@@ -131,7 +131,13 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       `mkdir -p /opt/runner && ` +
       `curl -fsSL ${shQuote(`${callbackBase}/runner-bundle.tgz`)} -o /tmp/rb.tgz && ` +
       `tar -xzf /tmp/rb.tgz -C /opt/runner`;
-    const bootstrapResult = await sandbox.runCommand("sh", ["-c", bootstrapCmd]);
+    // sudo: /opt is root-owned, and the runner (also root) must be able to
+    // read what we extract here.
+    const bootstrapResult = await sandbox.runCommand({
+      cmd: "sh",
+      args: ["-c", bootstrapCmd],
+      sudo: true,
+    });
     if (bootstrapResult.exitCode !== 0) {
       throw new Error(`runner bundle bootstrap failed (exit ${bootstrapResult.exitCode})`);
     }
@@ -150,11 +156,16 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
+    // sudo: the runner starts dockerd, which requires root; the docker CLI
+    // it then drives also needs root to reach the root-owned socket. Running
+    // the whole runner as root is simpler and matches the manual `vercel
+    // sandbox exec --sudo` path the pipeline was validated against.
     await sandbox.runCommand({
       cmd: "node",
       args: ["/opt/runner/scripts/runner/runner.mjs"],
       env: runnerEnv,
       detached: true,
+      sudo: true,
     });
 
     return { sandbox_id: sandbox.name };
