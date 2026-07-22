@@ -115,6 +115,12 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
 
       expect(exitCode).toBe(0);
 
+      // First status transition must be "running", posted right after
+      // run.sandbox_ready and before any task work starts (issue #23
+      // finding B) -- a run must never sit at "queued" until its terminal
+      // status.
+      expect(state.statusUpdates[0]?.status).toBe("running");
+
       const eventTypes = state.events.map((e) => e.type);
       expect(eventTypes).toContain("run.sandbox_ready");
       expect(eventTypes).toContain("task.started");

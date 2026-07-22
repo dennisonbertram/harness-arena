@@ -381,6 +381,10 @@ describe.skipIf(!RUNNER_IT)(
         // the container never leaked.
         expect(exitCode).toBe(0);
 
+        // The early "running" post (issue #23 finding B) must land even on
+        // a run that ultimately fails mid-task.
+        expect(state.statusUpdates[0]?.status).toBe("running");
+
         const finalStatus = state.statusUpdates.at(-1);
         expect(finalStatus.status).toBe("failed");
 

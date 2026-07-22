@@ -14,6 +14,7 @@ import {
   parseReward,
   parseSessionCost,
   redactSecrets,
+  safeCleanup,
   sh,
   shQuote,
 } from "../../scripts/runner/lib.mjs";
@@ -33,12 +34,22 @@ describe("parseSessionCost", () => {
   });
 
   it("returns zero cost and zero turns for empty input", () => {
-    expect(parseSessionCost("")).toEqual({ totalCost: 0, turns: 0, negativeCostCount: 0 });
+    expect(parseSessionCost("")).toEqual({
+      totalCost: 0,
+      turns: 0,
+      negativeCostCount: 0,
+      validCostCount: 0,
+    });
   });
 
   it("does not throw on a completely malformed jsonl blob", () => {
     const result = parseSessionCost("{{{not json\nalso not json\n");
-    expect(result).toEqual({ totalCost: 0, turns: 0, negativeCostCount: 0 });
+    expect(result).toEqual({
+      totalCost: 0,
+      turns: 0,
+      negativeCostCount: 0,
+      validCostCount: 0,
+    });
   });
 
   it("ignores negative cost.total values (clamped to 0) and counts them as a tamper signal", () => {
@@ -61,6 +72,8 @@ describe("parseSessionCost", () => {
     expect(result.totalCost).toBeCloseTo(0.03, 10);
     expect(result.turns).toBe(3);
     expect(result.negativeCostCount).toBe(1);
+    // Only the two nonnegative assistant cost.total values count as "valid".
+    expect(result.validCostCount).toBe(2);
   });
 });
 
@@ -272,12 +285,86 @@ describe("isSessionTextUnreadable", () => {
     expect(isSessionTextUnreadable("{{{not json\nalso not json\n")).toBe(true);
   });
 
-  it("is false when at least one line parses as valid JSON", () => {
+  // Regression for issue #23 finding G1: valid-but-empty JSON like `{}`
+  // used to be treated as "readable" (it parses) even though it carries
+  // zero assistant cost records, silently reporting an untracked $0
+  // instead of flooring + emitting a tamper signal.
+  it("is true for a lone valid JSON object with no assistant cost record at all (e.g. `{}`)", () => {
+    expect(isSessionTextUnreadable("{}")).toBe(true);
+  });
+
+  it("is true when the only parseable line is a non-assistant message (e.g. a user turn)", () => {
     const jsonl = [
       "not json at all",
       JSON.stringify({ type: "message", message: { role: "user", content: "go" } }),
     ].join("\n");
+    expect(isSessionTextUnreadable(jsonl)).toBe(true);
+  });
+
+  it("is true when an assistant message exists but has no numeric cost.total at all", () => {
+    const jsonl = JSON.stringify({ type: "message", message: { role: "assistant" } });
+    expect(isSessionTextUnreadable(jsonl)).toBe(true);
+  });
+
+  it("is true when the only assistant cost.total is negative (tampered, not usable)", () => {
+    const jsonl = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { cost: { total: -1 } } },
+    });
+    expect(isSessionTextUnreadable(jsonl)).toBe(true);
+  });
+
+  it("is false once at least one assistant message has a finite, nonnegative cost.total", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "user", content: "go" } }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", usage: { cost: { total: 0.01 } } },
+      }),
+    ].join("\n");
     expect(isSessionTextUnreadable(jsonl)).toBe(false);
+  });
+
+  it("is false for a real, legitimately-zero-cost assistant record (0 counts as valid/nonnegative)", () => {
+    const jsonl = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { cost: { total: 0 } } },
+    });
+    expect(isSessionTextUnreadable(jsonl)).toBe(false);
+  });
+});
+
+describe("safeCleanup (issue #23 finding G2: finally must never throw)", () => {
+  it("swallows a throwing cleanup fn and logs the failure instead of propagating", () => {
+    const logs = [];
+    expect(() =>
+      safeCleanup(
+        () => {
+          throw new Error("rmSync boom: ENOENT");
+        },
+        "temp dir /tmp/runner-xyz",
+        (line) => logs.push(line),
+      ),
+    ).not.toThrow();
+
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("temp dir /tmp/runner-xyz");
+    expect(logs[0]).toContain("rmSync boom: ENOENT");
+  });
+
+  it("runs the cleanup fn and logs nothing when it succeeds", () => {
+    let ran = false;
+    const logs = [];
+    safeCleanup(
+      () => {
+        ran = true;
+      },
+      "temp dir",
+      (line) => logs.push(line),
+    );
+
+    expect(ran).toBe(true);
+    expect(logs).toHaveLength(0);
   });
 });
 
