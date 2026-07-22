@@ -6,6 +6,7 @@ export const SUBMISSION_STATUSES = [
   "queued",
   "running",
   "scored",
+  // "failed": run infrastructure failed after queueing — contract addition over ticket #4, recorded in PR #13
   "failed",
 ] as const;
 
@@ -43,9 +44,9 @@ export const SubmissionSchema = z.object({
   judge_verdict: z.string().optional(),
   judge_reason: z.string().optional(),
   judge_model: z.string().optional(),
-  judged_at: z.string().optional(),
+  judged_at: z.iso.datetime().optional(),
   run_id: z.string().optional(),
-  created_at: z.string(),
+  created_at: z.iso.datetime(),
 });
 export type Submission = z.infer<typeof SubmissionSchema>;
 
@@ -65,21 +66,21 @@ export const RunSchema = z.object({
   id: z.string(),
   submission_id: z.string(),
   status: z.enum(RUN_STATUSES),
-  started_at: z.string().optional(),
-  finished_at: z.string().optional(),
+  started_at: z.iso.datetime().optional(),
+  finished_at: z.iso.datetime().optional(),
   tasks_passed: z.number().optional(),
   total_cost_usd: z.number().optional(),
   over_budget: z.boolean().optional(),
   sandbox_id: z.string().optional(),
   task_results: z.array(TaskResultSchema),
-  created_at: z.string(),
+  created_at: z.iso.datetime(),
 });
 export type Run = z.infer<typeof RunSchema>;
 
 export const RunEventSchema = z.object({
   run_id: z.string(),
   seq: z.number().int().positive(),
-  ts: z.string(),
+  ts: z.iso.datetime(),
   type: z.enum(RUN_EVENT_TYPES),
   payload: z.record(z.string(), z.unknown()),
 });

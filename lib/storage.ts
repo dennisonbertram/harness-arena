@@ -104,8 +104,19 @@ export class BlobStorage implements Storage {
     await this.writeJson(`submissions/${submission.id}.json`, submission);
   }
 
+  private async listAllBlobs(prefix: string): Promise<{ url: string }[]> {
+    const blobs: { url: string }[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ prefix, cursor });
+      blobs.push(...page.blobs);
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
+    return blobs;
+  }
+
   async listSubmissions(): Promise<Submission[]> {
-    const { blobs } = await list({ prefix: "submissions/" });
+    const blobs = await this.listAllBlobs("submissions/");
     const submissions = await Promise.all(
       blobs.map(async (blob) => {
         const text = await (await fetch(blob.url)).text();
@@ -124,7 +135,7 @@ export class BlobStorage implements Storage {
   }
 
   async listRuns(): Promise<Run[]> {
-    const { blobs } = await list({ prefix: "runs/" });
+    const blobs = await this.listAllBlobs("runs/");
     const runs = await Promise.all(
       blobs.map(async (blob) => {
         const text = await (await fetch(blob.url)).text();
@@ -177,5 +188,7 @@ export class BlobStorage implements Storage {
 }
 
 export function getStorage(): Storage {
-  return process.env.BLOB_READ_WRITE_TOKEN ? new BlobStorage() : new MemoryStorage();
+  if (process.env.STORAGE === "memory") return new MemoryStorage();
+  if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
+  throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }
