@@ -1,10 +1,14 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getLeaderboardView } from "@/lib/leaderboard-view";
-import { formatUsd, scaleScatterPoints } from "@/lib/format";
+import { formatUsd, scaleScatterPoints, scatterDotColor } from "@/lib/format";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 const CHART_OPTIONS = { width: 640, height: 320, padding: 40 };
+
+// The leaderboard reads from shared storage, so a build-time-cached page
+// would never show new submissions. ISR re-renders it at most every 15s.
+export const revalidate = 15;
 
 export default async function LeaderboardPage() {
   const storage = getStorage();
@@ -159,7 +163,7 @@ function ScatterChart({ rows }: { rows: Awaited<ReturnType<typeof getLeaderboard
             cx={point.cx}
             cy={point.cy}
             r={5}
-            fill={point.runId === leaderRunId ? "var(--blue-700)" : "var(--gray-600)"}
+            fill={scatterDotColor(point.runId === leaderRunId)}
           />
         </a>
       ))}

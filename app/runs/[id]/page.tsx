@@ -1,18 +1,11 @@
 import { notFound } from "next/navigation";
 import { getStorage } from "@/lib/storage";
 import { formatDuration, formatUsd } from "@/lib/format";
-import type { Run } from "@/lib/types";
+import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { CopyPromptButton } from "./CopyPromptButton";
+import { RunAutoRefresh } from "./RunAutoRefresh";
 
 export const revalidate = 15;
-
-const STATUS_STYLES: Record<Run["status"], { bg: string; fg: string }> = {
-  completed: { bg: "var(--blue-100)", fg: "var(--blue-700)" },
-  running: { bg: "var(--gray-100)", fg: "var(--gray-900)" },
-  queued: { bg: "var(--gray-100)", fg: "var(--gray-900)" },
-  failed: { bg: "var(--red-100)", fg: "var(--red-700)" },
-  reaped: { bg: "var(--gray-100)", fg: "var(--gray-900)" },
-};
 
 export default async function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -25,7 +18,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
 
   const submission = await storage.getSubmission(run.submission_id);
   const events = await storage.listRunEvents(id);
-  const status = STATUS_STYLES[run.status];
+  const status = RUN_STATUS_BADGE_STYLES[run.status];
   const totalTasks = run.task_results.length;
   const totalDurationSec = run.task_results.reduce((sum, t) => sum + (t.duration_s ?? 0), 0);
   const costPerTaskUsd =
@@ -33,6 +26,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
 
   return (
     <div style={{ maxWidth: 1000, margin: "0 auto", padding: "48px 24px" }}>
+      <RunAutoRefresh status={run.status} />
       <section style={{ marginBottom: 32 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
           <h1 style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em" }}>

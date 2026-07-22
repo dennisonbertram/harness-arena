@@ -17,15 +17,24 @@ export interface MinimalFetchResponse {
 }
 
 /**
- * Turns a fetch Response into a UI-ready {result, error} pair.
- * TODO(TASK-8-review): stub — calls response.json() unconditionally, so a
- * non-JSON body (e.g. an upstream proxy's HTML error page) throws instead of
- * falling back to "HTTP <status>".
+ * Turns a fetch Response into a UI-ready {result, error} pair. Parses the
+ * body defensively: a body that isn't valid JSON (e.g. an upstream proxy's
+ * HTML error page on a 502) falls back to "HTTP <status>" instead of
+ * throwing.
  */
 export async function parseSubmitResponse(response: MinimalFetchResponse): Promise<ParsedSubmitResponse> {
-  const body = (await response.json()) as SubmitResponse;
-  if (!response.ok) {
-    return { result: body, error: body?.judge_reason ?? "Submission failed." };
+  let body: SubmitResponse | null = null;
+  try {
+    body = (await response.json()) as SubmitResponse;
+  } catch {
+    body = null;
   }
-  return { result: body, error: null };
+
+  if (!response.ok) {
+    return { result: body, error: body?.judge_reason ?? `HTTP ${response.status}` };
+  }
+  if (body) {
+    return { result: body, error: null };
+  }
+  return { result: null, error: `HTTP ${response.status}` };
 }

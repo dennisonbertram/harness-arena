@@ -52,10 +52,16 @@ const Y_MAX = 10;
 
 /**
  * Maps (totalCostUsd, tasksPassed) pairs to SVG coordinates for a scatter
- * chart. x is linear over [0, xMax] where xMax is the highest cost among the
- * given runs (guarded against 0 so an all-zero-cost dataset doesn't divide by
- * zero). y is linear over the fixed [0, 10] tasks-passed range, inverted
- * because SVG y grows downward.
+ * chart. x is linear over [0, highest cost among the given runs]; tasksPassed
+ * is clamped into [0, 10] before scaling so an out-of-range value (defensive
+ * only — the harness always reports 0-10) can't plot past the axis. y is
+ * linear over the fixed [0, 10] tasks-passed range, inverted because SVG y
+ * grows downward.
+ *
+ * The returned `xMax` is the real highest cost (which can be 0) — it's for
+ * display only. Internally, scaling divides by 1 instead of 0 when every run
+ * costs $0, but that fallback never leaks into `xMax` so callers don't show
+ * a fabricated "$1.0000" axis label when there's no cost data.
  */
 export function scaleScatterPoints(
   runs: ScatterInput[],
@@ -63,25 +69,28 @@ export function scaleScatterPoints(
 ): ScatterScale {
   const { width, height, padding } = options;
   const highestCost = runs.reduce((max, run) => Math.max(max, run.totalCostUsd), 0);
-  const xMax = highestCost > 0 ? highestCost : 1;
+  const xScaleDivisor = highestCost > 0 ? highestCost : 1;
   const plotWidth = width - 2 * padding;
   const plotHeight = height - 2 * padding;
 
-  const points: ScatterPoint[] = runs.map((run) => ({
-    ...run,
-    cx: padding + (run.totalCostUsd / xMax) * plotWidth,
-    cy: height - padding - (run.tasksPassed / Y_MAX) * plotHeight,
-  }));
+  const points: ScatterPoint[] = runs.map((run) => {
+    const clampedTasksPassed = Math.min(Y_MAX, Math.max(0, run.tasksPassed));
+    return {
+      ...run,
+      cx: padding + (run.totalCostUsd / xScaleDivisor) * plotWidth,
+      cy: height - padding - (clampedTasksPassed / Y_MAX) * plotHeight,
+    };
+  });
 
-  return { points, xMax, yMax: Y_MAX, width, height, padding };
+  return { points, xMax: highestCost, yMax: Y_MAX, width, height, padding };
 }
 
 /**
- * Fill color for a scatter-chart dot.
- * TODO(TASK-8-review): stub — non-leader dots still use gray-600, which
- * measures ~2.38:1 contrast on white, below the 3:1 minimum for graphical
+ * Fill color for a scatter-chart dot: the leader is highlighted in blue;
+ * non-leader dots use gray-900 (~8.45:1 contrast on white) rather than
+ * gray-600 (~2.38:1), which falls short of the 3:1 minimum for graphical
  * objects.
  */
 export function scatterDotColor(isLeader: boolean): string {
-  return isLeader ? "var(--blue-700)" : "var(--gray-600)";
+  return isLeader ? "var(--blue-700)" : "var(--gray-900)";
 }

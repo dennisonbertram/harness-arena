@@ -2,15 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { parseSubmitResponse, type SubmitResponse } from "@/lib/submit-response";
 
 const PROMPT_MAX_CHARS = 32768;
-
-interface SubmitResponse {
-  submission_id: string;
-  run_id?: string;
-  status: string;
-  judge_reason?: string;
-}
 
 export default function SubmitPage() {
   const [agentName, setAgentName] = useState("");
@@ -30,13 +24,9 @@ export default function SubmitPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agent_name: agentName, prompt }),
       });
-      const body = (await response.json()) as SubmitResponse;
-      if (!response.ok) {
-        setError(body.judge_reason ?? "Submission failed.");
-        setResult(body);
-      } else {
-        setResult(body);
-      }
+      const { result: body, error: errorMessage } = await parseSubmitResponse(response);
+      setResult(body);
+      setError(errorMessage);
     } catch {
       setError("Could not reach the server. Try again.");
     } finally {
