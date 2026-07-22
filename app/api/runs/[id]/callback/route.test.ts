@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reapIfStale } from "@/lib/reaper";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -104,7 +105,79 @@ describe("POST /api/runs/[id]/callback", () => {
     expect(response.status).toBe(404);
   });
 
+  describe("regression: task.cost_tamper_signal event type (issue #23 finding A)", () => {
+    it("accepts a batch containing a task.cost_tamper_signal event instead of 400ing the whole callback", async () => {
+      await storageRef.current.putRun({
+        id: "run-tamper",
+        submission_id: "sub-tamper",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        callbackRequest("run-tamper", {
+          events: [
+            {
+              ts: "2026-07-21T00:01:00.000Z",
+              type: "task.cost_tamper_signal",
+              payload: { task_id: "t1", reason: "session_unreadable" },
+            },
+          ],
+        }),
+        { params: Promise.resolve({ id: "run-tamper" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const events = await storageRef.current.listRunEvents("run-tamper");
+      expect(events.some((e) => e.type === "task.cost_tamper_signal")).toBe(true);
+    });
+  });
+
   describe("status transition table", () => {
+    it("allows a direct queued->completed transition (belt-and-suspenders if the running post is lost)", async () => {
+      await storageRef.current.putRun({
+        id: "run-direct-complete",
+        submission_id: "sub-direct-complete",
+        status: "queued",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        callbackRequest("run-direct-complete", {
+          events: [],
+          status: "completed",
+          task_results: [{ task_id: "t1", attempted: true, passed: true }],
+          totals: { tasks_passed: 1, total_cost_usd: 0.1, over_budget: false },
+        }),
+        { params: Promise.resolve({ id: "run-direct-complete" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const run = await storageRef.current.getRun("run-direct-complete");
+      expect(run?.status).toBe("completed");
+    });
+
+    it("allows a direct queued->failed transition (belt-and-suspenders if the running post is lost)", async () => {
+      await storageRef.current.putRun({
+        id: "run-direct-fail",
+        submission_id: "sub-direct-fail",
+        status: "queued",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        callbackRequest("run-direct-fail", { events: [], status: "failed" }),
+        { params: Promise.resolve({ id: "run-direct-fail" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const run = await storageRef.current.getRun("run-direct-fail");
+      expect(run?.status).toBe("failed");
+    });
+
     it("rejects a completed->running regression: run stays completed and a warn is logged, but the event is still appended", async () => {
       await storageRef.current.putRun({
         id: "run-terminal",
@@ -250,6 +323,40 @@ describe("POST /api/runs/[id]/callback", () => {
       );
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  describe("regression: a reaped run (ticket #7's reaper) is not resurrected by a late callback", () => {
+    it("stays reaped when a callback later reports status=running -- the reaper already won the race", async () => {
+      await storageRef.current.putRun({
+        id: "run-raced",
+        submission_id: "sub-raced",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      // Simulate the reaper (GET /api/runs[/id]'s lazy reap, or the daily
+      // cron) having already marked this run stale before a straggling
+      // callback from the sandbox arrives.
+      const reaped = await reapIfStale(
+        storageRef.current,
+        (await storageRef.current.getRun("run-raced"))!,
+        new Date("2026-07-21T00:21:00.000Z").getTime(),
+      );
+      expect(reaped.status).toBe("reaped");
+
+      const response = await POST(
+        callbackRequest("run-raced", {
+          events: [{ ts: "2026-07-21T00:12:00.000Z", type: "task.started", payload: { task_id: "t1", index: 0 } }],
+          status: "running",
+        }),
+        { params: Promise.resolve({ id: "run-raced" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const run = await storageRef.current.getRun("run-raced");
+      expect(run?.status).toBe("reaped");
     });
   });
 

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -39,5 +39,32 @@ describe("GET /api/runs/[id]", () => {
     });
 
     expect(response.status).toBe(404);
+  });
+
+  describe("lazy reap", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("marks a stale queued run reaped and returns the reaped status, persisting the change", async () => {
+      vi.useFakeTimers();
+      // Reap threshold raised to 20 minutes (issue #23 finding F5).
+      vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
+      await storageRef.current.putRun({
+        id: "run-stale",
+        submission_id: "sub-1",
+        status: "queued",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const response = await GET(new NextRequest("http://localhost/api/runs/run-stale"), {
+        params: Promise.resolve({ id: "run-stale" }),
+      });
+      const body = await response.json();
+
+      expect(body.status).toBe("reaped");
+      expect((await storageRef.current.getRun("run-stale"))?.status).toBe("reaped");
+    });
   });
 });

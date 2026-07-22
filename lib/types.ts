@@ -34,6 +34,13 @@ export const RUN_EVENT_TYPES = [
   "run.completed",
   "run.failed",
   "run.reaped",
+  // Emitted by runner.mjs (issue #19/#24) whenever a task's cost can't be
+  // trusted from the session file (unreadable, no assistant cost record,
+  // or a negative cost.total) and a floor/clamp was applied. Missing from
+  // this enum meant the callback route's zod validation 400'd the whole
+  // batch -- including the run's status -- whenever the runner emitted it
+  // (issue #23 finding A).
+  "task.cost_tamper_signal",
 ] as const;
 
 export const SubmissionSchema = z.object({

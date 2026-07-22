@@ -18,6 +18,12 @@ export function parseSessionCost(jsonlText) {
   let totalCost = 0;
   let turns = 0;
   let negativeCostCount = 0;
+  // Count of assistant messages carrying a finite, nonnegative cost.total
+  // -- i.e. an actually-usable cost record (issue #23 finding G1). A
+  // session can parse as valid JSON line-by-line yet contain zero of
+  // these (e.g. `{}`, or only non-assistant turns), which must NOT count
+  // as "readable" for cost-accounting purposes.
+  let validCostCount = 0;
   for (const line of jsonlText.split("\n")) {
     if (!line.trim()) continue;
     let obj;
@@ -34,33 +40,26 @@ export function parseSessionCost(jsonlText) {
           negativeCostCount += 1;
         } else {
           totalCost += cost;
+          validCostCount += 1;
         }
       }
     }
   }
-  return { totalCost, turns, negativeCostCount };
+  return { totalCost, turns, negativeCostCount, validCostCount };
 }
 
-// Distinguishes "session file missing/empty/unparseable" (every line fails
-// to parse -- a tamper/corruption signal, cost should fall back to a
-// floor) from "session parsed fine but legitimately has zero cost" (a real
-// result, not a tamper signal). At least one line parsing as JSON is
-// enough to call the text readable, even if that line isn't an assistant
-// message with a cost.
+// Distinguishes "session unusable for cost accounting" (no assistant
+// record with a finite, nonnegative cost.total -- whether because the
+// file is missing/empty, every line fails to parse, or it parses fine but
+// carries no real cost data, e.g. `{}` or a lone user turn) from "session
+// parsed fine and has at least one real cost record" (issue #23 finding
+// G1: valid-but-empty/costless JSON used to be misclassified as readable,
+// silently reporting an untracked $0 instead of flooring + tamper-signaling).
 export function isSessionTextUnreadable(jsonlText) {
   if (jsonlText == null) return true;
   const trimmed = String(jsonlText).trim();
   if (trimmed === "") return true;
-  for (const line of trimmed.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      JSON.parse(line);
-      return false;
-    } catch {
-      continue;
-    }
-  }
-  return true;
+  return parseSessionCost(trimmed).validCostCount === 0;
 }
 
 // Scrub secret values from arbitrary text before it's uploaded as a public
@@ -119,6 +118,18 @@ export function buildContainerName(runId, index, taskId) {
   const safeRunId = String(runId).replace(CONTAINER_NAME_UNSAFE_RE, "-");
   const safeTaskId = String(taskId).replace(CONTAINER_NAME_UNSAFE_RE, "-");
   return `task-${safeRunId}-${index}-${safeTaskId}`;
+}
+
+// Run a best-effort cleanup step, swallowing any throw and logging instead
+// (issue #23 finding G2). Intended for `finally` blocks: cleanup itself
+// throwing must never mask the real task error or flip a failed task into
+// crashing the whole run with an unrelated stack trace.
+export function safeCleanup(fn, label, log) {
+  try {
+    fn();
+  } catch (err) {
+    log(`cleanup failed (${label}): ${err?.message ?? err}`);
+  }
 }
 
 // Deliver a terminal (completed/failed) status payload via `postFn`
