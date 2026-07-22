@@ -1,12 +1,87 @@
+/* Geist design tokens — light theme values from vercel.com/design.md,
+   dark theme values from vercel.com/design.dark.md. Kept as CSS custom
+   properties so components can reference var(--gray-700) etc. and get the
+   right theme automatically via prefers-color-scheme. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background-100: #ffffff;
+  --background-200: #fafafa;
+
+  --gray-100: #f2f2f2;
+  --gray-200: #ebebeb;
+  --gray-300: #e6e6e6;
+  --gray-400: #eaeaea;
+  --gray-500: #c9c9c9;
+  --gray-600: #a8a8a8;
+  --gray-700: #8f8f8f;
+  --gray-800: #7d7d7d;
+  --gray-900: #4d4d4d;
+  --gray-1000: #171717;
+
+  --gray-alpha-100: #0000000d;
+  --gray-alpha-200: #00000015;
+  --gray-alpha-300: #0000001a;
+  --gray-alpha-400: #00000014;
+  --gray-alpha-500: #00000036;
+  --gray-alpha-600: #0000003d;
+  --gray-alpha-700: #00000070;
+
+  --blue-100: #f0f7ff;
+  --blue-600: #48aeff;
+  --blue-700: #006bff;
+  --blue-800: #0059ec;
+
+  --red-100: #ffeeef;
+  --red-700: #fc0035;
+  --red-800: #ea001d;
+
+  --green-100: #ecfdec;
+  --green-700: #28a948;
+  --green-800: #279141;
+
+  --foreground: var(--gray-1000);
+  --background: var(--background-100);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background-100: #000000;
+    --background-200: #000000;
+
+    --gray-100: #1a1a1a;
+    --gray-200: #1f1f1f;
+    --gray-300: #292929;
+    --gray-400: #2e2e2e;
+    --gray-500: #454545;
+    --gray-600: #878787;
+    --gray-700: #8f8f8f;
+    --gray-800: #7d7d7d;
+    --gray-900: #a0a0a0;
+    --gray-1000: #ededed;
+
+    --gray-alpha-100: #ffffff12;
+    --gray-alpha-200: #ffffff17;
+    --gray-alpha-300: #ffffff21;
+    --gray-alpha-400: #ffffff24;
+    --gray-alpha-500: #ffffff3d;
+    --gray-alpha-600: #ffffff82;
+    --gray-alpha-700: #ffffff8a;
+
+    --blue-100: #06193a;
+    --blue-600: #0090ff;
+    --blue-700: #006efe;
+    --blue-800: #005be7;
+
+    --red-100: #330a11;
+    --red-700: #f13242;
+    --red-800: #e2162a;
+
+    --green-100: #002608;
+    --green-700: #00ac3a;
+    --green-800: #009432;
+
+    --foreground: var(--gray-1000);
+    --background: var(--background-100);
+    color-scheme: dark;
   }
 }
 
@@ -26,7 +101,7 @@ body {
   flex-direction: column;
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -42,8 +117,18 @@ a {
   text-decoration: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--gray-900);
 }

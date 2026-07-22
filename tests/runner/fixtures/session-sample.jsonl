@@ -1,0 +1,7 @@
+{"type":"message","message":{"role":"user","content":"do the task"}}
+{"type":"message","message":{"role":"assistant","usage":{"cost":{"total":0.0013278}}}}
+{"type":"other","foo":"bar"}
+{"type":"message","message":{"role":"assistant","usage":{"cost":{"total":0.0025}}}}
+
+not valid json at all
+{"type":"message","message":{"role":"assistant"}}
