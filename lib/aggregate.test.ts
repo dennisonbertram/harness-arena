@@ -4,22 +4,34 @@ import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
 
-function results(passFlags: boolean[]): TaskResult[] {
-  return passFlags.map((passed, i) => ({ task_id: `t${i}`, attempted: true, passed }));
+function results(passFlags: boolean[], costs?: number[]): TaskResult[] {
+  return passFlags.map((passed, i) => ({
+    task_id: `t${i}`,
+    attempted: true,
+    passed,
+    ...(costs ? { cost_usd: costs[i] } : {}),
+  }));
 }
 
 function sub(id: string, agentName: string, prompt: string, createdAt: string): Submission {
   return { id, agent_name: agentName, prompt, status: "scored", created_at: createdAt };
 }
 
-function run(id: string, submissionId: string, passFlags: boolean[], costUsd?: number, status: Run["status"] = "completed"): Run {
+function run(
+  id: string,
+  submissionId: string,
+  passFlags: boolean[],
+  costUsd?: number,
+  status: Run["status"] = "completed",
+  taskCosts?: number[],
+): Run {
   return {
     id,
     submission_id: submissionId,
     status,
     tasks_passed: status === "completed" ? passFlags.filter(Boolean).length : undefined,
     total_cost_usd: costUsd,
-    task_results: results(passFlags),
+    task_results: results(passFlags, taskCosts),
     created_at: "2026-07-21T00:00:00.000Z",
   };
 }
@@ -39,6 +51,25 @@ describe("aggregatePrompts", () => {
     expect(st.passRate).toBeCloseTo(0.75);
     expect(st.medianCostUsd).toBeCloseTo(1.0);
     expect(st.completesTest).toBe(false);
+  });
+
+  it("computes per-task cost (mean across runs) alongside the pass rate", () => {
+    const submissions = [sub("s1", "vanilla", "", "2026-07-20T00:00:00Z")];
+    const runs = [
+      run("r1", "s1", [true, false, false, false], undefined, "completed", [0.02, 0.1, 0.2, 0.3]),
+      run("r2", "s1", [true, false, false, false], undefined, "completed", [0.04, 0.2, 0.2, 0.3]),
+    ];
+    const [st] = aggregatePrompts(runs, submissions, TOTAL);
+    const byId = Object.fromEntries(st.perTask.map((p) => [p.taskId, p.meanCostUsd]));
+    expect(byId.t0).toBeCloseTo(0.03); // (0.02 + 0.04) / 2
+    expect(byId.t1).toBeCloseTo(0.15); // (0.1 + 0.2) / 2 — a failing task still has a cost
+  });
+
+  it("reports null per-task cost when no cost was recorded", () => {
+    const submissions = [sub("s1", "vanilla", "", "2026-07-20T00:00:00Z")];
+    const runs = [run("r1", "s1", [true, false, false, false])]; // no taskCosts
+    const [st] = aggregatePrompts(runs, submissions, TOTAL);
+    expect(st.perTask[0].meanCostUsd).toBeNull();
   });
 
   it("computes per-task pass rate across runs", () => {

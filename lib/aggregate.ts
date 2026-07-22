@@ -15,6 +15,7 @@ export interface TaskRate {
   taskId: string;
   passed: number; // runs in which this task passed
   of: number; // runs in which this task was recorded
+  meanCostUsd: number | null; // mean cost incurred attempting this task (pass or fail)
 }
 
 export interface PromptStanding {
@@ -77,17 +78,33 @@ export function aggregatePrompts(
     const runsCount = g.runs.length;
     const meanTasksPassed = g.runs.reduce((sum, r) => sum + (r.tasks_passed ?? 0), 0) / runsCount;
 
-    // Per-task pass rate across the group's runs.
+    // Per-task pass rate AND cost across the group's runs — the granular view
+    // that also applies to failing prompts (which tasks they do solve, and
+    // what each task costs whether it passes or not).
     const passed = new Map<string, number>();
     const of = new Map<string, number>();
+    const costSum = new Map<string, number>();
+    const costN = new Map<string, number>();
     for (const r of g.runs) {
       for (const t of r.task_results) {
         of.set(t.task_id, (of.get(t.task_id) ?? 0) + 1);
         if (t.passed) passed.set(t.task_id, (passed.get(t.task_id) ?? 0) + 1);
+        if (typeof t.cost_usd === "number") {
+          costSum.set(t.task_id, (costSum.get(t.task_id) ?? 0) + t.cost_usd);
+          costN.set(t.task_id, (costN.get(t.task_id) ?? 0) + 1);
+        }
       }
     }
     const perTask: TaskRate[] = [...of.keys()]
-      .map((taskId) => ({ taskId, passed: passed.get(taskId) ?? 0, of: of.get(taskId)! }))
+      .map((taskId) => {
+        const n = costN.get(taskId) ?? 0;
+        return {
+          taskId,
+          passed: passed.get(taskId) ?? 0,
+          of: of.get(taskId)!,
+          meanCostUsd: n > 0 ? costSum.get(taskId)! / n : null,
+        };
+      })
       .sort((a, b) => b.passed / b.of - a.passed / a.of || a.taskId.localeCompare(b.taskId));
 
     const costs = g.runs.map((r) => r.total_cost_usd).filter((c): c is number => typeof c === "number");

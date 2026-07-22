@@ -151,6 +151,9 @@ function PerTaskPanel({ standing }: { standing: PromptStanding }) {
                 <td className="tabular-nums" style={{ padding: "6px 12px", width: 90, textAlign: "right" }}>
                   {t.passed}/{t.of} · {(rate * 100).toFixed(0)}%
                 </td>
+                <td className="tabular-nums" style={{ padding: "6px 0", width: 80, textAlign: "right", color: "var(--gray-700)" }}>
+                  {t.meanCostUsd === null ? "—" : `${formatUsd(t.meanCostUsd)}/task`}
+                </td>
               </tr>
             );
           })}

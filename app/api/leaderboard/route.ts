@@ -19,7 +19,13 @@ export async function GET() {
     total_tasks: s.totalTaskCount,
     completes_test: s.completesTest,
     median_cost_usd: s.medianCostUsd,
-    per_task: s.perTask.map((t) => ({ task_id: t.taskId, passed: t.passed, of: t.of })),
+    per_task: s.perTask.map((t) => ({
+      task_id: t.taskId,
+      passed: t.passed,
+      of: t.of,
+      pass_rate: t.of > 0 ? t.passed / t.of : 0,
+      mean_cost_usd: t.meanCostUsd,
+    })),
     run_ids: s.runIds,
     last_submitted_at: s.lastSubmittedAt,
   }));
