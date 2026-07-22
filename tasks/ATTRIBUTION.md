@@ -28,7 +28,7 @@ them — the runner is expected to pre-pull/snapshot images to insulate runs.
 Every vendored task's `tests/test_outputs.py` preserves the upstream
 `terminal-bench-canary` GUID byte-identical, unmodified from the source file.
 
-Vendoring is staged and validated (all 10 tasks present with task.toml,
+Vendoring is staged and validated (all 16 tasks present with task.toml,
 instruction.md and tests/test.sh) before tasks/ is atomically replaced, so a
 partial or failed run never leaves tasks/ in an inconsistent state, and any
 directory no longer in the pinned manifest is dropped from tasks/ on the next

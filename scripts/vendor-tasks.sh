@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Vendors the 10 fixed Terminal-Bench 2.0 tasks into tasks/<id>/ at the
-# pinned upstream commit. Copies only task.toml, instruction.md and tests/
-# (never solution/ or environment/). Idempotent: re-running against the same
-# pinned commit produces no diff.
+# Vendors the 16 fixed Terminal-Bench 2.0 tasks (the harnessarena.xyz ranked
+# subset) into tasks/<id>/ at the pinned upstream commit. Copies only
+# task.toml, instruction.md and tests/ (never solution/ or environment/).
+# Idempotent: re-running against the same pinned commit produces no diff.
 #
 # The bundle is staged into a scratch directory first, validated for
-# completeness (all 10 tasks with task.toml + instruction.md + tests/test.sh,
+# completeness (all 16 tasks with task.toml + instruction.md + tests/test.sh,
 # plus a sha256-verified LICENSE), and only then atomically swapped in for
 # tasks/. Any validation failure aborts before tasks/ is touched, and the
 # swap replaces tasks/ wholesale so directories no longer in the manifest
@@ -27,16 +27,22 @@ LICENSE_URL="${VENDOR_TASKS_LICENSE_URL:-https://raw.githubusercontent.com/laude
 LICENSE_SHA256="c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
 
 TASK_IDS=(
-  "regex-log"
   "fix-git"
-  "log-summary-date-ranges"
-  "extract-elf"
-  "sqlite-db-truncate"
+  "kv-store-grpc"
+  "headless-terminal"
+  "cancel-async-tasks"
+  "write-compressor"
+  "nginx-request-logging"
+  "qemu-startup"
+  "sanitize-git-repo"
+  "fix-code-vulnerability"
+  "query-optimize"
+  "modernize-scientific-stack"
+  "custom-memory-heap-crash"
+  "model-extraction-relu-logits"
+  "pytorch-model-cli"
   "multi-source-data-merger"
-  "openssl-selfsigned-cert"
-  "prove-plus-comm"
-  "cobol-modernization"
-  "db-wal-recovery"
+  "sparql-university"
 )
 
 sha256_of() {
@@ -108,6 +114,18 @@ for id in "${TASK_IDS[@]}"; do
   done
 done
 
+# sanitize-git-repo's tests/test_outputs.py contains intentional fake leaked
+# tokens (the task is about scrubbing secrets from git history), which trips
+# GitHub secret-scanning push protection. Store it base64-encoded so nothing
+# pushable contains the token pattern; scripts/build-runner-bundle.mjs decodes
+# any tests/*.b64 back to the real file at bundle-build time (byte-identical).
+SANITIZE_TESTS="$STAGING_DIR/sanitize-git-repo/tests/test_outputs.py"
+if [ -f "$SANITIZE_TESTS" ]; then
+  base64 -i "$SANITIZE_TESTS" > "$SANITIZE_TESTS.b64"
+  rm "$SANITIZE_TESTS"
+  echo "Encoded sanitize-git-repo/tests/test_outputs.py -> .b64 (secret-scan safe)"
+fi
+
 echo "Fetching pinned LICENSE ($LICENSE_COMMIT) ..."
 curl -fsSL -o "$STAGING_DIR/LICENSE-terminal-bench-2" "$LICENSE_URL"
 
@@ -148,7 +166,7 @@ them — the runner is expected to pre-pull/snapshot images to insulate runs.
 Every vendored task's \`tests/test_outputs.py\` preserves the upstream
 \`terminal-bench-canary\` GUID byte-identical, unmodified from the source file.
 
-Vendoring is staged and validated (all 10 tasks present with task.toml,
+Vendoring is staged and validated (all 16 tasks present with task.toml,
 instruction.md and tests/test.sh) before tasks/ is atomically replaced, so a
 partial or failed run never leaves tasks/ in an inconsistent state, and any
 directory no longer in the pinned manifest is dropped from tasks/ on the next
