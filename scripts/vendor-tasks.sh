@@ -53,6 +53,11 @@ WORK_DIR="$(mktemp -d)"
 STAGING_DIR="$(mktemp -d "$REPO_ROOT/tasks.staging.XXXXXX")"
 OLD_DIR="${STAGING_DIR}.old"
 cleanup() {
+  # If we died between demoting tasks/ and promoting staging, restore the
+  # original tree before deleting anything — tasks/ must never end up absent.
+  if [ ! -d "$TASKS_DIR" ] && [ -d "$OLD_DIR" ]; then
+    mv "$OLD_DIR" "$TASKS_DIR"
+  fi
   rm -rf "$WORK_DIR" "$STAGING_DIR" "$OLD_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
