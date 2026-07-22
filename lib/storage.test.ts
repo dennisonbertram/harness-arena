@@ -286,6 +286,50 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.unstubAllGlobals();
   });
 
+  describe("regression: event log never falls back to a single rewritten blob", () => {
+    it("appendRunEvents never calls get() — it must not read back a shared blob to merge into", async () => {
+      // The original bug was a read-modify-rewrite of one shared blob. If
+      // that pattern is ever reintroduced (even under a different pathname),
+      // it would show up as a call to get() from appendRunEvents. Per-blob
+      // writes never need to read anything back.
+      const storage = new BlobStorage();
+      vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+      vi.mocked(put).mockResolvedValue({ url: "https://blob.example/events/run-1/0000000001.json" } as never);
+
+      await storage.appendRunEvents("run-1", [
+        { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+      ]);
+
+      expect(get).not.toHaveBeenCalled();
+    });
+
+    it("zero-pads seq to 10 digits so lexical blob-name order matches numeric seq order past single digits", async () => {
+      // Guards against dropping/shrinking the zero-pad width: without it,
+      // "events/run-1/10.json" would sort lexically before
+      // "events/run-1/9.json", silently reordering the timeline.
+      const storage = new BlobStorage();
+      vi.mocked(list).mockResolvedValueOnce({
+        blobs: Array.from({ length: 9 }, (_, i) => ({
+          url: `https://blob.example/events/run-1/000000000${i + 1}.json`,
+        })),
+        hasMore: false,
+      } as never);
+      vi.mocked(put).mockResolvedValue({ url: "https://blob.example/events/run-1/0000000010.json" } as never);
+
+      const [tenth] = await storage.appendRunEvents("run-1", [
+        { ts: "2026-07-21T00:00:09.000Z", type: "run.sandbox_ready", payload: {} },
+      ]);
+
+      expect(tenth.seq).toBe(10);
+      const pathname = vi.mocked(put).mock.calls[0][0];
+      expect(pathname).toBe("events/run-1/0000000010.json");
+      expect(["events/run-1/0000000009.json", pathname].sort()).toEqual([
+        "events/run-1/0000000009.json",
+        pathname,
+      ]);
+    });
+  });
+
   it("putSubmission writes JSON with access=public, no random suffix, allow overwrite, application/json content type", async () => {
     const storage = new BlobStorage();
     vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/submissions/sub-1.json" } as never);
