@@ -13,7 +13,11 @@ const MAX_BODY_BYTES = 262144;
 
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
-  prompt: z.string().min(1).max(MAX_PROMPT_CHARS),
+  // Empty prompt is allowed and means "run vanilla pi with its built-in
+  // default system prompt" (the baseline) -- matches harnessarena.xyz's
+  // baseline, which passes no --system-prompt. Non-empty prompts go through
+  // the fraud judge as usual.
+  prompt: z.string().max(MAX_PROMPT_CHARS),
 });
 
 // ponytail: naive in-memory per-IP rate limit — explicitly POC-level, not a
@@ -74,11 +78,16 @@ export async function POST(request: NextRequest) {
   await storage.putSubmission(submission);
 
   let verdict;
-  try {
-    verdict = await judgeSubmission(submission.prompt, getTasks());
-  } catch (err) {
-    log("error", "judge.unavailable", { submission_id: submission.id, error: (err as Error).message });
-    return NextResponse.json({ error: "judge unavailable, retry later" }, { status: 503 });
+  if (submission.prompt.trim().length === 0) {
+    // Vanilla baseline: no submitted prompt, nothing to judge for fraud.
+    verdict = { verdict: "approved" as const, reason: "vanilla baseline (no custom system prompt)" };
+  } else {
+    try {
+      verdict = await judgeSubmission(submission.prompt, getTasks());
+    } catch (err) {
+      log("error", "judge.unavailable", { submission_id: submission.id, error: (err as Error).message });
+      return NextResponse.json({ error: "judge unavailable, retry later" }, { status: 503 });
+    }
   }
 
   log("info", "judge.verdict", {

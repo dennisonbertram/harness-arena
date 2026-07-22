@@ -48,11 +48,14 @@ describe("POST /api/submissions", () => {
   });
 
   describe("validation", () => {
-    it("rejects with 400 before calling the judge when prompt is empty", async () => {
-      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "" }, "2.2.2.1"));
+    it("accepts an empty prompt as the vanilla baseline without calling the judge", async () => {
+      const response = await POST(postRequest({ agent_name: "pi-vanilla-baseline", prompt: "" }, "2.2.2.1"));
 
-      expect(response.status).toBe(400);
+      // Empty prompt = run vanilla pi (no --system-prompt); nothing to judge.
+      expect(response.status).toBe(200);
       expect(judgeSubmission).not.toHaveBeenCalled();
+      const body = await response.json();
+      expect(body.status).toBe("queued");
     });
 
     it("rejects with 400 before calling the judge when prompt exceeds 32768 chars", async () => {

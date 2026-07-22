@@ -368,20 +368,36 @@ describe("shQuote", () => {
 });
 
 describe("buildPiCommand", () => {
-  it("constructs the documented pi invocation wrapped in timeout, with safe quoting", () => {
+  it("constructs the vanilla-matching pi invocation wrapped in timeout, with safe quoting", () => {
     const cmd = buildPiCommand({
       agentTimeoutSec: 900,
       sessionDir: "/logs/agent/sessions",
       promptFile: "/tmp/system-prompt.txt",
       instruction: "Solve it and save to /app/regex.txt. Don't break \"quotes\".",
+      hasSystemPrompt: true,
     });
     expect(cmd).toContain("timeout 900 /usr/local/bin/pi");
     expect(cmd).toContain("--print --mode json");
     expect(cmd).toContain("--session-dir " + shQuote("/logs/agent/sessions"));
-    expect(cmd).toContain("-nc -ns --no-extensions");
+    // Matches harnessarena.xyz: no -nc/-ns/--no-extensions.
+    expect(cmd).not.toContain("--no-extensions");
+    expect(cmd).not.toContain("-nc");
     expect(cmd).toContain("--provider vercel-ai-gateway --model zai/glm-5.2");
     expect(cmd).toContain('--system-prompt "$(cat ' + shQuote("/tmp/system-prompt.txt") + ')"');
     expect(cmd).toContain(shQuote("Solve it and save to /app/regex.txt. Don't break \"quotes\"."));
+  });
+
+  it("omits --system-prompt entirely for the vanilla baseline (hasSystemPrompt false)", () => {
+    const cmd = buildPiCommand({
+      agentTimeoutSec: 900,
+      sessionDir: "/logs/agent/sessions",
+      promptFile: "/tmp/system-prompt.txt",
+      instruction: "Recover the lost commits.",
+      hasSystemPrompt: false,
+    });
+    expect(cmd).not.toContain("--system-prompt");
+    expect(cmd).toContain("--provider vercel-ai-gateway --model zai/glm-5.2");
+    expect(cmd).toContain(shQuote("Recover the lost commits."));
   });
 
   it("uses the override command instead of the default pi invocation when given", () => {
