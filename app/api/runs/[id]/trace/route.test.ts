@@ -113,4 +113,25 @@ describe("POST /api/runs/[id]/trace", () => {
       expect(response.status).toBe(400);
     });
   });
+
+  describe("regression: run-level trace (task_id=_run) with no matching task_result must not throw", () => {
+    it("stores the runner-log.txt blob and returns 200 even though no task_result has task_id=_run", async () => {
+      await storageRef.current.putRun({
+        id: "run-4",
+        submission_id: "sub-4",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        traceRequest("run-4", "task_id=_run&name=runner-log.txt", "full runner log"),
+        { params: Promise.resolve({ id: "run-4" }) },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(typeof body.url).toBe("string");
+    });
+  });
 });

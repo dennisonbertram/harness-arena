@@ -129,5 +129,34 @@ describe("POST /api/runs/[id]/callback", () => {
       expect(run?.total_cost_usd).toBe(0.5);
       expect(run?.finished_at).toBeUndefined();
     });
+
+    it("seq is monotonic across two separate callback POSTs to the same run, not restarting at 1", async () => {
+      await storageRef.current.putRun({
+        id: "run-3",
+        submission_id: "sub-3",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      const first = await POST(
+        callbackRequest("run-3", {
+          events: [{ ts: "2026-07-21T00:00:00.000Z", type: "run.sandbox_creating", payload: {} }],
+        }),
+        { params: Promise.resolve({ id: "run-3" }) },
+      );
+      expect((await first.json()).seq_assigned).toEqual([1]);
+
+      const second = await POST(
+        callbackRequest("run-3", {
+          events: [
+            { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_ready", payload: { sandbox_id: "sb-1" } },
+            { ts: "2026-07-21T00:00:02.000Z", type: "task.started", payload: { task_id: "t1", index: 0 } },
+          ],
+        }),
+        { params: Promise.resolve({ id: "run-3" }) },
+      );
+      expect((await second.json()).seq_assigned).toEqual([2, 3]);
+    });
   });
 });

@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -177,6 +177,64 @@ describe("POST /api/submissions", () => {
         postRequest({ agent_name: "agent-fresh", prompt: "hello" }, "9.9.9.11"),
       );
       expect(otherIpResponse.status).toBe(200);
+    });
+
+    describe("regression: rate limit window expiry", () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("allows a new submission from the same IP once the 1-hour window has fully elapsed", async () => {
+        vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
+        const ip = "9.9.9.20";
+        const start = new Date("2026-07-21T00:00:00.000Z");
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+
+        for (let i = 0; i < 5; i++) {
+          const response = await POST(postRequest({ agent_name: `agent-${i}`, prompt: "hello" }, ip));
+          expect(response.status).toBe(200);
+        }
+        const limited = await POST(postRequest({ agent_name: "agent-blocked", prompt: "hello" }, ip));
+        expect(limited.status).toBe(429);
+
+        vi.setSystemTime(new Date(start.getTime() + 61 * 60 * 1000));
+        const afterWindow = await POST(
+          postRequest({ agent_name: "agent-after-window", prompt: "hello" }, ip),
+        );
+        expect(afterWindow.status).toBe(200);
+      });
+    });
+  });
+
+  describe("regression: judge outcome bookkeeping", () => {
+    it("persists judge_model on the submission for an approved submission", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(postRequest({ agent_name: "agent-model", prompt: "hi" }, "6.6.6.1"));
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.judge_model).toBe("zai/glm-5.2");
+      expect(submission?.judged_at).toBeDefined();
+    });
+
+    it("persists judge_model on the submission for a rejected submission too", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "rejected", reason: "nope" });
+
+      const response = await POST(postRequest({ agent_name: "agent-model-2", prompt: "hi" }, "6.6.6.2"));
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.judge_model).toBe("zai/glm-5.2");
+    });
+
+    it("never calls the sandbox run-trigger when the judge rejects the submission", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "rejected", reason: "cheat detected" });
+
+      await POST(postRequest({ agent_name: "agent-reject-trigger", prompt: "cheat" }, "6.6.6.3"));
+
+      expect(startRun).not.toHaveBeenCalled();
     });
   });
 });
