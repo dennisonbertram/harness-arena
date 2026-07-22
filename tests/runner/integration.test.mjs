@@ -132,6 +132,9 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       expect(agentFinished.payload.task_id).toBe(TASK_ID);
       expect(agentFinished.payload.turns).toBe(2);
       expect(agentFinished.payload.cost_usd).toBeCloseTo(0.003, 6);
+      // Session file was readable, so cost came from the session, not the
+      // tamper-resistance floor (issue #19 finding 2).
+      expect(agentFinished.payload.cost_source).toBe("session");
 
       const verified = state.events.find((e) => e.type === "task.verified");
       expect(verified.payload.task_id).toBe(TASK_ID);
@@ -160,6 +163,17 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
         attempted: true,
         passed: false,
       });
+
+      // Container cleanup on the success path (issue #19 finding 5): the
+      // per-task container must not be left running/present after the run
+      // completes.
+      let containerStillExists = true;
+      try {
+        execFileSync("docker", ["inspect", CONTAINER_NAME], { stdio: "ignore" });
+      } catch {
+        containerStillExists = false;
+      }
+      expect(containerStillExists).toBe(false);
 
       bundle.cleanup();
     },
