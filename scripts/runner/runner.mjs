@@ -21,6 +21,7 @@ import {
   budgetExceeded,
   buildContainerName,
   buildPiCommand,
+  buildModelsConfig,
   computeTotals,
   deliverTerminalStatus,
   fetchWithTimeout,
@@ -42,6 +43,12 @@ const AGENTKIT_TGZ = process.env.AGENTKIT_TGZ || "/opt/agentkit.tgz";
 const PI_INVOKE_OVERRIDE = process.env.PI_INVOKE_OVERRIDE || undefined;
 const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
+// Per-completion output-token cap (anti-runaway). Written into the container's
+// pi model config so no single message can stream toward glm-5.2's 128k
+// ceiling. 8192 is generous for a think+act turn on a terminal task.
+const MAX_OUTPUT_TOKENS = parseInt(process.env.RUNNER_MAX_OUTPUT_TOKENS ?? "8192", 10);
+// pi config dir written/read inside the task container (holds models.json).
+const PI_AGENT_DIR = process.env.RUNNER_PI_AGENT_DIR || "/opt/pi-agent";
 // A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
 // reality and dominated the leaderboard whenever it was hit (live-run
 // evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the
@@ -317,6 +324,24 @@ async function runOneTask(task, index, systemPrompt) {
       sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
     }
 
+    // Cap output tokens per completion. glm-5.2 can otherwise stream a single
+    // runaway message toward its 128k ceiling and burn the whole agent
+    // timeout without ever taking an action (observed on regex-log /
+    // prove-plus-comm). pi reads modelOverrides from
+    // PI_CODING_AGENT_DIR/models.json; capping maxTokens makes such a message
+    // stop at the cap (stopReason: length) so the turn ends and the agent
+    // continues. This is fixed harness config applied identically to every
+    // competitor, not part of the submitted prompt.
+    const modelsJson = buildModelsConfig(MAX_OUTPUT_TOKENS);
+    sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", PI_AGENT_DIR]);
+    sh(DOCKER_CMD, [
+      "exec",
+      containerName,
+      "sh",
+      "-c",
+      `printf '%s' ${shQuote(modelsJson)} > ${PI_AGENT_DIR}/models.json`,
+    ]);
+
     const promptHostFile = writeTempFile(systemPrompt);
     tempDirs.push(path.dirname(promptHostFile));
     sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
@@ -340,7 +365,19 @@ async function runOneTask(task, index, systemPrompt) {
     // process.env by default, so no extra plumbing is needed here.
     const execResult = sh(
       DOCKER_CMD,
-      ["exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
+      [
+        "exec",
+        "-w",
+        "/app",
+        "-e",
+        "AI_GATEWAY_API_KEY",
+        "-e",
+        `PI_CODING_AGENT_DIR=${PI_AGENT_DIR}`,
+        containerName,
+        "sh",
+        "-c",
+        piCommand,
+      ],
       { maxBuffer: 5 * 1024 * 1024 },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
