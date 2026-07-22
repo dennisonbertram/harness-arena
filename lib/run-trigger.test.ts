@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+
+const mockCreateRunSandbox = vi.fn().mockResolvedValue({ sandbox_id: "sbx-1" });
+vi.mock("./sandbox", () => ({
+  createRunSandbox: (...args: unknown[]) => mockCreateRunSandbox(...args),
+}));
+
 import { startRun } from "./run-trigger";
 import type { Run } from "./types";
 
@@ -12,18 +18,18 @@ function makeRun(): Run {
   };
 }
 
-describe("startRun (stub for ticket #7)", () => {
-  it("resolves without throwing so a submission is never failed by the missing sandbox trigger", async () => {
-    await expect(startRun(makeRun())).resolves.toBeUndefined();
+describe("startRun", () => {
+  it("delegates to createRunSandbox with the run and the submitted prompt", async () => {
+    const run = makeRun();
+
+    await startRun(run, "be careful");
+
+    expect(mockCreateRunSandbox).toHaveBeenCalledWith(run, { prompt: "be careful" });
   });
 
-  it("logs that the run trigger is not implemented yet, instead of silently no-op'ing", async () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  it("propagates a createRunSandbox rejection instead of swallowing it (the caller owns the fire-and-forget catch)", async () => {
+    mockCreateRunSandbox.mockRejectedValueOnce(new Error("sandbox down"));
 
-    await startRun(makeRun());
-
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("run-trigger: not implemented (ticket #7)"));
-
-    logSpy.mockRestore();
+    await expect(startRun(makeRun(), "be careful")).rejects.toThrow("sandbox down");
   });
 });
