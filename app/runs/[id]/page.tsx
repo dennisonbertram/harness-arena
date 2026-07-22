@@ -5,6 +5,7 @@ import { formatDuration, formatUsd } from "@/lib/format";
 import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { RunAutoRefresh } from "./RunAutoRefresh";
+import { EventTimeline } from "./EventTimeline";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 
@@ -163,33 +164,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         {events.length === 0 ? (
           <p style={{ fontSize: 14, color: "var(--gray-900)" }}>No events yet.</p>
         ) : (
-          <ol style={{ listStyle: "none", fontSize: 13 }} className="mono">
-            {events.map((event) => (
-              <li
-                key={event.seq}
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  padding: "6px 0",
-                  borderBottom: "1px solid var(--gray-alpha-400)",
-                  color: "var(--gray-900)",
-                }}
-              >
-                <span style={{ color: "var(--gray-700)", flexShrink: 0 }}>{event.seq}</span>
-                <span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                  {new Date(event.ts).toLocaleTimeString()}
-                </span>
-                <span style={{ color: "var(--gray-1000)", whiteSpace: "nowrap", flexShrink: 0 }}>
-                  {event.type}
-                </span>
-                <span
-                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                >
-                  {JSON.stringify(event.payload)}
-                </span>
-              </li>
-            ))}
-          </ol>
+          <EventTimeline
+            events={events.map((e) => ({ seq: e.seq, ts: e.ts, type: e.type, payload: e.payload }))}
+          />
         )}
         {run.status === "running" || run.status === "queued" ? (
           <p style={{ fontSize: 12, color: "var(--gray-700)", marginTop: 12 }}>
