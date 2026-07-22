@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { countByStatus, recentActivity, totalSpendUsd } from "./status-view";
+import {
+  countByStatus,
+  PER_RUN_BUDGET_CAP_USD,
+  POC_BUDGET_CAP_USD,
+  recentActivity,
+  totalSpendUsd,
+} from "./status-view";
 import { RUN_STATUSES, SUBMISSION_STATUSES } from "./types";
 import type { Run, RunEvent, Submission } from "./types";
 
@@ -159,5 +165,40 @@ describe("totalSpendUsd", () => {
 
   it("returns 0 when there are no runs", () => {
     expect(totalSpendUsd([])).toBe(0);
+  });
+});
+
+describe("regression", () => {
+  it("countByStatus never drops or double-counts an item — every item's status is counted exactly once", () => {
+    // Walks the authoritative RUN_STATUSES list from lib/types.ts rather
+    // than a hardcoded set, so counts always sum back to the input length
+    // no matter how the status list grows in the future.
+    const runs = RUN_STATUSES.flatMap((status, i) =>
+      new Array(i + 1).fill(0).map((_, j) => run(`${status}-${j}`, "s1", status)),
+    );
+
+    const counts = countByStatus(runs, RUN_STATUSES);
+
+    const totalCounted = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    expect(totalCounted).toBe(runs.length);
+  });
+
+  it("recentActivity keeps each run's last-event lookup isolated — one run's events never leak into another run's row", () => {
+    const runs = [run("r1", "s1", "running"), run("r2", "s1", "completed")];
+    const submissions = [submission("s1", "agent-x")];
+    const eventsByRun = new Map<string, RunEvent[]>([
+      ["r1", [event("r1", 1, "run.created", "2026-07-20T00:00:00.000Z")]],
+      ["r2", [event("r2", 1, "run.created", "2026-07-19T00:00:00.000Z"), event("r2", 2, "run.completed", "2026-07-19T00:05:00.000Z")]],
+    ]);
+
+    const rows = recentActivity(runs, submissions, eventsByRun);
+
+    expect(rows.find((r) => r.runId === "r1")?.lastEventType).toBe("run.created");
+    expect(rows.find((r) => r.runId === "r2")?.lastEventType).toBe("run.completed");
+  });
+
+  it("keeps the POC budget figures at $25 total / $2 per-run — the same figures ticket #8's proof-run budget uses, not a separately drifted number", () => {
+    expect(POC_BUDGET_CAP_USD).toBe(25);
+    expect(PER_RUN_BUDGET_CAP_USD).toBe(2);
   });
 });

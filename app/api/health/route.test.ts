@@ -99,4 +99,20 @@ describe("GET /api/health", () => {
       expect(body.sha).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     });
   });
+
+  describe("regression: ok/sha stay present and unchanged regardless of the new checks' results", () => {
+    it("keeps ok:true and a non-empty sha even when storage is down, so ticket #1 consumers reading only {ok, sha} never break", async () => {
+      storageRef.current.listRuns = vi.fn().mockRejectedValue(new Error("storage unreachable"));
+
+      const response = await GET();
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(typeof body.sha).toBe("string");
+      expect(body.sha.length).toBeGreaterThan(0);
+      // ...and the new field is present alongside them, not replacing them.
+      expect(body.storage).toBe("down");
+    });
+  });
 });
