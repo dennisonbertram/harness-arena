@@ -1,18 +1,28 @@
 import type { Storage } from "./storage";
 import type { Run } from "./types";
 
-// Decided value from the spec sheet, not a placeholder (issue #7).
-const REAP_THRESHOLD_MS = 10 * 60 * 1000;
+// Default raised from 10 to 20 minutes (issue #23 finding F5) once the
+// per-task timeout caps in lib/tasks-for-runner.ts bound worst-case
+// per-task quiet time to ~300+240+setup =~ 10 minutes -- 10 minutes left
+// zero margin. Override via REAP_STALE_MINUTES; read per-call (not cached
+// at module load) so tests/ops can override without a process restart.
+const DEFAULT_REAP_STALE_MINUTES = 20;
 const REAPABLE_STATUSES = new Set<Run["status"]>(["queued", "running"]);
+
+function reapThresholdMs(): number {
+  const minutes = Number(process.env.REAP_STALE_MINUTES ?? DEFAULT_REAP_STALE_MINUTES);
+  return minutes * 60 * 1000;
+}
 
 /**
  * Pure predicate: a run is stale once it's been silent (no new events) for
- * over 10 minutes while still in a non-terminal status. Terminal statuses
- * (completed/failed/reaped) are never reaped, no matter how old.
+ * over the stale threshold (default 20 minutes) while still in a
+ * non-terminal status. Terminal statuses (completed/failed/reaped) are
+ * never reaped, no matter how old.
  */
 export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now()): boolean {
   if (!REAPABLE_STATUSES.has(run.status)) return false;
-  return now - new Date(lastEventTs).getTime() > REAP_THRESHOLD_MS;
+  return now - new Date(lastEventTs).getTime() > reapThresholdMs();
 }
 
 /**
@@ -29,7 +39,11 @@ export async function reapIfStale(storage: Storage, run: Run, now: number = Date
   const reaped: Run = { ...run, status: "reaped", finished_at: new Date(now).toISOString() };
   await storage.putRun(reaped);
   await storage.appendRunEvents(run.id, [
-    { ts: new Date(now).toISOString(), type: "run.reaped", payload: { reason: "no events for over 10 minutes" } },
+    {
+      ts: new Date(now).toISOString(),
+      type: "run.reaped",
+      payload: { reason: `no events for over ${reapThresholdMs() / 60000} minutes` },
+    },
   ]);
   return reaped;
 }

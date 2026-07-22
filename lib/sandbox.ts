@@ -1,4 +1,5 @@
 import { Sandbox } from "@vercel/sandbox";
+import type { NetworkPolicy } from "@vercel/sandbox";
 import { log } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
@@ -9,8 +10,50 @@ import type { Run } from "./types";
 // in. Override via RUNNER_SNAPSHOT_ID for a future rebuild without a
 // redeploy.
 const DEFAULT_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
-const SANDBOX_TIMEOUT_MS = 45 * 60 * 1000;
 const DEFAULT_CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
+
+// Raised from 45 to 120 minutes (issue #23 finding E) -- the Vercel account
+// is confirmed Pro (5h sandboxes supported), and the per-task timeout caps
+// in lib/tasks-for-runner.ts bound worst-case run duration to well under
+// 120 minutes regardless. Override via RUNNER_SANDBOX_TIMEOUT_MIN.
+const DEFAULT_SANDBOX_TIMEOUT_MIN = 120;
+
+function sandboxTimeoutMs(): number {
+  const minutes = Number(process.env.RUNNER_SANDBOX_TIMEOUT_MIN ?? DEFAULT_SANDBOX_TIMEOUT_MIN);
+  return minutes * 60 * 1000;
+}
+
+// Egress allowlist for the sandbox's default network policy (issue #23
+// finding D). Full gateway-only lockdown (proxying every outbound call,
+// including AI Gateway, through our own forwardURL) is CONCEPT.md's
+// documented v1.1 item, not built here. Compensating controls in the
+// meantime: trace redaction of secrets before upload (issue #19 finding 1),
+// planned post-POC key rotation, and the judge rejecting prompts that
+// attempt exfiltration. Set RUNNER_NETWORK_MODE=allow-all to disable this
+// allowlist entirely for local debugging.
+const NETWORK_ALLOWLIST = [
+  "ai-gateway.vercel.sh",
+  "harness-arena-psi.vercel.app",
+  "*.public.blob.vercel-storage.com",
+  "astral.sh",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "objects.githubusercontent.com",
+  "github.com",
+  "raw.githubusercontent.com",
+  "deb.debian.org",
+  "security.debian.org",
+  "archive.ubuntu.com",
+  "security.ubuntu.com",
+  "ports.ubuntu.com",
+  "registry.npmjs.org",
+  // Docker images are baked into the snapshot -- no docker registry needed.
+];
+
+function networkPolicy(): NetworkPolicy {
+  if (process.env.RUNNER_NETWORK_MODE === "allow-all") return "allow-all";
+  return { allow: NETWORK_ALLOWLIST };
+}
 
 interface VercelCredentials {
   token: string;
@@ -30,8 +73,9 @@ function vercelCredentials(): VercelCredentials | Record<string, never> {
   return {};
 }
 
-// Single-quote shell escaping: safe for embedding arbitrary values (secrets,
-// base64 blobs) as literal args inside a `sh -c` string.
+// Single-quote shell escaping: safe for embedding arbitrary values as
+// literal args inside a `sh -c` string. Only used for the bootstrap
+// command below, which carries no secrets.
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -42,8 +86,8 @@ function requireEnv(name: string): string {
   return value;
 }
 
-// Any failure here (missing env, SDK throw, non-zero bootstrap/launch exit)
-// must surface as run.failed instead of leaving the run stuck at `queued`
+// Any failure here (missing env, SDK throw, non-zero bootstrap exit) must
+// surface as run.failed instead of leaving the run stuck at `queued`
 // forever -- that's the whole point of this ticket.
 async function markFailed(run: Run, err: unknown): Promise<void> {
   const storage = getStorage();
@@ -67,7 +111,8 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
 
     const sandbox = await Sandbox.create({
       source: { type: "snapshot", snapshotId: process.env.RUNNER_SNAPSHOT_ID ?? DEFAULT_SNAPSHOT_ID },
-      timeout: SANDBOX_TIMEOUT_MS,
+      timeout: sandboxTimeoutMs(),
+      networkPolicy: networkPolicy(),
       ...vercelCredentials(),
     });
 
@@ -79,6 +124,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     ]);
     log("info", "sandbox.creating", { run_id: run.id, sandbox_id: sandbox.name });
 
+    // Bootstrap carries no secrets, so a plain shell string is fine here.
     const bootstrapCmd =
       `mkdir -p /opt/runner && ` +
       `curl -fsSL ${shQuote(`${callbackBase}/runner-bundle.tgz`)} -o /tmp/rb.tgz && ` +
@@ -88,6 +134,11 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       throw new Error(`runner bundle bootstrap failed (exit ${bootstrapResult.exitCode})`);
     }
 
+    // Launch via the SDK's structured runCommand + a real env map (issue
+    // #23 finding C): secrets travel exclusively through `env`, never
+    // interpolated into a command string or shell argv, so they never show
+    // up in sandbox command metadata/logs. `detached: true` returns
+    // immediately without waiting for the runner process to exit.
     const runnerEnv: Record<string, string> = {
       RUN_ID: run.id,
       CALLBACK_BASE: callbackBase,
@@ -97,14 +148,12 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
-    const envAssignments = Object.entries(runnerEnv)
-      .map(([key, value]) => `${key}=${shQuote(value)}`)
-      .join(" ");
-    const launchCmd = `nohup env ${envAssignments} node /opt/runner/scripts/runner/runner.mjs >/var/log/runner.log 2>&1 &`;
-    const launchResult = await sandbox.runCommand("sh", ["-c", launchCmd]);
-    if (launchResult.exitCode !== 0) {
-      throw new Error(`runner launch failed (exit ${launchResult.exitCode})`);
-    }
+    await sandbox.runCommand({
+      cmd: "node",
+      args: ["/opt/runner/scripts/runner/runner.mjs"],
+      env: runnerEnv,
+      detached: true,
+    });
 
     return { sandbox_id: sandbox.name };
   } catch (err) {

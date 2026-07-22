@@ -28,6 +28,7 @@ import {
   parseReward,
   parseSessionCost,
   redactSecrets,
+  safeCleanup,
   sh,
 } from "./lib.mjs";
 
@@ -426,10 +427,13 @@ async function runOneTask(task, index, systemPrompt) {
   } finally {
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its
-    // container or temp files (issue #19 finding 5).
-    cleanupContainer(containerName);
+    // container or temp files (issue #19 finding 5). Each cleanup step is
+    // wrapped so a throw here (e.g. rmSync ENOENT/EACCES) can never mask
+    // the real task error or turn a task's success into a crashed run
+    // (issue #23 finding G2).
+    safeCleanup(() => cleanupContainer(containerName), `container ${containerName}`, log);
     for (const dir of tempDirs) {
-      rmSync(dir, { recursive: true, force: true });
+      safeCleanup(() => rmSync(dir, { recursive: true, force: true }), `temp dir ${dir}`, log);
     }
   }
 }
@@ -448,6 +452,13 @@ async function main() {
       process.exit(delivered ? 0 : 1);
     }
     queueEvent("run.sandbox_ready", { sandbox_id: os.hostname() });
+    // First status transition of the run (issue #23 finding B): posting
+    // "running" here, before the task loop starts, closes the window
+    // where a run sits at "queued" until its (possibly much later)
+    // terminal status -- the callback route's canTransition also allows
+    // queued->completed/failed directly as a belt-and-suspenders fallback
+    // if this post is ever lost.
+    await flushEvents({ status: "running" });
 
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
     const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);

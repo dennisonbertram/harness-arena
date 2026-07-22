@@ -27,8 +27,11 @@ const CallbackBodySchema = z
 // queued -> running -> completed|failed. Anything else (including a
 // terminal-state regression) is logged and ignored, not applied.
 const TERMINAL_RUN_STATUSES = new Set<Run["status"]>(["completed", "failed", "reaped"]);
+// queued->completed/failed is belt-and-suspenders (issue #23 finding B):
+// if the runner's early "running" post is lost, its own terminal post must
+// still land instead of being rejected as an invalid transition.
 const VALID_RUN_TRANSITIONS: Partial<Record<Run["status"], Run["status"][]>> = {
-  queued: ["running"],
+  queued: ["running", "completed", "failed"],
   running: ["completed", "failed"],
 };
 
