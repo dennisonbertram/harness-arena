@@ -5,10 +5,16 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   budgetExceeded,
+  buildContainerName,
   buildPiCommand,
   computeTotals,
+  deliverTerminalStatus,
+  fetchWithTimeout,
+  isSessionTextUnreadable,
   parseReward,
   parseSessionCost,
+  redactSecrets,
+  sh,
   shQuote,
 } from "../../scripts/runner/lib.mjs";
 
@@ -27,12 +33,34 @@ describe("parseSessionCost", () => {
   });
 
   it("returns zero cost and zero turns for empty input", () => {
-    expect(parseSessionCost("")).toEqual({ totalCost: 0, turns: 0 });
+    expect(parseSessionCost("")).toEqual({ totalCost: 0, turns: 0, negativeCostCount: 0 });
   });
 
   it("does not throw on a completely malformed jsonl blob", () => {
     const result = parseSessionCost("{{{not json\nalso not json\n");
-    expect(result).toEqual({ totalCost: 0, turns: 0 });
+    expect(result).toEqual({ totalCost: 0, turns: 0, negativeCostCount: 0 });
+  });
+
+  it("ignores negative cost.total values (clamped to 0) and counts them as a tamper signal", () => {
+    const jsonl = [
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", usage: { cost: { total: 0.01 } } },
+      }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", usage: { cost: { total: -5 } } },
+      }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", usage: { cost: { total: 0.02 } } },
+      }),
+    ].join("\n");
+
+    const result = parseSessionCost(jsonl);
+    expect(result.totalCost).toBeCloseTo(0.03, 10);
+    expect(result.turns).toBe(3);
+    expect(result.negativeCostCount).toBe(1);
   });
 });
 
@@ -146,5 +174,143 @@ describe("buildPiCommand", () => {
       override: "/usr/local/bin/fake-pi.sh",
     });
     expect(cmd).toBe("timeout 60 /usr/local/bin/fake-pi.sh");
+  });
+});
+
+describe("redactSecrets", () => {
+  it("scrubs the exact secret value wherever it appears in the text", () => {
+    const text = "before AI_GATEWAY_API_KEY=sk-real-secret-value after sk-real-secret-value end";
+    expect(redactSecrets(text, ["sk-real-secret-value"])).toBe(
+      "before AI_GATEWAY_API_KEY=[REDACTED] after [REDACTED] end",
+    );
+  });
+
+  it("scrubs any vck_-prefixed token even when it is not in the known secrets list", () => {
+    const text = "printenv output: SOME_TOKEN=vck_abc123XYZ done";
+    expect(redactSecrets(text, [])).toBe("printenv output: SOME_TOKEN=[REDACTED] done");
+  });
+
+  it("leaves unrelated text completely untouched", () => {
+    const text = "totally normal log line with no secrets in it";
+    expect(redactSecrets(text, ["some-other-secret"])).toBe(text);
+  });
+
+  it("handles a known secret and a vck_ token together in the same blob", () => {
+    const text = "key=sk-real-key-value token=vck_deadbeef1234 other=fine";
+    expect(redactSecrets(text, ["sk-real-key-value"])).toBe(
+      "key=[REDACTED] token=[REDACTED] other=fine",
+    );
+  });
+});
+
+describe("sh", () => {
+  it("returns code 0, stdout, and timedOut=false for a successful command", () => {
+    const result = sh("printf", ["%s", "hello"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout.toString("utf8")).toBe("hello");
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("kills a hung command once the timeout elapses and reports timedOut=true", () => {
+    const start = Date.now();
+    const result = sh("sleep", ["5"], { timeout: 200 });
+    const elapsed = Date.now() - start;
+    expect(result.timedOut).toBe(true);
+    expect(result.code).not.toBe(0);
+    // Proves this actually enforced a deadline instead of waiting out the
+    // full 5s sleep.
+    expect(elapsed).toBeLessThan(4000);
+  });
+});
+
+describe("fetchWithTimeout", () => {
+  it("passes an AbortSignal alongside the caller's other fetch options", async () => {
+    let capturedOptions;
+    const fakeFetch = async (url, options) => {
+      capturedOptions = options;
+      return { ok: true, url };
+    };
+    await fetchWithTimeout(fakeFetch, "http://example.test", { method: "POST" }, 5000);
+    expect(capturedOptions.method).toBe("POST");
+    expect(capturedOptions.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts the underlying fetch once the timeout elapses", async () => {
+    const hangingFetch = (url, options) =>
+      new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    await expect(fetchWithTimeout(hangingFetch, "http://example.test", {}, 20)).rejects.toThrow();
+  });
+});
+
+describe("buildContainerName", () => {
+  it("includes RUN_ID, the task index, and the sanitized task id", () => {
+    const name = buildContainerName("run-abc123", 2, "regex-log");
+    expect(name).toBe("task-run-abc123-2-regex-log");
+  });
+
+  it("sanitizes unsafe characters out of RUN_ID and task id, staying docker-name-safe", () => {
+    const name = buildContainerName("run/weird id!", 0, "task with spaces & slashes/here");
+    expect(name).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
+    expect(name).toContain("-0-");
+  });
+});
+
+describe("isSessionTextUnreadable", () => {
+  it("is true for missing (null/undefined) session text", () => {
+    expect(isSessionTextUnreadable(null)).toBe(true);
+    expect(isSessionTextUnreadable(undefined)).toBe(true);
+  });
+
+  it("is true for empty/whitespace-only session text", () => {
+    expect(isSessionTextUnreadable("")).toBe(true);
+    expect(isSessionTextUnreadable("   \n  \n")).toBe(true);
+  });
+
+  it("is true when every line fails to parse as JSON", () => {
+    expect(isSessionTextUnreadable("{{{not json\nalso not json\n")).toBe(true);
+  });
+
+  it("is false when at least one line parses as valid JSON", () => {
+    const jsonl = [
+      "not json at all",
+      JSON.stringify({ type: "message", message: { role: "user", content: "go" } }),
+    ].join("\n");
+    expect(isSessionTextUnreadable(jsonl)).toBe(false);
+  });
+});
+
+describe("deliverTerminalStatus", () => {
+  it("returns delivered=true and never writes a fallback when postFn succeeds", async () => {
+    let fallbackCalled = false;
+    const result = await deliverTerminalStatus({
+      postFn: async () => true,
+      payload: { status: "completed" },
+      writeFallback: () => {
+        fallbackCalled = true;
+      },
+      fallbackPath: "/var/log/runner-terminal.json",
+    });
+    expect(result).toBe(true);
+    expect(fallbackCalled).toBe(false);
+  });
+
+  it("returns delivered=false and writes the payload to the fallback path when postFn always fails", async () => {
+    let writtenPath;
+    let writtenContent;
+    const payload = { status: "failed", totals: { total_cost_usd: 1.23 } };
+    const result = await deliverTerminalStatus({
+      postFn: async () => false,
+      payload,
+      writeFallback: (fallbackPath, content) => {
+        writtenPath = fallbackPath;
+        writtenContent = content;
+      },
+      fallbackPath: "/var/log/runner-terminal.json",
+    });
+    expect(result).toBe(false);
+    expect(writtenPath).toBe("/var/log/runner-terminal.json");
+    expect(JSON.parse(writtenContent)).toEqual(payload);
   });
 });
