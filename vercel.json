@@ -1,3 +1,4 @@
 {
+  "buildCommand": "node scripts/build-runner-bundle.mjs && next build",
   "crons": [{ "path": "/api/cron/reap", "schedule": "0 3 * * *" }]
 }
