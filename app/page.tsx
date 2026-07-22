@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
-import { getLeaderboardView } from "@/lib/leaderboard-view";
+import { getLeaderboardView, partitionBaseline, type LeaderboardRow } from "@/lib/leaderboard-view";
 import { formatUsd, scaleScatterPoints, scatterDotColor } from "@/lib/format";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
@@ -13,6 +13,7 @@ export const revalidate = 15;
 export default async function LeaderboardPage() {
   const storage = getStorage();
   const rows = await getLeaderboardView(storage);
+  const { baseline, competitors } = partitionBaseline(rows);
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -53,7 +54,51 @@ export default async function LeaderboardPage() {
         </div>
       ) : (
         <>
+          {baseline && (
+            <section style={{ marginBottom: 40 }}>
+              <h2 className="label" style={{ marginBottom: 12 }}>
+                Baseline to beat
+              </h2>
+              <Link
+                href={`/runs/${baseline.runId}`}
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "baseline",
+                  gap: "8px 32px",
+                  border: "1px solid var(--gray-alpha-400)",
+                  borderRadius: 12,
+                  padding: "20px 24px",
+                  background: "var(--gray-alpha-100)",
+                  textDecoration: "none",
+                  color: "inherit",
+                }}
+              >
+                <div style={{ flex: "1 1 240px" }}>
+                  <div style={{ fontSize: 16, fontWeight: 600 }}>Vanilla pi harness</div>
+                  <div style={{ fontSize: 13, color: "var(--gray-900)" }}>
+                    Stock pi system prompt, nothing added — the reference every submission tries to beat.
+                  </div>
+                </div>
+                <BaselineStat label="Tasks passed" value={`${baseline.tasksPassed}/${baseline.totalTasks}`} />
+                <BaselineStat label="Total cost" value={formatUsd(baseline.totalCostUsd)} />
+                <BaselineStat label="Cost / task" value={formatUsd(baseline.costPerTaskUsd)} />
+              </Link>
+            </section>
+          )}
+
           <section style={{ marginBottom: 48, overflowX: "auto" }}>
+            <h2 className="label" style={{ marginBottom: 16 }}>
+              Leaderboard
+            </h2>
+            {competitors.length === 0 ? (
+              <p style={{ fontSize: 14, color: "var(--gray-900)" }}>
+                No competitor submissions yet.{" "}
+                <Link href="/submit" style={{ color: "var(--blue-700)" }}>
+                  Be the first to beat the baseline.
+                </Link>
+              </p>
+            ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
@@ -78,7 +123,7 @@ export default async function LeaderboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
+                {competitors.map((row) => (
                   <tr key={row.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>
                       <Link href={`/runs/${row.runId}`}>{row.rank}</Link>
@@ -100,13 +145,14 @@ export default async function LeaderboardPage() {
                 ))}
               </tbody>
             </table>
+            )}
           </section>
 
           <section>
             <h2 className="label" style={{ marginBottom: 16 }}>
               Cost vs. tasks passed
             </h2>
-            <ScatterChart rows={rows} />
+            <ScatterChart rows={rows} baselineRunId={baseline?.runId} />
           </section>
         </>
       )}
@@ -116,12 +162,25 @@ export default async function LeaderboardPage() {
 
 const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
 
-function ScatterChart({ rows }: { rows: Awaited<ReturnType<typeof getLeaderboardView>> }) {
+function BaselineStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="label" style={{ marginBottom: 2 }}>
+        {label}
+      </div>
+      <div className="tabular-nums" style={{ fontSize: 20, fontWeight: 600 }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ScatterChart({ rows, baselineRunId }: { rows: LeaderboardRow[]; baselineRunId?: string }) {
   const { points, xMax, yMax, width, height, padding } = scaleScatterPoints(
     rows.map((row) => ({ runId: row.runId, totalCostUsd: row.totalCostUsd, tasksPassed: row.tasksPassed })),
     CHART_OPTIONS,
   );
-  const leaderRunId = rows[0]?.runId;
+  const leaderRunId = rows.find((row) => row.runId !== baselineRunId)?.runId;
 
   return (
     <svg
@@ -157,16 +216,32 @@ function ScatterChart({ rows }: { rows: Awaited<ReturnType<typeof getLeaderboard
         {formatUsd(xMax)}
       </text>
 
-      {points.map((point) => (
-        <a key={point.runId} href={`/runs/${point.runId}`}>
-          <circle
-            cx={point.cx}
-            cy={point.cy}
-            r={5}
-            fill={scatterDotColor(point.runId === leaderRunId)}
-          />
-        </a>
-      ))}
+      {points.map((point) => {
+        const isBaseline = point.runId === baselineRunId;
+        return (
+          <a key={point.runId} href={`/runs/${point.runId}`}>
+            {isBaseline ? (
+              // Baseline: hollow ring so it reads as the reference, not a competitor.
+              <circle
+                cx={point.cx}
+                cy={point.cy}
+                r={6}
+                fill="var(--background-100)"
+                stroke="var(--gray-1000)"
+                strokeWidth={2}
+                strokeDasharray="2 2"
+              />
+            ) : (
+              <circle cx={point.cx} cy={point.cy} r={5} fill={scatterDotColor(point.runId === leaderRunId)} />
+            )}
+          </a>
+        );
+      })}
+      {points.some((p) => p.runId === baselineRunId) && (
+        <text x={width - padding} y={padding - 8} fontSize={11} textAnchor="end" fill="currentColor">
+          ◌ baseline
+        </text>
+      )}
     </svg>
   );
 }

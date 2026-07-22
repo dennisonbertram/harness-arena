@@ -1,7 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { getLeaderboardView } from "./leaderboard-view";
+import { getLeaderboardView, partitionBaseline, type LeaderboardRow } from "./leaderboard-view";
 import { MemoryStorage } from "./storage";
 import type { Run, Submission } from "./types";
+
+function row(over: Partial<LeaderboardRow>): LeaderboardRow {
+  return {
+    rank: 1,
+    runId: "r",
+    agentName: "a",
+    tasksPassed: 0,
+    totalTasks: 10,
+    costPerTaskUsd: 0,
+    totalCostUsd: 0,
+    submittedAt: "2026-07-22T00:00:00.000Z",
+    ...over,
+  };
+}
+
+describe("partitionBaseline", () => {
+  it("pulls the baseline out and re-ranks the remaining competitors 1..n", () => {
+    const rows = [
+      row({ runId: "c1", agentName: "plan", rank: 1 }),
+      row({ runId: "base", agentName: "pi-vanilla-baseline", rank: 2 }),
+      row({ runId: "c2", agentName: "terse", rank: 3 }),
+    ];
+    const { baseline, competitors } = partitionBaseline(rows);
+    expect(baseline?.runId).toBe("base");
+    expect(competitors.map((c) => [c.runId, c.rank])).toEqual([
+      ["c1", 1],
+      ["c2", 2],
+    ]);
+  });
+
+  it("returns a null baseline (and all rows as competitors) when none is present", () => {
+    const rows = [row({ runId: "c1", agentName: "plan" })];
+    const { baseline, competitors } = partitionBaseline(rows);
+    expect(baseline).toBeNull();
+    expect(competitors).toHaveLength(1);
+  });
+});
 
 function submission(id: string, agentName: string, createdAt: string): Submission {
   return {

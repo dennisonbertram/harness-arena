@@ -1,6 +1,10 @@
 import { sortLeaderboard } from "./leaderboard";
 import type { Storage } from "./storage";
 
+/** The reference entry: stock pi harness prompt, nothing added. Shown as the
+ *  baseline to beat, above the competitive leaderboard. */
+export const BASELINE_AGENT_NAME = "pi-vanilla-baseline";
+
 export interface LeaderboardRow {
   rank: number;
   runId: string;
@@ -10,6 +14,25 @@ export interface LeaderboardRow {
   costPerTaskUsd: number;
   totalCostUsd: number;
   submittedAt: string;
+}
+
+/**
+ * Splits the baseline (stock pi harness) out of the ranked list so it can be
+ * featured as a reference above the leaderboard. The baseline is the
+ * best-ranked run named BASELINE_AGENT_NAME (rows arrive in rank order);
+ * competitors are everything else, re-ranked 1..n. If several baseline runs
+ * exist, only the top one is featured — the rest stay in the competitor list.
+ */
+export function partitionBaseline(rows: LeaderboardRow[]): {
+  baseline: LeaderboardRow | null;
+  competitors: LeaderboardRow[];
+} {
+  const baselineIndex = rows.findIndex((row) => row.agentName === BASELINE_AGENT_NAME);
+  const baseline = baselineIndex === -1 ? null : rows[baselineIndex];
+  const competitors = rows
+    .filter((_, i) => i !== baselineIndex)
+    .map((row, i) => ({ ...row, rank: i + 1 }));
+  return { baseline, competitors };
 }
 
 /**
