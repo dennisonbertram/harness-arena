@@ -72,13 +72,14 @@ export class MemoryStorage implements Storage {
 }
 
 // Blob-backed implementation. Per-entity JSON documents at
-// submissions/<id>.json and runs/<id>.json; events are a single JSONL blob
-// per run at events/<runId>.jsonl, rewritten wholesale on each append
-// (acceptable at POC scale per ticket #4 — single writer per run assumed,
-// no concurrent-append locking).
-// ponytail: read-modify-rewrite the whole events file on every append —
-// O(n) per append, fine until run event counts get large; move to a real
-// append-only store (or Postgres) if that ever matters.
+// submissions/<id>.json and runs/<id>.json. Events are stored one-per-blob
+// at events/<runId>/<10-digit zero-padded seq>.json (e.g. seq 7 ->
+// events/run-1/0000000007.json) instead of a single rewritten JSONL file:
+// Vercel Blob reads are not immediately consistent after a write, so a
+// read-modify-rewrite of one shared file loses concurrent-in-time appends
+// (confirmed in production: run 489288d4 persisted ~12 of ~50 events).
+// Each event blob is written once (allowOverwrite: false) and never
+// rewritten, eliminating the read-modify-rewrite race entirely.
 export class BlobStorage implements Storage {
   private async readJson<T>(pathname: string): Promise<T | undefined> {
     const result = await get(pathname, { access: "public" });
@@ -145,35 +146,38 @@ export class BlobStorage implements Storage {
     return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
-  private async readEvents(runId: string): Promise<RunEvent[]> {
-    const result = await get(`events/${runId}.jsonl`, { access: "public" });
-    if (!result) return [];
-    const raw = await new Response(result.stream).text();
-    return raw
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as RunEvent);
-  }
-
   async appendRunEvents(runId: string, newEvents: NewRunEvent[]): Promise<RunEvent[]> {
-    const existing = await this.readEvents(runId);
+    // ponytail: two concurrent appendRunEvents calls for the SAME run could
+    // both list the same existing count and compute the same starting seq
+    // (a write-write race, not the read-modify-rewrite bug this fixes). The
+    // runner only ever calls appendRunEvents sequentially per run, so this
+    // doesn't happen in practice — add per-run locking / a CAS if a second
+    // concurrent writer per run is ever introduced.
+    const existing = await this.listAllBlobs(`events/${runId}/`);
     let seq = existing.length;
-    const appended: RunEvent[] = newEvents.map((event) => {
+    const appended: RunEvent[] = [];
+    for (const event of newEvents) {
       seq += 1;
-      return { ...event, run_id: runId, seq };
-    });
-    const allLines = [...existing, ...appended].map((event) => JSON.stringify(event)).join("\n");
-    await put(`events/${runId}.jsonl`, allLines, {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/jsonl",
-    });
+      const full: RunEvent = { ...event, run_id: runId, seq };
+      await put(`events/${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: false,
+        contentType: "application/json",
+      });
+      appended.push(full);
+    }
     return appended;
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
-    const events = await this.readEvents(runId);
+    const blobs = await this.listAllBlobs(`events/${runId}/`);
+    const events = await Promise.all(
+      blobs.map(async (blob) => {
+        const text = await (await fetch(blob.url)).text();
+        return JSON.parse(text) as RunEvent;
+      }),
+    );
     return events.sort((a, b) => a.seq - b.seq);
   }
 
