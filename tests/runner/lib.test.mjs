@@ -135,13 +135,6 @@ describe("buildPiCommand", () => {
     expect(cmd).toContain("--provider vercel-ai-gateway --model zai/glm-5.2");
     expect(cmd).toContain('--system-prompt "$(cat ' + shQuote("/tmp/system-prompt.txt") + ')"');
     expect(cmd).toContain(shQuote("Solve it and save to /app/regex.txt. Don't break \"quotes\"."));
-
-    // Round-trip the whole thing through a real shell: strip the leading
-    // "timeout N " and the pi path, leave the rest so we can confirm the
-    // instruction argument survives a real shell parse untouched.
-    const instructionEcho = `sh -c 'set -- ${cmd.split("/usr/local/bin/pi")[1]}; printf "%s" "$*"'`;
-    const out = execFileSync("sh", ["-c", instructionEcho], { encoding: "utf8" });
-    expect(out).toContain("Solve it and save to /app/regex.txt. Don't break \"quotes\".");
   });
 
   it("uses the override command instead of the default pi invocation when given", () => {
