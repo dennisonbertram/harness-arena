@@ -77,6 +77,7 @@ export default function RootLayout({
             <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
               GitHub
             </a>
+            <Link href="/status">Status</Link>
             <span>runs on Vercel Sandbox · zai/glm-5.2 via AI Gateway</span>
           </div>
         </footer>
