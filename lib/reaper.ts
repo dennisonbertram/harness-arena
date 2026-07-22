@@ -35,6 +35,11 @@ export async function reapIfStale(storage: Storage, run: Run, now: number = Date
   const events = await storage.listRunEvents(run.id);
   const lastEventTs = events.length > 0 ? events[events.length - 1].ts : run.created_at;
   if (!shouldReap(run, lastEventTs, now)) return run;
+  // ponytail: read-then-write is not atomic — a runner callback that lands
+  // between the freshness check and putRun could be overwritten. Bounded in
+  // practice: the 20-min threshold far exceeds the max per-task quiet period,
+  // so a run this stale has almost certainly stopped emitting. Move to a CAS/
+  // conditional write if concurrent writers ever become real.
 
   const reaped: Run = { ...run, status: "reaped", finished_at: new Date(now).toISOString() };
   await storage.putRun(reaped);
