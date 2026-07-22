@@ -382,7 +382,7 @@ describe("buildPiCommand", () => {
     // Matches harnessarena.xyz: no -nc/-ns/--no-extensions.
     expect(cmd).not.toContain("--no-extensions");
     expect(cmd).not.toContain("-nc");
-    expect(cmd).toContain("--provider vercel-ai-gateway --model zai/glm-5.2");
+    expect(cmd).toContain("--provider " + shQuote("vercel-ai-gateway") + " --model " + shQuote("zai/glm-5.2"));
     expect(cmd).toContain('--system-prompt "$(cat ' + shQuote("/tmp/system-prompt.txt") + ')"');
     expect(cmd).toContain(shQuote("Solve it and save to /app/regex.txt. Don't break \"quotes\"."));
   });
@@ -396,7 +396,7 @@ describe("buildPiCommand", () => {
       hasSystemPrompt: false,
     });
     expect(cmd).not.toContain("--system-prompt");
-    expect(cmd).toContain("--provider vercel-ai-gateway --model zai/glm-5.2");
+    expect(cmd).toContain("--provider " + shQuote("vercel-ai-gateway") + " --model " + shQuote("zai/glm-5.2"));
     expect(cmd).toContain(shQuote("Recover the lost commits."));
   });
 
