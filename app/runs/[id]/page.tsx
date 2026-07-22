@@ -152,9 +152,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
       </section>
 
       <section>
-        <h2 className="label" style={{ marginBottom: 12 }}>
+        <h2 className="label" style={{ marginBottom: 4 }}>
           Event timeline
         </h2>
+        <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 12 }}>
+          Each entry is one step the run emitted, in order: sandbox setup, then for every task{" "}
+          <span className="mono">started → agent finished → verified</span> (plus trace uploads and cost signals),
+          ending in <span className="mono">run.completed</span>. Columns are sequence · time · event type · payload.
+        </p>
         {events.length === 0 ? (
           <p style={{ fontSize: 14, color: "var(--gray-900)" }}>No events yet.</p>
         ) : (
