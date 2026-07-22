@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reapIfStale } from "@/lib/reaper";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -250,6 +251,40 @@ describe("POST /api/runs/[id]/callback", () => {
       );
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  describe("regression: a reaped run (ticket #7's reaper) is not resurrected by a late callback", () => {
+    it("stays reaped when a callback later reports status=running -- the reaper already won the race", async () => {
+      await storageRef.current.putRun({
+        id: "run-raced",
+        submission_id: "sub-raced",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-21T00:00:00.000Z",
+      });
+
+      // Simulate the reaper (GET /api/runs[/id]'s lazy reap, or the daily
+      // cron) having already marked this run stale before a straggling
+      // callback from the sandbox arrives.
+      const reaped = await reapIfStale(
+        storageRef.current,
+        (await storageRef.current.getRun("run-raced"))!,
+        new Date("2026-07-21T00:11:00.000Z").getTime(),
+      );
+      expect(reaped.status).toBe("reaped");
+
+      const response = await POST(
+        callbackRequest("run-raced", {
+          events: [{ ts: "2026-07-21T00:12:00.000Z", type: "task.started", payload: { task_id: "t1", index: 0 } }],
+          status: "running",
+        }),
+        { params: Promise.resolve({ id: "run-raced" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const run = await storageRef.current.getRun("run-raced");
+      expect(run?.status).toBe("reaped");
     });
   });
 
