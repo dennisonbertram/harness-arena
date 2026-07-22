@@ -326,9 +326,15 @@ async function runOneTask(task, index, systemPrompt) {
     // runaway tasks, so the cap has no upside here. Removed — pi runs with its
     // own defaults, matching harnessarena.xyz's vanilla baseline. Bound
     // runaways at the runner level (agent timeout) instead if it recurs.
-    const promptHostFile = writeTempFile(systemPrompt);
-    tempDirs.push(path.dirname(promptHostFile));
-    sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
+    // An empty submitted prompt means "run vanilla pi with its own default
+    // system prompt" (the baseline), matching harnessarena.xyz. Only write and
+    // pass a prompt file when there's actually a submitted prompt.
+    const hasSystemPrompt = typeof systemPrompt === "string" && systemPrompt.trim().length > 0;
+    if (hasSystemPrompt) {
+      const promptHostFile = writeTempFile(systemPrompt);
+      tempDirs.push(path.dirname(promptHostFile));
+      sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
+    }
 
     // Test-only: force an exception mid-task to prove the finally block
     // below still removes the container (issue #19 finding 5).
@@ -342,16 +348,18 @@ async function runOneTask(task, index, systemPrompt) {
       promptFile: PROMPT_FILE,
       instruction: task.instruction,
       override: PI_INVOKE_OVERRIDE,
+      hasSystemPrompt,
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
     // through from this process's own environment -- execFileSync inherits
-    // process.env by default, so no extra plumbing is needed here.
+    // process.env by default, so no extra plumbing is needed here. maxBuffer is
+    // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
+    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks.
     const execResult = sh(
       DOCKER_CMD,
-      [
-        "exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
-      { maxBuffer: 5 * 1024 * 1024 },
+      ["exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
+      { maxBuffer: 64 * 1024 * 1024 },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
     const agentFinishedAt = Date.now();

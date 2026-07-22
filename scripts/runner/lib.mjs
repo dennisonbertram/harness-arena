@@ -308,17 +308,25 @@ export function buildPiCommand({
   promptFile,
   instruction,
   override,
+  hasSystemPrompt = true,
 }) {
   if (override) {
     return `timeout ${agentTimeoutSec} ${override}`;
   }
-  return [
+  // Match harnessarena.xyz's vanilla pi invocation (agent/pi_agent.py): do NOT
+  // pass -nc/-ns/--no-extensions -- those strip pi's context/skills/extensions
+  // and diverge from the reference baseline. When there is no submitted system
+  // prompt (the baseline), omit --system-prompt entirely so pi uses its own
+  // built-in default, exactly like their baseline.
+  const parts = [
     `timeout ${agentTimeoutSec} /usr/local/bin/pi`,
     "--print --mode json",
     `--session-dir ${shQuote(sessionDir)}`,
-    "-nc -ns --no-extensions",
     "--provider vercel-ai-gateway --model zai/glm-5.2",
-    `--system-prompt "$(cat ${shQuote(promptFile)})"`,
-    shQuote(instruction),
-  ].join(" ");
+  ];
+  if (hasSystemPrompt) {
+    parts.push(`--system-prompt "$(cat ${shQuote(promptFile)})"`);
+  }
+  parts.push(shQuote(instruction));
+  return parts.join(" ");
 }

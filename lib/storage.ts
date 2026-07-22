@@ -131,12 +131,17 @@ export class BlobStorage implements Storage {
   }
 
   private async writeJson(pathname: string, value: unknown): Promise<void> {
-    await put(pathname, JSON.stringify(value), {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/json",
-    });
+    // Retry: Blob rate-limits writes under a high-volume run (a 16-task run
+    // emits ~90 event blobs + ~32 trace blobs), and an un-retried put failure
+    // there 500'd the callback route and lost the run's totals.
+    await withRetry(() =>
+      put(pathname, JSON.stringify(value), {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: true,
+        contentType: "application/json",
+      }),
+    );
   }
 
   async getSubmission(id: string): Promise<Submission | undefined> {
@@ -248,11 +253,13 @@ export class BlobStorage implements Storage {
   }
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
-    const { url } = await put(`traces/${runId}/${taskId}/${name}`, data, {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-    });
+    const { url } = await withRetry(() =>
+      put(`traces/${runId}/${taskId}/${name}`, data, {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: true,
+      }),
+    );
     return url;
   }
 }
