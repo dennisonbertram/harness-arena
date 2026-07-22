@@ -26,7 +26,14 @@ export async function submitBaseline(base = process.env.BASE || DEFAULT_BASE) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ agent_name: AGENT_NAME, prompt }),
   });
-  const body = await submitRes.json();
+  const body = await submitRes.json().catch(() => null);
+  // A rejected submission is a legitimate 200 with status:"rejected"; only
+  // non-2xx (415/413/429/503/malformed) is a failure the caller must see.
+  if (!submitRes.ok) {
+    throw new Error(
+      `POST /api/submissions failed: HTTP ${submitRes.status}${body ? ` — ${JSON.stringify(body)}` : ""}`,
+    );
+  }
   return { status: submitRes.status, body };
 }
 

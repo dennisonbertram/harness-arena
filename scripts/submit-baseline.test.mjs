@@ -24,6 +24,7 @@ describe("scripts/submit-baseline.mjs", () => {
         text: async () => "vanilla prompt text",
       })
       .mockResolvedValueOnce({
+        ok: true,
         status: 200,
         json: async () => ({ submission_id: "sub-1", run_id: "run-1", status: "queued" }),
       });
@@ -57,6 +58,22 @@ describe("scripts/submit-baseline.mjs", () => {
 
     await expect(submitBaseline("https://example.test")).rejects.toThrow(
       "GET /api/baseline-prompt failed: 500",
+    );
+  });
+
+  it("throws on a non-2xx POST /api/submissions instead of reporting success", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => "vanilla prompt text" })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: async () => ({ error: "judge unavailable, retry later" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(submitBaseline("https://example.test")).rejects.toThrow(
+      "POST /api/submissions failed: HTTP 503",
     );
   });
 });
