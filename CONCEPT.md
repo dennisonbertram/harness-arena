@@ -134,7 +134,7 @@ SWE-bench), multi-trial averaging, hidden task sets.
   `alexgshaw/<task>:20251031` (verified live): regex-log, fix-git,
   log-summary-date-ranges, extract-elf, sqlite-db-truncate,
   multi-source-data-merger, openssl-selfsigned-cert, prove-plus-comm,
-  sanitize-git-repo, db-wal-recovery. Apache-2.0; canary GUID lines preserved
+  cobol-modernization, db-wal-recovery. Apache-2.0; canary GUID lines preserved
   byte-identical; solutions not vendored. Verification = official
   `tests/test.sh` → `/logs/verifier/reward.txt` (oracle-tested locally,
   reward=1 on regex-log).
