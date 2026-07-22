@@ -40,4 +40,17 @@ describe("parseSubmitResponse", () => {
     expect(parsed.error).toBe("HTTP 200");
     expect(parsed.result).toBeNull();
   });
+
+  it("regression: falls back to 'HTTP <status>' even when the body read fails with a non-SyntaxError (e.g. an aborted stream)", () => {
+    // A narrow `catch (e) { if (e instanceof SyntaxError) ... }` guard would
+    // let a different failure mode (e.g. the connection dropping mid-read)
+    // propagate as an unhandled rejection instead of degrading gracefully.
+    const response = fakeResponse(503, false, async () => {
+      throw new TypeError("terminated");
+    });
+    return expect(parseSubmitResponse(response)).resolves.toEqual({
+      result: null,
+      error: "HTTP 503",
+    });
+  });
 });

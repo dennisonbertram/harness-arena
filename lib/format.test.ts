@@ -112,6 +112,19 @@ describe("scaleScatterPoints", () => {
     expect(result.xMax).toBe(0);
     expect(Number.isFinite(result.points[0].cx)).toBe(true);
   });
+
+  it("regression: clamping an out-of-range tasksPassed doesn't reintroduce the fabricated xMax when costs are also all $0", () => {
+    // Exercises both fixes together: a naive implementation could clamp
+    // tasksPassed by mutating the shared scale state in a way that also
+    // resets xMax back to the fallback divisor (1) instead of the real (0)
+    // max cost.
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 15 }], opts);
+
+    expect(result.xMax).toBe(0);
+    const [point] = result.points;
+    expect(point.cy).toBeCloseTo(opts.padding, 5);
+    expect(point.cx).toBeCloseTo(opts.padding, 5);
+  });
 });
 
 describe("scatterDotColor", () => {
@@ -121,5 +134,36 @@ describe("scatterDotColor", () => {
 
   it("uses blue-700 for the leader dot", () => {
     expect(scatterDotColor(true)).toBe("var(--blue-700)");
+  });
+
+  describe("regression: contrast ratio, not just token name", () => {
+    // Hex values mirror the light-theme tokens in app/globals.css. Checking
+    // the actual contrast math (rather than the literal "var(--gray-900)"
+    // string) catches a regression even if a future edit swaps in some
+    // other token that still fails the 3:1 minimum.
+    const TOKEN_HEX: Record<string, string> = {
+      "var(--gray-600)": "#a8a8a8",
+      "var(--gray-900)": "#4d4d4d",
+      "var(--background-100)": "#ffffff",
+    };
+
+    function contrastRatio(hexA: string, hexB: string): number {
+      const luminance = (hex: string) => {
+        const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(1 + i, 3 + i), 16) / 255);
+        const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      };
+      const [lighter, darker] = [luminance(hexA), luminance(hexB)].sort((a, b) => b - a);
+      return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    it("keeps non-leader dots at or above 3:1 contrast against the white background", () => {
+      const nonLeaderHex = TOKEN_HEX[scatterDotColor(false)];
+      const ratio = contrastRatio(nonLeaderHex, TOKEN_HEX["var(--background-100)"]);
+      expect(ratio).toBeGreaterThanOrEqual(3);
+      // Sanity check that the old gray-600 value would in fact have failed —
+      // proves this test can catch the original bug.
+      expect(contrastRatio(TOKEN_HEX["var(--gray-600)"], TOKEN_HEX["var(--background-100)"])).toBeLessThan(3);
+    });
   });
 });
