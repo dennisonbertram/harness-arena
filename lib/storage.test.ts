@@ -1,6 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { get, list, put } from "@vercel/blob";
 import { BlobStorage, getStorage, MemoryStorage } from "./storage";
 import type { Run, Submission } from "./types";
+
+vi.mock("@vercel/blob", () => ({
+  get: vi.fn(),
+  put: vi.fn(),
+  list: vi.fn(),
+}));
 
 function makeRun(id: string, createdAt: string): Run {
   return {
@@ -143,6 +150,7 @@ describe("MemoryStorage", () => {
 
     describe("getStorage factory", () => {
       const originalToken = process.env.BLOB_READ_WRITE_TOKEN;
+      const originalStorage = process.env.STORAGE;
 
       afterEach(() => {
         if (originalToken === undefined) {
@@ -150,17 +158,145 @@ describe("MemoryStorage", () => {
         } else {
           process.env.BLOB_READ_WRITE_TOKEN = originalToken;
         }
+        if (originalStorage === undefined) {
+          delete process.env.STORAGE;
+        } else {
+          process.env.STORAGE = originalStorage;
+        }
       });
 
-      it("returns MemoryStorage when BLOB_READ_WRITE_TOKEN is unset", () => {
-        delete process.env.BLOB_READ_WRITE_TOKEN;
+      it("returns MemoryStorage when STORAGE=memory, even if BLOB_READ_WRITE_TOKEN is set", () => {
+        process.env.STORAGE = "memory";
+        process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";
         expect(getStorage()).toBeInstanceOf(MemoryStorage);
       });
 
-      it("returns BlobStorage when BLOB_READ_WRITE_TOKEN is set", () => {
+      it("returns BlobStorage when BLOB_READ_WRITE_TOKEN is set and STORAGE is not memory", () => {
+        delete process.env.STORAGE;
         process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";
         expect(getStorage()).toBeInstanceOf(BlobStorage);
       });
+
+      it("throws when neither STORAGE=memory nor BLOB_READ_WRITE_TOKEN is set, rather than silently falling back to memory", () => {
+        delete process.env.STORAGE;
+        delete process.env.BLOB_READ_WRITE_TOKEN;
+        expect(() => getStorage()).toThrow(
+          "storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory",
+        );
+      });
     });
+  });
+});
+
+describe("BlobStorage (contract, @vercel/blob mocked)", () => {
+  beforeEach(() => {
+    vi.mocked(get).mockReset();
+    vi.mocked(put).mockReset();
+    vi.mocked(list).mockReset();
+  });
+
+  it("appendRunEvents continues seq across two batches, reading the prior batch back from the mocked blob store", async () => {
+    const storage = new BlobStorage();
+    const runId = "run-1";
+
+    vi.mocked(get).mockResolvedValueOnce(null);
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1.jsonl" } as never);
+
+    const firstBatch = await storage.appendRunEvents(runId, [
+      { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+    ]);
+    expect(firstBatch.map((e) => e.seq)).toEqual([1]);
+
+    const writtenLines = firstBatch.map((e) => JSON.stringify(e)).join("\n");
+    vi.mocked(get).mockResolvedValueOnce({
+      statusCode: 200,
+      stream: new Response(writtenLines).body,
+      headers: new Headers(),
+      blob: {} as never,
+    } as never);
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1.jsonl" } as never);
+
+    const secondBatch = await storage.appendRunEvents(runId, [
+      { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_ready", payload: { sandbox_id: "sb-1" } },
+    ]);
+
+    expect(secondBatch.map((e) => e.seq)).toEqual([2]);
+  });
+
+  it("listRunEvents parses the stored JSONL and returns events ordered by seq", async () => {
+    const storage = new BlobStorage();
+    const lines = [
+      { run_id: "run-1", seq: 2, ts: "2026-07-21T00:00:01.000Z", type: "run.completed", payload: {} },
+      { run_id: "run-1", seq: 1, ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: {} },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n");
+
+    vi.mocked(get).mockResolvedValueOnce({
+      statusCode: 200,
+      stream: new Response(lines).body,
+      headers: new Headers(),
+      blob: {} as never,
+    } as never);
+
+    const events = await storage.listRunEvents("run-1");
+
+    expect(events.map((e) => e.seq)).toEqual([1, 2]);
+    expect(events.map((e) => e.type)).toEqual(["run.created", "run.completed"]);
+  });
+
+  it("putSubmission writes JSON with access=public, no random suffix, allow overwrite, application/json content type", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/submissions/sub-1.json" } as never);
+
+    await storage.putSubmission({
+      id: "sub-1",
+      agent_name: "agent-x",
+      prompt: "do the thing",
+      status: "queued",
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    expect(put).toHaveBeenCalledWith("submissions/sub-1.json", expect.any(String), {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: "application/json",
+    });
+  });
+
+  it("listSubmissions follows list() pagination across multiple pages instead of only reading the first page", async () => {
+    const storage = new BlobStorage();
+
+    vi.mocked(list)
+      .mockResolvedValueOnce({
+        blobs: [{ url: "https://blob.example/submissions/sub-1.json" } as never],
+        hasMore: true,
+        cursor: "cursor-1",
+      } as never)
+      .mockResolvedValueOnce({
+        blobs: [{ url: "https://blob.example/submissions/sub-2.json" } as never],
+        hasMore: false,
+      } as never);
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: async () => JSON.stringify({ id: "sub-1", created_at: "2026-07-01T00:00:00.000Z" }),
+        })
+        .mockResolvedValueOnce({
+          text: async () => JSON.stringify({ id: "sub-2", created_at: "2026-07-02T00:00:00.000Z" }),
+        }),
+    );
+
+    const result = await storage.listSubmissions();
+
+    expect(result.map((s) => s.id).sort()).toEqual(["sub-1", "sub-2"]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "cursor-1" }));
+
+    vi.unstubAllGlobals();
   });
 });

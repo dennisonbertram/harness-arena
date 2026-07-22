@@ -40,4 +40,26 @@ describe("sortLeaderboard", () => {
 
     expect(result.map((r) => r.id)).toEqual(["done"]);
   });
+
+  it("excludes a completed run missing tasks_passed instead of ranking it as zero", () => {
+    const runs = [
+      run("scored", "completed", 3, 1.0),
+      run("incomplete-data", "completed", undefined, 1.0),
+    ];
+
+    const result = sortLeaderboard(runs);
+
+    expect(result.map((r) => r.id)).toEqual(["scored"]);
+  });
+
+  it("excludes a completed run missing total_cost_usd instead of ranking it as zero", () => {
+    const runs = [
+      run("scored", "completed", 3, 1.0),
+      run("incomplete-data", "completed", 3, undefined),
+    ];
+
+    const result = sortLeaderboard(runs);
+
+    expect(result.map((r) => r.id)).toEqual(["scored"]);
+  });
 });
