@@ -10,13 +10,17 @@ import {
   computeTotals,
   deliverTerminalStatus,
   fetchWithTimeout,
+  flushWithPendingStatus,
   isSessionTextUnreadable,
   parseReward,
   parseSessionCost,
+  parseStdoutCost,
   redactSecrets,
+  resolveTaskCost,
   safeCleanup,
   sh,
   shQuote,
+  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -74,6 +78,207 @@ describe("parseSessionCost", () => {
     expect(result.negativeCostCount).toBe(1);
     // Only the two nonnegative assistant cost.total values count as "valid".
     expect(result.validCostCount).toBe(2);
+  });
+});
+
+// Live-run evidence (run 9f4a1b3e): pi was SIGTERM'd by the agent-timeout
+// wrapper before it ever flushed its --session-dir JSONL, so the session
+// file was empty -- but pi --print --mode json had already written real
+// per-turn cost data to stdout (message_end events) before being killed.
+// parseStdoutCost recovers that real cost instead of the runner silently
+// falling back to the (formerly $0.50, wildly-inflated) missing-cost floor.
+describe("parseStdoutCost", () => {
+  it("sums cost.total across message_end assistant events only, ignoring message_update partials", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "message_update",
+        message: { role: "assistant", usage: { cost: { total: 0.002 } } },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", usage: { cost: { total: 0.006 } } },
+      }),
+      JSON.stringify({
+        type: "message_update",
+        message: { role: "assistant", usage: { cost: { total: 0.001 } } },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", usage: { cost: { total: 0.009 } } },
+      }),
+    ].join("\n");
+
+    // Only the two message_end finals (0.006 + 0.009), never the
+    // message_update partials -- summing both would double-count.
+    expect(parseStdoutCost(stdout)).toBeCloseTo(0.015, 10);
+  });
+
+  it("falls back to the max cumulative cost seen in turn_end events when there is no message_end at all", () => {
+    const stdout = [
+      JSON.stringify({ type: "turn_end", usage: { cost: { total: 0.004 } } }),
+      JSON.stringify({ type: "turn_end", usage: { cost: { total: 0.011 } } }),
+    ].join("\n");
+
+    // turn_end usage is cumulative, so the max (not the sum) is the real
+    // total spend.
+    expect(parseStdoutCost(stdout)).toBeCloseTo(0.011, 10);
+  });
+
+  it("returns 0 for empty/missing stdout", () => {
+    expect(parseStdoutCost("")).toBe(0);
+    expect(parseStdoutCost(null)).toBe(0);
+    expect(parseStdoutCost(undefined)).toBe(0);
+  });
+
+  it("ignores non-JSON lines and non-assistant message_end events without crashing", () => {
+    const stdout = [
+      "runner: starting pi",
+      JSON.stringify({ type: "message_end", message: { role: "user" } }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", usage: { cost: { total: 0.003 } } },
+      }),
+      "not json either",
+    ].join("\n");
+
+    expect(parseStdoutCost(stdout)).toBeCloseTo(0.003, 10);
+  });
+});
+
+describe("resolveTaskCost (cost-source priority: session > stdout > floor)", () => {
+  it("uses the session cost when the session is usable, ignoring stdout entirely", () => {
+    const result = resolveTaskCost({
+      sessionUnreadable: false,
+      sessionCost: 0.02,
+      stdoutCost: 999,
+      floorUsd: 0.05,
+    });
+    expect(result).toEqual({ totalCost: 0.02, costSource: "session" });
+  });
+
+  // Regression for the exact live-run bug (9f4a1b3e): session unreadable
+  // (agent-timeout SIGTERM before flush) but stdout has a real recovered
+  // cost -- must use the real stdout cost, not the floor.
+  it("falls back to the real stdout cost (not the floor) when the session is unreadable but stdout has a positive cost", () => {
+    const result = resolveTaskCost({
+      sessionUnreadable: true,
+      sessionCost: 0,
+      stdoutCost: 0.018,
+      floorUsd: 0.05,
+    });
+    expect(result).toEqual({ totalCost: 0.018, costSource: "stdout" });
+  });
+
+  it("falls back to the floor when the session is unreadable and stdout has no usable cost", () => {
+    const result = resolveTaskCost({
+      sessionUnreadable: true,
+      sessionCost: 0,
+      stdoutCost: 0,
+      floorUsd: 0.05,
+    });
+    expect(result).toEqual({ totalCost: 0.05, costSource: "floor (session unreadable)" });
+  });
+});
+
+describe("truncateForUpload (trace-upload byte cap, HTTP 413 fix)", () => {
+  it("returns the buffer unchanged when it is already under the max", () => {
+    const buf = Buffer.from("small trace body", "utf8");
+    const result = truncateForUpload(buf, 262144);
+    expect(result.equals(buf)).toBe(true);
+  });
+
+  it("caps oversized input to exactly maxBytes, keeping the END (tail) prefixed with a truncation marker", () => {
+    const maxBytes = 1000;
+    const big = Buffer.from("A".repeat(500) + "END-MARKER-CONTENT" + "B".repeat(5000), "utf8");
+    const result = truncateForUpload(big, maxBytes);
+
+    expect(result.length).toBeLessThanOrEqual(maxBytes);
+    expect(result.length).toBe(maxBytes);
+    const text = result.toString("utf8");
+    expect(text).toMatch(/^\[trace truncated: showing last \d+ bytes of \d+ bytes\]\n/);
+    // Keeps the tail, not the head -- the truncation marker text itself
+    // must not swallow the real end-of-output content.
+    expect(text.endsWith("B".repeat(50))).toBe(true);
+    expect(text).not.toContain("END-MARKER-CONTENT");
+  });
+
+  it("accepts a plain string the same as a Buffer", () => {
+    const result = truncateForUpload("hello world", 262144);
+    expect(result.toString("utf8")).toBe("hello world");
+  });
+});
+
+describe("flushWithPendingStatus (running-status retry, issue evidence: run 9f4a1b3e stuck at queued)", () => {
+  it("sends the new status when postFn succeeds, and clears pendingStatus", async () => {
+    let sentBody;
+    const result = await flushWithPendingStatus({
+      postFn: async (body) => {
+        sentBody = body;
+        return { ok: true };
+      },
+      events: [{ type: "task.started" }],
+      pendingStatus: null,
+      extra: { status: "running" },
+    });
+    expect(sentBody).toEqual({ events: [{ type: "task.started" }], status: "running" });
+    expect(result.result).toEqual({ ok: true });
+    expect(result.pendingStatus).toBeNull();
+  });
+
+  // The exact live-run bug: a transient POST failure must not silently
+  // drop the "running" status -- it must be retried on the next flush
+  // even though that next flush's own `extra` is empty.
+  it("retries a previously-failed status on the next flush when the new extra is empty", async () => {
+    const calls = [];
+    let attempt = 0;
+    const postFn = async (body) => {
+      calls.push(body);
+      attempt += 1;
+      if (attempt === 1) return null;
+      return { ok: true };
+    };
+
+    const first = await flushWithPendingStatus({
+      postFn,
+      events: [],
+      pendingStatus: null,
+      extra: { status: "running" },
+    });
+    expect(first.result).toBeNull();
+    expect(first.pendingStatus).toEqual({ status: "running" });
+
+    const second = await flushWithPendingStatus({
+      postFn,
+      events: [{ type: "task.started" }],
+      pendingStatus: first.pendingStatus,
+      extra: {},
+    });
+
+    expect(calls[1]).toEqual({
+      events: [{ type: "task.started" }],
+      status: "running",
+    });
+    expect(second.result).toEqual({ ok: true });
+    expect(second.pendingStatus).toBeNull();
+  });
+
+  it("lets a new extra status override an older still-pending one", async () => {
+    let sentBody;
+    const result = await flushWithPendingStatus({
+      postFn: async (body) => {
+        sentBody = body;
+        return { ok: true };
+      },
+      events: [],
+      pendingStatus: { status: "running" },
+      extra: { status: "completed", totals: { total_cost_usd: 0.5 } },
+    });
+    expect(sentBody).toEqual({
+      events: [],
+      status: "completed",
+      totals: { total_cost_usd: 0.5 },
+    });
+    expect(result.pendingStatus).toBeNull();
   });
 });
 
