@@ -83,7 +83,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (transitioned && (run.status === "completed" || run.status === "failed")) {
     run.finished_at = new Date().toISOString();
   }
-  await storage.putRun(run);
+  // Only write the run doc when it actually changed. Events are persisted
+  // separately (appendRunEvents), so an events-only callback must NOT rewrite
+  // the run doc — under Blob read lag it would read a stale copy (e.g. still
+  // "queued" moments after "running" was set) and revert the status. That
+  // regression is exactly why runs displayed "queued" for their whole life.
+  const runChanged = transitioned || parsed.data.task_results !== undefined || parsed.data.totals !== undefined;
+  if (runChanged) {
+    await storage.putRun(run);
+  }
 
   if (transitioned) {
     const submission = await storage.getSubmission(run.submission_id);
