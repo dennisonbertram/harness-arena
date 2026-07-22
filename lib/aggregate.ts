@@ -145,3 +145,65 @@ export function aggregatePrompts(
       b.runs - a.runs,
   );
 }
+
+export interface TaskAttempt {
+  runId: string;
+  agentName: string;
+  isBaseline: boolean;
+  passed: boolean;
+  turns: number;
+  costUsd: number | null; // null = unmeasured (turns 0 / no real cost record)
+  submittedAt: string;
+}
+
+export interface TaskStats {
+  taskId: string;
+  attempts: number; // completed runs that recorded this task
+  passed: number;
+  passRate: number;
+  meanTurns: number;
+  meanCostUsd: number | null; // only real spend (turns > 0) counts, else null
+  results: TaskAttempt[]; // most recent submission first
+}
+
+/**
+ * Per-task view: every completed run's result for one task — pass/fail, turns,
+ * and (honest) cost. Same rules as the standings: a task that ran 0 turns has
+ * no real cost, so it's null (unmeasured), never a fabricated number. Returns
+ * null if no completed run recorded the task.
+ */
+export function aggregateTask(runs: Run[], submissions: Submission[], taskId: string): TaskStats | null {
+  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  const results: TaskAttempt[] = [];
+  for (const run of runs) {
+    if (run.status !== "completed") continue;
+    const tr = run.task_results.find((t) => t.task_id === taskId);
+    if (!tr) continue;
+    const submission = submissionById.get(run.submission_id);
+    const turns = tr.turns ?? 0;
+    results.push({
+      runId: run.id,
+      agentName: submission?.agent_name ?? "unknown",
+      isBaseline: (submission?.prompt ?? "") === "",
+      passed: tr.passed,
+      turns,
+      costUsd: typeof tr.cost_usd === "number" && turns > 0 ? tr.cost_usd : null,
+      submittedAt: submission?.created_at ?? run.created_at,
+    });
+  }
+  if (results.length === 0) return null;
+  results.sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1));
+
+  const attempts = results.length;
+  const passed = results.filter((r) => r.passed).length;
+  const measured = results.filter((r) => r.costUsd !== null) as (TaskAttempt & { costUsd: number })[];
+  return {
+    taskId,
+    attempts,
+    passed,
+    passRate: passed / attempts,
+    meanTurns: results.reduce((s, r) => s + r.turns, 0) / attempts,
+    meanCostUsd: measured.length > 0 ? measured.reduce((s, r) => s + r.costUsd, 0) / measured.length : null,
+    results,
+  };
+}

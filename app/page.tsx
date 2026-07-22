@@ -134,7 +134,7 @@ function PerTaskPanel({ standing }: { standing: PromptStanding }) {
             return (
               <tr key={t.taskId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                 <td className="mono" style={{ padding: "6px 12px 6px 0" }}>
-                  {t.taskId}
+                  <Link href={`/tasks/${t.taskId}`}>{t.taskId}</Link>
                 </td>
                 <td style={{ padding: "6px 0", width: "45%" }}>
                   <div style={{ background: "var(--gray-alpha-200)", borderRadius: 4, height: 8 }}>
@@ -148,7 +148,10 @@ function PerTaskPanel({ standing }: { standing: PromptStanding }) {
                     />
                   </div>
                 </td>
-                <td className="tabular-nums" style={{ padding: "6px 12px", width: 90, textAlign: "right" }}>
+                <td
+                  className="tabular-nums"
+                  style={{ padding: "6px 12px", width: 90, textAlign: "right", whiteSpace: "nowrap" }}
+                >
                   {t.passed}/{t.of} · {(rate * 100).toFixed(0)}%
                 </td>
                 <td className="tabular-nums" style={{ padding: "6px 8px", width: 70, textAlign: "right", color: "var(--gray-700)" }}>

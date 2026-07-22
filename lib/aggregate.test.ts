@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregatePrompts } from "./aggregate";
+import { aggregatePrompts, aggregateTask } from "./aggregate";
 import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
@@ -158,5 +158,34 @@ describe("aggregatePrompts", () => {
     expect(st.runs).toBe(1);
     expect(st.passRate).toBe(1);
     expect(st.completesTest).toBe(true);
+  });
+});
+
+describe("aggregateTask", () => {
+  const subs = [
+    sub("s1", "alice", "P1", "2026-07-20T00:00:00Z"),
+    sub("s2", "bob", "P2", "2026-07-21T00:00:00Z"),
+  ];
+
+  it("collects every completed run's result for one task, honest cost, newest first", () => {
+    const runs = [
+      // t0: alice passed (5 turns, $0.02); bob failed but ran 0 turns -> unmeasured cost.
+      run("r1", "s1", [true, false, false, false], undefined, "completed", [0.02, 0, 0, 0], [5, 0, 0, 0]),
+      run("r2", "s2", [false, false, false, false], undefined, "completed", [0.05, 0, 0, 0], [0, 0, 0, 0]),
+    ];
+    const stats = aggregateTask(runs, subs, "t0")!;
+    expect(stats.attempts).toBe(2);
+    expect(stats.passed).toBe(1);
+    expect(stats.passRate).toBeCloseTo(0.5);
+    expect(stats.meanTurns).toBeCloseTo(2.5); // (5 + 0) / 2
+    expect(stats.meanCostUsd).toBeCloseTo(0.02); // only the 5-turn run counts; 0-turn is unmeasured
+    // newest submission (bob, s2 2026-07-21) first
+    expect(stats.results.map((r) => r.agentName)).toEqual(["bob", "alice"]);
+    expect(stats.results.find((r) => r.agentName === "bob")!.costUsd).toBeNull();
+  });
+
+  it("returns null when no completed run recorded the task", () => {
+    const runs = [run("r1", "s1", [true, false, false, false], undefined, "running")];
+    expect(aggregateTask(runs, subs, "t0")).toBeNull();
   });
 });
