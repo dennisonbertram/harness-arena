@@ -195,54 +195,95 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.mocked(list).mockReset();
   });
 
-  it("appendRunEvents continues seq across two batches, reading the prior batch back from the mocked blob store", async () => {
+  it("appendRunEvents writes ONE immutable blob per event, not a single rewritten events file", async () => {
+    // This is the production data-loss bug: read-modify-rewrite of a single
+    // events/<runId>.jsonl blob loses earlier writes under Vercel Blob's
+    // eventual-consistency reads. Each event must land in its own blob.
     const storage = new BlobStorage();
     const runId = "run-1";
 
-    vi.mocked(get).mockResolvedValueOnce(null);
-    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1.jsonl" } as never);
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(put).mockResolvedValue({ url: "https://blob.example/events/run-1/x.json" } as never);
+
+    const appended = await storage.appendRunEvents(runId, [
+      { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+      { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_creating", payload: {} },
+      { ts: "2026-07-21T00:00:02.000Z", type: "run.sandbox_ready", payload: { sandbox_id: "sb-1" } },
+    ]);
+
+    expect(appended.map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect(put).toHaveBeenCalledTimes(3);
+    const pathnames = vi.mocked(put).mock.calls.map((call) => call[0]);
+    expect(pathnames).toEqual([
+      "events/run-1/0000000001.json",
+      "events/run-1/0000000002.json",
+      "events/run-1/0000000003.json",
+    ]);
+    expect(new Set(pathnames).size).toBe(3);
+    expect(pathnames.some((p) => p.endsWith(`${runId}.jsonl`))).toBe(false);
+  });
+
+  it("appendRunEvents continues seq monotonically across two batches (second call lists the first batch's blobs)", async () => {
+    const storage = new BlobStorage();
+    const runId = "run-1";
+
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1/0000000001.json" } as never);
 
     const firstBatch = await storage.appendRunEvents(runId, [
       { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
     ]);
     expect(firstBatch.map((e) => e.seq)).toEqual([1]);
 
-    const writtenLines = firstBatch.map((e) => JSON.stringify(e)).join("\n");
-    vi.mocked(get).mockResolvedValueOnce({
-      statusCode: 200,
-      stream: new Response(writtenLines).body,
-      headers: new Headers(),
-      blob: {} as never,
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ url: "https://blob.example/events/run-1/0000000001.json", pathname: "events/run-1/0000000001.json" }],
+      hasMore: false,
     } as never);
-    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1.jsonl" } as never);
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/events/run-1/0000000002.json" } as never);
 
     const secondBatch = await storage.appendRunEvents(runId, [
       { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_ready", payload: { sandbox_id: "sb-1" } },
     ]);
 
     expect(secondBatch.map((e) => e.seq)).toEqual([2]);
+    expect(put).toHaveBeenLastCalledWith(
+      "events/run-1/0000000002.json",
+      expect.any(String),
+      expect.objectContaining({ allowOverwrite: false }),
+    );
   });
 
-  it("listRunEvents parses the stored JSONL and returns events ordered by seq", async () => {
+  it("listRunEvents lists per-seq blobs, fetches each, and returns events ordered by seq", async () => {
     const storage = new BlobStorage();
-    const lines = [
-      { run_id: "run-1", seq: 2, ts: "2026-07-21T00:00:01.000Z", type: "run.completed", payload: {} },
-      { run_id: "run-1", seq: 1, ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: {} },
-    ]
-      .map((e) => JSON.stringify(e))
-      .join("\n");
 
-    vi.mocked(get).mockResolvedValueOnce({
-      statusCode: 200,
-      stream: new Response(lines).body,
-      headers: new Headers(),
-      blob: {} as never,
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [
+        { url: "https://blob.example/events/run-1/0000000002.json", pathname: "events/run-1/0000000002.json" },
+        { url: "https://blob.example/events/run-1/0000000001.json", pathname: "events/run-1/0000000001.json" },
+      ],
+      hasMore: false,
     } as never);
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: async () =>
+            JSON.stringify({ run_id: "run-1", seq: 2, ts: "2026-07-21T00:00:01.000Z", type: "run.completed", payload: {} }),
+        })
+        .mockResolvedValueOnce({
+          text: async () =>
+            JSON.stringify({ run_id: "run-1", seq: 1, ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: {} }),
+        }),
+    );
 
     const events = await storage.listRunEvents("run-1");
 
     expect(events.map((e) => e.seq)).toEqual([1, 2]);
     expect(events.map((e) => e.type)).toEqual(["run.created", "run.completed"]);
+
+    vi.unstubAllGlobals();
   });
 
   it("putSubmission writes JSON with access=public, no random suffix, allow overwrite, application/json content type", async () => {
