@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
-import { getLeaderboardView, partitionBaseline, type LeaderboardRow } from "@/lib/leaderboard-view";
-import { formatUsd, scaleScatterPoints, scatterDotColor } from "@/lib/format";
+import { getLeaderboardView, partitionBaseline } from "@/lib/leaderboard-view";
+import { formatUsd, scaleScatterPoints } from "@/lib/format";
+import { ScatterChart, type ScatterItem } from "./ScatterChart";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
-// Plot area (dots live here); the SVG viewBox is wider to hold a label column
-// on the right, since the dots cluster tightly and inline labels would overlap.
-const CHART_OPTIONS = { width: 560, height: 380, padding: 52 };
-const CHART_LABEL_COL = 320; // px of label column to the right of the plot
+// Full-width plot; detail shows on hover so the tightly-clustered dots don't
+// need static labels.
+const CHART_OPTIONS = { width: 960, height: 420, padding: 56 };
 
 // The leaderboard reads from shared storage, so a build-time-cached page
 // would never show new submissions. ISR re-renders it at most every 15s.
@@ -17,6 +17,26 @@ export default async function LeaderboardPage() {
   const storage = getStorage();
   const rows = await getLeaderboardView(storage);
   const { baseline, competitors } = partitionBaseline(rows);
+
+  const { points, xMax, yMax, width, height, padding } = scaleScatterPoints(
+    rows.map((row) => ({ runId: row.runId, totalCostUsd: row.totalCostUsd, tasksPassed: row.tasksPassed })),
+    CHART_OPTIONS,
+  );
+  const leaderRunId = rows.find((row) => row.runId !== baseline?.runId)?.runId;
+  const chartItems: ScatterItem[] = points.map((point) => {
+    const row = rows.find((r) => r.runId === point.runId)!;
+    return {
+      runId: point.runId,
+      cx: point.cx,
+      cy: point.cy,
+      agentName: row.agentName,
+      tasksPassed: row.tasksPassed,
+      totalTasks: row.totalTasks,
+      totalCostUsd: row.totalCostUsd,
+      isBaseline: point.runId === baseline?.runId,
+      isLeader: point.runId === leaderRunId,
+    };
+  });
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -153,9 +173,16 @@ export default async function LeaderboardPage() {
 
           <section>
             <h2 className="label" style={{ marginBottom: 16 }}>
-              Cost vs. tasks passed
+              Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· hover a point for detail</span>
             </h2>
-            <ScatterChart rows={rows} baselineRunId={baseline?.runId} />
+            <ScatterChart
+              items={chartItems}
+              width={width}
+              height={height}
+              padding={padding}
+              xMax={xMax}
+              yMax={yMax}
+            />
           </section>
         </>
       )}
@@ -175,155 +202,5 @@ function BaselineStat({ label, value }: { label: string; value: string }) {
         {value}
       </div>
     </div>
-  );
-}
-
-function ScatterChart({ rows, baselineRunId }: { rows: LeaderboardRow[]; baselineRunId?: string }) {
-  const { points, xMax, yMax, width, height, padding } = scaleScatterPoints(
-    rows.map((row) => ({ runId: row.runId, totalCostUsd: row.totalCostUsd, tasksPassed: row.tasksPassed })),
-    CHART_OPTIONS,
-  );
-  const rowByRunId = new Map(rows.map((r) => [r.runId, r]));
-  const leaderRunId = rows.find((row) => row.runId !== baselineRunId)?.runId;
-  const svgWidth = width + CHART_LABEL_COL;
-  const plotRight = width - padding;
-  const plotTop = padding;
-  const plotBottom = height - padding;
-
-  const yTicks = [0, 2, 4, 6, 8, 10];
-  const xTicks = [0, 0.25, 0.5, 0.75, 1];
-
-  // Stagger the right-column labels so tightly-clustered dots don't collide:
-  // sort by vertical position, then push each label down to keep a min gap.
-  const labelGap = 26;
-  let prevY = -Infinity;
-  const labels = [...points]
-    .sort((a, b) => a.cy - b.cy)
-    .map((point) => {
-      const y = Math.min(plotBottom, Math.max(plotTop, Math.max(point.cy, prevY + labelGap)));
-      prevY = y;
-      const row = rowByRunId.get(point.runId);
-      return { point, y, row };
-    });
-
-  return (
-    <svg
-      viewBox={`0 0 ${svgWidth} ${height + 28}`}
-      width="100%"
-      style={{ maxWidth: svgWidth, color: "var(--gray-1000)" }}
-      role="img"
-      aria-label="Scatter chart of total inference cost versus tasks passed for each scored run"
-    >
-      {/* Horizontal gridlines + Y ticks (tasks passed) */}
-      {yTicks.map((t) => {
-        const y = plotBottom - (t / yMax) * (plotBottom - plotTop);
-        return (
-          <g key={`y${t}`}>
-            <line x1={padding} y1={y} x2={plotRight} y2={y} stroke="var(--gray-alpha-300)" />
-            <text x={padding - 8} y={y + 4} fontSize={11} textAnchor="end" fill="var(--gray-900)">
-              {t}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* X ticks (total cost) */}
-      {xTicks.map((f) => {
-        const x = padding + f * (plotRight - padding);
-        return (
-          <g key={`x${f}`}>
-            <line x1={x} y1={plotBottom} x2={x} y2={plotBottom + 5} stroke="var(--gray-alpha-400)" />
-            <text x={x} y={plotBottom + 18} fontSize={11} textAnchor="middle" fill="var(--gray-900)">
-              {formatUsd(f * xMax)}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* Axis lines */}
-      <line x1={padding} y1={plotBottom} x2={plotRight} y2={plotBottom} stroke="var(--gray-alpha-500)" />
-      <line x1={padding} y1={plotTop} x2={padding} y2={plotBottom} stroke="var(--gray-alpha-500)" />
-
-      {/* Axis titles */}
-      <text
-        x={padding + (plotRight - padding) / 2}
-        y={height + 20}
-        fontSize={12}
-        textAnchor="middle"
-        fill="var(--gray-900)"
-        className="label"
-      >
-        Total inference cost (USD)
-      </text>
-      <text
-        x={16}
-        y={plotTop + (plotBottom - plotTop) / 2}
-        fontSize={12}
-        textAnchor="middle"
-        fill="var(--gray-900)"
-        className="label"
-        transform={`rotate(-90 16 ${plotTop + (plotBottom - plotTop) / 2})`}
-      >
-        Tasks passed (of 10)
-      </text>
-
-      {/* Leader lines from each dot to its staggered label */}
-      {labels.map(({ point, y }) => (
-        <line
-          key={`ln-${point.runId}`}
-          x1={point.cx}
-          y1={point.cy}
-          x2={plotRight + 16}
-          y2={y}
-          stroke="var(--gray-alpha-300)"
-        />
-      ))}
-
-      {/* Dots */}
-      {points.map((point) => {
-        const isBaseline = point.runId === baselineRunId;
-        return (
-          <a key={point.runId} href={`/runs/${point.runId}`}>
-            {isBaseline ? (
-              <circle
-                cx={point.cx}
-                cy={point.cy}
-                r={6}
-                fill="var(--background-100)"
-                stroke="var(--gray-1000)"
-                strokeWidth={2}
-                strokeDasharray="2 2"
-              />
-            ) : (
-              <circle cx={point.cx} cy={point.cy} r={5.5} fill={scatterDotColor(point.runId === leaderRunId)} />
-            )}
-          </a>
-        );
-      })}
-
-      {/* Right-column labels: agent · tasks · cost */}
-      {labels.map(({ point, y, row }) => {
-        if (!row) return null;
-        const isBaseline = point.runId === baselineRunId;
-        const swatch = isBaseline ? "var(--gray-1000)" : scatterDotColor(point.runId === leaderRunId);
-        return (
-          <a key={`lb-${point.runId}`} href={`/runs/${point.runId}`}>
-            {isBaseline ? (
-              <circle cx={plotRight + 22} cy={y - 3} r={4} fill="none" stroke={swatch} strokeWidth={1.5} strokeDasharray="2 2" />
-            ) : (
-              <circle cx={plotRight + 22} cy={y - 3} r={4} fill={swatch} />
-            )}
-            <text x={plotRight + 32} y={y} fontSize={12} fill="var(--gray-1000)">
-              <tspan fontWeight={600}>{row.agentName}</tspan>
-              <tspan fill="var(--gray-900)">
-                {"  "}
-                {row.tasksPassed}/{row.totalTasks} · {formatUsd(row.totalCostUsd)}
-                {isBaseline ? " · baseline" : ""}
-              </tspan>
-            </text>
-          </a>
-        );
-      })}
-    </svg>
   );
 }
