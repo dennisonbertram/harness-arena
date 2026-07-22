@@ -77,4 +77,25 @@ describe("scaleScatterPoints", () => {
     const [point] = result.points;
     expect(point.cy).toBeCloseTo(opts.height - opts.padding, 5);
   });
+
+  describe("regression: zero-cost run must not corrupt the shared x-scale", () => {
+    it("keeps a cheaper run to the left of a costlier run even when a third run costs $0", () => {
+      // A naive xMax guard (e.g. clamping every cost to at least 1 before
+      // scaling, instead of only guarding xMax itself) would wrongly place
+      // the $0 run at the same x as a genuinely $1 run. If scaleScatterPoints
+      // regresses to that behavior, this test fails.
+      const result = scaleScatterPoints(
+        [
+          { runId: "cheap", totalCostUsd: 1, tasksPassed: 5 },
+          { runId: "free", totalCostUsd: 0, tasksPassed: 5 },
+          { runId: "expensive", totalCostUsd: 3, tasksPassed: 5 },
+        ],
+        opts,
+      );
+
+      const byId = Object.fromEntries(result.points.map((p) => [p.runId, p]));
+      expect(byId.free.cx).toBeLessThan(byId.cheap.cx);
+      expect(byId.cheap.cx).toBeLessThan(byId.expensive.cx);
+    });
+  });
 });

@@ -88,4 +88,18 @@ describe("getLeaderboardView", () => {
 
     expect(rows).toEqual([]);
   });
+
+  describe("regression: a run referencing a missing submission must not crash the join", () => {
+    it("falls back to a placeholder agent name instead of throwing", async () => {
+      const storage = new MemoryStorage();
+      await storage.putRun(
+        run("run-1", "sub-does-not-exist", "completed", { tasks_passed: 2, total_cost_usd: 0.5 }),
+      );
+
+      const rows = await getLeaderboardView(storage);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].agentName).toBe("unknown");
+    });
+  });
 });
