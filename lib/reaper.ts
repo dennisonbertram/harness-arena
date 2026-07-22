@@ -32,8 +32,10 @@ export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now
 export async function reapIfStale(storage: Storage, run: Run, now: number = Date.now()): Promise<Run> {
   if (!REAPABLE_STATUSES.has(run.status)) return run;
 
-  const events = await storage.listRunEvents(run.id);
-  const lastEventTs = events.length > 0 ? events[events.length - 1].ts : run.created_at;
+  // Cheap staleness probe (list metadata only). Using listRunEvents here
+  // would fetch every event blob's content on every run read — a fetch-storm
+  // that rate-limits Blob (403) and crashed the read routes.
+  const lastEventTs = (await storage.latestEventTimestamp(run.id)) ?? run.created_at;
   if (!shouldReap(run, lastEventTs, now)) return run;
   // ponytail: read-then-write is not atomic — a runner callback that lands
   // between the freshness check and putRun could be overwritten. Bounded in

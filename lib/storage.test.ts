@@ -286,6 +286,55 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("listRunEvents skips an event blob that 403s (HTML error page) instead of throwing", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValue({
+      blobs: [
+        { url: "https://blob.example/events/run-1/0000000001.json", pathname: "events/run-1/0000000001.json" },
+        { url: "https://blob.example/events/run-1/0000000002.json", pathname: "events/run-1/0000000002.json" },
+      ],
+      hasMore: false,
+    } as never);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        // seq 1 fetches fine
+        .mockResolvedValueOnce({
+          ok: true,
+          text: async () =>
+            JSON.stringify({ run_id: "run-1", seq: 1, ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: {} }),
+        })
+        // seq 2 is a rate-limited HTML 403 page on every retry
+        .mockResolvedValue({ ok: false, status: 403, text: async () => "<!DOCTYPE html><html>Forbidden</html>" }),
+    );
+
+    const events = await storage.listRunEvents("run-1");
+
+    // The unreadable event is skipped; the route gets partial data, not a 500.
+    expect(events.map((e) => e.seq)).toEqual([1]);
+    vi.unstubAllGlobals();
+  });
+
+  it("latestEventTimestamp uses list() metadata only — no per-event content fetch", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValue({
+      blobs: [
+        { url: "u1", pathname: "events/run-1/0000000001.json", uploadedAt: "2026-07-21T00:00:00.000Z" },
+        { url: "u2", pathname: "events/run-1/0000000002.json", uploadedAt: "2026-07-21T00:05:00.000Z" },
+      ],
+      hasMore: false,
+    } as never);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const ts = await storage.latestEventTimestamp("run-1");
+
+    expect(ts).toBe("2026-07-21T00:05:00.000Z");
+    expect(fetchSpy).not.toHaveBeenCalled(); // reaper must not fetch event contents
+    vi.unstubAllGlobals();
+  });
+
   describe("regression: event log never falls back to a single rewritten blob", () => {
     it("appendRunEvents never calls get() — it must not read back a shared blob to merge into", async () => {
       // The original bug was a read-modify-rewrite of one shared blob. If

@@ -10,8 +10,14 @@ export interface Storage {
   listRuns(): Promise<Run[]>;
   /** Assigns each event a monotonic seq (1..n, continuing across batches) and returns them with seq/run_id filled in. */
   appendRunEvents(runId: string, events: NewRunEvent[]): Promise<RunEvent[]>;
-  /** Returns all events for a run in strict seq order. */
+  /** Returns all events for a run in strict seq order. Best-effort: skips any event that can't be read. */
   listRunEvents(runId: string): Promise<RunEvent[]>;
+  /**
+   * Cheap staleness probe for the reaper: the timestamp of the most recent
+   * event, or undefined if none. Must NOT fetch every event's content (the
+   * reaper runs on every run read); Blob derives it from list() metadata.
+   */
+  latestEventTimestamp(runId: string): Promise<string | undefined>;
   putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string>;
 }
 
@@ -63,6 +69,12 @@ export class MemoryStorage implements Storage {
     return [...(this.events.get(runId) ?? [])].sort((a, b) => a.seq - b.seq);
   }
 
+  async latestEventTimestamp(runId: string): Promise<string | undefined> {
+    const events = this.events.get(runId);
+    if (!events || events.length === 0) return undefined;
+    return events.reduce((latest, e) => (e.ts > latest ? e.ts : latest), events[0].ts);
+  }
+
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const key = `traces/${runId}/${taskId}/${name}`;
     const url = `memory://${key}`;
@@ -80,12 +92,42 @@ export class MemoryStorage implements Storage {
 // (confirmed in production: run 489288d4 persisted ~12 of ~50 events).
 // Each event blob is written once (allowOverwrite: false) and never
 // rewritten, eliminating the read-modify-rewrite race entirely.
+// Vercel Blob is eventually consistent and rate-limits reads: a blob can
+// briefly 403/404 (returning an HTML error page, not JSON) right after it's
+// written or under a burst of reads. A single failed read must never crash a
+// route, so blob reads retry a few times and list reads skip individual
+// failures rather than rejecting the whole batch.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url, { cache: "no-store" });
+  // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
+  // must throw BEFORE parsing (a bare JSON.parse on "<!DOCTYPE..." is the
+  // exact crash this replaces). res.ok may be undefined in unit mocks; only
+  // a strictly-false ok is treated as a failure.
+  if (res.ok === false) throw new Error(`blob fetch ${res.status}`);
+  return JSON.parse(await res.text()) as T;
+}
+
 export class BlobStorage implements Storage {
   private async readJson<T>(pathname: string): Promise<T | undefined> {
-    const result = await get(pathname, { access: "public" });
-    if (!result) return undefined;
-    const text = await new Response(result.stream).text();
-    return JSON.parse(text) as T;
+    return withRetry(async () => {
+      const result = await get(pathname, { access: "public" });
+      if (!result) return undefined;
+      const text = await new Response(result.stream).text();
+      return JSON.parse(text) as T;
+    });
   }
 
   private async writeJson(pathname: string, value: unknown): Promise<void> {
@@ -105,8 +147,8 @@ export class BlobStorage implements Storage {
     await this.writeJson(`submissions/${submission.id}.json`, submission);
   }
 
-  private async listAllBlobs(prefix: string): Promise<{ url: string }[]> {
-    const blobs: { url: string }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ url: string; uploadedAt: string | Date }[]> {
+    const blobs: { url: string; uploadedAt: string | Date }[] = [];
     let cursor: string | undefined;
     do {
       const page = await list({ prefix, cursor });
@@ -118,13 +160,12 @@ export class BlobStorage implements Storage {
 
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
-    const submissions = await Promise.all(
-      blobs.map(async (blob) => {
-        const text = await (await fetch(blob.url)).text();
-        return JSON.parse(text) as Submission;
-      }),
+    const results = await Promise.all(
+      blobs.map((blob) => withRetry(() => fetchJson<Submission>(blob.url), 3).catch(() => undefined)),
     );
-    return submissions.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return results
+      .filter((s): s is Submission => s !== undefined)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async getRun(id: string): Promise<Run | undefined> {
@@ -137,13 +178,12 @@ export class BlobStorage implements Storage {
 
   async listRuns(): Promise<Run[]> {
     const blobs = await this.listAllBlobs("runs/");
-    const runs = await Promise.all(
-      blobs.map(async (blob) => {
-        const text = await (await fetch(blob.url)).text();
-        return JSON.parse(text) as Run;
-      }),
+    const results = await Promise.all(
+      blobs.map((blob) => withRetry(() => fetchJson<Run>(blob.url), 3).catch(() => undefined)),
     );
-    return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return results
+      .filter((r): r is Run => r !== undefined)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async appendRunEvents(runId: string, newEvents: NewRunEvent[]): Promise<RunEvent[]> {
@@ -158,27 +198,53 @@ export class BlobStorage implements Storage {
     const appended: RunEvent[] = [];
     for (const event of newEvents) {
       seq += 1;
-      const full: RunEvent = { ...event, run_id: runId, seq };
-      await put(`events/${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
-        access: "public",
-        addRandomSuffix: false,
-        allowOverwrite: false,
-        contentType: "application/json",
-      });
-      appended.push(full);
+      // list() lag can make two sequential appends compute the same starting
+      // seq; allowOverwrite:false then throws "already exists" on the second.
+      // Retry with the next seq (bounded) rather than clobbering or failing
+      // the callback (which would drop the whole event batch).
+      for (let tries = 0; tries < 50; tries++) {
+        try {
+          const full: RunEvent = { ...event, run_id: runId, seq };
+          await put(`events/${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
+            access: "public",
+            addRandomSuffix: false,
+            allowOverwrite: false,
+            contentType: "application/json",
+          });
+          appended.push(full);
+          break;
+        } catch {
+          seq += 1; // path collided (or transient) — advance and retry
+        }
+      }
     }
     return appended;
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
     const blobs = await this.listAllBlobs(`events/${runId}/`);
-    const events = await Promise.all(
+    const results = await Promise.all(
       blobs.map(async (blob) => {
-        const text = await (await fetch(blob.url)).text();
-        return JSON.parse(text) as RunEvent;
+        try {
+          return await withRetry(() => fetchJson<RunEvent>(blob.url), 3);
+        } catch {
+          return undefined; // skip an event we can't read rather than 500 the route
+        }
       }),
     );
-    return events.sort((a, b) => a.seq - b.seq);
+    return results.filter((e): e is RunEvent => e !== undefined).sort((a, b) => a.seq - b.seq);
+  }
+
+  async latestEventTimestamp(runId: string): Promise<string | undefined> {
+    // Cheap: list() metadata only (no per-event content fetch). Event blob
+    // names are zero-padded seq, so the lexically-last name is the newest
+    // event; its blob uploadedAt is a fine staleness proxy for the reaper.
+    const blobs = await this.listAllBlobs(`events/${runId}/`);
+    if (blobs.length === 0) return undefined;
+    return blobs.reduce<string>((latest, b) => {
+      const ts = new Date(b.uploadedAt).toISOString();
+      return ts > latest ? ts : latest;
+    }, new Date(0).toISOString());
   }
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
