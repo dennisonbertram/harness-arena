@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildContainerName } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
 
@@ -25,7 +26,10 @@ const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
 // name never collides with other tests/runner/*.test.mjs files that also
 // exercise the regex-log image concurrently under vitest's file parallelism.
 const TASK_ID = "regex-log-it";
-const CONTAINER_NAME = `task-${TASK_ID}`;
+const RUN_ID = "it-run-1";
+// Container name now includes RUN_ID + index (issue #19 finding 6) so
+// concurrent runs can never force-remove each other's containers.
+const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
 
 function cleanupContainer() {
   try {
@@ -75,7 +79,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
 
       const env = {
         ...process.env,
-        RUN_ID: "it-run-1",
+        RUN_ID,
         CALLBACK_BASE: baseUrl,
         RUNNER_CALLBACK_SECRET: "test-secret",
         AI_GATEWAY_API_KEY: "test-gateway-key",

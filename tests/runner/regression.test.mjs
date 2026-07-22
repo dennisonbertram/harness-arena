@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildPiCommand, parseSessionCost } from "../../scripts/runner/lib.mjs";
+import { buildContainerName, buildPiCommand, parseSessionCost } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
 
@@ -97,7 +97,12 @@ describe("parseSessionCost regression: realistic upstream JSONL noise", () => {
 // other tests/runner/*.test.mjs files exercising the same image concurrently.
 const TASK_ID_1 = "regex-log-budget-1";
 const TASK_ID_2 = "regex-log-budget-2";
-const CONTAINER_NAMES = [`task-${TASK_ID_1}`, `task-${TASK_ID_2}`];
+const BUDGET_RUN_ID = "it-run-budget";
+// Container names now include RUN_ID + index (issue #19 finding 6).
+const CONTAINER_NAMES = [
+  buildContainerName(BUDGET_RUN_ID, 0, TASK_ID_1),
+  buildContainerName(BUDGET_RUN_ID, 1, TASK_ID_2),
+];
 function cleanupContainers() {
   for (const name of CONTAINER_NAMES) {
     try {
@@ -158,7 +163,7 @@ describe.skipIf(!RUNNER_IT)(
 
         const env = {
           ...process.env,
-          RUN_ID: "it-run-budget",
+          RUN_ID: BUDGET_RUN_ID,
           CALLBACK_BASE: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-2",
           AI_GATEWAY_API_KEY: "test-gateway-key",
@@ -213,7 +218,7 @@ describe.skipIf(!RUNNER_IT)(
         // No container was ever created for the skipped second task.
         let secondContainerExists = true;
         try {
-          execFileSync("docker", ["inspect", `task-${TASK_ID_2}`], { stdio: "ignore" });
+          execFileSync("docker", ["inspect", CONTAINER_NAMES[1]], { stdio: "ignore" });
         } catch {
           secondContainerExists = false;
         }

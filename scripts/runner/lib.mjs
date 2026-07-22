@@ -1,14 +1,23 @@
 // Pure, import-testable helpers used by scripts/runner/runner.mjs. No
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
+import { execFileSync } from "node:child_process";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
 // non-assistant lines and lines that fail to parse as JSON (schema drift /
 // truncated writes should degrade gracefully, not crash the run).
+//
+// A root agent could rewrite its own session JSONL to report a negative
+// cost.total and dodge the budget cap -- negative values are clamped to 0
+// (never subtracted from the running total) and counted in
+// negativeCostCount as a tamper signal for the caller to log/alert on. The
+// platform's gateway-credits ledger remains the authoritative spend
+// ceiling; this parser is a secondary, spoofable signal.
 export function parseSessionCost(jsonlText) {
   let totalCost = 0;
   let turns = 0;
+  let negativeCostCount = 0;
   for (const line of jsonlText.split("\n")) {
     if (!line.trim()) continue;
     let obj;
@@ -21,11 +30,111 @@ export function parseSessionCost(jsonlText) {
       turns += 1;
       const cost = obj.message.usage?.cost?.total;
       if (typeof cost === "number" && Number.isFinite(cost)) {
-        totalCost += cost;
+        if (cost < 0) {
+          negativeCostCount += 1;
+        } else {
+          totalCost += cost;
+        }
       }
     }
   }
-  return { totalCost, turns };
+  return { totalCost, turns, negativeCostCount };
+}
+
+// Distinguishes "session file missing/empty/unparseable" (every line fails
+// to parse -- a tamper/corruption signal, cost should fall back to a
+// floor) from "session parsed fine but legitimately has zero cost" (a real
+// result, not a tamper signal). At least one line parsing as JSON is
+// enough to call the text readable, even if that line isn't an assistant
+// message with a cost.
+export function isSessionTextUnreadable(jsonlText) {
+  if (jsonlText == null) return true;
+  const trimmed = String(jsonlText).trim();
+  if (trimmed === "") return true;
+  for (const line of trimmed.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      JSON.parse(line);
+      return false;
+    } catch {
+      continue;
+    }
+  }
+  return true;
+}
+
+// Scrub secret values from arbitrary text before it's uploaded as a public
+// trace. Scrubs every exact occurrence of each string in `secrets`, plus
+// any vck_-prefixed token (Vercel AI Gateway key format) even if it wasn't
+// passed in explicitly -- defense in depth against a root agent
+// `printenv`-ing the key into its own output.
+const VCK_TOKEN_RE = /vck_[A-Za-z0-9]+/g;
+
+export function redactSecrets(text, secrets = []) {
+  let result = text;
+  for (const secret of secrets) {
+    if (typeof secret !== "string" || secret === "") continue;
+    result = result.split(secret).join("[REDACTED]");
+  }
+  return result.replace(VCK_TOKEN_RE, "[REDACTED]");
+}
+
+// Shell-out helper: never throws, always returns a result. Pass
+// `timeout` (ms) for a bounded per-attempt deadline -- Node's execFileSync
+// kills the child with SIGTERM once it elapses, so a wedged command (e.g.
+// `docker info` against a stuck daemon) can never block a polling loop
+// forever.
+export function sh(cmd, args, opts = {}) {
+  try {
+    const stdout = execFileSync(cmd, args, {
+      maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
+      timeout: opts.timeout,
+    });
+    return { code: 0, stdout, stderr: Buffer.alloc(0), timedOut: false };
+  } catch (err) {
+    return {
+      code: typeof err.status === "number" ? err.status : 1,
+      stdout: err.stdout ?? Buffer.alloc(0),
+      stderr: err.stderr ?? Buffer.alloc(0),
+      timedOut: err.signal === "SIGTERM",
+      error: err,
+    };
+  }
+}
+
+// Wrap a fetch call with a request-scoped abort deadline so a hung
+// callback endpoint can never block the runner indefinitely. `fetchImpl`
+// is injected for testability (no network needed to unit test this).
+export function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs) {
+  return fetchImpl(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+}
+
+// Container name: task-${RUN_ID}-${index}-${sanitized task id}. Including
+// RUN_ID and index means concurrent runs -- and concurrent tasks within a
+// run -- never collide and force-remove each other's containers. Strips
+// to the characters Docker allows in container names.
+const CONTAINER_NAME_UNSAFE_RE = /[^a-zA-Z0-9_.-]/g;
+
+export function buildContainerName(runId, index, taskId) {
+  const safeRunId = String(runId).replace(CONTAINER_NAME_UNSAFE_RE, "-");
+  const safeTaskId = String(taskId).replace(CONTAINER_NAME_UNSAFE_RE, "-");
+  return `task-${safeRunId}-${index}-${safeTaskId}`;
+}
+
+// Deliver a terminal (completed/failed) status payload via `postFn`
+// (expected to already retry/backoff internally and resolve to a
+// truthy/falsy delivered flag). If delivery still fails, write the
+// payload to `fallbackPath` via `writeFallback` so an out-of-band reaper
+// process can reconcile the run's final status, and report
+// delivered=false so the caller can exit non-zero instead of silently
+// exiting 0 on a lost terminal status.
+export async function deliverTerminalStatus({ postFn, payload, writeFallback, fallbackPath }) {
+  const delivered = await postFn(payload);
+  if (delivered) return true;
+  if (writeFallback) {
+    writeFallback(fallbackPath, JSON.stringify(payload, null, 2));
+  }
+  return false;
 }
 
 // Sum cost_usd and count passed tasks across the run's task results.
