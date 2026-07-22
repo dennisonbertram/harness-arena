@@ -129,7 +129,15 @@ SWE-bench), multi-trial averaging, hidden task sets.
 - Scoring: lexicographic (tasks passed desc, then cost asc). Metrics shown:
   tasks solved, cost per task, total benchmark cost.
 - Model: `zai/glm-5.2` via Vercel AI Gateway. Fixed per board.
-- Tasks: 10 fixed Terminal-Bench tasks, same for every run.
+- Tasks: 10 fixed Terminal-Bench 2.0 tasks, same for every run, vendored at
+  upstream commit `69671fb` (harbor registry pin), prebuilt images
+  `alexgshaw/<task>:20251031` (verified live): regex-log, fix-git,
+  log-summary-date-ranges, extract-elf, sqlite-db-truncate,
+  multi-source-data-merger, openssl-selfsigned-cert, prove-plus-comm,
+  sanitize-git-repo, db-wal-recovery. Apache-2.0; canary GUID lines preserved
+  byte-identical; solutions not vendored. Verification = official
+  `tests/test.sh` → `/logs/verifier/reward.txt` (oracle-tested locally,
+  reward=1 on regex-log).
 - Runner: Docker inside Vercel Sandbox (spike passed), pi harness inside the
   task container, verification by platform after agent finishes.
 - Anti-cheat: LLM judge pre-screens every submitted prompt before any run
