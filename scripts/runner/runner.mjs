@@ -332,15 +332,12 @@ async function runOneTask(task, index, systemPrompt) {
     // stop at the cap (stopReason: length) so the turn ends and the agent
     // continues. This is fixed harness config applied identically to every
     // competitor, not part of the submitted prompt.
-    const modelsJson = buildModelsConfig(MAX_OUTPUT_TOKENS);
+    // Write via docker cp (like the prompt file) to avoid shell-quoting the
+    // JSON's braces/quotes into `sh -c`.
     sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", PI_AGENT_DIR]);
-    sh(DOCKER_CMD, [
-      "exec",
-      containerName,
-      "sh",
-      "-c",
-      `printf '%s' ${shQuote(modelsJson)} > ${PI_AGENT_DIR}/models.json`,
-    ]);
+    const modelsHostFile = writeTempFile(buildModelsConfig(MAX_OUTPUT_TOKENS));
+    tempDirs.push(path.dirname(modelsHostFile));
+    sh(DOCKER_CMD, ["cp", modelsHostFile, `${containerName}:${PI_AGENT_DIR}/models.json`]);
 
     const promptHostFile = writeTempFile(systemPrompt);
     tempDirs.push(path.dirname(promptHostFile));
