@@ -156,6 +156,11 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
+    // Optional model-routing overrides (default = Vercel AI Gateway). Set to
+    // route the fixed board through OpenRouter, matching harnessarena.xyz.
+    if (process.env.RUNNER_PROVIDER) runnerEnv.RUNNER_PROVIDER = process.env.RUNNER_PROVIDER;
+    if (process.env.RUNNER_MODEL) runnerEnv.RUNNER_MODEL = process.env.RUNNER_MODEL;
+    if (process.env.OPENROUTER_API_KEY) runnerEnv.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
     // sudo: the runner starts dockerd, which requires root; the docker CLI
     // it then drives also needs root to reach the root-owned socket. Running
     // the whole runner as root is simpler and matches the manual `vercel

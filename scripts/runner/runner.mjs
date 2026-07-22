@@ -41,6 +41,12 @@ const PI_INSTALL_MODE = process.env.PI_INSTALL_MODE || "agentkit";
 const AGENTKIT_TGZ = process.env.AGENTKIT_TGZ || "/opt/agentkit.tgz";
 const PI_INVOKE_OVERRIDE = process.env.PI_INVOKE_OVERRIDE || undefined;
 const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
+// Model routing. Default = Vercel AI Gateway. Set RUNNER_PROVIDER=openrouter and
+// RUNNER_MODEL=z-ai/glm-5.2 (plus OPENROUTER_API_KEY in the env) to match
+// harnessarena.xyz's exact provider. Both provider API keys are forwarded into
+// the task container; pi uses the one matching --provider.
+const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
+const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
 // A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
 // reality and dominated the leaderboard whenever it was hit (live-run
@@ -349,6 +355,8 @@ async function runOneTask(task, index, systemPrompt) {
       instruction: task.instruction,
       override: PI_INVOKE_OVERRIDE,
       hasSystemPrompt,
+      provider: RUNNER_PROVIDER,
+      model: RUNNER_MODEL,
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
@@ -358,7 +366,19 @@ async function runOneTask(task, index, systemPrompt) {
     // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks.
     const execResult = sh(
       DOCKER_CMD,
-      ["exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
+      [
+        "exec",
+        "-w",
+        "/app",
+        "-e",
+        "AI_GATEWAY_API_KEY",
+        "-e",
+        "OPENROUTER_API_KEY",
+        containerName,
+        "sh",
+        "-c",
+        piCommand,
+      ],
       { maxBuffer: 64 * 1024 * 1024 },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
