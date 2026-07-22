@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDuration, formatUsd, scaleScatterPoints } from "./format";
+import { formatDuration, formatUsd, scaleScatterPoints, scatterDotColor } from "./format";
 
 describe("formatUsd", () => {
   it("formats zero with 4 decimal places", () => {
@@ -97,5 +97,29 @@ describe("scaleScatterPoints", () => {
       expect(byId.free.cx).toBeLessThan(byId.cheap.cx);
       expect(byId.cheap.cx).toBeLessThan(byId.expensive.cx);
     });
+  });
+
+  it("clamps an out-of-range tasksPassed (>10) to the top of the fixed 0-10 y-scale", () => {
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 1, tasksPassed: 11 }], opts);
+
+    const [point] = result.points;
+    expect(point.cy).toBeCloseTo(opts.padding, 5);
+  });
+
+  it("returns a real (zero) xMax for display when every run costs $0, instead of a fabricated non-zero value", () => {
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 3 }], opts);
+
+    expect(result.xMax).toBe(0);
+    expect(Number.isFinite(result.points[0].cx)).toBe(true);
+  });
+});
+
+describe("scatterDotColor", () => {
+  it("uses gray-900 (not gray-600) for non-leader dots to meet the 3:1 contrast minimum on white", () => {
+    expect(scatterDotColor(false)).toBe("var(--gray-900)");
+  });
+
+  it("uses blue-700 for the leader dot", () => {
+    expect(scatterDotColor(true)).toBe("var(--blue-700)");
   });
 });

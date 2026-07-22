@@ -75,3 +75,13 @@ export function scaleScatterPoints(
 
   return { points, xMax, yMax: Y_MAX, width, height, padding };
 }
+
+/**
+ * Fill color for a scatter-chart dot.
+ * TODO(TASK-8-review): stub — non-leader dots still use gray-600, which
+ * measures ~2.38:1 contrast on white, below the 3:1 minimum for graphical
+ * objects.
+ */
+export function scatterDotColor(isLeader: boolean): string {
+  return isLeader ? "var(--blue-700)" : "var(--gray-600)";
+}
