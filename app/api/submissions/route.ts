@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
 import { log } from "@/lib/log";
@@ -118,11 +118,22 @@ export async function POST(request: NextRequest) {
   submission.run_id = run.id;
   await storage.putSubmission(submission);
 
-  // Fire-and-forget: a failing/stubbed trigger must never fail the
-  // submission response (ticket #7 implements the real sandbox creation).
-  void startRun(run).catch((err) => {
+  // Run the trigger via after() so it executes once the response has been
+  // sent but is still awaited within the function's lifetime (a bare
+  // fire-and-forget setTimeout would get killed once the invocation ends).
+  // after() throws synchronously if there's no live Next.js request scope
+  // (e.g. this route handler invoked directly, as this repo's route tests
+  // do) -- fall back to the original ticket #4 fire-and-forget contract in
+  // that case so the trigger still runs. Either way, a failing/stubbed
+  // trigger must never fail the submission response.
+  const onTriggerFailure = (err: unknown) => {
     log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message });
-  });
+  };
+  try {
+    after(() => startRun(run, submission.prompt).catch(onTriggerFailure));
+  } catch {
+    void startRun(run, submission.prompt).catch(onTriggerFailure);
+  }
 
   return NextResponse.json({ submission_id: submission.id, run_id: run.id, status: submission.status });
 }

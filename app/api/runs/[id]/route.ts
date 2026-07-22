@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { reapIfStale } from "@/lib/reaper";
 import { getStorage } from "@/lib/storage";
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -8,5 +9,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   if (!run) {
     return NextResponse.json({ error: "run not found" }, { status: 404 });
   }
-  return NextResponse.json(run);
+  // Lazy reap: see app/api/runs/route.ts.
+  const current = await reapIfStale(storage, run);
+  return NextResponse.json(current);
 }

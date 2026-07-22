@@ -4,7 +4,7 @@
 // image, injects the agent kit, invokes `pi` with the submitted system
 // prompt, verifies the result, uploads traces, and reports events/results
 // to CALLBACK_BASE per callback-contract.md / event-taxonomy.md.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -19,10 +19,17 @@ import os from "node:os";
 import path from "node:path";
 import {
   budgetExceeded,
+  buildContainerName,
   buildPiCommand,
   computeTotals,
+  deliverTerminalStatus,
+  fetchWithTimeout,
+  isSessionTextUnreadable,
   parseReward,
   parseSessionCost,
+  redactSecrets,
+  safeCleanup,
+  sh,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -31,6 +38,15 @@ const AGENTKIT_TGZ = process.env.AGENTKIT_TGZ || "/opt/agentkit.tgz";
 const PI_INVOKE_OVERRIDE = process.env.PI_INVOKE_OVERRIDE || undefined;
 const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
+const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.50");
+const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
+const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
+const TERMINAL_FALLBACK_PATH =
+  process.env.RUNNER_TERMINAL_FALLBACK_PATH || "/var/log/runner-terminal.json";
+// Test-only hook: throws inside runOneTask for the named task id, to prove
+// container cleanup happens even when a task errors mid-run (issue #19
+// finding 5). Never set in production.
+const RUNNER_FORCE_TASK_ERROR = process.env.RUNNER_FORCE_TASK_ERROR || undefined;
 
 const RUN_ID = process.env.RUN_ID;
 const CALLBACK_BASE = process.env.CALLBACK_BASE;
@@ -56,24 +72,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// --- shell-out helper: never throws, always returns a result -------------
-function sh(cmd, args, opts = {}) {
-  try {
-    const stdout = execFileSync(cmd, args, {
-      maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
-      timeout: opts.timeout,
-    });
-    return { code: 0, stdout, stderr: Buffer.alloc(0) };
-  } catch (err) {
-    return {
-      code: typeof err.status === "number" ? err.status : 1,
-      stdout: err.stdout ?? Buffer.alloc(0),
-      stderr: err.stderr ?? Buffer.alloc(0),
-      error: err,
-    };
-  }
-}
-
 function decodeB64(value) {
   return Buffer.from(value, "base64").toString("utf8");
 }
@@ -92,10 +90,16 @@ function tailFile(filePath, maxBytes) {
 }
 
 // --- docker readiness ------------------------------------------------------
+function dockerInfoReady() {
+  // Bounded per-attempt deadline: a wedged dockerd must never block this
+  // poll loop past DOCKER_INFO_TIMEOUT_MS on a single attempt.
+  return sh(DOCKER_CMD, ["info"], { timeout: DOCKER_INFO_TIMEOUT_MS }).code === 0;
+}
+
 async function pollDockerReady(waitSec) {
   const deadline = Date.now() + waitSec * 1000;
   while (Date.now() < deadline) {
-    if (sh(DOCKER_CMD, ["info"]).code === 0) return true;
+    if (dockerInfoReady()) return true;
     await sleep(2000);
   }
   return false;
@@ -116,7 +120,7 @@ function startDockerdBackground() {
 }
 
 async function ensureDockerReady() {
-  if (sh(DOCKER_CMD, ["info"]).code === 0) return true;
+  if (dockerInfoReady()) return true;
 
   log("docker info failed; removing stale pid/sock and starting dockerd");
   for (const waitSec of [60, 30]) {
@@ -145,7 +149,12 @@ async function postWithRetry(url, body, isJson) {
   for (const delay of delays) {
     if (delay) await sleep(delay);
     try {
-      const res = await fetch(url, { method: "POST", headers, body: payload });
+      const res = await fetchWithTimeout(
+        fetch,
+        url,
+        { method: "POST", headers, body: payload },
+        HTTP_TIMEOUT_MS,
+      );
       if (!res.ok) {
         lastErr = new Error(`HTTP ${res.status}`);
         continue;
@@ -176,6 +185,28 @@ async function flushEvents(extra = {}) {
 async function uploadTrace(taskId, name, buffer) {
   const url = `${CALLBACK_BASE}/api/runs/${RUN_ID}/trace?task_id=${encodeURIComponent(taskId)}&name=${encodeURIComponent(name)}`;
   return postWithRetry(url, buffer, false);
+}
+
+// Terminal status delivery (status completed/failed + totals) is the one
+// callback that must never be silently lost: flushEvents already retries
+// the POST 3x with backoff; if it still fails, write the payload to
+// TERMINAL_FALLBACK_PATH for a reaper/reconciliation process and signal
+// non-delivery so main() exits non-zero instead of exiting 0 on a lost
+// final status. Non-terminal event-post failures stay non-fatal (queued
+// via flushEvents/pendingEvents as before).
+async function finalizeTerminalStatus(payload) {
+  return deliverTerminalStatus({
+    postFn: async (p) => (await flushEvents(p)) !== null,
+    payload,
+    writeFallback: (fallbackPath, json) => {
+      try {
+        writeFileSync(fallbackPath, json);
+      } catch (writeErr) {
+        log(`failed to write terminal fallback file ${fallbackPath}: ${writeErr?.message ?? writeErr}`);
+      }
+    },
+    fallbackPath: TERMINAL_FALLBACK_PATH,
+  });
 }
 
 // --- per-task docker helpers -----------------------------------------------
@@ -237,112 +268,174 @@ function readRewardFile(containerName) {
 }
 
 async function runOneTask(task, index, systemPrompt) {
-  const containerName = `task-${task.id}`;
+  const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
+  const tempDirs = [];
 
-  queueEvent("task.started", { task_id: task.id, index });
-  await flushEvents();
+  try {
+    queueEvent("task.started", { task_id: task.id, index });
+    await flushEvents();
 
-  cleanupContainer(containerName);
-  sh(DOCKER_CMD, [
-    "run",
-    "-d",
-    "--name",
-    containerName,
-    task.image,
-    "sh",
-    "-c",
-    `sleep ${task.agent_timeout_sec + 900}`,
-  ]);
+    cleanupContainer(containerName);
+    sh(DOCKER_CMD, [
+      "run",
+      "-d",
+      "--name",
+      containerName,
+      task.image,
+      "sh",
+      "-c",
+      `sleep ${task.agent_timeout_sec + 900}`,
+    ]);
 
-  if (PI_INSTALL_MODE === "agentkit") {
-    sh(DOCKER_CMD, ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
-    sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
+    if (PI_INSTALL_MODE === "agentkit") {
+      sh(DOCKER_CMD, ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
+      sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
+    }
+
+    const promptHostFile = writeTempFile(systemPrompt);
+    tempDirs.push(path.dirname(promptHostFile));
+    sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
+
+    // Test-only: force an exception mid-task to prove the finally block
+    // below still removes the container (issue #19 finding 5).
+    if (RUNNER_FORCE_TASK_ERROR && RUNNER_FORCE_TASK_ERROR === task.id) {
+      throw new Error(`RUNNER_FORCE_TASK_ERROR: forced failure for task ${task.id}`);
+    }
+
+    const piCommand = buildPiCommand({
+      agentTimeoutSec: task.agent_timeout_sec,
+      sessionDir: SESSION_DIR,
+      promptFile: PROMPT_FILE,
+      instruction: task.instruction,
+      override: PI_INVOKE_OVERRIDE,
+    });
+
+    // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
+    // through from this process's own environment -- execFileSync inherits
+    // process.env by default, so no extra plumbing is needed here.
+    const execResult = sh(
+      DOCKER_CMD,
+      ["exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
+      { maxBuffer: 5 * 1024 * 1024 },
+    );
+    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
+    const agentFinishedAt = Date.now();
+
+    const sessionText = extractNewestSessionJsonl(containerName);
+    const sessionUnreadable = isSessionTextUnreadable(sessionText);
+    const parsed = parseSessionCost(sessionText);
+    const turns = parsed.turns;
+
+    // Cost tamper resistance (issue #19 finding 2): a root agent can rewrite
+    // its own session JSONL. A missing/empty/unparseable session file is
+    // treated as unreadable and floored to a configurable default rather
+    // than silently costing $0; negative cost.total values are clamped and
+    // counted as a tamper signal by parseSessionCost. The platform's
+    // gateway-credits ledger remains the authoritative spend ceiling --
+    // this is a secondary, spoofable signal surfaced for visibility.
+    let totalCost;
+    let costSource;
+    if (sessionUnreadable) {
+      totalCost = MISSING_COST_FLOOR_USD;
+      costSource = "floor (session unreadable)";
+      log(`task ${task.id}: cost_source: ${costSource}`);
+      queueEvent("task.cost_tamper_signal", {
+        task_id: task.id,
+        reason: "session_unreadable",
+        cost_source: costSource,
+        floor_usd: MISSING_COST_FLOOR_USD,
+      });
+    } else {
+      totalCost = parsed.totalCost;
+      costSource = "session";
+      if (parsed.negativeCostCount > 0) {
+        log(
+          `task ${task.id}: ${parsed.negativeCostCount} negative cost.total value(s) ignored (tamper signal)`,
+        );
+        queueEvent("task.cost_tamper_signal", {
+          task_id: task.id,
+          reason: "negative_cost_total",
+          cost_source: costSource,
+          negative_cost_count: parsed.negativeCostCount,
+        });
+      }
+    }
+
+    queueEvent("task.agent_finished", {
+      task_id: task.id,
+      turns,
+      cost_usd: totalCost,
+      cost_source: costSource,
+      duration_s: (agentFinishedAt - taskStart) / 1000,
+    });
+    await flushEvents();
+
+    // Verification against a clean copy of the task's tests.
+    sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
+    sh(DOCKER_CMD, ["cp", path.join(RUNNER_TASKS_DIR, task.id, "tests"), `${containerName}:/tests`]);
+    sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", "/logs/verifier"]);
+
+    queueEvent("task.verify_started", { task_id: task.id });
+    await flushEvents();
+
+    const verifyStart = Date.now();
+    sh(
+      DOCKER_CMD,
+      ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
+      { maxBuffer: 20 * 1024 * 1024 },
+    );
+    const verifyDurationS = (Date.now() - verifyStart) / 1000;
+
+    const rewardText = readRewardFile(containerName);
+    const passed = parseReward(rewardText);
+    const rewardNumber = rewardText != null ? Number(String(rewardText).trim()) : NaN;
+    const reward = Number.isFinite(rewardNumber) ? rewardNumber : 0;
+
+    queueEvent("task.verified", { task_id: task.id, passed, reward, duration_s: verifyDurationS });
+    await flushEvents();
+
+    // Trace uploads -- secrets scrubbed from the bytes first (issue #19
+    // finding 1): a root agent could printenv AI_GATEWAY_API_KEY into its
+    // own session/stdout, and these traces are uploaded publicly.
+    const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
+    let traceBlobUrl;
+    const redactedSession = redactSecrets(sessionText, secrets);
+    const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));
+    if (sessionUpload?.url) {
+      traceBlobUrl = sessionUpload.url;
+      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
+    }
+    const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
+    const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
+    if (stdoutUpload?.url) {
+      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
+    }
+    await flushEvents();
+
+    return {
+      task_id: task.id,
+      attempted: true,
+      passed,
+      reward,
+      cost_usd: totalCost,
+      cost_source: costSource,
+      duration_s: (Date.now() - taskStart) / 1000,
+      turns,
+      trace_blob_url: traceBlobUrl,
+    };
+  } finally {
+    // Runs on every path -- success, verification failure, or a thrown
+    // exception mid-task -- so a task that errors never leaks its
+    // container or temp files (issue #19 finding 5). Each cleanup step is
+    // wrapped so a throw here (e.g. rmSync ENOENT/EACCES) can never mask
+    // the real task error or turn a task's success into a crashed run
+    // (issue #23 finding G2).
+    safeCleanup(() => cleanupContainer(containerName), `container ${containerName}`, log);
+    for (const dir of tempDirs) {
+      safeCleanup(() => rmSync(dir, { recursive: true, force: true }), `temp dir ${dir}`, log);
+    }
   }
-
-  const promptHostFile = writeTempFile(systemPrompt);
-  sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
-  rmSync(path.dirname(promptHostFile), { recursive: true, force: true });
-
-  const piCommand = buildPiCommand({
-    agentTimeoutSec: task.agent_timeout_sec,
-    sessionDir: SESSION_DIR,
-    promptFile: PROMPT_FILE,
-    instruction: task.instruction,
-    override: PI_INVOKE_OVERRIDE,
-  });
-
-  // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
-  // through from this process's own environment -- execFileSync inherits
-  // process.env by default, so no extra plumbing is needed here.
-  const execResult = sh(
-    DOCKER_CMD,
-    ["exec", "-w", "/app", "-e", "AI_GATEWAY_API_KEY", containerName, "sh", "-c", piCommand],
-    { maxBuffer: 5 * 1024 * 1024 },
-  );
-  const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
-  const agentFinishedAt = Date.now();
-
-  const sessionText = extractNewestSessionJsonl(containerName);
-  const { totalCost, turns } = parseSessionCost(sessionText);
-
-  queueEvent("task.agent_finished", {
-    task_id: task.id,
-    turns,
-    cost_usd: totalCost,
-    duration_s: (agentFinishedAt - taskStart) / 1000,
-  });
-  await flushEvents();
-
-  // Verification against a clean copy of the task's tests.
-  sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
-  sh(DOCKER_CMD, ["cp", path.join(RUNNER_TASKS_DIR, task.id, "tests"), `${containerName}:/tests`]);
-  sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", "/logs/verifier"]);
-
-  queueEvent("task.verify_started", { task_id: task.id });
-  await flushEvents();
-
-  const verifyStart = Date.now();
-  sh(
-    DOCKER_CMD,
-    ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
-    { maxBuffer: 20 * 1024 * 1024 },
-  );
-  const verifyDurationS = (Date.now() - verifyStart) / 1000;
-
-  const rewardText = readRewardFile(containerName);
-  const passed = parseReward(rewardText);
-  const rewardNumber = rewardText != null ? Number(String(rewardText).trim()) : NaN;
-  const reward = Number.isFinite(rewardNumber) ? rewardNumber : 0;
-
-  queueEvent("task.verified", { task_id: task.id, passed, reward, duration_s: verifyDurationS });
-  await flushEvents();
-
-  // Trace uploads.
-  let traceBlobUrl;
-  const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(sessionText, "utf8"));
-  if (sessionUpload?.url) {
-    traceBlobUrl = sessionUpload.url;
-    queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
-  }
-  const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", piStdout);
-  if (stdoutUpload?.url) {
-    queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
-  }
-  await flushEvents();
-
-  cleanupContainer(containerName);
-
-  return {
-    task_id: task.id,
-    attempted: true,
-    passed,
-    reward,
-    cost_usd: totalCost,
-    duration_s: (Date.now() - taskStart) / 1000,
-    turns,
-    trace_blob_url: traceBlobUrl,
-  };
 }
 
 // --- main -------------------------------------------------------------
@@ -355,10 +448,17 @@ async function main() {
         error: `dockerd did not become ready: ${tailFile(DOCKERD_LOG, 4000)}`,
         stage: "sandbox_ready",
       });
-      await flushEvents({ status: "failed" });
-      process.exit(0);
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
     }
     queueEvent("run.sandbox_ready", { sandbox_id: os.hostname() });
+    // First status transition of the run (issue #23 finding B): posting
+    // "running" here, before the task loop starts, closes the window
+    // where a run sits at "queued" until its (possibly much later)
+    // terminal status -- the callback route's canTransition also allows
+    // queued->completed/failed directly as a belt-and-suspenders fallback
+    // if this post is ever lost.
+    await flushEvents({ status: "running" });
 
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
     const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
@@ -399,12 +499,12 @@ async function main() {
 
     await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
 
-    await flushEvents({
+    const delivered = await finalizeTerminalStatus({
       status: "completed",
       totals: { ...totals, over_budget: overBudget },
       task_results: taskResults,
     });
-    process.exit(0);
+    process.exit(delivered ? 0 : 1);
   } catch (err) {
     log(`uncaught error: ${err?.stack ?? err}`);
     queueEvent("run.failed", { error: String(err?.message ?? err), stage: "run" });
@@ -413,8 +513,8 @@ async function main() {
     } catch {
       // best-effort only
     }
-    const result = await flushEvents({ status: "failed" });
-    process.exit(result === null ? 1 : 0);
+    const delivered = await finalizeTerminalStatus({ status: "failed" });
+    process.exit(delivered ? 0 : 1);
   }
 }
 

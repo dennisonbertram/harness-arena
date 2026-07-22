@@ -153,6 +153,10 @@ describe("POST /api/submissions", () => {
       expect(events[0].payload).toEqual({ submission_id: body.submission_id });
 
       expect(startRun).toHaveBeenCalledTimes(1);
+      expect(startRun).toHaveBeenCalledWith(
+        expect.objectContaining({ id: body.run_id }),
+        "Plan carefully before acting.",
+      );
     });
 
     it("a failing run-trigger stub does not fail the submission response", async () => {
@@ -294,6 +298,21 @@ describe("POST /api/submissions", () => {
       await POST(postRequest({ agent_name: "agent-reject-trigger", prompt: "cheat" }, "6.6.6.3"));
 
       expect(startRun).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("regression: run trigger still fires outside a live Next.js request scope", () => {
+    it("invokes startRun via the fire-and-forget fallback when next/server's after() throws " +
+      "(as it does when a route handler is invoked directly, e.g. by this test harness, " +
+      "instead of through a real Next.js request lifecycle)", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(
+        postRequest({ agent_name: "agent-after-fallback", prompt: "hello there" }, "8.8.8.1"),
+      );
+
+      expect(response.status).toBe(200);
+      expect(startRun).toHaveBeenCalledWith(expect.anything(), "hello there");
     });
   });
 });

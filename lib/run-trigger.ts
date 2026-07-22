@@ -1,10 +1,12 @@
-import { log } from "./log";
+import { createRunSandbox } from "./sandbox";
 import type { Run } from "./types";
 
-// Stub for ticket #7 (the real sandbox-creation trigger). Ticket #5 only
-// defines the call site and interface; the route calls this fire-and-forget
-// (see app/api/submissions/route.ts) so a missing/failing implementation
-// here can never fail a submission response.
-export async function startRun(run: Run): Promise<void> {
-  log("warn", "run-trigger: not implemented (ticket #7)", { run_id: run.id });
+// The real sandbox-creation trigger (ticket #7). The caller (see
+// app/api/submissions/route.ts) invokes this fire-and-forget-ish via
+// next/server's after(), and is responsible for catching/logging a
+// rejection -- createRunSandbox itself already marks the run failed and
+// appends a run.failed event before rethrowing, so a broken trigger
+// surfaces on the UI instead of a run stuck at `queued` forever.
+export async function startRun(run: Run, prompt: string): Promise<void> {
+  await createRunSandbox(run, { prompt });
 }

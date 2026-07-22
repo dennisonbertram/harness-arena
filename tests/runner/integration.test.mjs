@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildContainerName } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
 
@@ -25,7 +26,10 @@ const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
 // name never collides with other tests/runner/*.test.mjs files that also
 // exercise the regex-log image concurrently under vitest's file parallelism.
 const TASK_ID = "regex-log-it";
-const CONTAINER_NAME = `task-${TASK_ID}`;
+const RUN_ID = "it-run-1";
+// Container name now includes RUN_ID + index (issue #19 finding 6) so
+// concurrent runs can never force-remove each other's containers.
+const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
 
 function cleanupContainer() {
   try {
@@ -75,7 +79,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
 
       const env = {
         ...process.env,
-        RUN_ID: "it-run-1",
+        RUN_ID,
         CALLBACK_BASE: baseUrl,
         RUNNER_CALLBACK_SECRET: "test-secret",
         AI_GATEWAY_API_KEY: "test-gateway-key",
@@ -111,6 +115,12 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
 
       expect(exitCode).toBe(0);
 
+      // First status transition must be "running", posted right after
+      // run.sandbox_ready and before any task work starts (issue #23
+      // finding B) -- a run must never sit at "queued" until its terminal
+      // status.
+      expect(state.statusUpdates[0]?.status).toBe("running");
+
       const eventTypes = state.events.map((e) => e.type);
       expect(eventTypes).toContain("run.sandbox_ready");
       expect(eventTypes).toContain("task.started");
@@ -128,6 +138,9 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       expect(agentFinished.payload.task_id).toBe(TASK_ID);
       expect(agentFinished.payload.turns).toBe(2);
       expect(agentFinished.payload.cost_usd).toBeCloseTo(0.003, 6);
+      // Session file was readable, so cost came from the session, not the
+      // tamper-resistance floor (issue #19 finding 2).
+      expect(agentFinished.payload.cost_source).toBe("session");
 
       const verified = state.events.find((e) => e.type === "task.verified");
       expect(verified.payload.task_id).toBe(TASK_ID);
@@ -156,6 +169,17 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
         attempted: true,
         passed: false,
       });
+
+      // Container cleanup on the success path (issue #19 finding 5): the
+      // per-task container must not be left running/present after the run
+      // completes.
+      let containerStillExists = true;
+      try {
+        execFileSync("docker", ["inspect", CONTAINER_NAME], { stdio: "ignore" });
+      } catch {
+        containerStillExists = false;
+      }
+      expect(containerStillExists).toBe(false);
 
       bundle.cleanup();
     },
