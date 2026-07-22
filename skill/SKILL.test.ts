@@ -37,6 +37,6 @@ describe("skill/SKILL.md", () => {
   });
 
   it("has frontmatter with name and description", () => {
-    expect(content).toMatch(/^---\nname:.+\ndescription:.+\n---/s);
+    expect(content).toMatch(/^---\nname:[^\n]+\ndescription:[^\n]+\n---/);
   });
 });
