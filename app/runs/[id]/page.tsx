@@ -104,8 +104,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
               {run.task_results.map((task) => (
                 <tr key={task.task_id} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                   <td style={cellStyle} className="mono">{task.task_id}</td>
-                  <td style={cellStyle}>{task.attempted ? "✓" : "✗"}</td>
-                  <td style={cellStyle}>{task.passed ? "✓" : "✗"}</td>
+                  <td style={cellStyle}><BoolMark ok={task.attempted} yes="attempted" no="not attempted" /></td>
+                  <td style={cellStyle}><BoolMark ok={task.passed} yes="passed" no="failed" /></td>
                   <td style={cellStyle} className="tabular-nums">
                     {task.cost_usd !== undefined ? formatUsd(task.cost_usd) : "—"}
                   </td>
@@ -188,6 +188,20 @@ function Stat({ label, value }: { label: string; value: string }) {
         {value}
       </div>
     </div>
+  );
+}
+
+// Green ✓ / red ✗. The glyph carries the meaning (not colour alone), and the
+// title gives screen-reader/hover text.
+function BoolMark({ ok, yes, no }: { ok: boolean; yes: string; no: string }) {
+  return (
+    <span
+      title={ok ? yes : no}
+      aria-label={ok ? yes : no}
+      style={{ color: ok ? "#22c55e" : "#ef4444", fontWeight: 600 }}
+    >
+      {ok ? "✓" : "✗"}
+    </span>
   );
 }
 
