@@ -61,19 +61,21 @@ function makeRun(overrides: Partial<Run> = {}): Run {
   };
 }
 
-type ShRunCommand = (cmd: string, args: string[]) => Promise<{ exitCode: number }>;
-type ObjRunCommand = (params: { cmd: string; args?: string[]; env?: Record<string, string>; detached?: boolean }) => Promise<unknown>;
+type ObjRunCommand = (params: {
+  cmd: string;
+  args?: string[];
+  env?: Record<string, string>;
+  detached?: boolean;
+  sudo?: boolean;
+}) => Promise<{ exitCode?: number }>;
 
-function makeSandbox(bootstrapImpl?: ShRunCommand, launchImpl?: ObjRunCommand) {
+function makeSandbox(bootstrapImpl?: ObjRunCommand, launchImpl?: ObjRunCommand) {
   const bootstrap = bootstrapImpl ?? (async () => ({ exitCode: 0 }));
   const launch = launchImpl ?? (async () => ({ exitCode: 0 }));
-  const runCommand = vi.fn((...args: unknown[]) => {
-    // Overloaded SDK signature: (cmd, args) for the bootstrap shell string,
-    // ({cmd, args, env, detached}) for the structured detached launch.
-    if (typeof args[0] === "string") {
-      return bootstrap(args[0] as string, args[1] as string[]);
-    }
-    return launch(args[0] as Parameters<ObjRunCommand>[0]);
+  const runCommand = vi.fn((params: Parameters<ObjRunCommand>[0]) => {
+    // Both calls use the structured object form. Bootstrap runs `sh`
+    // (awaited, exitCode checked); the detached launch runs `node`.
+    return params.detached ? launch(params) : bootstrap(params);
   });
   return { name: "sbx-abc123", runCommand };
 }
@@ -162,10 +164,15 @@ describe("createRunSandbox", () => {
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
-    const [cmd, args] = sandbox.runCommand.mock.calls[0] as [string, string[]];
-    expect(cmd).toBe("sh");
-    expect(args[0]).toBe("-c");
-    const bootstrapScript = args[1] as string;
+    const bootstrap = sandbox.runCommand.mock.calls[0][0] as {
+      cmd: string;
+      args: string[];
+      sudo?: boolean;
+    };
+    expect(bootstrap.cmd).toBe("sh");
+    expect(bootstrap.args[0]).toBe("-c");
+    expect(bootstrap.sudo).toBe(true);
+    const bootstrapScript = bootstrap.args[1];
     expect(bootstrapScript).toContain("mkdir -p /opt/runner");
     expect(bootstrapScript).toContain("https://cb.example.test/runner-bundle.tgz");
     expect(bootstrapScript).toContain("tar -xzf /tmp/rb.tgz -C /opt/runner");
@@ -178,8 +185,8 @@ describe("createRunSandbox", () => {
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
-    const bootstrapScript = (sandbox.runCommand.mock.calls[0] as [string, string[]])[1][1];
-    expect(bootstrapScript).toContain("https://harness-arena-psi.vercel.app/runner-bundle.tgz");
+    const bootstrap = sandbox.runCommand.mock.calls[0][0] as { args: string[] };
+    expect(bootstrap.args[1]).toContain("https://harness-arena-psi.vercel.app/runner-bundle.tgz");
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {
@@ -196,11 +203,13 @@ describe("createRunSandbox", () => {
         args: string[];
         env: Record<string, string>;
         detached: boolean;
+        sudo: boolean;
       };
 
       expect(launchCall.cmd).toBe("node");
       expect(launchCall.args).toEqual(["/opt/runner/scripts/runner/runner.mjs"]);
       expect(launchCall.detached).toBe(true);
+      expect(launchCall.sudo).toBe(true);
 
       expect(launchCall.env.RUN_ID).toBe(run.id);
       expect(launchCall.env.CALLBACK_BASE).toBe("https://cb.example.test");
@@ -217,8 +226,8 @@ describe("createRunSandbox", () => {
       // No argv element (the bootstrap's `cmd`/`args`, or the launch call's
       // own `cmd`/`args`, excluding its dedicated `env` map) may contain the
       // raw secret values -- they must travel exclusively through the env map.
-      const bootstrapCall = sandbox.runCommand.mock.calls[0];
-      const argvText = JSON.stringify([bootstrapCall[0], bootstrapCall[1], launchCall.cmd, launchCall.args]);
+      const bootstrapCall = sandbox.runCommand.mock.calls[0][0];
+      const argvText = JSON.stringify([bootstrapCall, launchCall.cmd, launchCall.args]);
       expect(argvText).not.toContain("test-secret");
       expect(argvText).not.toContain("test-gw-key");
     });
