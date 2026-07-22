@@ -4,11 +4,14 @@ import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
 
-function results(passFlags: boolean[], costs?: number[]): TaskResult[] {
+// turns defaults to 1 (the task actually ran) so any provided cost counts as
+// real spend; pass explicit turns to exercise the 0-turn/unmeasured path.
+function results(passFlags: boolean[], costs?: number[], turns?: number[]): TaskResult[] {
   return passFlags.map((passed, i) => ({
     task_id: `t${i}`,
     attempted: true,
     passed,
+    turns: turns ? turns[i] : 1,
     ...(costs ? { cost_usd: costs[i] } : {}),
   }));
 }
@@ -24,6 +27,7 @@ function run(
   costUsd?: number,
   status: Run["status"] = "completed",
   taskCosts?: number[],
+  taskTurns?: number[],
 ): Run {
   return {
     id,
@@ -31,7 +35,7 @@ function run(
     status,
     tasks_passed: status === "completed" ? passFlags.filter(Boolean).length : undefined,
     total_cost_usd: costUsd,
-    task_results: results(passFlags, taskCosts),
+    task_results: results(passFlags, taskCosts, taskTurns),
     created_at: "2026-07-21T00:00:00.000Z",
   };
 }
@@ -70,6 +74,31 @@ describe("aggregatePrompts", () => {
     const runs = [run("r1", "s1", [true, false, false, false])]; // no taskCosts
     const [st] = aggregatePrompts(runs, submissions, TOTAL);
     expect(st.perTask[0].meanCostUsd).toBeNull();
+  });
+
+  it("treats a 0-turn task's stored cost as unmeasured (de-fabricates the old $0.05 floor)", () => {
+    const submissions = [sub("s1", "vanilla", "", "2026-07-20T00:00:00Z")];
+    // task t0 ran 5 turns and cost $0.02 (real); task t1 ran 0 turns but has a
+    // stored $0.05 (the old fabricated floor) — that must NOT count as cost.
+    const runs = [
+      run("r1", "s1", [true, false, false, false], undefined, "completed", [0.02, 0.05, 0, 0], [5, 0, 0, 0]),
+    ];
+    const [st] = aggregatePrompts(runs, submissions, TOTAL);
+    const byId = Object.fromEntries(st.perTask.map((p) => [p.taskId, p.meanCostUsd]));
+    expect(byId.t0).toBeCloseTo(0.02); // real spend, counted
+    expect(byId.t1).toBeNull(); // 0 turns -> stored $0.05 is not a real measurement
+  });
+
+  it("reports mean turns per task (0 = the agent never engaged the task)", () => {
+    const submissions = [sub("s1", "vanilla", "", "2026-07-20T00:00:00Z")];
+    const runs = [
+      run("r1", "s1", [true, false, false, false], undefined, "completed", undefined, [10, 0, 4, 2]),
+      run("r2", "s1", [true, false, false, false], undefined, "completed", undefined, [20, 0, 4, 2]),
+    ];
+    const [st] = aggregatePrompts(runs, submissions, TOTAL);
+    const turns = Object.fromEntries(st.perTask.map((p) => [p.taskId, p.meanTurns]));
+    expect(turns.t0).toBeCloseTo(15); // (10+20)/2
+    expect(turns.t1).toBe(0); // never engaged in either run
   });
 
   it("computes per-task pass rate across runs", () => {

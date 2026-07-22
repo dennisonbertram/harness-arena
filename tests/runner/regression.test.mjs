@@ -38,9 +38,9 @@
 //     (realistic pi output has turn_end lines throughout, not just at the
 //     very end) -- falling back to turn_end whenever it's merely present
 //     would silently under/over-count real per-task cost.
-//  10. The actual default RUNNER_MISSING_COST_FLOOR (no env override) must
-//      be 0.05, not the old 0.50 -- real Docker, both session and stdout
-//      unusable.
+//  10. When both session and stdout are unusable, cost is reported as
+//      UNMEASURED (cost_usd absent, cost_source "unmeasured") -- never a
+//      fabricated floor value.
 import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
@@ -465,7 +465,7 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "floors cost_usd to RUNNER_MISSING_COST_FLOOR and marks cost_source when no session.jsonl is written (issue #19 finding 2)",
+      "reports cost as UNMEASURED (no fabricated floor, cost_usd absent) when no session.jsonl is written",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-nosession" });
@@ -492,7 +492,6 @@ describe.skipIf(!RUNNER_IT)(
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
           BUDGET_CAP_USD: "2",
-          RUNNER_MISSING_COST_FLOOR: "0.37",
           TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
           RUNNER_TASKS_DIR: bundle.root,
           AGENTKIT_TGZ: agentkitTgz,
@@ -513,15 +512,17 @@ describe.skipIf(!RUNNER_IT)(
         expect(exitCode).toBe(0);
 
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("floor (session unreadable)");
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.37, 10);
+        expect(agentFinished.payload.cost_source).toBe("unmeasured");
+        // No fabricated number — cost_usd is absent, not a floor.
+        expect(agentFinished.payload.cost_usd).toBeUndefined();
 
         const tamperEvent = state.events.find((e) => e.type === "task.cost_tamper_signal");
         expect(tamperEvent).toBeDefined();
-        expect(tamperEvent.payload.reason).toBe("session_unreadable");
+        expect(tamperEvent.payload.reason).toBe("cost_unmeasured");
 
         const finalStatus = state.statusUpdates.at(-1);
-        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.37, 10);
+        // Unmeasured tasks contribute nothing to the total (no invented spend).
+        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0, 10);
       },
       600000,
     );
@@ -529,7 +530,7 @@ describe.skipIf(!RUNNER_IT)(
 );
 
 describe.skipIf(!RUNNER_IT)(
-  "runner regression (RUNNER_IT=1, real local docker): default missing-cost floor is 0.05, not the old 0.50",
+  "runner regression (RUNNER_IT=1, real local docker): no fabricated cost floor",
   () => {
     const TASK_ID = "regex-log-default-floor";
     const RUN_ID = "it-run-default-floor";
@@ -544,7 +545,7 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "floors cost_usd to 0.05 (the lowered default), not the old 0.50, when RUNNER_MISSING_COST_FLOOR is unset and stdout has no usable cost",
+      "does NOT invent a cost floor — cost_usd is absent and cost_source is 'unmeasured' when no session and no stdout cost",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
         const { state, baseUrl, stop } = await startCallbackServer({
@@ -579,10 +580,6 @@ describe.skipIf(!RUNNER_IT)(
           PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
         };
         delete env.PI_INSTALL_MODE;
-        // Deliberately NOT setting RUNNER_MISSING_COST_FLOOR -- this test
-        // exists specifically to catch an accidental revert of the
-        // lowered default back to 0.50.
-        delete env.RUNNER_MISSING_COST_FLOOR;
 
         const exitCode = await new Promise((resolve, reject) => {
           const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
@@ -597,8 +594,8 @@ describe.skipIf(!RUNNER_IT)(
         expect(exitCode).toBe(0);
 
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("floor (session unreadable)");
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.05, 10);
+        expect(agentFinished.payload.cost_source).toBe("unmeasured");
+        expect(agentFinished.payload.cost_usd).toBeUndefined();
       },
       600000,
     );
@@ -650,9 +647,6 @@ describe.skipIf(!RUNNER_IT)(
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
           BUDGET_CAP_USD: "2",
-          // A distinctly different value from the real recoverable stdout
-          // cost (0.015) so the assertion can tell floor vs. stdout apart.
-          RUNNER_MISSING_COST_FLOOR: "0.5",
           TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
           RUNNER_TASKS_DIR: bundle.root,
           AGENTKIT_TGZ: agentkitTgz,
@@ -674,7 +668,8 @@ describe.skipIf(!RUNNER_IT)(
 
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
         expect(agentFinished.payload.cost_source).toBe("stdout");
-        // 0.006 + 0.009 from the two message_end events, never the 0.5 floor.
+        // 0.006 + 0.009 from the two message_end events — a real recovered
+        // cost, never a fabricated value.
         expect(agentFinished.payload.cost_usd).toBeCloseTo(0.015, 10);
 
         const finalStatus = state.statusUpdates.at(-1);

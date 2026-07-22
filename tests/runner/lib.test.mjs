@@ -146,38 +146,23 @@ describe("parseStdoutCost", () => {
   });
 });
 
-describe("resolveTaskCost (cost-source priority: session > stdout > floor)", () => {
+describe("resolveTaskCost (cost-source priority: session > stdout > unmeasured)", () => {
   it("uses the session cost when the session is usable, ignoring stdout entirely", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: false,
-      sessionCost: 0.02,
-      stdoutCost: 999,
-      floorUsd: 0.05,
-    });
+    const result = resolveTaskCost({ sessionUnreadable: false, sessionCost: 0.02, stdoutCost: 999 });
     expect(result).toEqual({ totalCost: 0.02, costSource: "session" });
   });
 
   // Regression for the exact live-run bug (9f4a1b3e): session unreadable
   // (agent-timeout SIGTERM before flush) but stdout has a real recovered
-  // cost -- must use the real stdout cost, not the floor.
-  it("falls back to the real stdout cost (not the floor) when the session is unreadable but stdout has a positive cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0.018,
-      floorUsd: 0.05,
-    });
+  // cost -- must use the real stdout cost.
+  it("falls back to the real stdout cost when the session is unreadable but stdout has a positive cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0.018 });
     expect(result).toEqual({ totalCost: 0.018, costSource: "stdout" });
   });
 
-  it("falls back to the floor when the session is unreadable and stdout has no usable cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0,
-      floorUsd: 0.05,
-    });
-    expect(result).toEqual({ totalCost: 0.05, costSource: "floor (session unreadable)" });
+  it("reports UNMEASURED (null, never a fabricated floor) when neither session nor stdout has a cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0 });
+    expect(result).toEqual({ totalCost: null, costSource: "unmeasured" });
   });
 });
 

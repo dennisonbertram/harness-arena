@@ -24,6 +24,8 @@ export async function GET() {
       passed: t.passed,
       of: t.of,
       pass_rate: t.of > 0 ? t.passed / t.of : 0,
+      mean_turns: t.meanTurns,
+      // null = unmeasured (no real cost record); never a fabricated placeholder.
       mean_cost_usd: t.meanCostUsd,
     })),
     run_ids: s.runIds,

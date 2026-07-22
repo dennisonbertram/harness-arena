@@ -1,8 +1,8 @@
 #!/bin/sh
 # Deterministic fake `pi` that never writes a session.jsonl at all --
 # simulates a corrupted/missing session file (issue #19 finding 2: cost
-# tamper resistance). The runner must fall back to RUNNER_MISSING_COST_FLOOR
-# instead of silently treating this as a $0-cost task.
+# tamper resistance). With no session and no stdout cost, the runner must
+# report the task's cost as UNMEASURED (no fabricated floor value).
 set -e
 
 mkdir -p /logs/agent/sessions

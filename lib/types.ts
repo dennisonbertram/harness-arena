@@ -63,6 +63,10 @@ export const TaskResultSchema = z.object({
   passed: z.boolean(),
   reward: z.number().optional(),
   cost_usd: z.number().optional(),
+  // How cost_usd was derived: "session" | "stdout" | "unmeasured". Absent
+  // cost_usd with cost_source "unmeasured" means no cost record existed — we
+  // report it as unknown rather than inventing a number.
+  cost_source: z.string().optional(),
   duration_s: z.number().optional(),
   turns: z.number().optional(),
   trace_blob_url: z.string().optional(),

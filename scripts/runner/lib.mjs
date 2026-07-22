@@ -110,20 +110,27 @@ export function parseStdoutCost(stdoutText) {
   return 0;
 }
 
-// Cost-source priority used by the runner for each task: (a) the session
-// JSONL cost if the session parsed as usable, (b) else the real cost
-// recovered from stdout via parseStdoutCost if it's a genuine positive
-// number, (c) else the (tamper/missing-cost-signaled) floor. Extracted as
-// a pure function so the priority order itself -- specifically that (b)
-// beats (c) -- is unit-testable without Docker.
-export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost, floorUsd }) {
+// Cost-source priority for each task: (a) the session JSONL cost if the
+// session parsed as usable, (b) else the real cost recovered from stdout via
+// parseStdoutCost if it's a genuine positive number, (c) else UNMEASURED.
+//
+// We do NOT fabricate a floor value: an invented dollar amount that isn't real
+// is worse than an honest "unknown" on a public leaderboard. Reaching (c)
+// means neither the session nor stdout carried any cost record — which happens
+// when the agent produced no billable turn (a real ~$0) OR when the cost data
+// was genuinely lost; we can't tell those apart from here, so we report null
+// (unmeasured) rather than claim a number. Note real spend almost always
+// leaves a trace in stdout even if the session file is deleted (tamper), so it
+// is caught by branch (b); (c) is truly "no signal". totalCost null is carried
+// through as an absent cost_usd, and the aggregation treats it as unmeasured.
+export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost }) {
   if (!sessionUnreadable) {
     return { totalCost: sessionCost, costSource: "session" };
   }
   if (typeof stdoutCost === "number" && stdoutCost > 0) {
     return { totalCost: stdoutCost, costSource: "stdout" };
   }
-  return { totalCost: floorUsd, costSource: "floor (session unreadable)" };
+  return { totalCost: null, costSource: "unmeasured" };
 }
 
 // Cap a trace's bytes to `maxBytes` before upload (live-run evidence: run

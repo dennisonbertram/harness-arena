@@ -52,11 +52,6 @@ const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
 // would deflate its pass rate. Sandbox.ts passes the real value; this default
 // is the fallback.
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
-// A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
-// reality and dominated the leaderboard whenever it was hit (live-run
-// evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the
-// $1.06 total run cost vs. $0.32 real gateway spend).
-const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.05");
 // Cap on the bytes of a trace actually UPLOADED to the callback (live-run
 // evidence: run 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
 // HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). Does
@@ -410,17 +405,17 @@ async function runOneTask(task, index, systemPrompt) {
       sessionUnreadable,
       sessionCost: parsed.totalCost,
       stdoutCost,
-      floorUsd: MISSING_COST_FLOOR_USD,
     });
 
     if (sessionUnreadable) {
       log(`task ${task.id}: cost_source: ${costSource}`);
-      if (costSource === "floor (session unreadable)") {
+      if (costSource === "unmeasured") {
+        // Neither session nor stdout carried a cost — reported as unmeasured
+        // (no fabricated number). Surfaced as a signal for visibility.
         queueEvent("task.cost_tamper_signal", {
           task_id: task.id,
-          reason: "session_unreadable",
+          reason: "cost_unmeasured",
           cost_source: costSource,
-          floor_usd: MISSING_COST_FLOOR_USD,
         });
       }
     } else if (parsed.negativeCostCount > 0) {
@@ -503,7 +498,9 @@ async function runOneTask(task, index, systemPrompt) {
       attempted: true,
       passed,
       reward,
-      cost_usd: totalCost,
+      // null (unmeasured) is carried as an absent cost_usd, never a fabricated
+      // number; cost_source records why (unmeasured vs session/stdout).
+      cost_usd: totalCost === null ? undefined : totalCost,
       cost_source: costSource,
       duration_s: (Date.now() - taskStart) / 1000,
       turns,

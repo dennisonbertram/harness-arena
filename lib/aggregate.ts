@@ -15,7 +15,11 @@ export interface TaskRate {
   taskId: string;
   passed: number; // runs in which this task passed
   of: number; // runs in which this task was recorded
-  meanCostUsd: number | null; // mean cost incurred attempting this task (pass or fail)
+  meanTurns: number; // mean agent turns spent on this task (0 = never engaged)
+  // Mean cost incurred attempting this task (pass or fail), null when unmeasured.
+  // Only real spend counts: a task where the agent took 0 turns (nothing billed,
+  // or the old fabricated floor) is treated as unmeasured, never a fake number.
+  meanCostUsd: number | null;
 }
 
 export interface PromptStanding {
@@ -78,18 +82,25 @@ export function aggregatePrompts(
     const runsCount = g.runs.length;
     const meanTasksPassed = g.runs.reduce((sum, r) => sum + (r.tasks_passed ?? 0), 0) / runsCount;
 
-    // Per-task pass rate AND cost across the group's runs — the granular view
-    // that also applies to failing prompts (which tasks they do solve, and
-    // what each task costs whether it passes or not).
+    // Per-task pass rate, turns, AND cost across the group's runs — the
+    // granular view that also applies to failing prompts (which tasks they do
+    // solve, how hard they try, and what each costs whether it passes or not).
     const passed = new Map<string, number>();
     const of = new Map<string, number>();
+    const turnsSum = new Map<string, number>();
     const costSum = new Map<string, number>();
     const costN = new Map<string, number>();
     for (const r of g.runs) {
       for (const t of r.task_results) {
         of.set(t.task_id, (of.get(t.task_id) ?? 0) + 1);
         if (t.passed) passed.set(t.task_id, (passed.get(t.task_id) ?? 0) + 1);
-        if (typeof t.cost_usd === "number") {
+        const turns = t.turns ?? 0;
+        turnsSum.set(t.task_id, (turnsSum.get(t.task_id) ?? 0) + turns);
+        // Only count a cost that reflects real spend: turns > 0 with a numeric
+        // cost. A 0-turn task billed nothing, so any stored figure there (incl.
+        // the old fabricated $0.05 floor) is not a real measurement — exclude
+        // it so meanCostUsd stays honest rather than inventing a number.
+        if (typeof t.cost_usd === "number" && turns > 0) {
           costSum.set(t.task_id, (costSum.get(t.task_id) ?? 0) + t.cost_usd);
           costN.set(t.task_id, (costN.get(t.task_id) ?? 0) + 1);
         }
@@ -97,11 +108,13 @@ export function aggregatePrompts(
     }
     const perTask: TaskRate[] = [...of.keys()]
       .map((taskId) => {
+        const runsWith = of.get(taskId)!;
         const n = costN.get(taskId) ?? 0;
         return {
           taskId,
           passed: passed.get(taskId) ?? 0,
-          of: of.get(taskId)!,
+          of: runsWith,
+          meanTurns: turnsSum.get(taskId)! / runsWith,
           meanCostUsd: n > 0 ? costSum.get(taskId)! / n : null,
         };
       })
