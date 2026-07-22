@@ -24,12 +24,16 @@ import {
   computeTotals,
   deliverTerminalStatus,
   fetchWithTimeout,
+  flushWithPendingStatus,
   isSessionTextUnreadable,
   parseReward,
   parseSessionCost,
+  parseStdoutCost,
   redactSecrets,
+  resolveTaskCost,
   safeCleanup,
   sh,
+  truncateForUpload,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -38,7 +42,16 @@ const AGENTKIT_TGZ = process.env.AGENTKIT_TGZ || "/opt/agentkit.tgz";
 const PI_INVOKE_OVERRIDE = process.env.PI_INVOKE_OVERRIDE || undefined;
 const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
-const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.50");
+// A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
+// reality and dominated the leaderboard whenever it was hit (live-run
+// evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the
+// $1.06 total run cost vs. $0.32 real gateway spend).
+const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.05");
+// Cap on the bytes of a trace actually UPLOADED to the callback (live-run
+// evidence: run 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
+// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). Does
+// not affect the local 5MB capture used for cost parsing.
+const TRACE_UPLOAD_MAX_BYTES = parseInt(process.env.RUNNER_TRACE_UPLOAD_MAX_BYTES ?? "262144", 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -135,6 +148,12 @@ async function ensureDockerReady() {
 
 // --- callback client (retry 3x with backoff; never crash the run) --------
 let pendingEvents = [];
+// Stashed status/totals/task_results payload (e.g. {status:"running"})
+// from the most recent flushEvents call whose POST hasn't yet succeeded.
+// Retried on every subsequent flush via flushWithPendingStatus until
+// delivery succeeds (issue evidence: run 9f4a1b3e stayed status=queued
+// its entire duration because a lost "running" post was never resent).
+let pendingStatus = null;
 
 function queueEvent(type, payload) {
   pendingEvents.push({ ts: new Date().toISOString(), type, payload });
@@ -174,11 +193,16 @@ async function postWithRetry(url, body, isJson) {
 async function flushEvents(extra = {}) {
   const events = pendingEvents;
   pendingEvents = [];
-  const body = { events, ...extra };
-  const result = await postWithRetry(`${CALLBACK_BASE}/api/runs/${RUN_ID}/callback`, body, true);
+  const { result, pendingStatus: nextStatus } = await flushWithPendingStatus({
+    postFn: (body) => postWithRetry(`${CALLBACK_BASE}/api/runs/${RUN_ID}/callback`, body, true),
+    events,
+    pendingStatus,
+    extra,
+  });
   if (result === null) {
     pendingEvents = events.concat(pendingEvents);
   }
+  pendingStatus = nextStatus;
   return result;
 }
 
@@ -329,37 +353,44 @@ async function runOneTask(task, index, systemPrompt) {
 
     // Cost tamper resistance (issue #19 finding 2): a root agent can rewrite
     // its own session JSONL. A missing/empty/unparseable session file is
-    // treated as unreadable and floored to a configurable default rather
-    // than silently costing $0; negative cost.total values are clamped and
-    // counted as a tamper signal by parseSessionCost. The platform's
-    // gateway-credits ledger remains the authoritative spend ceiling --
-    // this is a secondary, spoofable signal surfaced for visibility.
-    let totalCost;
-    let costSource;
+    // treated as unreadable; rather than immediately flooring it, the real
+    // cost recovered from pi's captured stdout is used if available (live-run
+    // evidence: run 9f4a1b3e -- an agent-timeout SIGTERM killed pi before it
+    // flushed session.jsonl, but pi had already written real per-turn cost
+    // data to stdout). Only when stdout has no usable cost either does this
+    // fall back to the configurable floor. Negative cost.total values from
+    // the session are clamped and counted as a tamper signal by
+    // parseSessionCost. The platform's gateway-credits ledger remains the
+    // authoritative spend ceiling -- this is a secondary, spoofable signal
+    // surfaced for visibility.
+    const stdoutCost = sessionUnreadable ? parseStdoutCost(piStdout.toString("utf8")) : 0;
+    const { totalCost, costSource } = resolveTaskCost({
+      sessionUnreadable,
+      sessionCost: parsed.totalCost,
+      stdoutCost,
+      floorUsd: MISSING_COST_FLOOR_USD,
+    });
+
     if (sessionUnreadable) {
-      totalCost = MISSING_COST_FLOOR_USD;
-      costSource = "floor (session unreadable)";
       log(`task ${task.id}: cost_source: ${costSource}`);
-      queueEvent("task.cost_tamper_signal", {
-        task_id: task.id,
-        reason: "session_unreadable",
-        cost_source: costSource,
-        floor_usd: MISSING_COST_FLOOR_USD,
-      });
-    } else {
-      totalCost = parsed.totalCost;
-      costSource = "session";
-      if (parsed.negativeCostCount > 0) {
-        log(
-          `task ${task.id}: ${parsed.negativeCostCount} negative cost.total value(s) ignored (tamper signal)`,
-        );
+      if (costSource === "floor (session unreadable)") {
         queueEvent("task.cost_tamper_signal", {
           task_id: task.id,
-          reason: "negative_cost_total",
+          reason: "session_unreadable",
           cost_source: costSource,
-          negative_cost_count: parsed.negativeCostCount,
+          floor_usd: MISSING_COST_FLOOR_USD,
         });
       }
+    } else if (parsed.negativeCostCount > 0) {
+      log(
+        `task ${task.id}: ${parsed.negativeCostCount} negative cost.total value(s) ignored (tamper signal)`,
+      );
+      queueEvent("task.cost_tamper_signal", {
+        task_id: task.id,
+        reason: "negative_cost_total",
+        cost_source: costSource,
+        negative_cost_count: parsed.negativeCostCount,
+      });
     }
 
     queueEvent("task.agent_finished", {
@@ -397,17 +428,29 @@ async function runOneTask(task, index, systemPrompt) {
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
     // finding 1): a root agent could printenv AI_GATEWAY_API_KEY into its
-    // own session/stdout, and these traces are uploaded publicly.
+    // own session/stdout, and these traces are uploaded publicly. Cost was
+    // already parsed from the FULL piStdout above; the bytes actually
+    // uploaded are capped to TRACE_UPLOAD_MAX_BYTES (live-run evidence: run
+    // 9f4a1b3e, HTTP 413 uploading pi-stdout.txt past Vercel's ~4.5MB
+    // function body limit).
     const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
     let traceBlobUrl;
     const redactedSession = redactSecrets(sessionText, secrets);
-    const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));
+    const sessionUpload = await uploadTrace(
+      task.id,
+      "session.jsonl",
+      truncateForUpload(Buffer.from(redactedSession, "utf8"), TRACE_UPLOAD_MAX_BYTES),
+    );
     if (sessionUpload?.url) {
       traceBlobUrl = sessionUpload.url;
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
     }
     const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
-    const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
+    const stdoutUpload = await uploadTrace(
+      task.id,
+      "pi-stdout.txt",
+      truncateForUpload(redactedStdout, TRACE_UPLOAD_MAX_BYTES),
+    );
     if (stdoutUpload?.url) {
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
     }
@@ -458,7 +501,13 @@ async function main() {
     // terminal status -- the callback route's canTransition also allows
     // queued->completed/failed directly as a belt-and-suspenders fallback
     // if this post is ever lost.
-    await flushEvents({ status: "running" });
+    const runningResult = await flushEvents({ status: "running" });
+    if (runningResult === null) {
+      // Self-healing belt: one immediate retry before any task starts, on
+      // top of flushEvents' own carried-forward pendingStatus retry on
+      // every later flush.
+      await flushEvents();
+    }
 
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
     const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
