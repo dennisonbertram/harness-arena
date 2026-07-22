@@ -9,7 +9,8 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   if (!run) {
     return NextResponse.json({ error: "run not found" }, { status: 404 });
   }
-  // Lazy reap: see app/api/runs/route.ts.
-  const current = await reapIfStale(storage, run);
+  // Lazy reap: see app/api/runs/route.ts. Reaping must never break the read —
+  // if the staleness probe transiently fails, return the run as-is.
+  const current = await reapIfStale(storage, run).catch(() => run);
   return NextResponse.json(current);
 }
