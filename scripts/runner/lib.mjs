@@ -309,6 +309,8 @@ export function buildPiCommand({
   instruction,
   override,
   hasSystemPrompt = true,
+  provider = "vercel-ai-gateway",
+  model = "zai/glm-5.2",
 }) {
   if (override) {
     return `timeout ${agentTimeoutSec} ${override}`;
@@ -317,12 +319,15 @@ export function buildPiCommand({
   // pass -nc/-ns/--no-extensions -- those strip pi's context/skills/extensions
   // and diverge from the reference baseline. When there is no submitted system
   // prompt (the baseline), omit --system-prompt entirely so pi uses its own
-  // built-in default, exactly like their baseline.
+  // built-in default, exactly like their baseline. Provider/model are
+  // configurable (RUNNER_PROVIDER/RUNNER_MODEL) so the fixed board can route
+  // through OpenRouter (provider=openrouter, model=z-ai/glm-5.2) exactly like
+  // harnessarena, or the Vercel AI Gateway by default.
   const parts = [
     `timeout ${agentTimeoutSec} /usr/local/bin/pi`,
     "--print --mode json",
     `--session-dir ${shQuote(sessionDir)}`,
-    "--provider vercel-ai-gateway --model zai/glm-5.2",
+    `--provider ${shQuote(provider)} --model ${shQuote(model)}`,
   ];
   if (hasSystemPrompt) {
     parts.push(`--system-prompt "$(cat ${shQuote(promptFile)})"`);
