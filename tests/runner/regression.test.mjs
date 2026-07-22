@@ -26,6 +26,21 @@
 //     Docker, forced failure via RUNNER_FORCE_TASK_ERROR).
 //  7. A missing session.jsonl (real Docker, no docker cp source) must floor
 //     the task's cost rather than reporting $0.
+//
+// Regression coverage for the live-run 9f4a1b3e fixes, added after the
+// green implementation in 6863ebb:
+//  8. truncateForUpload must never exceed maxBytes even in the extreme
+//     edge case where maxBytes is smaller than the truncation marker
+//     itself -- a naive implementation could invert the cap and upload
+//     something LARGER than the limit it's meant to enforce.
+//  9. parseStdoutCost must prefer the message_end sum over the turn_end
+//     cumulative fallback even when both appear in the same noisy stream
+//     (realistic pi output has turn_end lines throughout, not just at the
+//     very end) -- falling back to turn_end whenever it's merely present
+//     would silently under/over-count real per-task cost.
+//  10. The actual default RUNNER_MISSING_COST_FLOOR (no env override) must
+//      be 0.05, not the old 0.50 -- real Docker, both session and stdout
+//      unusable.
 import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
@@ -45,7 +60,9 @@ import {
   buildPiCommand,
   deliverTerminalStatus,
   parseSessionCost,
+  parseStdoutCost,
   redactSecrets,
+  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
@@ -133,6 +150,37 @@ describe("redactSecrets regression: realistic noisy blob with a substring-collid
     expect(result).toContain("[2026-01-01T00:00:00.000Z] starting task");
     expect(result).toContain("[2026-01-01T00:00:05.000Z] task finished");
     expect(result.match(/\[REDACTED\]/g)).toHaveLength(3);
+  });
+});
+
+describe("truncateForUpload regression: cap holds even when maxBytes is smaller than the marker itself", () => {
+  it("never returns a buffer larger than maxBytes, even at an absurdly tiny cap", () => {
+    const big = Buffer.from("X".repeat(10000), "utf8");
+    const tinyMax = 10; // shorter than "[trace truncated: showing last 10 bytes of 10000 bytes]\n"
+    const result = truncateForUpload(big, tinyMax);
+    expect(result.length).toBeLessThanOrEqual(tinyMax);
+  });
+});
+
+describe("parseStdoutCost regression: message_end sum takes priority over turn_end fallback in mixed noisy output", () => {
+  it("sums only the message_end finals and ignores turn_end lines when both appear in the same stream", () => {
+    const stdout = [
+      JSON.stringify({ type: "turn_end", usage: { cost: { total: 0.05 } } }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", usage: { cost: { total: 0.004 } } },
+      }),
+      JSON.stringify({ type: "turn_end", usage: { cost: { total: 0.09 } } }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", usage: { cost: { total: 0.006 } } },
+      }),
+    ].join("\n");
+
+    // If this fell back to the turn_end max (0.09) whenever turn_end lines
+    // are merely present, it would badly over-report cost -- message_end
+    // is the authoritative per-turn final whenever it exists at all.
+    expect(parseStdoutCost(stdout)).toBeCloseTo(0.01, 10);
   });
 });
 
@@ -474,6 +522,243 @@ describe.skipIf(!RUNNER_IT)(
 
         const finalStatus = state.statusUpdates.at(-1);
         expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.37, 10);
+      },
+      600000,
+    );
+  },
+);
+
+describe.skipIf(!RUNNER_IT)(
+  "runner regression (RUNNER_IT=1, real local docker): default missing-cost floor is 0.05, not the old 0.50",
+  () => {
+    const TASK_ID = "regex-log-default-floor";
+    const RUN_ID = "it-run-default-floor";
+    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+
+    afterEach(() => {
+      try {
+        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
+      } catch {
+        // fine
+      }
+    });
+
+    it(
+      "floors cost_usd to 0.05 (the lowered default), not the old 0.50, when RUNNER_MISSING_COST_FLOOR is unset and stdout has no usable cost",
+      async () => {
+        const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
+        const { state, baseUrl, stop } = await startCallbackServer({
+          secret: "test-secret-default-floor",
+        });
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+        const instruction = readFileSync(
+          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
+          "utf8",
+        );
+        const tasks = [
+          {
+            id: TASK_ID,
+            image: "alexgshaw/regex-log:20251031",
+            instruction,
+            agent_timeout_sec: 60,
+            verifier_timeout_sec: 300,
+          },
+        ];
+
+        const env = {
+          ...process.env,
+          RUN_ID,
+          CALLBACK_BASE: baseUrl,
+          RUNNER_CALLBACK_SECRET: "test-secret-default-floor",
+          AI_GATEWAY_API_KEY: "test-gateway-key",
+          SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
+          BUDGET_CAP_USD: "2",
+          TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+          RUNNER_TASKS_DIR: bundle.root,
+          AGENTKIT_TGZ: agentkitTgz,
+          PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
+        };
+        delete env.PI_INSTALL_MODE;
+        // Deliberately NOT setting RUNNER_MISSING_COST_FLOOR -- this test
+        // exists specifically to catch an accidental revert of the
+        // lowered default back to 0.50.
+        delete env.RUNNER_MISSING_COST_FLOOR;
+
+        const exitCode = await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+          child.on("error", reject);
+          child.on("close", (code) => resolve(code));
+        });
+
+        await stop();
+        rmSync(tgzRoot, { recursive: true, force: true });
+        bundle.cleanup();
+
+        expect(exitCode).toBe(0);
+
+        const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
+        expect(agentFinished.payload.cost_source).toBe("floor (session unreadable)");
+        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.05, 10);
+      },
+      600000,
+    );
+  },
+);
+
+describe.skipIf(!RUNNER_IT)(
+  "runner regression (RUNNER_IT=1, real local docker): cost recovery from stdout on agent-timeout SIGTERM",
+  () => {
+    const TASK_ID = "regex-log-timeout";
+    const RUN_ID = "it-run-timeout";
+    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+
+    afterEach(() => {
+      try {
+        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
+      } catch {
+        // fine
+      }
+    });
+
+    it(
+      "uses the real cost recovered from pi's captured stdout, not the missing-cost floor, when the agent-timeout SIGTERM kills pi before it flushes session.jsonl (live-run evidence: run 9f4a1b3e)",
+      async () => {
+        const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-timeout.sh");
+        const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-timeout" });
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+        const instruction = readFileSync(
+          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
+          "utf8",
+        );
+        const tasks = [
+          {
+            id: TASK_ID,
+            image: "alexgshaw/regex-log:20251031",
+            instruction,
+            // Short enough that `timeout` SIGTERMs fake-pi-timeout.sh's
+            // `sleep 120` well before it ever writes a session.jsonl.
+            agent_timeout_sec: 3,
+            verifier_timeout_sec: 300,
+          },
+        ];
+
+        const env = {
+          ...process.env,
+          RUN_ID,
+          CALLBACK_BASE: baseUrl,
+          RUNNER_CALLBACK_SECRET: "test-secret-timeout",
+          AI_GATEWAY_API_KEY: "test-gateway-key",
+          SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
+          BUDGET_CAP_USD: "2",
+          // A distinctly different value from the real recoverable stdout
+          // cost (0.015) so the assertion can tell floor vs. stdout apart.
+          RUNNER_MISSING_COST_FLOOR: "0.5",
+          TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+          RUNNER_TASKS_DIR: bundle.root,
+          AGENTKIT_TGZ: agentkitTgz,
+          PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
+        };
+        delete env.PI_INSTALL_MODE;
+
+        const exitCode = await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+          child.on("error", reject);
+          child.on("close", (code) => resolve(code));
+        });
+
+        await stop();
+        rmSync(tgzRoot, { recursive: true, force: true });
+        bundle.cleanup();
+
+        expect(exitCode).toBe(0);
+
+        const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
+        expect(agentFinished.payload.cost_source).toBe("stdout");
+        // 0.006 + 0.009 from the two message_end events, never the 0.5 floor.
+        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.015, 10);
+
+        const finalStatus = state.statusUpdates.at(-1);
+        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.015, 10);
+      },
+      600000,
+    );
+  },
+);
+
+describe.skipIf(!RUNNER_IT)(
+  "runner regression (RUNNER_IT=1, real local docker): trace upload byte cap (HTTP 413 fix)",
+  () => {
+    const TASK_ID = "regex-log-bigstdout";
+    const RUN_ID = "it-run-bigstdout";
+    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+
+    afterEach(() => {
+      try {
+        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
+      } catch {
+        // fine
+      }
+    });
+
+    it(
+      "uploads pi-stdout.txt truncated to RUNNER_TRACE_UPLOAD_MAX_BYTES even though the real stdout is much larger (live-run evidence: 413 on pi-stdout.txt)",
+      async () => {
+        const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-bigstdout.sh");
+        const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-bigstdout" });
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+        const instruction = readFileSync(
+          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
+          "utf8",
+        );
+        const tasks = [
+          {
+            id: TASK_ID,
+            image: "alexgshaw/regex-log:20251031",
+            instruction,
+            agent_timeout_sec: 60,
+            verifier_timeout_sec: 300,
+          },
+        ];
+
+        const env = {
+          ...process.env,
+          RUN_ID,
+          CALLBACK_BASE: baseUrl,
+          RUNNER_CALLBACK_SECRET: "test-secret-bigstdout",
+          AI_GATEWAY_API_KEY: "test-gateway-key",
+          SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
+          BUDGET_CAP_USD: "2",
+          TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+          RUNNER_TASKS_DIR: bundle.root,
+          AGENTKIT_TGZ: agentkitTgz,
+          PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
+        };
+        delete env.PI_INSTALL_MODE;
+
+        const exitCode = await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+          child.on("error", reject);
+          child.on("close", (code) => resolve(code));
+        });
+
+        await stop();
+        rmSync(tgzRoot, { recursive: true, force: true });
+        bundle.cleanup();
+
+        expect(exitCode).toBe(0);
+
+        const stdoutTrace = state.traces.find((t) => t.name === "pi-stdout.txt");
+        expect(stdoutTrace).toBeDefined();
+        // The real fixture emits ~600KB of stdout -- proves the cap is
+        // actually being applied, not just coincidentally under it.
+        expect(stdoutTrace.body.length).toBeLessThanOrEqual(262144);
+
+        // Cost must still be parsed from the FULL local stdout (the real
+        // session.jsonl cost, 0.004), unaffected by the upload-side
+        // truncation applied after cost parsing.
+        const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
+        expect(agentFinished.payload.cost_source).toBe("session");
+        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.004, 10);
       },
       600000,
     );

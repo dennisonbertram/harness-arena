@@ -62,6 +62,107 @@ export function isSessionTextUnreadable(jsonlText) {
   return parseSessionCost(trimmed).validCostCount === 0;
 }
 
+// Recover a task's real cost from `pi`'s captured stdout when the session
+// JSONL is unreadable (live-run evidence: run 9f4a1b3e -- pi was SIGTERM'd
+// by the agent-timeout wrapper before it ever flushed its --session-dir
+// JSONL, so the session file was empty even though pi had already written
+// real per-turn cost data to stdout). `pi --print --mode json` emits one
+// JSON object per line; each assistant turn's FINAL cost lands in a
+// `message_end` event, with `message_update` lines carrying in-progress
+// partials that must be ignored (summing partials + finals would
+// double-count). If no `message_end` line is present at all (pi killed
+// mid-first-turn), falls back to the max cumulative cost seen across
+// `turn_end` events (turn_end usage is cumulative, so max -- not sum -- is
+// the real total spend).
+export function parseStdoutCost(stdoutText) {
+  if (!stdoutText) return 0;
+  let messageEndSum = 0;
+  let sawMessageEnd = false;
+  let maxTurnEndCumulative = 0;
+  let sawTurnEnd = false;
+
+  for (const line of String(stdoutText).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (obj?.type === "message_end" && obj?.message?.role === "assistant") {
+      sawMessageEnd = true;
+      const cost = obj.message.usage?.cost?.total;
+      if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) {
+        messageEndSum += cost;
+      }
+    } else if (obj?.type === "turn_end") {
+      const cost = obj.usage?.cost?.total;
+      if (typeof cost === "number" && Number.isFinite(cost)) {
+        sawTurnEnd = true;
+        if (cost > maxTurnEndCumulative) maxTurnEndCumulative = cost;
+      }
+    }
+  }
+
+  if (sawMessageEnd) return messageEndSum;
+  if (sawTurnEnd) return maxTurnEndCumulative;
+  return 0;
+}
+
+// Cost-source priority used by the runner for each task: (a) the session
+// JSONL cost if the session parsed as usable, (b) else the real cost
+// recovered from stdout via parseStdoutCost if it's a genuine positive
+// number, (c) else the (tamper/missing-cost-signaled) floor. Extracted as
+// a pure function so the priority order itself -- specifically that (b)
+// beats (c) -- is unit-testable without Docker.
+export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost, floorUsd }) {
+  if (!sessionUnreadable) {
+    return { totalCost: sessionCost, costSource: "session" };
+  }
+  if (typeof stdoutCost === "number" && stdoutCost > 0) {
+    return { totalCost: stdoutCost, costSource: "stdout" };
+  }
+  return { totalCost: floorUsd, costSource: "floor (session unreadable)" };
+}
+
+// Cap a trace's bytes to `maxBytes` before upload (live-run evidence: run
+// 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
+// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit).
+// Keeps the TAIL (errors/final output live at the end), prefixed with a
+// one-line marker so a truncated trace is self-evident. Cost/other local
+// parsing must always happen on the FULL text before calling this --
+// this only shrinks what gets uploaded.
+export function truncateForUpload(text, maxBytes) {
+  const buf = Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8");
+  if (buf.length <= maxBytes) return buf;
+  const marker = `[trace truncated: showing last ${maxBytes} bytes of ${buf.length} bytes]\n`;
+  const markerBuf = Buffer.from(marker, "utf8").subarray(0, maxBytes);
+  const keepBytes = Math.max(0, maxBytes - markerBuf.length);
+  const tail = buf.subarray(buf.length - keepBytes);
+  return Buffer.concat([markerBuf, tail]);
+}
+
+// Pure core of the runner's event-flush retry logic (live-run evidence:
+// run 9f4a1b3e stayed status=queued for its entire duration because a
+// transient callback POST failure re-queued only the events and silently
+// dropped the "running" status passed via `extra` -- it was never
+// resent). Given the events to send, any previously-stashed status
+// update, and a new `extra` status update (if any this flush), returns
+// what to send this time and what to keep pending if the post fails. A
+// status is retried on every subsequent flush -- carried in
+// `pendingStatus` -- until a post finally succeeds; a new `extra` status
+// always supersedes an older still-pending one.
+export async function flushWithPendingStatus({ postFn, events, pendingStatus, extra = {} }) {
+  const statusToSend = Object.keys(extra).length > 0 ? extra : pendingStatus;
+  const body = { events, ...(statusToSend || {}) };
+  const result = await postFn(body);
+  if (result === null) {
+    return { result, pendingStatus: statusToSend ?? null };
+  }
+  return { result, pendingStatus: null };
+}
+
 // Scrub secret values from arbitrary text before it's uploaded as a public
 // trace. Scrubs every exact occurrence of each string in `secrets`, plus
 // any vck_-prefixed token (Vercel AI Gateway key format) even if it wasn't
