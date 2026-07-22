@@ -15,12 +15,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
+import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
 
 const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
-const CONTAINER_NAME = "task-regex-log";
+// Unique per test file (not just "regex-log") so this suite's container
+// name never collides with other tests/runner/*.test.mjs files that also
+// exercise the regex-log image concurrently under vitest's file parallelism.
+const TASK_ID = "regex-log-it";
+const CONTAINER_NAME = `task-${TASK_ID}`;
 
 function cleanupContainer() {
   try {
@@ -52,6 +57,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       execFileSync("tar", ["-czf", agentkitTgz, "-C", tgzRoot, "bin"]);
 
       const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret" });
+      const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
 
       const instruction = readFileSync(
         path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
@@ -59,7 +65,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       );
       const tasks = [
         {
-          id: "regex-log",
+          id: TASK_ID,
           image: "alexgshaw/regex-log:20251031",
           instruction,
           agent_timeout_sec: 60,
@@ -78,7 +84,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
         ),
         BUDGET_CAP_USD: "2",
         TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
-        RUNNER_TASKS_DIR: path.join(REPO_ROOT, "tasks"),
+        RUNNER_TASKS_DIR: bundle.root,
         AGENTKIT_TGZ: agentkitTgz,
         PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
       };
@@ -119,12 +125,12 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
 
       const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-      expect(agentFinished.payload.task_id).toBe("regex-log");
+      expect(agentFinished.payload.task_id).toBe(TASK_ID);
       expect(agentFinished.payload.turns).toBe(2);
       expect(agentFinished.payload.cost_usd).toBeCloseTo(0.003, 6);
 
       const verified = state.events.find((e) => e.type === "task.verified");
-      expect(verified.payload.task_id).toBe("regex-log");
+      expect(verified.payload.task_id).toBe(TASK_ID);
       expect(verified.payload.passed).toBe(false);
       expect(verified.payload.reward).toBe(0);
 
@@ -146,10 +152,12 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       expect(finalStatus.totals.over_budget).toBe(false);
       expect(finalStatus.task_results).toHaveLength(1);
       expect(finalStatus.task_results[0]).toMatchObject({
-        task_id: "regex-log",
+        task_id: TASK_ID,
         attempted: true,
         passed: false,
       });
+
+      bundle.cleanup();
     },
     600000,
   );

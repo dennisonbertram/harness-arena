@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildPiCommand, parseSessionCost } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
+import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
 
 const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -92,7 +93,11 @@ describe("parseSessionCost regression: realistic upstream JSONL noise", () => {
   });
 });
 
-const CONTAINER_NAMES = ["task-regex-log", "task-regex-log-2"];
+// Unique per test file so this suite's container names never collide with
+// other tests/runner/*.test.mjs files exercising the same image concurrently.
+const TASK_ID_1 = "regex-log-budget-1";
+const TASK_ID_2 = "regex-log-budget-2";
+const CONTAINER_NAMES = [`task-${TASK_ID_1}`, `task-${TASK_ID_2}`];
 function cleanupContainers() {
   for (const name of CONTAINER_NAMES) {
     try {
@@ -125,6 +130,7 @@ describe.skipIf(!RUNNER_IT)(
         execFileSync("tar", ["-czf", agentkitTgz, "-C", tgzRoot, "bin"]);
 
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-2" });
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID_1);
 
         const instruction = readFileSync(
           path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
@@ -132,7 +138,7 @@ describe.skipIf(!RUNNER_IT)(
         );
         const tasks = [
           {
-            id: "regex-log",
+            id: TASK_ID_1,
             image: "alexgshaw/regex-log:20251031",
             instruction,
             agent_timeout_sec: 60,
@@ -142,7 +148,7 @@ describe.skipIf(!RUNNER_IT)(
             // Second task must never be attempted once task 1 alone
             // crosses the $2 cap -- its id/image are nominal, no
             // container should ever be created for it.
-            id: "regex-log-2",
+            id: TASK_ID_2,
             image: "alexgshaw/regex-log:20251031",
             instruction,
             agent_timeout_sec: 60,
@@ -161,7 +167,7 @@ describe.skipIf(!RUNNER_IT)(
           ),
           BUDGET_CAP_USD: "2",
           TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
-          RUNNER_TASKS_DIR: path.join(REPO_ROOT, "tasks"),
+          RUNNER_TASKS_DIR: bundle.root,
           AGENTKIT_TGZ: agentkitTgz,
           PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
         };
@@ -175,13 +181,14 @@ describe.skipIf(!RUNNER_IT)(
 
         await stop();
         rmSync(tgzRoot, { recursive: true, force: true });
+        bundle.cleanup();
 
         expect(exitCode).toBe(0);
 
         const startedTaskIds = state.events
           .filter((e) => e.type === "task.started")
           .map((e) => e.payload.task_id);
-        expect(startedTaskIds).toEqual(["regex-log"]);
+        expect(startedTaskIds).toEqual([TASK_ID_1]);
 
         const budgetEvent = state.events.find((e) => e.type === "run.budget_exceeded");
         expect(budgetEvent).toBeDefined();
@@ -194,11 +201,11 @@ describe.skipIf(!RUNNER_IT)(
         expect(finalStatus.totals.over_budget).toBe(true);
         expect(finalStatus.task_results).toHaveLength(2);
         expect(finalStatus.task_results[0]).toMatchObject({
-          task_id: "regex-log",
+          task_id: TASK_ID_1,
           attempted: true,
         });
         expect(finalStatus.task_results[1]).toEqual({
-          task_id: "regex-log-2",
+          task_id: TASK_ID_2,
           attempted: false,
           passed: false,
         });
@@ -206,7 +213,7 @@ describe.skipIf(!RUNNER_IT)(
         // No container was ever created for the skipped second task.
         let secondContainerExists = true;
         try {
-          execFileSync("docker", ["inspect", "task-regex-log-2"], { stdio: "ignore" });
+          execFileSync("docker", ["inspect", `task-${TASK_ID_2}`], { stdio: "ignore" });
         } catch {
           secondContainerExists = false;
         }
