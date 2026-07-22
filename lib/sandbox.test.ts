@@ -40,8 +40,10 @@ function makeRun(overrides: Partial<Run> = {}): Run {
   };
 }
 
-function makeSandbox(runCommandImpl?: (...args: unknown[]) => unknown) {
-  const runCommand = vi.fn(runCommandImpl ?? (async () => ({ exitCode: 0 })));
+type RunCommandFn = (cmd: string, args: string[]) => Promise<{ exitCode: number }>;
+
+function makeSandbox(runCommandImpl?: RunCommandFn) {
+  const runCommand = vi.fn<RunCommandFn>(runCommandImpl ?? (async () => ({ exitCode: 0 })));
   return { name: "sbx-abc123", runCommand };
 }
 
