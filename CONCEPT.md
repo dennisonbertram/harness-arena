@@ -52,12 +52,11 @@ Defense in depth — three cheap layers:
    verification. Rejection shows the reason. Judgment-based, so it can be
    fooled by obfuscation and can false-positive — it's a filter, not the
    guarantee.
-2. **Runtime task draw (the structural guarantee):** subset drawn at run time
-   from the pool; submitter doesn't know which tasks. Hardcoding then
-   requires embedding solutions for the whole pool, which cost scoring taxes
-   every turn. ~One line of code; keep it even with the judge.
-3. **Transparency as audit:** all prompts and transcripts public, so the
+2. **Transparency as audit:** all prompts and transcripts public, so the
    community can flag cheats the judge missed.
+3. ~~Runtime task draw~~ — dropped for v1 by decision (2026-07-21): the task
+   set is 10 FIXED tasks so results are comparable across submissions.
+   Revisit if judge + transparency prove insufficient.
 
 Plus platform-level controls:
 
@@ -77,9 +76,17 @@ Plus platform-level controls:
 - Cost accounting: per-request usage from AI Gateway, tagged per run.
   (Verify the tagging mechanism — per-run attribution is load-bearing.)
 
-## Sandbox substrate (researched 2026-07-21, official docs)
+## Sandbox substrate (SPIKE PASSED 2026-07-22)
 
-The Docker gap is smaller than first assumed:
+Verified live: Docker runs inside Vercel Sandbox (Amazon Linux 2023,
+`dnf install -y docker`, no systemd so start `dockerd` directly; overlay2,
+cgroup v2; `docker run hello-world` succeeded). Runner = Option B: task
+Docker images inside one sandbox per run. Also verified: pi 0.80.9 has a
+native `vercel-ai-gateway` provider (model `zai/glm-5.2`) via
+AI_GATEWAY_API_KEY; pi session JSONL records per-message tokens + cost;
+Gateway responses carry exact billed cost in `usage.cost`.
+
+Earlier research (2026-07-21, official docs):
 
 - **Vercel Sandbox supports custom OCI images** via Vercel Container Registry:
   push the image to VCR, and `Sandbox.create({ image })` boots from its
@@ -117,16 +124,23 @@ Runner options, in order of preference:
 Deferred: multiple models/boards, other harnesses, other benchmarks (e.g.
 SWE-bench), multi-trial averaging, hidden task sets.
 
-## Decided
+## Decided (v1 spec, 2026-07-21)
 
-- Scoring: lexicographic (tasks passed desc, then cost asc).
-- Transparency: everything public — prompts and transcripts. Copyable winning
-  prompts are the point: take the leader and beat it.
-- Who pays: Dennison, for the POC. Budget caps still required.
-- Anti-cheat: LLM judge pre-screen + runtime task draw + public audit (see
-  Cheating section).
-
-## Open decisions
-
-- Which model for the first board?
-- Runner option A vs B (validate A with 2–3 tasks first).
+- Scoring: lexicographic (tasks passed desc, then cost asc). Metrics shown:
+  tasks solved, cost per task, total benchmark cost.
+- Model: `zai/glm-5.2` via Vercel AI Gateway. Fixed per board.
+- Tasks: 10 fixed Terminal-Bench tasks, same for every run.
+- Runner: Docker inside Vercel Sandbox (spike passed), pi harness inside the
+  task container, verification by platform after agent finishes.
+- Anti-cheat: LLM judge pre-screens every submitted prompt before any run
+  (rejects empty / hardcoded-solution / tamper prompts, reason shown) +
+  full public transparency of prompts and traces.
+- Budget: $25 total POC inference, $2/run cap, enforced in code. Dennison pays.
+- Transparency: everything public — prompts, traces, per-task results. API
+  exposes previous submissions' prompts AND traces so agents can study them.
+- Submitters: self-chosen names, no auth in v1. GitHub OAuth later.
+- Distribution: a skill file (SKILL.md) teaches an agent to read the baseline
+  vanilla pi prompt, submit, poll, and study prior runs.
+- Hosting: Next.js on Vercel; design system = vercel.com/design.md (Geist).
+- Process: GitHub issues (synthetix epic/ticket format), TDD red/green
+  commits, PRs to `dev`, Codex gpt-5.6 reviews, observability planned first.
