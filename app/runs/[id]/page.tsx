@@ -1,9 +1,12 @@
 import { notFound } from "next/navigation";
 import { getStorage } from "@/lib/storage";
+import { getTasks } from "@/lib/tasks";
 import { formatDuration, formatUsd } from "@/lib/format";
 import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { RunAutoRefresh } from "./RunAutoRefresh";
+
+const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 
 export const revalidate = 15;
 
@@ -20,6 +23,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
   const events = await storage.listRunEvents(id);
   const status = RUN_STATUS_BADGE_STYLES[run.status];
   const totalTasks = run.task_results.length;
+  const benchmarkTaskCount = getTasks().length;
   const totalDurationSec = run.task_results.reduce((sum, t) => sum + (t.duration_s ?? 0), 0);
   const costPerTaskUsd =
     run.total_cost_usd !== undefined && totalTasks > 0 ? run.total_cost_usd / totalTasks : undefined;
@@ -47,6 +51,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         </div>
         <p style={{ fontSize: 13, color: "var(--gray-900)" }} className="mono">
           {run.id}
+        </p>
+        <p style={{ fontSize: 13, color: "var(--gray-700)", marginTop: 6 }}>
+          Benchmark:{" "}
+          <a href={BENCHMARK_REPO} target="_blank" rel="noopener noreferrer">
+            Terminal-Bench 2
+          </a>{" "}
+          · {benchmarkTaskCount}-task subset · model{" "}
+          <span className="mono">zai/glm-5.2</span> via AI Gateway
         </p>
       </section>
 
