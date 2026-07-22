@@ -137,7 +137,7 @@ export function truncateForUpload(text, maxBytes) {
   const buf = Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8");
   if (buf.length <= maxBytes) return buf;
   const marker = `[trace truncated: showing last ${maxBytes} bytes of ${buf.length} bytes]\n`;
-  const markerBuf = Buffer.from(marker, "utf8");
+  const markerBuf = Buffer.from(marker, "utf8").subarray(0, maxBytes);
   const keepBytes = Math.max(0, maxBytes - markerBuf.length);
   const tail = buf.subarray(buf.length - keepBytes);
   return Buffer.concat([markerBuf, tail]);
