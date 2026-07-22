@@ -32,18 +32,24 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: `invalid trace name "${name}"` }, { status: 400 });
   }
 
+  // The runner uploads traces gzip-compressed (so the full, untruncated trace
+  // fits under the function body limit). We store the bytes as-is and expose a
+  // view route that decompresses on read, so the linked URL stays readable.
   const buffer = Buffer.from(await request.arrayBuffer());
-  const url = await storage.putTraceBlob(id, taskId, name, buffer);
+  await storage.putTraceBlob(id, taskId, name, buffer);
+  const viewUrl = `${request.nextUrl.origin}/api/runs/${id}/trace-view?task_id=${encodeURIComponent(
+    taskId,
+  )}&name=${encodeURIComponent(name)}`;
 
   if (name === "session.jsonl") {
     const taskResult = run.task_results.find((tr) => tr.task_id === taskId);
     if (taskResult) {
-      taskResult.trace_blob_url = url;
+      taskResult.trace_blob_url = viewUrl;
       await storage.putRun(run);
     }
   }
 
   log("info", "trace.received", { run_id: id, task_id: taskId, name });
 
-  return NextResponse.json({ ok: true, url });
+  return NextResponse.json({ ok: true, url: viewUrl });
 }

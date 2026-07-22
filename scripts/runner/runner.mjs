@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import {
   budgetExceeded,
   buildContainerName,
@@ -33,7 +34,6 @@ import {
   resolveTaskCost,
   safeCleanup,
   sh,
-  truncateForUpload,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -52,11 +52,12 @@ const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
 // would deflate its pass rate. Sandbox.ts passes the real value; this default
 // is the fallback.
 const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
-// Cap on the bytes of a trace actually UPLOADED to the callback (live-run
-// evidence: run 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
-// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). Does
-// not affect the local 5MB capture used for cost parsing.
-const TRACE_UPLOAD_MAX_BYTES = parseInt(process.env.RUNNER_TRACE_UPLOAD_MAX_BYTES ?? "262144", 10);
+// Upper bound on the pi stdout we hold in memory (cost parsing + trace). Traces
+// are gzip-uploaded in full, so this is only a memory-safety ceiling for a
+// runaway-verbose process, not a routine trace cut -- a real per-task stdout is
+// well under this. gzip keeps even this bound's worth of text far below the
+// callback body limit.
+const STDOUT_CAP_BYTES = parseInt(process.env.RUNNER_STDOUT_CAP_BYTES ?? String(16 * 1024 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -211,9 +212,14 @@ async function flushEvents(extra = {}) {
   return result;
 }
 
+// Traces are uploaded gzip-compressed so the FULL, untruncated trace fits
+// under the callback's request-body limit (a JSONL/text trace compresses
+// ~10x). The server stores the bytes as-is; the trace-view route decompresses
+// on read. We never truncate — cutting data out of a trace is not allowed.
 async function uploadTrace(taskId, name, buffer) {
   const url = `${CALLBACK_BASE}/api/runs/${RUN_ID}/trace?task_id=${encodeURIComponent(taskId)}&name=${encodeURIComponent(name)}`;
-  return postWithRetry(url, buffer, false);
+  const gz = gzipSync(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
+  return postWithRetry(url, gz, false);
 }
 
 // Terminal status delivery (status completed/failed + totals) is the one
@@ -380,7 +386,7 @@ async function runOneTask(task, index, systemPrompt) {
       ],
       { maxBuffer: 64 * 1024 * 1024 },
     );
-    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
+    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
 
     const sessionText = extractNewestSessionJsonl(containerName);
@@ -465,29 +471,19 @@ async function runOneTask(task, index, systemPrompt) {
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
     // finding 1): a root agent could printenv AI_GATEWAY_API_KEY into its
-    // own session/stdout, and these traces are uploaded publicly. Cost was
-    // already parsed from the FULL piStdout above; the bytes actually
-    // uploaded are capped to TRACE_UPLOAD_MAX_BYTES (live-run evidence: run
-    // 9f4a1b3e, HTTP 413 uploading pi-stdout.txt past Vercel's ~4.5MB
-    // function body limit).
+    // own session/stdout, and these traces are uploaded publicly. The FULL
+    // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
+    // ~4.5MB callback body limit) -- no truncation.
     const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
     let traceBlobUrl;
     const redactedSession = redactSecrets(sessionText, secrets);
-    const sessionUpload = await uploadTrace(
-      task.id,
-      "session.jsonl",
-      truncateForUpload(Buffer.from(redactedSession, "utf8"), TRACE_UPLOAD_MAX_BYTES),
-    );
+    const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));
     if (sessionUpload?.url) {
       traceBlobUrl = sessionUpload.url;
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
     }
     const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
-    const stdoutUpload = await uploadTrace(
-      task.id,
-      "pi-stdout.txt",
-      truncateForUpload(redactedStdout, TRACE_UPLOAD_MAX_BYTES),
-    );
+    const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
     if (stdoutUpload?.url) {
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
     }

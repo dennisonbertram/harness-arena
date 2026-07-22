@@ -19,6 +19,8 @@ export interface Storage {
    */
   latestEventTimestamp(runId: string): Promise<string | undefined>;
   putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string>;
+  /** Raw bytes of a stored trace blob, or null if it doesn't exist. */
+  getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null>;
 }
 
 // In-memory implementation used by tests and by BlobStorage's internal
@@ -28,7 +30,7 @@ export class MemoryStorage implements Storage {
   private submissions = new Map<string, Submission>();
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
-  private traces = new Map<string, string>();
+  private traces = new Map<string, Buffer>();
 
   async getSubmission(id: string): Promise<Submission | undefined> {
     return this.submissions.get(id);
@@ -78,8 +80,12 @@ export class MemoryStorage implements Storage {
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const key = `traces/${runId}/${taskId}/${name}`;
     const url = `memory://${key}`;
-    this.traces.set(key, typeof data === "string" ? data : data.toString("utf8"));
+    this.traces.set(key, Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8"));
     return url;
+  }
+
+  async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
+    return this.traces.get(`traces/${runId}/${taskId}/${name}`) ?? null;
   }
 }
 
@@ -261,6 +267,18 @@ export class BlobStorage implements Storage {
       }),
     );
     return url;
+  }
+
+  async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
+    try {
+      return await withRetry(async () => {
+        const result = await get(`traces/${runId}/${taskId}/${name}`, { access: "public" });
+        if (!result) return null;
+        return Buffer.from(await new Response(result.stream).arrayBuffer());
+      });
+    } catch {
+      return null;
+    }
   }
 }
 

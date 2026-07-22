@@ -21,7 +21,6 @@ import {
   safeCleanup,
   sh,
   shQuote,
-  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -163,34 +162,6 @@ describe("resolveTaskCost (cost-source priority: session > stdout > unmeasured)"
   it("reports UNMEASURED (null, never a fabricated floor) when neither session nor stdout has a cost", () => {
     const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0 });
     expect(result).toEqual({ totalCost: null, costSource: "unmeasured" });
-  });
-});
-
-describe("truncateForUpload (trace-upload byte cap, HTTP 413 fix)", () => {
-  it("returns the buffer unchanged when it is already under the max", () => {
-    const buf = Buffer.from("small trace body", "utf8");
-    const result = truncateForUpload(buf, 262144);
-    expect(result.equals(buf)).toBe(true);
-  });
-
-  it("caps oversized input to exactly maxBytes, keeping the END (tail) prefixed with a truncation marker", () => {
-    const maxBytes = 1000;
-    const big = Buffer.from("A".repeat(500) + "END-MARKER-CONTENT" + "B".repeat(5000), "utf8");
-    const result = truncateForUpload(big, maxBytes);
-
-    expect(result.length).toBeLessThanOrEqual(maxBytes);
-    expect(result.length).toBe(maxBytes);
-    const text = result.toString("utf8");
-    expect(text).toMatch(/^\[trace truncated: showing last \d+ bytes of \d+ bytes\]\n/);
-    // Keeps the tail, not the head -- the truncation marker text itself
-    // must not swallow the real end-of-output content.
-    expect(text.endsWith("B".repeat(50))).toBe(true);
-    expect(text).not.toContain("END-MARKER-CONTENT");
-  });
-
-  it("accepts a plain string the same as a Buffer", () => {
-    const result = truncateForUpload("hello world", 262144);
-    expect(result.toString("utf8")).toBe("hello world");
   });
 });
 

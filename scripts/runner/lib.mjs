@@ -133,23 +133,6 @@ export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost }) 
   return { totalCost: null, costSource: "unmeasured" };
 }
 
-// Cap a trace's bytes to `maxBytes` before upload (live-run evidence: run
-// 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
-// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit).
-// Keeps the TAIL (errors/final output live at the end), prefixed with a
-// one-line marker so a truncated trace is self-evident. Cost/other local
-// parsing must always happen on the FULL text before calling this --
-// this only shrinks what gets uploaded.
-export function truncateForUpload(text, maxBytes) {
-  const buf = Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8");
-  if (buf.length <= maxBytes) return buf;
-  const marker = `[trace truncated: showing last ${maxBytes} bytes of ${buf.length} bytes]\n`;
-  const markerBuf = Buffer.from(marker, "utf8").subarray(0, maxBytes);
-  const keepBytes = Math.max(0, maxBytes - markerBuf.length);
-  const tail = buf.subarray(buf.length - keepBytes);
-  return Buffer.concat([markerBuf, tail]);
-}
-
 // Pure core of the runner's event-flush retry logic (live-run evidence:
 // run 9f4a1b3e stayed status=queued for its entire duration because a
 // transient callback POST failure re-queued only the events and silently

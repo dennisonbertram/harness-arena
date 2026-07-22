@@ -29,10 +29,6 @@
 //
 // Regression coverage for the live-run 9f4a1b3e fixes, added after the
 // green implementation in 6863ebb:
-//  8. truncateForUpload must never exceed maxBytes even in the extreme
-//     edge case where maxBytes is smaller than the truncation marker
-//     itself -- a naive implementation could invert the cap and upload
-//     something LARGER than the limit it's meant to enforce.
 //  9. parseStdoutCost must prefer the message_end sum over the turn_end
 //     cumulative fallback even when both appear in the same noisy stream
 //     (realistic pi output has turn_end lines throughout, not just at the
@@ -54,6 +50,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildContainerName,
@@ -62,7 +59,6 @@ import {
   parseSessionCost,
   parseStdoutCost,
   redactSecrets,
-  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
@@ -150,15 +146,6 @@ describe("redactSecrets regression: realistic noisy blob with a substring-collid
     expect(result).toContain("[2026-01-01T00:00:00.000Z] starting task");
     expect(result).toContain("[2026-01-01T00:00:05.000Z] task finished");
     expect(result.match(/\[REDACTED\]/g)).toHaveLength(3);
-  });
-});
-
-describe("truncateForUpload regression: cap holds even when maxBytes is smaller than the marker itself", () => {
-  it("never returns a buffer larger than maxBytes, even at an absurdly tiny cap", () => {
-    const big = Buffer.from("X".repeat(10000), "utf8");
-    const tinyMax = 10; // shorter than "[trace truncated: showing last 10 bytes of 10000 bytes]\n"
-    const result = truncateForUpload(big, tinyMax);
-    expect(result.length).toBeLessThanOrEqual(tinyMax);
   });
 });
 
@@ -681,7 +668,7 @@ describe.skipIf(!RUNNER_IT)(
 );
 
 describe.skipIf(!RUNNER_IT)(
-  "runner regression (RUNNER_IT=1, real local docker): trace upload byte cap (HTTP 413 fix)",
+  "runner regression (RUNNER_IT=1, real local docker): full trace stored gzipped, never truncated",
   () => {
     const TASK_ID = "regex-log-bigstdout";
     const RUN_ID = "it-run-bigstdout";
@@ -696,7 +683,7 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "uploads pi-stdout.txt truncated to RUNNER_TRACE_UPLOAD_MAX_BYTES even though the real stdout is much larger (live-run evidence: 413 on pi-stdout.txt)",
+      "uploads the FULL ~600KB pi-stdout.txt gzip-compressed (no truncation)",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-bigstdout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-bigstdout" });
@@ -744,13 +731,13 @@ describe.skipIf(!RUNNER_IT)(
 
         const stdoutTrace = state.traces.find((t) => t.name === "pi-stdout.txt");
         expect(stdoutTrace).toBeDefined();
-        // The real fixture emits ~600KB of stdout -- proves the cap is
-        // actually being applied, not just coincidentally under it.
-        expect(stdoutTrace.body.length).toBeLessThanOrEqual(262144);
+        // Stored gzip-compressed; the FULL ~600KB stdout must gunzip back with
+        // no truncation (well over the old 262144 cap).
+        const full = gunzipSync(stdoutTrace.body);
+        expect(full.length).toBeGreaterThan(262144);
 
         // Cost must still be parsed from the FULL local stdout (the real
-        // session.jsonl cost, 0.004), unaffected by the upload-side
-        // truncation applied after cost parsing.
+        // session.jsonl cost, 0.004).
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
         expect(agentFinished.payload.cost_source).toBe("session");
         expect(agentFinished.payload.cost_usd).toBeCloseTo(0.004, 10);
