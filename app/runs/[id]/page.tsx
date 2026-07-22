@@ -175,10 +175,16 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                   color: "var(--gray-900)",
                 }}
               >
-                <span style={{ color: "var(--gray-700)" }}>{event.seq}</span>
-                <span>{new Date(event.ts).toLocaleTimeString()}</span>
-                <span style={{ color: "var(--gray-1000)" }}>{event.type}</span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ color: "var(--gray-700)", flexShrink: 0 }}>{event.seq}</span>
+                <span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                  {new Date(event.ts).toLocaleTimeString()}
+                </span>
+                <span style={{ color: "var(--gray-1000)", whiteSpace: "nowrap", flexShrink: 0 }}>
+                  {event.type}
+                </span>
+                <span
+                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                >
                   {JSON.stringify(event.payload)}
                 </span>
               </li>
