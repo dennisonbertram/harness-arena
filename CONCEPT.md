@@ -55,7 +55,7 @@ Defense in depth — three cheap layers:
 2. **Transparency as audit:** all prompts and transcripts public, so the
    community can flag cheats the judge missed.
 3. ~~Runtime task draw~~ — dropped for v1 by decision (2026-07-21): the task
-   set is 10 FIXED tasks so results are comparable across submissions.
+   set is 16 FIXED tasks so results are comparable across submissions.
    Revisit if judge + transparency prove insufficient.
 
 Plus platform-level controls:
@@ -129,15 +129,19 @@ SWE-bench), multi-trial averaging, hidden task sets.
 - Scoring: lexicographic (tasks passed desc, then cost asc). Metrics shown:
   tasks solved, cost per task, total benchmark cost.
 - Model: `zai/glm-5.2` via Vercel AI Gateway. Fixed per board.
-- Tasks: 10 fixed Terminal-Bench 2.0 tasks, same for every run, vendored at
-  upstream commit `69671fb` (harbor registry pin), prebuilt images
-  `alexgshaw/<task>:20251031` (verified live): regex-log, fix-git,
-  log-summary-date-ranges, extract-elf, sqlite-db-truncate,
-  multi-source-data-merger, openssl-selfsigned-cert, prove-plus-comm,
-  cobol-modernization, db-wal-recovery. Apache-2.0; canary GUID lines preserved
-  byte-identical; solutions not vendored. Verification = official
+- Tasks: 16 fixed Terminal-Bench 2.0 tasks, same for every run, aligned to
+  harnessarena.xyz's ranked subset (repo mcclurejt/harness-arena,
+  docs/ranked-subset.md; 1 easy / 10 medium / 5 hard), vendored at upstream
+  commit `69671fb` (harbor registry pin), prebuilt images
+  `alexgshaw/<task>:20251031` (verified live): fix-git, kv-store-grpc,
+  headless-terminal, cancel-async-tasks, write-compressor,
+  nginx-request-logging, qemu-startup, sanitize-git-repo,
+  fix-code-vulnerability, query-optimize, modernize-scientific-stack,
+  custom-memory-heap-crash, model-extraction-relu-logits, pytorch-model-cli,
+  multi-source-data-merger, sparql-university. Apache-2.0; canary GUID lines
+  preserved byte-identical; solutions not vendored. Verification = official
   `tests/test.sh` → `/logs/verifier/reward.txt` (oracle-tested locally,
-  reward=1 on regex-log).
+  reward=1 on regex-log under the prior 10-task set).
 - Runner: Docker inside Vercel Sandbox (spike passed), pi harness inside the
   task container, verification by platform after agent finishes.
 - Anti-cheat: LLM judge pre-screens every submitted prompt before any run
