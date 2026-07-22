@@ -62,4 +62,17 @@ describe("sortLeaderboard", () => {
 
     expect(result.map((r) => r.id)).toEqual(["scored"]);
   });
+
+  describe("regression: missing data vs. a genuine zero score", () => {
+    it("includes a completed run with tasks_passed=0 (a real zero, not missing data)", () => {
+      // A naive fix (e.g. `if (!run.tasks_passed) return false`) would treat
+      // 0 as falsy and wrongly exclude a run that legitimately passed zero
+      // tasks. Only `undefined` means "missing", not `0`.
+      const runs = [run("zero-score", "completed", 0, 5.0), run("higher-score", "completed", 2, 5.0)];
+
+      const result = sortLeaderboard(runs);
+
+      expect(result.map((r) => r.id)).toEqual(["higher-score", "zero-score"]);
+    });
+  });
 });

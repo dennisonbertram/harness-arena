@@ -299,4 +299,63 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
 
     vi.unstubAllGlobals();
   });
+
+  describe("regression: pagination and misconfiguration are not partially fixed", () => {
+    it("listRuns also follows list() pagination across multiple pages, not just listSubmissions", async () => {
+      // Guards against a fix applied to listSubmissions only, leaving
+      // listRuns silently truncated at the first page.
+      const storage = new BlobStorage();
+
+      vi.mocked(list)
+        .mockResolvedValueOnce({
+          blobs: [{ url: "https://blob.example/runs/run-1.json" } as never],
+          hasMore: true,
+          cursor: "cursor-1",
+        } as never)
+        .mockResolvedValueOnce({
+          blobs: [{ url: "https://blob.example/runs/run-2.json" } as never],
+          hasMore: false,
+        } as never);
+
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce({
+            text: async () => JSON.stringify(makeRun("run-1", "2026-07-01T00:00:00.000Z")),
+          })
+          .mockResolvedValueOnce({
+            text: async () => JSON.stringify(makeRun("run-2", "2026-07-02T00:00:00.000Z")),
+          }),
+      );
+
+      const result = await storage.listRuns();
+
+      expect(result.map((r) => r.id).sort()).toEqual(["run-1", "run-2"]);
+      expect(list).toHaveBeenCalledTimes(2);
+
+      vi.unstubAllGlobals();
+    });
+
+    it("getStorage throws when STORAGE is set to a non-memory value and no token is present", () => {
+      // Guards against a naive fix like `if (process.env.STORAGE) return new MemoryStorage()`
+      // that treats any truthy STORAGE value as "use memory" instead of
+      // requiring the exact value "memory".
+      const originalStorage = process.env.STORAGE;
+      const originalToken = process.env.BLOB_READ_WRITE_TOKEN;
+      process.env.STORAGE = "postgres";
+      delete process.env.BLOB_READ_WRITE_TOKEN;
+
+      try {
+        expect(() => getStorage()).toThrow(
+          "storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory",
+        );
+      } finally {
+        if (originalStorage === undefined) delete process.env.STORAGE;
+        else process.env.STORAGE = originalStorage;
+        if (originalToken === undefined) delete process.env.BLOB_READ_WRITE_TOKEN;
+        else process.env.BLOB_READ_WRITE_TOKEN = originalToken;
+      }
+    });
+  });
 });
