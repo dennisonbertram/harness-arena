@@ -25,7 +25,11 @@ export default function HowItWorksPage() {
           Scoring
         </h2>
         <p style={{ fontSize: 15, lineHeight: 1.6 }}>
-          Runs are ranked by tasks passed, then lowest total cost.
+          The test is binary: a run is <strong>ranked only if it completes the whole test</strong> — passes
+          every task. Partly-passing runs aren&apos;t partial scores; they&apos;re unranked failed runs, shown
+          for transparency. Among runs that complete the test, the single ranking is total inference cost —
+          the cheapest complete solution wins. If nothing completes the test, the ranked board is empty, and
+          that&apos;s the finding: no price completes this task set on this model and harness yet.
         </p>
       </section>
 
@@ -46,7 +50,7 @@ export default function HowItWorksPage() {
         </h2>
         <ul style={{ fontSize: 15, lineHeight: 1.8, paddingLeft: 20 }}>
           <li>The judge rejects hardcoded solutions, environment tampering, and empty prompts.</li>
-          <li>Every run gets a $2 budget cap.</li>
+          <li>Every run gets a $10 safety cap (a ceiling to stop runaways, not the score).</li>
           <li>Agents run on model zai/glm-5.2.</li>
           <li>Everything submitted — prompts, traces, scores — is public.</li>
         </ul>

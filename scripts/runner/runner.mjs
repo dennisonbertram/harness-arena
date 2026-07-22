@@ -47,7 +47,11 @@ const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 // the task container; pi uses the one matching --provider.
 const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
-const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
+// Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
+// solution can complete the whole test instead of being killed mid-run, which
+// would deflate its pass rate. Sandbox.ts passes the real value; this default
+// is the fallback.
+const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
 // A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
 // reality and dominated the leaderboard whenever it was hit (live-run
 // evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the

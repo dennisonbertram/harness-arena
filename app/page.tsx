@@ -1,42 +1,21 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
-import { getLeaderboardView, partitionBaseline } from "@/lib/leaderboard-view";
-import { formatUsd, scaleScatterPoints } from "@/lib/format";
-import { ScatterChart, type ScatterItem } from "./ScatterChart";
+import { getStandings } from "@/lib/leaderboard-view";
+import { getTasks } from "@/lib/tasks";
+import { formatUsd } from "@/lib/format";
+import type { PromptStanding } from "@/lib/aggregate";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
-// Full-width plot; detail shows on hover so the tightly-clustered dots don't
-// need static labels.
-const CHART_OPTIONS = { width: 960, height: 420, padding: 56 };
 
 // The leaderboard reads from shared storage, so a build-time-cached page
 // would never show new submissions. ISR re-renders it at most every 15s.
 export const revalidate = 15;
 
 export default async function LeaderboardPage() {
-  const storage = getStorage();
-  const rows = await getLeaderboardView(storage);
-  const { baseline, competitors } = partitionBaseline(rows);
-
-  const { points, xMax, yMax, width, height, padding } = scaleScatterPoints(
-    rows.map((row) => ({ runId: row.runId, totalCostUsd: row.totalCostUsd, tasksPassed: row.tasksPassed })),
-    CHART_OPTIONS,
-  );
-  const leaderRunId = rows.find((row) => row.runId !== baseline?.runId)?.runId;
-  const chartItems: ScatterItem[] = points.map((point) => {
-    const row = rows.find((r) => r.runId === point.runId)!;
-    return {
-      runId: point.runId,
-      cx: point.cx,
-      cy: point.cy,
-      agentName: row.agentName,
-      tasksPassed: row.tasksPassed,
-      totalTasks: row.totalTasks,
-      totalCostUsd: row.totalCostUsd,
-      isBaseline: point.runId === baseline?.runId,
-      isLeader: point.runId === leaderRunId,
-    };
-  });
+  const standings = await getStandings(getStorage());
+  const totalTasks = getTasks().length;
+  // Per-task diagnostic uses the vanilla baseline if present, else the leader.
+  const diagnostic = standings.find((s) => s.promptKey === "") ?? standings[0];
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -44,9 +23,10 @@ export default async function LeaderboardPage() {
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
           Harness Arena
         </h1>
-        <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 640, marginBottom: 16 }}>
-          A public contest: submit a system prompt, run it against 10 real terminal tasks, and see
-          how it ranks on cost and correctness.
+        <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 16 }}>
+          A public contest: submit a system prompt, run it against {totalTasks} real terminal tasks. The model is
+          noisy, so prompts are ranked by <strong>pass rate</strong> — mean tasks solved across every run — not one
+          lucky attempt. Cost comes later, once pass rate is solved.
         </p>
         <div style={{ display: "flex", gap: 20, fontSize: 14 }}>
           <Link href="/how-it-works">How it works</Link>
@@ -57,7 +37,7 @@ export default async function LeaderboardPage() {
         </div>
       </section>
 
-      {rows.length === 0 ? (
+      {standings.length === 0 ? (
         <div
           style={{
             border: "1px solid var(--gray-alpha-400)",
@@ -77,113 +57,55 @@ export default async function LeaderboardPage() {
         </div>
       ) : (
         <>
-          {baseline && (
-            <section style={{ marginBottom: 40 }}>
-              <h2 className="label" style={{ marginBottom: 12 }}>
-                Baseline to beat
-              </h2>
-              <Link
-                href={`/runs/${baseline.runId}`}
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "baseline",
-                  gap: "8px 32px",
-                  border: "1px solid var(--gray-alpha-400)",
-                  borderRadius: 12,
-                  padding: "20px 24px",
-                  background: "var(--gray-alpha-100)",
-                  textDecoration: "none",
-                  color: "inherit",
-                }}
-              >
-                <div style={{ flex: "1 1 240px" }}>
-                  <div style={{ fontSize: 16, fontWeight: 600 }}>Vanilla pi harness</div>
-                  <div style={{ fontSize: 13, color: "var(--gray-900)" }}>
-                    Stock pi system prompt, nothing added — the reference every submission tries to beat.
-                  </div>
-                </div>
-                <BaselineStat label="Tasks passed" value={`${baseline.tasksPassed}/${baseline.totalTasks}`} />
-                <BaselineStat label="Total cost" value={formatUsd(baseline.totalCostUsd)} />
-                <BaselineStat label="Cost / task" value={formatUsd(baseline.costPerTaskUsd)} />
-              </Link>
-            </section>
-          )}
-
           <section style={{ marginBottom: 48, overflowX: "auto" }}>
             <h2 className="label" style={{ marginBottom: 16 }}>
-              Leaderboard
+              Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by pass rate</span>
             </h2>
-            {competitors.length === 0 ? (
-              <p style={{ fontSize: 14, color: "var(--gray-900)" }}>
-                No competitor submissions yet.{" "}
-                <Link href="/submit" style={{ color: "var(--blue-700)" }}>
-                  Be the first to beat the baseline.
-                </Link>
-              </p>
-            ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                  <th className="label" style={cellStyle}>
-                    Rank
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Agent
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Tasks passed
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Cost / task
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Total cost
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Submitted
-                  </th>
+                  <th className="label" style={cellStyle}>Rank</th>
+                  <th className="label" style={cellStyle}>Agent</th>
+                  <th className="label" style={cellStyle}>Pass rate</th>
+                  <th className="label" style={cellStyle}>Mean tasks</th>
+                  <th className="label" style={cellStyle}>Runs</th>
+                  <th className="label" style={cellStyle}>Median cost</th>
                 </tr>
               </thead>
               <tbody>
-                {competitors.map((row) => (
-                  <tr key={row.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                {standings.map((s, i) => (
+                  <tr key={s.promptKey || "baseline"} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>
-                      <Link href={`/runs/${row.runId}`}>{row.rank}</Link>
+                      <Link href={`/runs/${s.runIds[0]}`}>{i + 1}</Link>
                     </td>
                     <td style={cellStyle}>
-                      <Link href={`/runs/${row.runId}`}>{row.agentName}</Link>
+                      <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
+                      {s.promptKey === "" && (
+                        <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
+                      )}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {row.tasksPassed}/{row.totalTasks}
+                      {(s.passRate * 100).toFixed(0)}%
+                      {s.completesTest && (
+                        <span style={{ marginLeft: 6, fontSize: 12, color: "var(--blue-700)" }}>· complete</span>
+                      )}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {formatUsd(row.costPerTaskUsd)}
+                      {s.meanTasksPassed.toFixed(1)}/{s.totalTaskCount}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {formatUsd(row.totalCostUsd)}
+                      {s.runs}
                     </td>
-                    <td style={cellStyle}>{new Date(row.submittedAt).toLocaleDateString()}</td>
+                    <td style={cellStyle} className="tabular-nums">
+                      {s.medianCostUsd === null ? "—" : formatUsd(s.medianCostUsd)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            )}
           </section>
 
-          <section>
-            <h2 className="label" style={{ marginBottom: 16 }}>
-              Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· hover a point for detail</span>
-            </h2>
-            <ScatterChart
-              items={chartItems}
-              width={width}
-              height={height}
-              padding={padding}
-              xMax={xMax}
-              yMax={yMax}
-            />
-          </section>
+          {diagnostic && <PerTaskPanel standing={diagnostic} />}
         </>
       )}
     </div>
@@ -192,15 +114,48 @@ export default async function LeaderboardPage() {
 
 const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
 
-function BaselineStat({ label, value }: { label: string; value: string }) {
+// Per-task pass rate — where the variance actually lives: which tasks are
+// solved reliably, which are flaky, which are walls the harness never clears.
+function PerTaskPanel({ standing }: { standing: PromptStanding }) {
   return (
-    <div>
-      <div className="label" style={{ marginBottom: 2 }}>
-        {label}
-      </div>
-      <div className="tabular-nums" style={{ fontSize: 20, fontWeight: 600 }}>
-        {value}
-      </div>
-    </div>
+    <section>
+      <h2 className="label" style={{ marginBottom: 8 }}>
+        Per-task pass rate
+        <span style={{ color: "var(--gray-700)" }}>
+          {" · "}
+          {standing.agentName}
+          {standing.promptKey === "" ? " (baseline)" : ""}, {standing.runs} run{standing.runs === 1 ? "" : "s"}
+        </span>
+      </h2>
+      <table style={{ width: "100%", maxWidth: 640, borderCollapse: "collapse", fontSize: 14 }}>
+        <tbody>
+          {standing.perTask.map((t) => {
+            const rate = t.of > 0 ? t.passed / t.of : 0;
+            return (
+              <tr key={t.taskId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                <td className="mono" style={{ padding: "6px 12px 6px 0" }}>
+                  {t.taskId}
+                </td>
+                <td style={{ padding: "6px 0", width: 160 }}>
+                  <div style={{ background: "var(--gray-alpha-200)", borderRadius: 4, height: 8 }}>
+                    <div
+                      style={{
+                        width: `${rate * 100}%`,
+                        background: rate === 1 ? "var(--blue-700)" : rate === 0 ? "var(--gray-alpha-400)" : "var(--gray-900)",
+                        height: 8,
+                        borderRadius: 4,
+                      }}
+                    />
+                  </div>
+                </td>
+                <td className="tabular-nums" style={{ padding: "6px 12px", width: 90, textAlign: "right" }}>
+                  {t.passed}/{t.of} · {(rate * 100).toFixed(0)}%
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
   );
 }

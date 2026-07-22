@@ -107,7 +107,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const callbackBase = process.env.CALLBACK_BASE ?? DEFAULT_CALLBACK_BASE;
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
-    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "2";
+    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "10";
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
     const tasksJsonB64 = Buffer.from(JSON.stringify(buildRunnerTasks()), "utf8").toString("base64");
 
