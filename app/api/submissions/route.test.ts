@@ -28,6 +28,18 @@ function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   });
 }
 
+function postRequestRaw(
+  body: string,
+  headers: Record<string, string>,
+  ip = "1.1.1.1",
+): NextRequest {
+  return new NextRequest("http://localhost/api/submissions", {
+    method: "POST",
+    headers: { "x-forwarded-for": ip, ...headers },
+    body,
+  });
+}
+
 describe("POST /api/submissions", () => {
   beforeEach(() => {
     resetStorage();
@@ -62,6 +74,53 @@ describe("POST /api/submissions", () => {
         postRequest({ agent_name: "a".repeat(41), prompt: "do stuff" }, "2.2.2.4"),
       );
       expect(response.status).toBe(400);
+    });
+  });
+
+  describe("input hardening", () => {
+    it("rejects with 415 before calling the judge when content-type is not application/json", async () => {
+      const response = await POST(
+        postRequestRaw(JSON.stringify({ agent_name: "agent-x", prompt: "hi" }), {
+          "content-type": "text/plain",
+        }, "7.7.7.1"),
+      );
+
+      expect(response.status).toBe(415);
+      expect(judgeSubmission).not.toHaveBeenCalled();
+    });
+
+    it("rejects with 415 when content-type header is missing entirely", async () => {
+      const response = await POST(
+        postRequestRaw(JSON.stringify({ agent_name: "agent-x", prompt: "hi" }), {}, "7.7.7.2"),
+      );
+
+      expect(response.status).toBe(415);
+      expect(judgeSubmission).not.toHaveBeenCalled();
+    });
+
+    it("accepts a content-type with a charset suffix (application/json; charset=utf-8)", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(
+        postRequestRaw(JSON.stringify({ agent_name: "agent-x", prompt: "hi" }), {
+          "content-type": "application/json; charset=utf-8",
+        }, "7.7.7.3"),
+      );
+
+      expect(response.status).toBe(200);
+    });
+
+    it("rejects with 413 before reading the body when content-length exceeds 262144 bytes", async () => {
+      const oversized = "a".repeat(300000);
+      const response = await POST(
+        postRequestRaw(oversized, {
+          "content-type": "application/json",
+          "content-length": String(oversized.length),
+        }, "7.7.7.4"),
+      );
+
+      expect(response.status).toBe(413);
+      expect(judgeSubmission).not.toHaveBeenCalled();
     });
   });
 

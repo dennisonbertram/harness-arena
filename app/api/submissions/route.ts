@@ -9,6 +9,7 @@ import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
 
 const MAX_PROMPT_CHARS = 32768;
+const MAX_BODY_BYTES = 262144;
 
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
@@ -37,6 +38,16 @@ function clientIp(request: NextRequest): string {
 }
 
 export async function POST(request: NextRequest) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return NextResponse.json({ error: "content-type must be application/json" }, { status: 415 });
+  }
+
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "request body too large" }, { status: 413 });
+  }
+
   const ip = clientIp(request);
   if (isRateLimited(ip)) {
     log("warn", "submission.rate_limited", { ip });
