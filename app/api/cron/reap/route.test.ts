@@ -19,7 +19,8 @@ describe("GET /api/cron/reap", () => {
 
   it("reaps every stale run and reports the reaped count, leaving fresh runs alone", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-21T00:11:00.000Z"));
+    // Reap threshold raised to 20 minutes (issue #23 finding F5).
+    vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
     await storageRef.current.putRun({
       id: "run-stale",
       submission_id: "sub-1",
@@ -32,7 +33,7 @@ describe("GET /api/cron/reap", () => {
       submission_id: "sub-2",
       status: "queued",
       task_results: [],
-      created_at: "2026-07-21T00:09:00.000Z",
+      created_at: "2026-07-21T00:19:00.000Z",
     });
 
     const response = await GET();

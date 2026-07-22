@@ -48,7 +48,8 @@ describe("GET /api/runs/[id]", () => {
 
     it("marks a stale queued run reaped and returns the reaped status, persisting the change", async () => {
       vi.useFakeTimers();
-      vi.setSystemTime(new Date("2026-07-21T00:11:00.000Z"));
+      // Reap threshold raised to 20 minutes (issue #23 finding F5).
+      vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
       await storageRef.current.putRun({
         id: "run-stale",
         submission_id: "sub-1",
