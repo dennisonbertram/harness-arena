@@ -127,7 +127,7 @@ function PerTaskPanel({ standing }: { standing: PromptStanding }) {
           {standing.promptKey === "" ? " (baseline)" : ""}, {standing.runs} run{standing.runs === 1 ? "" : "s"}
         </span>
       </h2>
-      <table style={{ width: "100%", maxWidth: 640, borderCollapse: "collapse", fontSize: 14 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <tbody>
           {standing.perTask.map((t) => {
             const rate = t.of > 0 ? t.passed / t.of : 0;
@@ -136,7 +136,7 @@ function PerTaskPanel({ standing }: { standing: PromptStanding }) {
                 <td className="mono" style={{ padding: "6px 12px 6px 0" }}>
                   {t.taskId}
                 </td>
-                <td style={{ padding: "6px 0", width: 160 }}>
+                <td style={{ padding: "6px 0", width: "45%" }}>
                   <div style={{ background: "var(--gray-alpha-200)", borderRadius: 4, height: 8 }}>
                     <div
                       style={{
