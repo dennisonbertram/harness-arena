@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { MemoryStorage } from "./storage";
+import { afterEach, describe, expect, it } from "vitest";
+import { BlobStorage, getStorage, MemoryStorage } from "./storage";
 import type { Run, Submission } from "./types";
 
 function makeRun(id: string, createdAt: string): Run {
@@ -121,5 +121,46 @@ describe("MemoryStorage", () => {
   it("listSubmissions returns an empty array when nothing has been stored", async () => {
     const storage = new MemoryStorage();
     expect(await storage.listSubmissions()).toEqual([]);
+  });
+
+  describe("regression: seq isolation and backend selection", () => {
+    it("appendRunEvents keeps an independent seq counter per run_id", async () => {
+      const storage = new MemoryStorage();
+
+      const runAEvents = await storage.appendRunEvents("run-a", [
+        { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+        { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_creating", payload: {} },
+      ]);
+      const runBEvents = await storage.appendRunEvents("run-b", [
+        { ts: "2026-07-21T00:00:02.000Z", type: "run.created", payload: { submission_id: "sub-2" } },
+      ]);
+
+      // If seq were a single global counter instead of per-run, run-b's
+      // first event would come back as seq 3, not seq 1.
+      expect(runAEvents.map((e) => e.seq)).toEqual([1, 2]);
+      expect(runBEvents.map((e) => e.seq)).toEqual([1]);
+    });
+
+    describe("getStorage factory", () => {
+      const originalToken = process.env.BLOB_READ_WRITE_TOKEN;
+
+      afterEach(() => {
+        if (originalToken === undefined) {
+          delete process.env.BLOB_READ_WRITE_TOKEN;
+        } else {
+          process.env.BLOB_READ_WRITE_TOKEN = originalToken;
+        }
+      });
+
+      it("returns MemoryStorage when BLOB_READ_WRITE_TOKEN is unset", () => {
+        delete process.env.BLOB_READ_WRITE_TOKEN;
+        expect(getStorage()).toBeInstanceOf(MemoryStorage);
+      });
+
+      it("returns BlobStorage when BLOB_READ_WRITE_TOKEN is set", () => {
+        process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";
+        expect(getStorage()).toBeInstanceOf(BlobStorage);
+      });
+    });
   });
 });
