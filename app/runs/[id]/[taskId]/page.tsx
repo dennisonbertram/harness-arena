@@ -2,8 +2,10 @@ import { gunzipSync } from "node:zlib";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStorage, type Storage } from "@/lib/storage";
+import { getTasks } from "@/lib/tasks";
 import { formatUsd, formatDuration } from "@/lib/format";
 import { parseTrajectory } from "@/lib/trajectory";
+import { reconstructRunProgress, type TaskState } from "@/lib/run-progress";
 import { TrajectoryView } from "./TrajectoryView";
 
 export const revalidate = 15;
@@ -15,20 +17,61 @@ async function readTraceText(storage: Storage, id: string, taskId: string, name:
   return (isGz ? gunzipSync(bytes) : bytes).toString("utf-8");
 }
 
+type PageState = TaskState | "pending";
+const STATE_STYLE: Record<PageState, { label: string; color: string }> = {
+  passed: { label: "passed", color: "#22c55e" },
+  failed: { label: "failed", color: "#ef4444" },
+  running: { label: "running…", color: "var(--blue-700)" },
+  verifying: { label: "verifying…", color: "var(--gray-700)" },
+  pending: { label: "not started", color: "var(--gray-700)" },
+};
+
 export default async function TrajectoryPage({ params }: { params: Promise<{ id: string; taskId: string }> }) {
   const { id, taskId } = await params;
+  // Only a real benchmark task id is valid — but do NOT require it to be in
+  // run.task_results, which is empty until the run finishes (this is exactly
+  // why mid-run trajectory links used to 404).
+  if (!getTasks().some((t) => t.id === taskId)) notFound();
+
   const storage = getStorage();
   const run = await storage.getRun(id);
   if (!run) notFound();
-  const task = run.task_results.find((t) => t.task_id === taskId);
-  if (!task) notFound();
 
-  const submission = await storage.getSubmission(run.submission_id);
-  const [sessionText, verifierText] = await Promise.all([
+  // Per-task status comes from the run doc once finished, else from the live
+  // event stream while running.
+  const fromResults = run.task_results.find((t) => t.task_id === taskId);
+  const [submission, events, sessionText, verifierText] = await Promise.all([
+    storage.getSubmission(run.submission_id),
+    fromResults ? Promise.resolve([]) : storage.listRunEvents(id),
     readTraceText(storage, id, taskId, "session.jsonl"),
     readTraceText(storage, id, taskId, "verifier.txt"),
   ]);
-  const trajectory = sessionText ? parseTrajectory(sessionText) : { steps: [], summary: { turns: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, costUsd: null } };
+  const fromEvents = fromResults ? undefined : reconstructRunProgress(events).tasks.find((t) => t.taskId === taskId);
+
+  let state: PageState;
+  let reward: number | null = null;
+  let turns: number | undefined;
+  let costUsd: number | undefined;
+  let durationS: number | undefined;
+  if (fromResults) {
+    state = fromResults.passed ? "passed" : "failed";
+    reward = fromResults.reward ?? null;
+    turns = fromResults.turns;
+    costUsd = fromResults.cost_usd;
+    durationS = fromResults.duration_s;
+  } else if (fromEvents) {
+    state = fromEvents.state;
+    turns = fromEvents.turns;
+    costUsd = fromEvents.costUsd;
+    durationS = fromEvents.durationS;
+  } else {
+    state = "pending";
+  }
+
+  const trajectory = sessionText
+    ? parseTrajectory(sessionText)
+    : { steps: [], summary: { turns: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, costUsd: null } };
+  const badge = STATE_STYLE[state];
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "48px 24px" }}>
@@ -47,11 +90,11 @@ export default async function TrajectoryPage({ params }: { params: Promise<{ id:
             fontWeight: 600,
             padding: "2px 10px",
             borderRadius: 9999,
-            color: task.passed ? "#22c55e" : "#ef4444",
-            border: `1px solid ${task.passed ? "#22c55e" : "#ef4444"}`,
+            color: badge.color,
+            border: `1px solid ${badge.color}`,
           }}
         >
-          {task.passed ? "passed" : "failed"}
+          {badge.label}
         </span>
       </div>
       <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 24 }}>
@@ -70,31 +113,37 @@ export default async function TrajectoryPage({ params }: { params: Promise<{ id:
           marginBottom: 28,
         }}
       >
-        <Stat label="Steps" value={`${task.turns ?? trajectory.summary.turns}`} />
+        <Stat label="Steps" value={`${turns ?? trajectory.summary.turns}`} />
         <Stat label="Tokens in" value={trajectory.summary.tokensIn.toLocaleString()} />
         <Stat label="Tokens out" value={trajectory.summary.tokensOut.toLocaleString()} />
         <Stat label="Cache read" value={trajectory.summary.cacheRead.toLocaleString()} />
         <Stat
           label="Cost"
           value={
-            task.cost_usd !== undefined
-              ? formatUsd(task.cost_usd)
+            costUsd !== undefined
+              ? formatUsd(costUsd)
               : trajectory.summary.costUsd !== null
                 ? formatUsd(trajectory.summary.costUsd)
                 : "unmeasured"
           }
         />
-        <Stat label="Duration" value={task.duration_s !== undefined ? formatDuration(task.duration_s) : "—"} />
+        <Stat label="Duration" value={durationS !== undefined ? formatDuration(durationS) : "—"} />
       </section>
 
-      <TrajectoryView
-        steps={trajectory.steps}
-        summary={trajectory.summary}
-        verifier={verifierText}
-        passed={task.passed}
-        reward={task.reward ?? null}
-        durationS={task.duration_s ?? null}
-      />
+      {state === "pending" && trajectory.steps.length === 0 ? (
+        <p style={{ fontSize: 14, color: "var(--gray-900)" }}>
+          This task hasn&apos;t started yet in this run. The page auto-refreshes.
+        </p>
+      ) : (
+        <TrajectoryView
+          steps={trajectory.steps}
+          summary={trajectory.summary}
+          verifier={verifierText}
+          passed={state === "passed"}
+          reward={reward}
+          durationS={durationS ?? null}
+        />
+      )}
     </div>
   );
 }
