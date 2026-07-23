@@ -4,6 +4,7 @@ import { getStorage } from "@/lib/storage";
 import { aggregateTask } from "@/lib/aggregate";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
+import { ARENA_BENCHMARK, ARENA_BENCHMARK_URL } from "@/lib/arena-params";
 
 export const revalidate = 15;
 
@@ -21,9 +22,15 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
       <div style={{ fontSize: 14, marginBottom: 16 }}>
         <Link href="/">← Leaderboard</Link>
       </div>
-      <h1 className="mono" style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.01em", marginBottom: 8 }}>
+      <h1 className="mono" style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.01em", marginBottom: 6 }}>
         {taskId}
       </h1>
+      <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 8 }}>
+        Task in{" "}
+        <a href={ARENA_BENCHMARK_URL} target="_blank" rel="noopener noreferrer">
+          {ARENA_BENCHMARK}
+        </a>
+      </p>
 
       {stats === null ? (
         <p style={{ fontSize: 15, color: "var(--gray-900)" }}>No completed runs have recorded this task yet.</p>
@@ -62,8 +69,14 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
                         <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
                       )}
                     </td>
-                    <td style={{ ...cell, color: r.passed ? "var(--blue-700)" : "var(--gray-700)" }}>
-                      {r.passed ? "passed" : "failed"}
+                    <td style={cell}>
+                      <Link
+                        href={`/runs/${r.runId}/${taskId}`}
+                        style={{ color: r.passed ? "#22c55e" : "#ef4444" }}
+                        title="View this attempt's trajectory"
+                      >
+                        {r.passed ? "passed" : "failed"}
+                      </Link>
                     </td>
                     <td style={cell} className="tabular-nums">
                       {r.turns}

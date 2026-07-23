@@ -212,6 +212,49 @@ async function flushEvents(extra = {}) {
   return result;
 }
 
+// Fetch grading materials (tests/*) from the authenticated /api/runner-tests
+// route and write them under RUNNER_TASKS_DIR/<id>/tests, where runOneTask's
+// verify step docker-cp's them into each task container AFTER the agent's turn.
+// These are NOT in the public runner bundle (that would let any harness read
+// the assertions it's graded against); only this runner, which holds
+// RUNNER_CALLBACK_SECRET, can fetch them. Fails closed: a run cannot be scored
+// without tests, so a fetch failure aborts the run rather than silently passing.
+async function fetchTaskTests() {
+  const url = `${CALLBACK_BASE}/api/runner-tests`;
+  const delays = [0, 500, 1500];
+  let lastErr;
+  for (const delay of delays) {
+    if (delay) await sleep(delay);
+    try {
+      const res = await fetchWithTimeout(
+        fetch,
+        url,
+        { method: "GET", headers: { "x-runner-secret": RUNNER_CALLBACK_SECRET } },
+        HTTP_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const { tests } = await res.json();
+      let fileCount = 0;
+      for (const [taskId, files] of Object.entries(tests ?? {})) {
+        for (const [rel, b64] of Object.entries(files)) {
+          const dst = path.join(RUNNER_TASKS_DIR, taskId, "tests", rel);
+          mkdirSync(path.dirname(dst), { recursive: true });
+          writeFileSync(dst, Buffer.from(b64, "base64"));
+          fileCount += 1;
+        }
+      }
+      log(`fetched tests for ${Object.keys(tests ?? {}).length} task(s), ${fileCount} file(s)`);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`fetch task tests failed after retries: ${lastErr?.message ?? lastErr}`);
+}
+
 // Traces are uploaded gzip-compressed so the FULL, untruncated trace fits
 // under the callback's request-body limit (a JSONL/text trace compresses
 // ~10x). The server stores the bytes as-is; the trace-view route decompresses
@@ -454,7 +497,7 @@ async function runOneTask(task, index, systemPrompt) {
     await flushEvents();
 
     const verifyStart = Date.now();
-    sh(
+    const verifyResult = sh(
       DOCKER_CMD,
       ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
       { maxBuffer: 20 * 1024 * 1024 },
@@ -486,6 +529,20 @@ async function runOneTask(task, index, systemPrompt) {
     const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
     if (stdoutUpload?.url) {
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
+    }
+    // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
+    // Verifier tab shows WHY a task passed or failed, not just the reward.
+    const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
+    const verifyStderr = verifyResult.stderr?.toString("utf8") ?? "";
+    if (verifyStderr.trim()) verifierParts.push(`\n[stderr]\n${verifyStderr}`);
+    verifierParts.push(`\n[reward.txt] ${rewardText ?? "(missing)"}`);
+    const verifierUpload = await uploadTrace(
+      task.id,
+      "verifier.txt",
+      Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
+    );
+    if (verifierUpload?.url) {
+      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: verifierUpload.url });
     }
     await flushEvents();
 
@@ -542,6 +599,17 @@ async function main() {
       // top of flushEvents' own carried-forward pendingStatus retry on
       // every later flush.
       await flushEvents();
+    }
+
+    // Pull grading materials before any task runs. Fail closed (see
+    // fetchTaskTests): without tests we cannot verify, so abort rather than
+    // report unscored passes.
+    try {
+      await fetchTaskTests();
+    } catch (err) {
+      queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
     }
 
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));

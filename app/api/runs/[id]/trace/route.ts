@@ -3,7 +3,7 @@ import { log } from "@/lib/log";
 import { verifyRunnerSecret } from "@/lib/runner-auth";
 import { getStorage } from "@/lib/storage";
 
-const VALID_NAMES = new Set(["session.jsonl", "pi-stdout.txt", "runner-log.txt"]);
+const VALID_NAMES = new Set(["session.jsonl", "pi-stdout.txt", "runner-log.txt", "verifier.txt"]);
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

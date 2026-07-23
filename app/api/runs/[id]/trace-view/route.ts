@@ -2,7 +2,7 @@ import { gunzipSync } from "node:zlib";
 import { NextRequest, NextResponse } from "next/server";
 import { getStorage } from "@/lib/storage";
 
-const VALID_NAMES = new Set(["session.jsonl", "pi-stdout.txt", "runner-log.txt"]);
+const VALID_NAMES = new Set(["session.jsonl", "pi-stdout.txt", "runner-log.txt", "verifier.txt"]);
 
 // Serves a stored trace, decompressing it on read. Traces are stored gzipped
 // (so the full untruncated trace fits under the upload body limit); this route

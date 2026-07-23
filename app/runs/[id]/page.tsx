@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
@@ -103,7 +104,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
             <tbody>
               {run.task_results.map((task) => (
                 <tr key={task.task_id} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                  <td style={cellStyle} className="mono">{task.task_id}</td>
+                  <td style={cellStyle} className="mono">
+                    <Link href={`/runs/${run.id}/${task.task_id}`}>{task.task_id}</Link>
+                  </td>
                   <td style={cellStyle}><BoolMark ok={task.attempted} yes="attempted" no="not attempted" /></td>
                   <td style={cellStyle}><BoolMark ok={task.passed} yes="passed" no="failed" /></td>
                   <td style={cellStyle} className="tabular-nums">
@@ -116,13 +119,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                     {task.turns ?? "—"}
                   </td>
                   <td style={cellStyle}>
+                    <Link href={`/runs/${run.id}/${task.task_id}`} style={{ color: "var(--blue-700)" }}>
+                      trajectory
+                    </Link>
                     {task.trace_blob_url ? (
-                      <a href={task.trace_blob_url} style={{ color: "var(--blue-700)" }}>
-                        raw
-                      </a>
-                    ) : (
-                      "—"
-                    )}
+                      <>
+                        {" · "}
+                        <a href={task.trace_blob_url} style={{ color: "var(--gray-700)" }}>
+                          raw
+                        </a>
+                      </>
+                    ) : null}
                   </td>
                 </tr>
               ))}
