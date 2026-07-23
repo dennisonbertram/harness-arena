@@ -4,6 +4,7 @@ import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, type TaskRate } from "@/lib/aggregate";
 import { ARENA_MODEL, ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
+import { RerunButton } from "./RerunButton";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 
@@ -100,6 +101,7 @@ export default async function LeaderboardPage() {
                   <th className="label" style={cellStyle}>Mean tasks</th>
                   <th className="label" style={cellStyle}>Runs</th>
                   <th className="label" style={numCellStyle}>Median cost</th>
+                  <th className="label" style={numCellStyle}></th>
                 </tr>
               </thead>
               <tbody>
@@ -128,6 +130,9 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={numCellStyle} className="tabular-nums">
                       {s.medianCostUsd === null ? "—" : formatUsd(s.medianCostUsd)}
+                    </td>
+                    <td style={numCellStyle}>
+                      <RerunButton agentName={s.agentName} prompt={s.promptKey} />
                     </td>
                   </tr>
                 ))}
