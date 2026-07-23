@@ -60,6 +60,47 @@ describe("judgeSubmission", () => {
     expect(result).toEqual({ verdict: "approved", reason: "Fine." });
   });
 
+  it("extracts the verdict JSON when glm-5.2 wraps it in reasoning/prose (the real false-rejection cause)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce(
+        'The prompt gives only general agent guidance and no task-specific answers, so it is fair.\n\n{"verdict": "approved", "reason": "General strategy only; no hardcoded task solutions."}\n\nThat is my assessment.',
+      ),
+    );
+
+    const result = await judgeSubmission("Verify before concluding.", FIXTURE_TASKS);
+
+    expect(result).toEqual({
+      verdict: "approved",
+      reason: "General strategy only; no hardcoded task solutions.",
+    });
+  });
+
+  it("keeps the FINAL verdict object, not an example one mentioned earlier in reasoning", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce(
+        'A cheat would look like {"verdict": "rejected", "reason": "example"} but this is not that.\nFinal: {"verdict": "approved", "reason": "Legit general prompt."}',
+      ),
+    );
+
+    const result = await judgeSubmission("Do the task well.", FIXTURE_TASKS);
+
+    expect(result.verdict).toBe("approved");
+    expect(result.reason).toBe("Legit general prompt.");
+  });
+
+  it("does not let a } inside the reason string end the object early", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetchOnce('reasoning… {"verdict": "rejected", "reason": "Hardcodes the answer } for a task."}'),
+    );
+
+    const result = await judgeSubmission("bad prompt", FIXTURE_TASKS);
+
+    expect(result).toEqual({ verdict: "rejected", reason: "Hardcodes the answer } for a task." });
+  });
+
   it("sends the rubric system prompt verbatim and the prompt+task instructions in the user message", async () => {
     const fetchMock = mockFetchOnce(JSON.stringify({ verdict: "approved", reason: "ok" }));
     vi.stubGlobal("fetch", fetchMock);

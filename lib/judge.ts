@@ -58,13 +58,53 @@ function stripFences(text: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
-function tryParseVerdict(raw: string): JudgeVerdict | undefined {
-  try {
-    const parsed = VerdictSchema.safeParse(JSON.parse(stripFences(raw)));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
+// Every top-level {...} object in the text, brace-matched with string/escape
+// awareness so a `}` inside the "reason" string doesn't end an object early.
+// glm-5.2 (thinking on) routinely wraps its verdict in reasoning/prose, so the
+// verdict JSON is embedded, not the whole output — this recovers it instead of
+// falsely rejecting a fair prompt.
+function jsonObjectCandidates(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
   }
+  return out;
+}
+
+function tryParseVerdict(raw: string): JudgeVerdict | undefined {
+  // The whole (fence-stripped) output, then each embedded object. Keep the LAST
+  // valid verdict — the model's final answer, not an example inside reasoning.
+  let result: JudgeVerdict | undefined;
+  for (const candidate of [stripFences(raw), ...jsonObjectCandidates(raw)]) {
+    try {
+      const parsed = VerdictSchema.safeParse(JSON.parse(candidate));
+      if (parsed.success) result = parsed.data;
+    } catch {
+      // not JSON — try the next candidate
+    }
+  }
+  return result;
 }
 
 // Throws on network/5xx failures (judge infra failure) — callers should
