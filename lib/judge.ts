@@ -2,7 +2,11 @@ import { z } from "zod";
 import { log } from "./log";
 import type { Task } from "./tasks";
 
-export const JUDGE_MODEL = "zai/glm-5.2";
+// An independent, reliable model for the fairness gate — not the model being
+// benchmarked. Claude Sonnet 5 follows the "return only JSON" instruction far
+// more reliably than glm-5.2 (whose prose-wrapped verdicts caused false
+// rejections) and reasons better about subtle cheats.
+export const JUDGE_MODEL = "anthropic/claude-sonnet-5";
 const GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/chat/completions";
 
 // Verbatim rubric system prompt — published openly on /how-it-works for
@@ -120,7 +124,7 @@ async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> 
     body: JSON.stringify({
       model: JUDGE_MODEL,
       temperature: 0.1,
-      max_tokens: 300,
+      max_tokens: 512,
       messages: [
         { role: "system", content: JUDGE_SYSTEM_PROMPT },
         { role: "user", content: buildUserMessage(prompt, tasks) },
@@ -150,6 +154,14 @@ export async function judgeSubmission(prompt: string, tasks: JudgeTask[]): Promi
   const retryParsed = tryParseVerdict(retryRaw);
   if (retryParsed) return retryParsed;
 
+  // Bias to APPROVE when the judge can't produce a clear verdict: a parsing
+  // failure is uncertainty, not evidence of cheating, and rejecting a fair
+  // competitor over an infra hiccup is worse than letting one questionable
+  // prompt through (every prompt and trace is public for post-hoc review).
   log("warn", "judge.parse_failed", { attempt: 2 });
-  return { verdict: "rejected", reason: "judge output unparseable — resubmit" };
+  return {
+    verdict: "approved",
+    reason:
+      "Approved by default: the fairness judge could not return a clear verdict (we bias to approving when uncertain). This prompt and its run traces are public.",
+  };
 }

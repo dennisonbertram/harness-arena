@@ -30,9 +30,9 @@ export default async function LeaderboardPage() {
           Harness Arena
         </h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 16 }}>
-          A public contest: submit a system prompt, run it against {totalTasks} real terminal tasks. The model is
-          noisy, so prompts are ranked by <strong>pass rate</strong> — mean tasks solved across every run — not one
-          lucky attempt. Cost comes later, once pass rate is solved.
+          A public contest: submit a system prompt and it runs against {totalTasks} real terminal tasks. The model
+          is noisy, so prompts are ranked by <strong>pass rate</strong> — mean tasks solved across every run, not a
+          single lucky attempt — with cost as the tiebreaker once pass rate is solved.
         </p>
         <div style={{ display: "flex", gap: 20, fontSize: 14, marginBottom: 24 }}>
           <Link href="/how-it-works">How it works</Link>

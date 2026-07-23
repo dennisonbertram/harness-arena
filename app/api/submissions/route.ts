@@ -85,8 +85,14 @@ export async function POST(request: NextRequest) {
     try {
       verdict = await judgeSubmission(submission.prompt, getTasks());
     } catch (err) {
-      log("error", "judge.unavailable", { submission_id: submission.id, error: (err as Error).message });
-      return NextResponse.json({ error: "judge unavailable, retry later" }, { status: 503 });
+      const detail = (err as Error).message;
+      log("error", "judge.unavailable", { submission_id: submission.id, error: detail });
+      return NextResponse.json(
+        {
+          error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${detail})`,
+        },
+        { status: 503 },
+      );
     }
   }
 

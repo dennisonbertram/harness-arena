@@ -120,7 +120,7 @@ describe("judgeSubmission", () => {
 
     expect(requestBody.model).toBe(JUDGE_MODEL);
     expect(requestBody.temperature).toBe(0.1);
-    expect(requestBody.max_tokens).toBe(300);
+    expect(requestBody.max_tokens).toBe(512);
     expect(requestBody.messages[0].role).toBe("system");
     expect(requestBody.messages[0].content).toContain("fairness judge for Harness Arena");
     expect(requestBody.messages[0].content).toContain("REJECT when the prompt contains any of");
@@ -129,7 +129,7 @@ describe("judgeSubmission", () => {
     expect(requestBody.messages[1].content).toContain("Extract lines matching a pattern from a log file.");
   });
 
-  it("retries once on unparseable output, then rejects with a resubmit reason if the retry also fails to parse", async () => {
+  it("retries once on unparseable output, then APPROVES by default (bias to approve) if the retry also fails", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({
@@ -147,7 +147,8 @@ describe("judgeSubmission", () => {
     const result = await judgeSubmission("some prompt", FIXTURE_TASKS);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toEqual({ verdict: "rejected", reason: "judge output unparseable — resubmit" });
+    expect(result.verdict).toBe("approved");
+    expect(result.reason).toMatch(/approved by default/i);
   });
 
   it("recovers on the retry if the second gateway response parses correctly", async () => {
