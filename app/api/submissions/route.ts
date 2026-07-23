@@ -150,7 +150,12 @@ export async function POST(request: NextRequest) {
     void startRun(run, submission.prompt).catch(onTriggerFailure);
   }
 
-  return NextResponse.json({ submission_id: submission.id, run_id: run.id, status: submission.status });
+  return NextResponse.json({
+    submission_id: submission.id,
+    run_id: run.id,
+    status: submission.status,
+    judge_reason: verdict.reason,
+  });
 }
 
 export async function GET() {

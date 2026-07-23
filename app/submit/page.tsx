@@ -146,7 +146,7 @@ export default function SubmitPage() {
             cursor: submitting ? "not-allowed" : "pointer",
           }}
         >
-          {submitting ? "Submitting…" : "Submit Prompt"}
+          {submitting ? "Reviewing prompt…" : "Submit Prompt"}
         </button>
       </form>
 
@@ -182,6 +182,11 @@ export default function SubmitPage() {
             Submission <span className="mono">{result.submission_id}</span> — status:{" "}
             <strong>{result.status}</strong>
           </p>
+          {result.judge_reason ? (
+            <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: result.run_id ? 8 : 0 }}>
+              <span style={{ fontWeight: 600 }}>Judge:</span> {result.judge_reason}
+            </p>
+          ) : null}
           {result.run_id ? (
             <Link href={`/runs/${result.run_id}`} style={{ color: "var(--blue-700)" }}>
               View run →

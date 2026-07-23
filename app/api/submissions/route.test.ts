@@ -140,6 +140,8 @@ describe("POST /api/submissions", () => {
       expect(body.status).toBe("queued");
       expect(typeof body.submission_id).toBe("string");
       expect(typeof body.run_id).toBe("string");
+      // The judge's feedback is returned on approval too, so the submitter sees it.
+      expect(body.judge_reason).toBe("looks fair");
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
       expect(submission?.status).toBe("queued");
