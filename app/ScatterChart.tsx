@@ -1,18 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { formatUsd, scatterDotColor } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
+import { modelColor, modelLabel } from "@/lib/models";
 
 export interface ScatterItem {
   runId: string;
   cx: number;
   cy: number;
   agentName: string;
+  model: string;
   tasksPassed: number;
   totalTasks: number;
   totalCostUsd: number;
   isBaseline: boolean;
-  isLeader: boolean;
 }
 
 interface Props {
@@ -32,7 +33,8 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
   const plotRight = width - padding;
   const plotTop = padding;
   const plotBottom = height - padding;
-  const yTicks = [0, 2, 4, 6, 8, 10];
+  const yStep = yMax > 10 ? 4 : 2;
+  const yTicks = Array.from({ length: Math.floor(yMax / yStep) + 1 }, (_, i) => i * yStep);
   const xTicks = [0, 0.25, 0.5, 0.75, 1];
   const hoveredItem = items.find((i) => i.runId === hovered) ?? null;
 
@@ -94,13 +96,13 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
         className="label"
         transform={`rotate(-90 18 ${plotTop + (plotBottom - plotTop) / 2})`}
       >
-        Tasks passed (of 10)
+        Tasks passed (of {yMax})
       </text>
 
       {/* Dots */}
       {items.map((item) => {
         const active = item.runId === hovered;
-        const color = item.isBaseline ? "var(--gray-1000)" : scatterDotColor(item.isLeader);
+        const color = modelColor(item.model);
         return (
           <a key={item.runId} href={`/runs/${item.runId}`}>
             {/* Invisible larger hit area so hover/click is easy on small dots */}
@@ -112,13 +114,14 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
               onMouseEnter={() => setHovered(item.runId)}
               onMouseLeave={() => setHovered((h) => (h === item.runId ? null : h))}
             />
+            {/* Fill = model color (per-model comparison); baseline = dashed ring. */}
             {item.isBaseline ? (
               <circle
                 cx={item.cx}
                 cy={item.cy}
                 r={active ? 8 : 6}
                 fill="var(--background-100)"
-                stroke="var(--gray-1000)"
+                stroke={color}
                 strokeWidth={2}
                 strokeDasharray="2 2"
                 pointerEvents="none"
@@ -138,7 +141,7 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
 
 function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; plotTop: number }) {
   const line1 = item.agentName + (item.isBaseline ? "  (baseline)" : "");
-  const line2 = `${item.tasksPassed}/${item.totalTasks} tasks · ${formatUsd(item.totalCostUsd)}`;
+  const line2 = `${modelLabel(item.model)} · ${item.tasksPassed}/${item.totalTasks} · ${formatUsd(item.totalCostUsd)}`;
   const boxW = Math.max(line1.length, line2.length) * 7.2 + 24;
   const boxH = 44;
   // Prefer above-right of the dot; flip left if it would overflow the right edge.

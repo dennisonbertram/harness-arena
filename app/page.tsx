@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
-import { formatUsd } from "@/lib/format";
+import { formatUsd, scaleScatterPoints } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, type TaskModelBreakdown } from "@/lib/aggregate";
 import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
-import { modelLabel, modelColor, MODEL_LABELS } from "@/lib/models";
+import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { RerunButton } from "./RerunButton";
+import { ScatterChart, type ScatterItem } from "./ScatterChart";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 
@@ -24,6 +25,38 @@ export default async function LeaderboardPage() {
   const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
   const completedRuns = runs.filter((r) => r.status === "completed" && r.tasks_passed !== undefined).length;
   const pendingRuns = runs.filter((r) => r.status === "running" || r.status === "queued").length;
+
+  // Cost-vs-tasks scatter: one dot per completed run, colored by model.
+  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  const chartRuns = runs.filter(
+    (r) => r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined,
+  );
+  const scale = scaleScatterPoints(
+    chartRuns.map((r) => ({
+      runId: r.id,
+      totalCostUsd: r.total_cost_usd!,
+      tasksPassed: r.tasks_passed!,
+      model: runModel(r.model ?? submissionById.get(r.submission_id)?.model),
+    })),
+    { width: 960, height: 400, padding: 52, yMax: totalTasks },
+  );
+  const runById = new Map(chartRuns.map((r) => [r.id, r]));
+  const scatterItems: ScatterItem[] = scale.points.map((p) => {
+    const run = runById.get(p.runId)!;
+    const sub = submissionById.get(run.submission_id);
+    return {
+      runId: p.runId,
+      cx: p.cx,
+      cy: p.cy,
+      agentName: sub?.agent_name ?? "unknown",
+      model: p.model,
+      tasksPassed: p.tasksPassed,
+      totalTasks,
+      totalCostUsd: p.totalCostUsd,
+      isBaseline: (sub?.prompt ?? "") === "",
+    };
+  });
+  const chartModels = Array.from(new Set(scatterItems.map((i) => i.model)));
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -151,6 +184,31 @@ export default async function LeaderboardPage() {
           </section>
 
           {taskOverview.length > 0 && <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />}
+
+          {scatterItems.length > 0 && (
+            <section style={{ marginTop: 48, overflowX: "auto" }}>
+              <h2 className="label" style={{ marginBottom: 8 }}>
+                Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per run, colored by model</span>
+              </h2>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12, fontSize: 12 }}>
+                {chartModels.map((m) => (
+                  <span key={m}>
+                    <span style={{ color: modelColor(m), marginRight: 5 }}>●</span>
+                    {modelLabel(m)}
+                  </span>
+                ))}
+                <span style={{ color: "var(--gray-700)" }}>◌ dashed = baseline (vanilla prompt)</span>
+              </div>
+              <ScatterChart
+                items={scatterItems}
+                width={scale.width}
+                height={scale.height}
+                padding={scale.padding}
+                xMax={scale.xMax}
+                yMax={scale.yMax}
+              />
+            </section>
+          )}
         </>
       )}
     </div>
