@@ -255,7 +255,7 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
         ))}
       </div>
       <p style={{ fontSize: 11, color: "var(--gray-700)", marginTop: 0, marginBottom: 14 }}>
-        Fainter bars = fewer runs, so less certain — a single 100% (1/1) is weaker evidence than a solid 80% (8/10).
+        Every submission runs 5×. Fainter bars = fewer than 5 runs, so less certain — a single 100% (1/1) is weaker evidence than a solid 80% (8/10).
       </p>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <tbody>
@@ -268,10 +268,13 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   {t.perModel.map((m) => {
                     // Sample-size confidence: a lone run is weak evidence, so fade
-                    // its bar. Full opacity by ~8 runs. Bar LENGTH stays = pass
-                    // rate (matches the % text); opacity carries how much to trust
-                    // it, so 100% (1/1) reads as tentative next to a solid 80% (8/10).
-                    const conf = Math.min(1, m.attempts / 8);
+                    // its bar. Submissions now run 5x, so full opacity at n>=5;
+                    // historical rows (n=1, n=10, …) and resubmission accumulation
+                    // keep n non-uniform, so the fade still earns its place. Bar
+                    // LENGTH stays = pass rate (matches the % text); opacity carries
+                    // how much to trust it, so 100% (1/1) reads as tentative next to
+                    // a solid 80% (8/10).
+                    const conf = Math.min(1, m.attempts / 5);
                     const barOpacity = 0.28 + 0.72 * conf;
                     return (
                       <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>

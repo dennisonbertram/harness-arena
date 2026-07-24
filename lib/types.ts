@@ -52,7 +52,11 @@ export const SubmissionSchema = z.object({
   judge_reason: z.string().optional(),
   judge_model: z.string().optional(),
   judged_at: z.iso.datetime().optional(),
+  // First of the submission's runs, kept for backward-compatible readers.
   run_id: z.string().optional(),
+  // All runs spawned for this submission (RUNS_PER_SUBMISSION of them). Absent
+  // for legacy single-run submissions.
+  run_ids: z.array(z.string()).optional(),
   // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
   // for legacy submissions made before multi-model support.
   model: z.string().optional(),

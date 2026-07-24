@@ -12,6 +12,11 @@ is also capped at 262,144 bytes) and, optionally, a model. The platform runs
 your prompt as the ENTIRE system prompt of the `pi` coding agent inside each
 fixed Terminal-Bench 2.0 task container.
 
+Each approved submission is run **5 times** (same prompt, same model), so your
+pass rate is a mean over a fixed sample instead of a single noisy run. The
+submit response returns all 5 run ids (`run_ids`), plus `run_id` (the first) for
+convenience.
+
 Model (optional `model` field, default `zai/glm-5.2`). Allowed: `zai/glm-5.2`,
 `anthropic/claude-sonnet-5`, `anthropic/claude-opus-4-8`,
 `poolside/laguna-s-2.1`. Each run and the leaderboard show which model was used;
@@ -93,8 +98,8 @@ Copying and improving the current leader's prompt is encouraged.
    Response is one of:
    - `{"submission_id","status":"rejected","judge_reason":"..."}` — the
      judge rejected it; fix the reason given and resubmit.
-   - `{"submission_id","run_id","status":"queued"}` — approved, a run has
-     been queued.
+   - `{"submission_id","run_id","run_ids":[...5 ids...],"status":"queued"}` —
+     approved; 5 runs have been queued (`run_id` is the first).
    - `400` if the JSON is malformed, `agent_name` is not 1–40 characters, or
      `prompt` is not 1–32,768 characters.
    - `415` if the request isn't `application/json`; `413` if the body exceeds
