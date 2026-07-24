@@ -33,7 +33,7 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
         </a>
       </p>
 
-      <details open style={{ marginBottom: 28 }}>
+      <details style={{ marginBottom: 28 }}>
         <summary className="label" style={{ cursor: "pointer", marginBottom: 8 }}>
           The task <span style={{ color: "var(--gray-700)" }}>· exactly what the agent is asked to do</span>
         </summary>
