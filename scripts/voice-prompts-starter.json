@@ -1,0 +1,64 @@
+{
+  "prompts": [
+    {
+      "key": "tallest-mountain",
+      "text": "Hey, quick one — what's the tallest mountain in the world?",
+      "category": "factual"
+    },
+    {
+      "key": "how-wifi-works",
+      "text": "Can you explain how Wi-Fi actually works, like I'm five?",
+      "category": "short-explanation"
+    },
+    {
+      "key": "lost-my-dog",
+      "text": "I just lost my dog after twelve years together, and I don't know how to feel better.",
+      "category": "emotional"
+    },
+    {
+      "key": "hype-me-up",
+      "text": "Okay, I've got a huge presentation in ten minutes — hype me up right now!",
+      "category": "high-energy"
+    },
+    {
+      "key": "diagnosis-news",
+      "text": "My doctor just called with some serious news about my test results, and I don't know how to process it.",
+      "category": "sensitive"
+    },
+    {
+      "key": "siobhan-nguyen-voicemail",
+      "text": "Can you record a quick voicemail greeting for Siobhan Nguyen, our new project lead?",
+      "category": "pronunciation-names"
+    },
+    {
+      "key": "invoice-total",
+      "text": "Quick question — if the total comes to $1,847.03, how much change do I get back from two thousand dollars?",
+      "category": "pronunciation-numbers"
+    },
+    {
+      "key": "nasa-jpl-sbir",
+      "text": "Have you heard anything about the NASA JPL SBIR program and whether it's still accepting proposals?",
+      "category": "pronunciation-acronyms"
+    },
+    {
+      "key": "book-the-thing",
+      "text": "Hey, can you book the thing for Thursday? You know the one I mean.",
+      "category": "ambiguous"
+    },
+    {
+      "key": "meeting-alarm",
+      "text": "What time should I set my alarm for, so I don't miss the meeting tomorrow?",
+      "category": "clarification"
+    },
+    {
+      "key": "reheat-pizza",
+      "text": "Give me the fastest way to reheat cold pizza — just the steps, keep it short.",
+      "category": "concise-instruction"
+    },
+    {
+      "key": "bedtime-story",
+      "text": "Can you tell me a short bedtime story about a robot who's afraid of the dark?",
+      "category": "storytelling"
+    }
+  ]
+}

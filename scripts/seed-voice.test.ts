@@ -192,6 +192,18 @@ describe("assembleManifest", () => {
     expect(counts.responses).toEqual({ reused: 0, minted: 1, reminted: 0 });
   });
 
+  it("carries a response's transcript through to the output manifest verbatim, and omits the key when absent", () => {
+    const input = validInput();
+    (input.responses[0] as { transcript?: string }).transcript = "Hello there, how can I help?";
+    // responses[1] has no transcript field -- must not appear in the written JSON at all.
+
+    const { manifest } = assembleManifest(input, null);
+    const serialized = JSON.parse(JSON.stringify(manifest));
+
+    expect(serialized.responses[0].transcript).toBe("Hello there, how can I help?");
+    expect(serialized.responses[1]).not.toHaveProperty("transcript");
+  });
+
   it("fails input validation before assembling anything, with a clear error", () => {
     const input = validInput();
     input.responses.push({ prompt: "prompt-1", model: "not-a-model", file: "/fixtures/x.wav" });

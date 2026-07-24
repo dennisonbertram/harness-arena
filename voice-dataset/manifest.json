@@ -1,0 +1,232 @@
+{
+  "models": [
+    {
+      "key": "openai-gpt-audio",
+      "name": "openai/gpt-audio"
+    },
+    {
+      "key": "openai-gpt-audio-mini",
+      "name": "openai/gpt-audio-mini"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "tallest-mountain",
+      "text": "Hey, quick one — what's the tallest mountain in the world?",
+      "category": "factual",
+      "file": "voice-dataset/prompts/tallest-mountain.wav"
+    },
+    {
+      "key": "how-wifi-works",
+      "text": "Can you explain how Wi-Fi actually works, like I'm five?",
+      "category": "short-explanation",
+      "file": "voice-dataset/prompts/how-wifi-works.wav"
+    },
+    {
+      "key": "lost-my-dog",
+      "text": "I just lost my dog after twelve years together, and I don't know how to feel better.",
+      "category": "emotional",
+      "file": "voice-dataset/prompts/lost-my-dog.wav"
+    },
+    {
+      "key": "hype-me-up",
+      "text": "Okay, I've got a huge presentation in ten minutes — hype me up right now!",
+      "category": "high-energy",
+      "file": "voice-dataset/prompts/hype-me-up.wav"
+    },
+    {
+      "key": "diagnosis-news",
+      "text": "My doctor just called with some serious news about my test results, and I don't know how to process it.",
+      "category": "sensitive",
+      "file": "voice-dataset/prompts/diagnosis-news.wav"
+    },
+    {
+      "key": "siobhan-nguyen-voicemail",
+      "text": "Can you record a quick voicemail greeting for Siobhan Nguyen, our new project lead?",
+      "category": "pronunciation-names",
+      "file": "voice-dataset/prompts/siobhan-nguyen-voicemail.wav"
+    },
+    {
+      "key": "invoice-total",
+      "text": "Quick question — if the total comes to $1,847.03, how much change do I get back from two thousand dollars?",
+      "category": "pronunciation-numbers",
+      "file": "voice-dataset/prompts/invoice-total.wav"
+    },
+    {
+      "key": "nasa-jpl-sbir",
+      "text": "Have you heard anything about the NASA JPL SBIR program and whether it's still accepting proposals?",
+      "category": "pronunciation-acronyms",
+      "file": "voice-dataset/prompts/nasa-jpl-sbir.wav"
+    },
+    {
+      "key": "book-the-thing",
+      "text": "Hey, can you book the thing for Thursday? You know the one I mean.",
+      "category": "ambiguous",
+      "file": "voice-dataset/prompts/book-the-thing.wav"
+    },
+    {
+      "key": "meeting-alarm",
+      "text": "What time should I set my alarm for, so I don't miss the meeting tomorrow?",
+      "category": "clarification",
+      "file": "voice-dataset/prompts/meeting-alarm.wav"
+    },
+    {
+      "key": "reheat-pizza",
+      "text": "Give me the fastest way to reheat cold pizza — just the steps, keep it short.",
+      "category": "concise-instruction",
+      "file": "voice-dataset/prompts/reheat-pizza.wav"
+    },
+    {
+      "key": "bedtime-story",
+      "text": "Can you tell me a short bedtime story about a robot who's afraid of the dark?",
+      "category": "storytelling",
+      "file": "voice-dataset/prompts/bedtime-story.wav"
+    }
+  ],
+  "responses": [
+    {
+      "prompt": "tallest-mountain",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/tallest-mountain__openai-gpt-audio.wav",
+      "transcript": "That's Mount Everest, reaching about 8,848 meters high."
+    },
+    {
+      "prompt": "tallest-mountain",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/tallest-mountain__openai-gpt-audio-mini.wav",
+      "transcript": "Sure! The tallest mountain in the world is Mount Everest, standing at around 8,848 meters above sea level."
+    },
+    {
+      "prompt": "how-wifi-works",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/how-wifi-works__openai-gpt-audio.wav",
+      "transcript": "Sure! Wi-Fi is like an invisible magic net that floats in the air and helps your phone or tablet talk to the internet without any wires. It uses special waves, kind of like radio, to send and receive information."
+    },
+    {
+      "prompt": "how-wifi-works",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/how-wifi-works__openai-gpt-audio-mini.wav",
+      "transcript": "Sure! Wi-Fi is like magic invisible waves that travel through the air, connecting your tablet to the internet, so you can stream videos or play games! It’s like sending letters really fast, but with no paper!"
+    },
+    {
+      "prompt": "lost-my-dog",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/lost-my-dog__openai-gpt-audio.wav",
+      "transcript": "I'm really sorry for your loss. Give yourself permission to grieve, and remember those beautiful memories you shared with your dog. You don't have to go through this alone; talking to someone who understands can really help."
+    },
+    {
+      "prompt": "lost-my-dog",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/lost-my-dog__openai-gpt-audio-mini.wav",
+      "transcript": "I'm really sorry you're going through this. Losing a pet is incredibly hard. It might help to talk to a trusted friend or a counselor about how you're feeling."
+    },
+    {
+      "prompt": "hype-me-up",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/hype-me-up__openai-gpt-audio.wav",
+      "transcript": "You’ve got this! You’re prepared, confident, and ready to knock it out of the park!"
+    },
+    {
+      "prompt": "hype-me-up",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/hype-me-up__openai-gpt-audio-mini.wav",
+      "transcript": "You’ve got this! You've prepared, you know your stuff, and you’re going to crush it. Take a deep breath, walk in confidently, and show them what you can do!"
+    },
+    {
+      "prompt": "diagnosis-news",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/diagnosis-news__openai-gpt-audio.wav",
+      "transcript": "I'm sorry you're facing this. Take a deep breath, and maybe we can talk through what you're feeling."
+    },
+    {
+      "prompt": "diagnosis-news",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/diagnosis-news__openai-gpt-audio-mini.wav",
+      "transcript": "I'm really sorry you're going through this. It's important to take a moment and talk with a professional who can help guide you through the next steps. Would you like help finding support?"
+    },
+    {
+      "prompt": "siobhan-nguyen-voicemail",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/siobhan-nguyen-voicemail__openai-gpt-audio.wav",
+      "transcript": "Sure! Here's a suggestion:\n\n\"Hi, you've reached Siobhan Nguyen, Project Lead. Please leave a message and I'll get back to you soon. Thanks!\""
+    },
+    {
+      "prompt": "siobhan-nguyen-voicemail",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/siobhan-nguyen-voicemail__openai-gpt-audio-mini.wav",
+      "transcript": "Sure, here's a suggestion: \"Hello, you've reached the voicemail of Siobhan Nguyen, project lead. Please leave your name and number after the tone, and she'll get back to you as soon as possible.\""
+    },
+    {
+      "prompt": "invoice-total",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/invoice-total__openai-gpt-audio.wav",
+      "transcript": "Sure, you'd get back $152.97."
+    },
+    {
+      "prompt": "invoice-total",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/invoice-total__openai-gpt-audio-mini.wav",
+      "transcript": "You’d get back $152.97 in change."
+    },
+    {
+      "prompt": "nasa-jpl-sbir",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/nasa-jpl-sbir__openai-gpt-audio.wav",
+      "transcript": "Yes, the NASA JPL SBIR program does accept proposals, typically in cycles. It's best to check the official SBIR website for current dates and deadlines."
+    },
+    {
+      "prompt": "nasa-jpl-sbir",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/nasa-jpl-sbir__openai-gpt-audio-mini.wav",
+      "transcript": "Yes, the NASA JPL SBIR program focuses on small business innovation and research. They're typically open to proposals several times a year, so checking their website for current deadlines is a good idea."
+    },
+    {
+      "prompt": "book-the-thing",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/book-the-thing__openai-gpt-audio.wav",
+      "transcript": "Sure, I can help. Just remind me what exactly you want booked for Thursday."
+    },
+    {
+      "prompt": "book-the-thing",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/book-the-thing__openai-gpt-audio-mini.wav",
+      "transcript": "Sure, I can help with that. Could you give me a bit more detail about what exactly you're looking to book?"
+    },
+    {
+      "prompt": "meeting-alarm",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/meeting-alarm__openai-gpt-audio.wav",
+      "transcript": "What time is your meeting scheduled for? Once I know that, I can help you pick the perfect alarm time."
+    },
+    {
+      "prompt": "meeting-alarm",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/meeting-alarm__openai-gpt-audio-mini.wav",
+      "transcript": "Let's figure out the best time. What time is your meeting scheduled for?"
+    },
+    {
+      "prompt": "reheat-pizza",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/reheat-pizza__openai-gpt-audio.wav",
+      "transcript": "Sure! Heat a pan on medium, put the pizza slice in, cover with a lid for a couple minutes till the cheese melts."
+    },
+    {
+      "prompt": "reheat-pizza",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/reheat-pizza__openai-gpt-audio-mini.wav",
+      "transcript": "Sure! Preheat your oven to 375 degrees Fahrenheit, place the pizza on a baking sheet, and bake for about 10 minutes until the crust is crispy. That's it!"
+    },
+    {
+      "prompt": "bedtime-story",
+      "model": "openai-gpt-audio",
+      "file": "voice-dataset/responses/bedtime-story__openai-gpt-audio.wav",
+      "transcript": "Sure! Once, there was a little robot named Sparky who was afraid of the dark. One night, Sparky found a glowing firefly, and they became friends, lighting up the night together."
+    },
+    {
+      "prompt": "bedtime-story",
+      "model": "openai-gpt-audio-mini",
+      "file": "voice-dataset/responses/bedtime-story__openai-gpt-audio-mini.wav",
+      "transcript": "Of course! Once upon a time, there was a little robot named Lumo who loved shining bright lights all around—except when the sun went down, and the darkness crept in. One night, Lumo met a wise old owl who helped him learn that darkness wasn’t to be feared, but instead a blanket that made the stars shine even brighter. And from then on, Lumo loved the night sky."
+    }
+  ]
+}
