@@ -24,8 +24,10 @@ describe("VoiceJudgmentSchema", () => {
   });
 
   it("parses a valid judgment without optional reason/free_text", () => {
-    const { reason: _reason, free_text: _freeText, ...rest } = validJudgment();
-    const result = VoiceJudgmentSchema.safeParse(rest);
+    const judgment: Record<string, unknown> = { ...validJudgment() };
+    delete judgment.reason;
+    delete judgment.free_text;
+    const result = VoiceJudgmentSchema.safeParse(judgment);
     expect(result.success).toBe(true);
   });
 

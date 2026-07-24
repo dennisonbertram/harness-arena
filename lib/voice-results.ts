@@ -85,8 +85,8 @@ export function aggregate(
 
     if (j.outcome === "tie") entry.ties++;
     else if (j.outcome === "both_bad") entry.bothBad++;
-    else if (j.outcome === "a") aIsX ? entry.xWins++ : entry.yWins++;
-    else if (j.outcome === "b") aIsX ? entry.yWins++ : entry.xWins++;
+    else if (j.outcome === "a") entry[aIsX ? "xWins" : "yWins"]++;
+    else if (j.outcome === "b") entry[aIsX ? "yWins" : "xWins"]++;
   }
 
   const pairs: VoicePairResult[] = [...stats.entries()]
