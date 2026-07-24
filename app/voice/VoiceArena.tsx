@@ -228,7 +228,9 @@ export default function VoiceArena() {
   return (
     <div style={panelStyle}>
       <div aria-live="polite" style={srOnlyStyle}>
-        {`Comparison ${comparison.progress.judged + 1}`}
+        {/* Must match the visible heading — outside single-batch sessions a
+            cumulative count would diverge from what sighted users see. */}
+        {`Comparison ${comparison.progress.batch.position} of ${comparison.progress.batch.size}`}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
         <h2 ref={headingRef} tabIndex={-1} style={{ fontSize: 18, fontWeight: 600, outline: "none" }}>
@@ -339,7 +341,16 @@ export default function VoiceArena() {
               </button>
             </div>
           ) : (
-            <button type="button" onClick={handleSubmit} disabled={!readyToSubmit || submitting} style={primaryButtonStyle}>
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={!readyToSubmit || submitting}
+              style={
+                !readyToSubmit || submitting
+                  ? { ...primaryButtonStyle, opacity: 0.45, cursor: "not-allowed" }
+                  : primaryButtonStyle
+              }
+            >
               {submitting ? "Submitting…" : "Submit"}
             </button>
           )}

@@ -67,10 +67,13 @@ export default async function VoiceResultsPage() {
                     Pair
                   </th>
                   <th className="label" style={numCellStyle}>
-                    X wins
+                    n
                   </th>
                   <th className="label" style={numCellStyle}>
-                    Y wins
+                    Left wins
+                  </th>
+                  <th className="label" style={numCellStyle}>
+                    Right wins
                   </th>
                   <th className="label" style={numCellStyle}>
                     Tie
@@ -78,15 +81,15 @@ export default async function VoiceResultsPage() {
                   <th className="label" style={numCellStyle}>
                     Both bad
                   </th>
-                  <th className="label" style={numCellStyle}>
-                    n
-                  </th>
                 </tr>
               </thead>
               <tbody>
                 {pairs.map((p) => (
                   <tr key={p.pairKey} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>{p.pairKey}</td>
+                    <td style={numCellStyle} className="tabular-nums">
+                      {p.n}
+                    </td>
                     <td style={numCellStyle} className="tabular-nums">
                       {p.xWins} ({(p.xWinRate * 100).toFixed(0)}%)
                     </td>
@@ -99,15 +102,12 @@ export default async function VoiceResultsPage() {
                     <td style={numCellStyle} className="tabular-nums">
                       {p.bothBad} ({(p.bothBadRate * 100).toFixed(0)}%)
                     </td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.n}
-                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
             <p style={{ fontSize: 12, color: "var(--gray-700)", marginTop: 12 }}>
-              &quot;X vs Y&quot; pair names are alphabetical — X wins is the left model, Y wins is the right.
+              Percentages are shares of n and are rounded independently, so a row may not sum to exactly 100%.
             </p>
           </section>
         </>
