@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
+import { modelColor, modelLabel } from "@/lib/models";
 import { formatUsd } from "@/lib/format";
 import { reconstructRunProgress } from "@/lib/run-progress";
 import { PendingAutoRefresh } from "./PendingAutoRefresh";
@@ -60,6 +61,7 @@ export default async function PendingRunsPage() {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                 <th className="label" style={cell}>Agent</th>
+                <th className="label" style={cell}>Model</th>
                 <th className="label" style={cell}>Status</th>
                 <th className="label" style={cell}>Passed so far</th>
                 <th className="label" style={cell}>Progress</th>
@@ -73,6 +75,20 @@ export default async function PendingRunsPage() {
                   <td style={cell}>
                     <Link href={`/runs/${run.id}`}>{agentName}</Link>
                     {isBaseline && <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>}
+                  </td>
+                  <td style={cell}>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        background: modelColor(run.model),
+                        marginRight: 6,
+                        verticalAlign: "middle",
+                      }}
+                    />
+                    <span className="mono" style={{ verticalAlign: "middle" }}>{modelLabel(run.model)}</span>
                   </td>
                   <td style={cell}>
                     <span style={{ color: run.status === "running" ? "var(--blue-700)" : "var(--gray-700)" }}>
