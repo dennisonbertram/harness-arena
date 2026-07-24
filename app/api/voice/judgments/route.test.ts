@@ -117,6 +117,19 @@ describe("POST /api/voice/judgments", () => {
     });
   });
 
+  describe("schema validation", () => {
+    it("returns 400 with 'invalid judgment' for a schema-invalid outcome and writes nothing", async () => {
+      const response = await POST(
+        postRequest(validPayload({ outcome: "c" }), { evaluatorId, ip: "3.3.3.5" }),
+      );
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("invalid judgment");
+      expect(await storedJudgmentCount()).toBe(0);
+    });
+  });
+
   describe("business validation", () => {
     it("returns 400 when response IDs come from different prompts", async () => {
       const response = await POST(

@@ -110,8 +110,15 @@ export class BlobVoiceStorage implements VoiceStorage {
       return { created: true };
     } catch (err) {
       if (isAlreadyExistsError(err)) return { created: false };
-      await withRetry(write);
-      return { created: true };
+      try {
+        await withRetry(write);
+        return { created: true };
+      } catch (err2) {
+        // The first attempt may have transiently failed after actually writing
+        // (or another writer beat us to it) — retries then see a real conflict.
+        if (isAlreadyExistsError(err2)) return { created: false };
+        throw err2;
+      }
     }
   }
 

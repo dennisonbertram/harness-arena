@@ -28,26 +28,38 @@ function pairKeyFor(nameX: string, nameY: string): string {
   return `${nameX} vs ${nameY}`;
 }
 
+// Model IDs are UUIDs, which never contain "|" — safe as a join separator.
+function idPairKey(idA: string, idB: string): string {
+  return idA <= idB ? `${idA}|${idB}` : `${idB}|${idA}`;
+}
+
 interface PairStats {
-  modelX: string;
-  modelY: string;
-  xWins: number;
-  yWins: number;
+  // `a`/`b` are the pair's two models ordered by ID (a.id <= b.id) — this is
+  // the single canonical orientation used to map judgment outcomes onto
+  // winsA/winsB. It has nothing to do with display order.
+  a: VoiceModel;
+  b: VoiceModel;
+  winsA: number;
+  winsB: number;
   ties: number;
   bothBad: number;
 }
 
-function emptyStats(x: VoiceModel, y: VoiceModel): PairStats {
-  return { modelX: x.name, modelY: y.name, xWins: 0, yWins: 0, ties: 0, bothBad: 0 };
+function emptyStats(a: VoiceModel, b: VoiceModel): PairStats {
+  return { a, b, winsA: 0, winsB: 0, ties: 0, bothBad: 0 };
 }
 
 /**
  * Pure pairwise-preference aggregation for the results page. Resolves each
- * judgment's response IDs to models via the manifest, canonicalizes the pair
- * alphabetically by model name, and maps the judgment's a/b outcome onto a
- * win for whichever canonical side (X or Y) that display-order slot actually
- * held. Every model pair in the manifest is enumerated up front so a pair
- * with no judgments still appears (n=0) rather than disappearing.
+ * judgment's response IDs to models via the manifest and keys each pair by
+ * its two model IDs sorted lexically (IDs are unique and stable, unlike
+ * display names) so every judgment's canonicalization matches the
+ * pre-enumerated pair exactly — there is no orientation mismatch to miss.
+ * Win counts are tallied against that ID-based orientation, then display
+ * order (modelX/modelY, and the "X vs Y" pairKey) is derived separately by
+ * name, purely for rendering. Every model pair in the manifest is enumerated
+ * up front so a pair with no judgments still appears (n=0) rather than
+ * disappearing.
  */
 export function aggregate(
   manifest: VoiceManifest,
@@ -57,11 +69,12 @@ export function aggregate(
   const modelById = new Map(manifest.models.map((m) => [m.id, m]));
   const responseById = new Map(manifest.responses.map((r) => [r.id, r]));
 
-  const models = [...manifest.models].sort((a, b) => a.name.localeCompare(b.name));
+  const models = manifest.models;
   const stats = new Map<string, PairStats>();
   for (let i = 0; i < models.length; i++) {
     for (let j = i + 1; j < models.length; j++) {
-      stats.set(pairKeyFor(models[i].name, models[j].name), emptyStats(models[i], models[j]));
+      const [a, b] = models[i].id <= models[j].id ? [models[i], models[j]] : [models[j], models[i]];
+      stats.set(idPairKey(a.id, b.id), emptyStats(a, b));
     }
   }
 
@@ -76,33 +89,40 @@ export function aggregate(
       continue;
     }
 
-    const aIsX = modelA.name <= modelB.name;
-    const x = aIsX ? modelA : modelB;
-    const y = aIsX ? modelB : modelA;
-    const key = pairKeyFor(x.name, y.name);
-    const entry = stats.get(key) ?? emptyStats(x, y);
-    stats.set(key, entry);
+    const entry = stats.get(idPairKey(modelA.id, modelB.id));
+    if (!entry) {
+      throw new Error(
+        `voice-results: judgment references a model pair not in the manifest (${modelA.id}, ${modelB.id})`,
+      );
+    }
+    const aIsCanonicalA = modelA.id === entry.a.id;
 
     if (j.outcome === "tie") entry.ties++;
     else if (j.outcome === "both_bad") entry.bothBad++;
-    else if (j.outcome === "a") entry[aIsX ? "xWins" : "yWins"]++;
-    else if (j.outcome === "b") entry[aIsX ? "yWins" : "xWins"]++;
+    else if (j.outcome === "a") entry[aIsCanonicalA ? "winsA" : "winsB"]++;
+    else if (j.outcome === "b") entry[aIsCanonicalA ? "winsB" : "winsA"]++;
   }
 
-  const pairs: VoicePairResult[] = [...stats.entries()]
-    .map(([pairKey, s]) => {
-      const n = s.xWins + s.yWins + s.ties + s.bothBad;
+  const pairs: VoicePairResult[] = [...stats.values()]
+    .map((s) => {
+      const nameCmp = s.a.name.localeCompare(s.b.name);
+      const xFirst = nameCmp < 0 || (nameCmp === 0 && s.a.id <= s.b.id);
+      const modelX = xFirst ? s.a : s.b;
+      const modelY = xFirst ? s.b : s.a;
+      const xWins = xFirst ? s.winsA : s.winsB;
+      const yWins = xFirst ? s.winsB : s.winsA;
+      const n = xWins + yWins + s.ties + s.bothBad;
       return {
-        pairKey,
-        modelX: s.modelX,
-        modelY: s.modelY,
+        pairKey: pairKeyFor(modelX.name, modelY.name),
+        modelX: modelX.name,
+        modelY: modelY.name,
         n,
-        xWins: s.xWins,
-        yWins: s.yWins,
+        xWins,
+        yWins,
         ties: s.ties,
         bothBad: s.bothBad,
-        xWinRate: n > 0 ? s.xWins / n : 0,
-        yWinRate: n > 0 ? s.yWins / n : 0,
+        xWinRate: n > 0 ? xWins / n : 0,
+        yWinRate: n > 0 ? yWins / n : 0,
         tieRate: n > 0 ? s.ties / n : 0,
         bothBadRate: n > 0 ? s.bothBad / n : 0,
       };

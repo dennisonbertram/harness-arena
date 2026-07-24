@@ -131,4 +131,67 @@ describe("aggregate", () => {
     expect(orphans).toBe(0);
     expect(pairs[0].n).toBe(0);
   });
+
+  it("collapses a mixed-case pair into exactly one row regardless of judgment display order", () => {
+    // "alpha" < "Beta" alphabetically (localeCompare), but "alpha" > "Beta" in
+    // code-unit order — the two canonicalization rules used to disagree and
+    // produce a duplicate row. Pairing is keyed by model ID now, so it can't.
+    const mixedCaseManifest = manifest(
+      [
+        { id: "m1", name: "alpha" },
+        { id: "m2", name: "Beta" },
+      ],
+      [
+        { id: "r1", model_id: "m1" },
+        { id: "r2", model_id: "m2" },
+      ],
+    );
+    const judgments: VoiceJudgment[] = [
+      judgment("r1", "r2", "a"), // A=alpha, B=Beta, "a" -> alpha win
+      judgment("r2", "r1", "b"), // A=Beta, B=alpha, "b" -> alpha win
+      judgment("r1", "r2", "b"), // A=alpha, B=Beta, "b" -> Beta win
+      judgment("r2", "r1", "a"), // A=Beta, B=alpha, "a" -> Beta win
+    ];
+
+    const { pairs } = aggregate(mixedCaseManifest, judgments, 0);
+
+    expect(pairs).toHaveLength(1);
+    const [pair] = pairs;
+    expect(pair.pairKey).toBe("alpha vs Beta");
+    expect(pair.modelX).toBe("alpha");
+    expect(pair.modelY).toBe("Beta");
+    expect(pair.n).toBe(4);
+    expect(pair.xWins).toBe(2); // alpha
+    expect(pair.yWins).toBe(2); // Beta
+  });
+
+  it("keeps two models with identical display names as distinct rows, n split per ID-pair", () => {
+    const duplicateNameManifest = manifest(
+      [
+        { id: "z1", name: "Zeta" },
+        { id: "e1", name: "Echo" },
+        { id: "e2", name: "Echo" },
+      ],
+      [
+        { id: "rz", model_id: "z1" },
+        { id: "re1", model_id: "e1" },
+        { id: "re2", model_id: "e2" },
+      ],
+    );
+    const judgments: VoiceJudgment[] = [
+      judgment("rz", "re1", "a"), // z1 vs e1: Zeta wins
+      judgment("rz", "re2", "a"), // z1 vs e2: Zeta wins
+      judgment("re2", "rz", "tie"), // z1 vs e2: tie
+    ];
+
+    const { pairs } = aggregate(duplicateNameManifest, judgments, 0);
+
+    // Three distinct ID-pairs enumerated, even though two of them render
+    // the same "Echo vs Zeta" text.
+    expect(pairs).toHaveLength(3);
+    const echoVsZeta = pairs.filter((p) => p.pairKey === "Echo vs Zeta");
+    expect(echoVsZeta).toHaveLength(2);
+    expect(echoVsZeta.map((p) => p.n).sort()).toEqual([1, 2]); // not merged into one n=3 row
+    expect(pairs.find((p) => p.pairKey === "Echo vs Echo")?.n).toBe(0);
+  });
 });

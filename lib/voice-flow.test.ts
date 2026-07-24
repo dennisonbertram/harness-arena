@@ -284,6 +284,45 @@ describe("voiceFlowReducer", () => {
     );
     expect(payload).not.toHaveProperty("evaluator_id");
   });
+
+  it("notSeeded transitions to the not_seeded phase, preserving excludeIds", () => {
+    const state = voiceFlowReducer({ ...initialVoiceFlowState, excludeIds: ["r1_r2"] }, { type: "notSeeded" });
+    expect(state).toEqual({ phase: "not_seeded", excludeIds: ["r1_r2"] });
+  });
+
+  it("allDone transitions to the done phase, carrying progress and preserving excludeIds", () => {
+    const progress = { judged: 8, total: 10, batch: { index: 1, size: 10, position: 9 } };
+    const state = voiceFlowReducer({ ...initialVoiceFlowState, excludeIds: ["r1_r2"] }, { type: "allDone", progress });
+    expect(state).toEqual({ phase: "done", excludeIds: ["r1_r2"], progress });
+  });
+
+  it("audioErrored sets audioError on the active comparison; clearAudioError clears it", () => {
+    let state: VoiceFlowState = voiceFlowReducer(initialVoiceFlowState, {
+      type: "loaded",
+      comparison: comparison(),
+      loadedAt: 0,
+    });
+    state = voiceFlowReducer(state, { type: "audioErrored", clip: "b" });
+    expect((state as ActiveFlowState).audioError).toBe("b");
+
+    state = voiceFlowReducer(state, { type: "clearAudioError" });
+    expect((state as ActiveFlowState).audioError).toBeUndefined();
+  });
+
+  it("audioErrored on a non-active (pending/not_seeded/done) state is a no-op", () => {
+    const pending: VoiceFlowState = { phase: "pending", excludeIds: [] };
+    expect(voiceFlowReducer(pending, { type: "audioErrored", clip: "a" })).toBe(pending);
+
+    const notSeeded: VoiceFlowState = { phase: "not_seeded", excludeIds: [] };
+    expect(voiceFlowReducer(notSeeded, { type: "audioErrored", clip: "a" })).toBe(notSeeded);
+
+    const done: VoiceFlowState = {
+      phase: "done",
+      excludeIds: [],
+      progress: { judged: 10, total: 10, batch: { index: 1, size: 10, position: 10 } },
+    };
+    expect(voiceFlowReducer(done, { type: "audioErrored", clip: "a" })).toBe(done);
+  });
 });
 
 describe("buildJudgmentPayload", () => {

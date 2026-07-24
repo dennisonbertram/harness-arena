@@ -50,6 +50,71 @@ describe("validateInput", () => {
     expect(() => validateInput(validInput())).not.toThrow();
   });
 
+  it("rejects a non-object input", () => {
+    expect(() => validateInput(null)).toThrow(/must be a JSON object/);
+    expect(() => validateInput("nope")).toThrow(/must be a JSON object/);
+  });
+
+  it("rejects an input missing the models/prompts/responses arrays", () => {
+    expect(() => validateInput({})).toThrow(/must have models\[\], prompts\[\], responses\[\] arrays/);
+  });
+
+  it("rejects a model entry missing a key", () => {
+    const input = validInput();
+    delete (input.models[0] as { key?: string }).key;
+
+    expect(() => validateInput(input)).toThrow(/model entry missing a string "key"/);
+  });
+
+  it("rejects a model entry missing a name", () => {
+    const input = validInput();
+    delete (input.models[0] as { name?: string }).name;
+
+    expect(() => validateInput(input)).toThrow(/model "model-alpha" missing a string "name"/);
+  });
+
+  it("rejects two models sharing a key", () => {
+    const input = validInput();
+    input.models[1].key = input.models[0].key;
+
+    expect(() => validateInput(input)).toThrow(/duplicate model key "model-alpha"/);
+  });
+
+  it("rejects two models sharing a display name, even with different keys", () => {
+    const input = validInput();
+    input.models[1].name = input.models[0].name;
+
+    expect(() => validateInput(input)).toThrow(/duplicate model name "Model Alpha"/);
+  });
+
+  it("rejects a prompt entry missing a key", () => {
+    const input = validInput();
+    delete (input.prompts[0] as { key?: string }).key;
+
+    expect(() => validateInput(input)).toThrow(/prompt entry missing a string "key"/);
+  });
+
+  it("rejects a prompt entry missing a file", () => {
+    const input = validInput();
+    delete (input.prompts[0] as { file?: string }).file;
+
+    expect(() => validateInput(input)).toThrow(/prompt "prompt-1" missing a string "file"/);
+  });
+
+  it("rejects two prompts sharing a key", () => {
+    const input = validInput();
+    input.prompts[1].key = input.prompts[0].key;
+
+    expect(() => validateInput(input)).toThrow(/duplicate prompt key "prompt-1"/);
+  });
+
+  it("rejects a response missing prompt/model/file", () => {
+    const input = validInput();
+    delete (input.responses[0] as { model?: string }).model;
+
+    expect(() => validateInput(input)).toThrow(/response\[0\] must have "prompt", "model", and "file" strings/);
+  });
+
   it("rejects a response referencing an unknown prompt key, before any upload", () => {
     const input = validInput();
     input.responses[0].prompt = "no-such-prompt";
@@ -123,8 +188,8 @@ describe("assembleManifest", () => {
     expect(manifest.responses[0].id).not.toBe(priorPrompt.id);
 
     expect(counts.models).toEqual({ reused: 1, minted: 0 });
-    expect(counts.prompts).toEqual({ reused: 1, minted: 0 });
-    expect(counts.responses).toEqual({ reused: 0, minted: 1 });
+    expect(counts.prompts).toEqual({ reused: 1, minted: 0, reminted: 0 });
+    expect(counts.responses).toEqual({ reused: 0, minted: 1, reminted: 0 });
   });
 
   it("fails input validation before assembling anything, with a clear error", () => {
@@ -132,5 +197,75 @@ describe("assembleManifest", () => {
     input.responses.push({ prompt: "prompt-1", model: "not-a-model", file: "/fixtures/x.wav" });
 
     expect(() => assembleManifest(input, null)).toThrow(/unknown model key "not-a-model"/);
+  });
+
+  describe("content-aware id reuse (audio_sha256)", () => {
+    const HASH_A = "a".repeat(64);
+    const HASH_B = "b".repeat(64);
+    const priorId = "22222222-2222-4222-8222-222222222222";
+
+    function priorManifestWithPrompt(audio_sha256?: string) {
+      return {
+        version: "1",
+        created_at: "2026-01-01T00:00:00.000Z",
+        models: [],
+        prompts: [
+          {
+            key: "prompt-1",
+            id: priorId,
+            audio_url: `voice/audio/prompts/${priorId}.wav`,
+            ...(audio_sha256 !== undefined ? { audio_sha256 } : {}),
+          },
+        ],
+        responses: [],
+      };
+    }
+
+    function inputWithPrompt(file: string) {
+      return { models: [], prompts: [{ key: "prompt-1", file }], responses: [] };
+    }
+
+    it("reuses the id when both the key and the audio hash match a prior entry", () => {
+      const hashesByFile = new Map([["/fixtures/prompt-1.wav", HASH_A]]);
+
+      const { manifest, counts } = assembleManifest(
+        inputWithPrompt("/fixtures/prompt-1.wav"),
+        priorManifestWithPrompt(HASH_A),
+        hashesByFile,
+      );
+
+      expect(manifest.prompts[0].id).toBe(priorId);
+      expect(manifest.prompts[0].audio_sha256).toBe(HASH_A);
+      expect(counts.prompts).toEqual({ reused: 1, minted: 0, reminted: 0 });
+    });
+
+    it("mints a new id when the key matches but the audio hash changed", () => {
+      const hashesByFile = new Map([["/fixtures/prompt-1-new.wav", HASH_B]]);
+
+      const { manifest, counts } = assembleManifest(
+        inputWithPrompt("/fixtures/prompt-1-new.wav"),
+        priorManifestWithPrompt(HASH_A),
+        hashesByFile,
+      );
+
+      expect(manifest.prompts[0].id).toMatch(UUID_RE);
+      expect(manifest.prompts[0].id).not.toBe(priorId);
+      expect(manifest.prompts[0].audio_sha256).toBe(HASH_B);
+      expect(counts.prompts).toEqual({ reused: 0, minted: 0, reminted: 1 });
+    });
+
+    it("reuses by key alone when the prior entry predates audio_sha256 (backward compatible)", () => {
+      const hashesByFile = new Map([["/fixtures/prompt-1.wav", HASH_B]]); // hash is irrelevant here
+
+      const { manifest, counts } = assembleManifest(
+        inputWithPrompt("/fixtures/prompt-1.wav"),
+        priorManifestWithPrompt(undefined),
+        hashesByFile,
+      );
+
+      expect(manifest.prompts[0].id).toBe(priorId);
+      expect(manifest.prompts[0].audio_sha256).toBe(HASH_B);
+      expect(counts.prompts).toEqual({ reused: 1, minted: 0, reminted: 0 });
+    });
   });
 });

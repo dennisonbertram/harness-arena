@@ -29,10 +29,19 @@
 // every clip has been uploaded and HEAD-polled until readable, so it acts as
 // the commit marker: a manifest that exists always points at readable audio.
 //
+// ID reuse is also content-aware: every prompt/response entry carries an
+// `audio_sha256` (sha256 of its audio file's bytes). A key match only reuses
+// the prior UUID when the hash also matches; if the same key now points at
+// different audio, a new UUID is minted so old judgments (made against the
+// old audio) don't silently merge with new ones -- they become orphans
+// instead, which the results page already counts and surfaces. Manifests
+// written before this field existed have no `audio_sha256` and are treated
+// as unknown, so they still reuse by key alone (backward compatible).
+//
 // --fixtures generates small distinguishable tone WAVs in-process (no input
 // file needed) for two models across a handful of prompts, so /voice is
 // exercisable with no real TTS clips.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -101,6 +110,7 @@ export function validateInput(input) {
   }
 
   const modelKeys = new Set();
+  const modelNames = new Set();
   for (const m of models) {
     if (!m || typeof m.key !== "string" || !m.key) {
       throw new Error(`model entry missing a string "key": ${JSON.stringify(m)}`);
@@ -110,6 +120,10 @@ export function validateInput(input) {
     }
     if (modelKeys.has(m.key)) throw new Error(`duplicate model key "${m.key}"`);
     modelKeys.add(m.key);
+    // Duplicate display names would collapse two distinct models into one
+    // leaderboard/results row.
+    if (modelNames.has(m.name)) throw new Error(`duplicate model name "${m.name}"`);
+    modelNames.add(m.name);
   }
 
   const promptKeys = new Set();
@@ -154,20 +168,52 @@ function indexByKey(entries) {
 }
 
 /**
+ * Decides the UUID for a content-addressed (prompt/response) entry.
+ *
+ * Reuses the prior id when the stable key matched AND either the prior
+ * entry predates the audio_sha256 field (unknown -> treated as a match, for
+ * backward compatibility with manifests written before this check existed)
+ * or its stored audio_sha256 equals the new file's hash. Otherwise mints a
+ * fresh id: either this is a genuinely new entry, or the key is unchanged
+ * but the audio behind it changed, in which case reusing the id would merge
+ * old judgments (made against the old audio) with new ones.
+ */
+function resolveAudioId(prior, hash, countsBucket) {
+  if (!prior?.id) {
+    countsBucket.minted++;
+    return randomUUID();
+  }
+  if (prior.audio_sha256 === undefined || prior.audio_sha256 === hash) {
+    countsBucket.reused++;
+    return prior.id;
+  }
+  countsBucket.reminted++;
+  return randomUUID();
+}
+
+/**
  * Builds the new manifest from the input manifest, reusing UUIDs of any
  * model/prompt/response whose stable key matches an entry in
  * `priorManifestRaw` (the RAW remote voice/manifest.json JSON, read without
  * going through the Zod schema so its `key` fields survive) and minting new
- * UUIDs for everything else.
+ * UUIDs for everything else. Prompt/response reuse is additionally gated on
+ * content -- see resolveAudioId.
+ *
+ * `hashesByFile` maps each prompt/response input's `file` path to the
+ * sha256 hex digest of its audio bytes. Hashing is I/O (reading a file, or
+ * for --fixtures, the generated buffer), so it's computed by the caller and
+ * passed in here -- this function stays a pure function of its inputs and
+ * never touches the filesystem.
  *
  * Returns:
  *   - manifest: the VoiceManifest-shaped object to write last, with
  *     audio_url set to the destination blob KEY (not yet the real URL --
  *     the caller fills that in after upload).
  *   - uploads: [{ id, kind, file, blobPath }] the caller must upload.
- *   - counts: { models, prompts, responses } each { reused, minted }.
+ *   - counts: { models: {reused,minted}, prompts/responses: {reused,minted,reminted} }.
+ *     "reminted" = same key, but the audio hash changed underneath it.
  */
-export function assembleManifest(input, priorManifestRaw) {
+export function assembleManifest(input, priorManifestRaw, hashesByFile = new Map()) {
   validateInput(input);
 
   const priorModels = indexByKey(priorManifestRaw?.models);
@@ -176,8 +222,8 @@ export function assembleManifest(input, priorManifestRaw) {
 
   const counts = {
     models: { reused: 0, minted: 0 },
-    prompts: { reused: 0, minted: 0 },
-    responses: { reused: 0, minted: 0 },
+    prompts: { reused: 0, minted: 0, reminted: 0 },
+    responses: { reused: 0, minted: 0, reminted: 0 },
   };
 
   const models = input.models.map((m) => {
@@ -190,15 +236,15 @@ export function assembleManifest(input, priorManifestRaw) {
 
   const prompts = input.prompts.map((p) => {
     const prior = priorPrompts.get(p.key);
-    if (prior?.id) counts.prompts.reused++;
-    else counts.prompts.minted++;
-    const id = prior?.id ?? randomUUID();
+    const hash = hashesByFile.get(p.file);
+    const id = resolveAudioId(prior, hash, counts.prompts);
     return {
       id,
       key: p.key,
       text: p.text,
       category: p.category,
       audio_url: blobKeyFor("prompt", id),
+      audio_sha256: hash,
       _file: p.file,
     };
   });
@@ -209,15 +255,15 @@ export function assembleManifest(input, priorManifestRaw) {
     // researcher-chosen key of its own.
     const key = `${r.prompt}::${r.model}`;
     const prior = priorResponses.get(key);
-    if (prior?.id) counts.responses.reused++;
-    else counts.responses.minted++;
-    const id = prior?.id ?? randomUUID();
+    const hash = hashesByFile.get(r.file);
+    const id = resolveAudioId(prior, hash, counts.responses);
     return {
       id,
       key,
       prompt_id: promptIdByKey.get(r.prompt),
       model_id: modelIdByKey.get(r.model),
       audio_url: blobKeyFor("response", id),
+      audio_sha256: hash,
       _file: r.file,
     };
   });
@@ -259,23 +305,44 @@ const FIXTURE_BASE_FREQ_HZ = 220;
 const FIXTURE_PROMPT_STEP_HZ = 60;
 const FIXTURE_MODEL_OFFSET_HZ = { "model-alpha": 0, "model-beta": 180 };
 
+function sha256Hex(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
 function buildFixturesInput(tmpDir) {
   const prompts = [];
   const responses = [];
+  const hashesByFile = new Map();
   for (let i = 0; i < FIXTURE_PROMPT_COUNT; i++) {
     const key = `fixture-prompt-${i + 1}`;
     const baseFreq = FIXTURE_BASE_FREQ_HZ + i * FIXTURE_PROMPT_STEP_HZ;
     const promptFile = path.join(tmpDir, `${key}.wav`);
-    writeFileSync(promptFile, generateToneWav({ frequencyHz: baseFreq }));
+    const promptBuf = generateToneWav({ frequencyHz: baseFreq });
+    writeFileSync(promptFile, promptBuf);
+    hashesByFile.set(promptFile, sha256Hex(promptBuf));
     prompts.push({ key, text: `Fixture prompt ${i + 1}`, category: "fixture", file: promptFile });
 
     for (const model of FIXTURE_MODELS) {
       const responseFile = path.join(tmpDir, `${key}__${model.key}.wav`);
-      writeFileSync(responseFile, generateToneWav({ frequencyHz: baseFreq + FIXTURE_MODEL_OFFSET_HZ[model.key] }));
+      const responseBuf = generateToneWav({ frequencyHz: baseFreq + FIXTURE_MODEL_OFFSET_HZ[model.key] });
+      writeFileSync(responseFile, responseBuf);
+      hashesByFile.set(responseFile, sha256Hex(responseBuf));
       responses.push({ prompt: key, model: model.key, file: responseFile });
     }
   }
-  return { models: FIXTURE_MODELS, prompts, responses };
+  return { input: { models: FIXTURE_MODELS, prompts, responses }, hashesByFile };
+}
+
+/** Hashes every prompt/response input file's bytes for a real (non-fixture) manifest. */
+function hashInputFiles(input) {
+  const hashesByFile = new Map();
+  for (const p of input.prompts ?? []) {
+    if (typeof p?.file === "string") hashesByFile.set(p.file, sha256Hex(readFileSync(p.file)));
+  }
+  for (const r of input.responses ?? []) {
+    if (typeof r?.file === "string") hashesByFile.set(r.file, sha256Hex(readFileSync(r.file)));
+  }
+  return hashesByFile;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,10 +365,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function headPollUntilReady(url, { attempts = 10, delayMs = 300 } = {}) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, { method: "HEAD" });
+      const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5000) });
       if (res.ok) return;
     } catch {
-      // transient -- retry
+      // transient -- including a timed-out/aborted request -- retry
     }
     await sleep(delayMs);
   }
@@ -315,9 +382,10 @@ async function main() {
 
   let tmpDir;
   let input;
+  let fixtureHashes;
   if (fixtures) {
     tmpDir = mkdtempSync(path.join(tmpdir(), "seed-voice-fixtures-"));
-    input = buildFixturesInput(tmpDir);
+    ({ input, hashesByFile: fixtureHashes } = buildFixturesInput(tmpDir));
   } else {
     if (!inputPath) {
       throw new Error("usage: node scripts/seed-voice.mjs <manifest.json> | --fixtures");
@@ -329,8 +397,9 @@ async function main() {
     // Validate before any network call or upload.
     validateInput(input);
 
+    const hashesByFile = fixtures ? fixtureHashes : hashInputFiles(input);
     const priorManifestRaw = await fetchPriorManifestRaw();
-    const { manifest, uploads, counts } = assembleManifest(input, priorManifestRaw);
+    const { manifest, uploads, counts } = assembleManifest(input, priorManifestRaw, hashesByFile);
 
     const idToUrl = new Map();
     for (const upload of uploads) {
@@ -363,8 +432,12 @@ async function main() {
       `Seeded voice/manifest.json: ${manifest.models.length} models, ${manifest.prompts.length} prompts, ${manifest.responses.length} responses`,
     );
     console.log(`  models:    ${counts.models.reused} reused, ${counts.models.minted} minted`);
-    console.log(`  prompts:   ${counts.prompts.reused} reused, ${counts.prompts.minted} minted`);
-    console.log(`  responses: ${counts.responses.reused} reused, ${counts.responses.minted} minted`);
+    console.log(
+      `  prompts:   ${counts.prompts.reused} reused, ${counts.prompts.minted} minted, ${counts.prompts.reminted} re-minted (audio changed)`,
+    );
+    console.log(
+      `  responses: ${counts.responses.reused} reused, ${counts.responses.minted} minted, ${counts.responses.reminted} re-minted (audio changed)`,
+    );
   } finally {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   }

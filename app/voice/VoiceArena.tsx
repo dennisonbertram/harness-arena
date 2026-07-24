@@ -41,6 +41,11 @@ export default function VoiceArena() {
   // "Play both" arms B to auto-start from A's `ended` event; a plain replay
   // of A alone must not trigger it.
   const playBothArmedRef = useRef(false);
+  // Set around B's priming play()/pause() in handlePlayBoth; B's `play` event
+  // fires asynchronously afterward, so the flag is consumed (and cleared) in
+  // handleBPlay rather than right after pause(). Keeps the priming play from
+  // inflating play_counts.b.
+  const primingBRef = useRef(false);
 
   async function loadNext(excludeIds: string[]) {
     setNextFetchError(false);
@@ -67,6 +72,9 @@ export default function VoiceArena() {
 
   const activeComparisonId = isActiveState(state) ? state.comparison.comparisonId : null;
   useEffect(() => {
+    // A new comparison (or leaving one) invalidates any pending "Play both"
+    // arming from the previous comparison.
+    playBothArmedRef.current = false;
     if (activeComparisonId) headingRef.current?.focus();
   }, [activeComparisonId]);
 
@@ -116,6 +124,7 @@ export default function VoiceArena() {
     if (!isActiveState(state)) return;
     const { comparisonId } = state.comparison;
     const nextExclude = appendExclude(state.excludeIds, comparisonId);
+    playBothArmedRef.current = false;
     dispatch({ type: "skip", comparisonId });
     loadNext(nextExclude);
   }
@@ -128,6 +137,9 @@ export default function VoiceArena() {
     // Prime B synchronously right here (play, then immediately pause)
     // before starting A, so B's later play() from A's `ended` handler —
     // which is not itself a user gesture — is still allowed. Load-bearing.
+    // primingBRef suppresses the resulting `played` dispatch for B exactly
+    // once, so this priming play doesn't inflate play_counts.b.
+    primingBRef.current = true;
     playBothArmedRef.current = true;
     b.play().catch(() => {});
     b.pause();
@@ -140,6 +152,19 @@ export default function VoiceArena() {
       playBothArmedRef.current = false;
       audioBRef.current?.play().catch(() => {});
     }
+  }
+
+  function handleAError() {
+    playBothArmedRef.current = false;
+    dispatch({ type: "audioErrored", clip: "a" });
+  }
+
+  function handleBPlay() {
+    if (primingBRef.current) {
+      primingBRef.current = false;
+      return;
+    }
+    dispatch({ type: "played", clip: "b" });
   }
 
   function retryClip(clip: ClipKey) {
@@ -157,9 +182,21 @@ export default function VoiceArena() {
   }
 
   if (state.phase === "done") {
+    const { judged, total } = state.progress;
+    const allJudged = judged >= total;
     return (
       <div style={panelStyle}>
-        <p style={{ fontSize: 15, marginBottom: 8 }}>You&apos;ve judged every available comparison — thank you.</p>
+        {allJudged ? (
+          <p style={{ fontSize: 15, marginBottom: 8 }}>You&apos;ve judged every available comparison — thank you.</p>
+        ) : (
+          <>
+            <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Session complete</h2>
+            <p style={{ fontSize: 15, marginBottom: 8 }}>
+              You judged {judged} of {total} available comparisons — {total - judged} were skipped or unavailable. Reload
+              to revisit them.
+            </p>
+          </>
+        )}
         <Link href="/voice/results" style={{ color: "var(--blue-700)" }}>
           View results →
         </Link>
@@ -226,7 +263,7 @@ export default function VoiceArena() {
           error={audioError === "a"}
           onPlay={() => dispatch({ type: "played", clip: "a" })}
           onEnded={handleAEnded}
-          onError={() => dispatch({ type: "audioErrored", clip: "a" })}
+          onError={handleAError}
           onRetry={() => retryClip("a")}
           onSkip={handleSkip}
         />
@@ -235,7 +272,7 @@ export default function VoiceArena() {
           audioRef={audioBRef}
           src={comparison.clipB.audioUrl}
           error={audioError === "b"}
-          onPlay={() => dispatch({ type: "played", clip: "b" })}
+          onPlay={handleBPlay}
           onError={() => dispatch({ type: "audioErrored", clip: "b" })}
           onRetry={() => retryClip("b")}
           onSkip={handleSkip}
