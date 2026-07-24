@@ -53,6 +53,7 @@ export default function RootLayout({
               <Link href="/">Leaderboard</Link>
               <Link href="/how-it-works">How it works</Link>
               <Link href="/submit">Submit</Link>
+              <Link href="/voice">Voice</Link>
             </div>
           </nav>
         </header>
