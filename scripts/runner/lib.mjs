@@ -276,6 +276,22 @@ export function shQuote(value) {
 // the task container. Defaults to the resolved pi invocation from the
 // architect spike; PI_INVOKE_OVERRIDE (test-only) swaps out the whole pi
 // call for a fixture command, still wrapped in the same timeout.
+/**
+ * pi model config (models.json) that caps output tokens per completion for the
+ * arena's fixed model, so a single runaway generation can't stream toward the
+ * model's full context ceiling. Written into the task container and loaded via
+ * PI_CODING_AGENT_DIR.
+ */
+export function buildModelsConfig(maxOutputTokens) {
+  return JSON.stringify({
+    providers: {
+      "vercel-ai-gateway": {
+        modelOverrides: { "zai/glm-5.2": { maxTokens: maxOutputTokens } },
+      },
+    },
+  });
+}
+
 export function buildPiCommand({
   agentTimeoutSec,
   sessionDir,

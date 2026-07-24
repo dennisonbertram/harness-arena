@@ -13,12 +13,9 @@ your prompt as the ENTIRE system prompt of the `pi` coding agent inside each
 fixed Terminal-Bench 2.0 task container.
 
 Model (optional `model` field, default `zai/glm-5.2`). Allowed: `zai/glm-5.2`,
-`anthropic/claude-sonnet-5`, `anthropic/claude-opus-4-8`,
-`poolside/laguna-s-2.1`. Models run on different inference providers (the Claude
-and glm models via the Vercel AI Gateway, Laguna via poolside's own endpoint),
-but that's transparent to you — pick an id. Each run and the leaderboard show
-which model was used; standings are grouped per (prompt, model), so the same
-prompt on different models is compared separately.
+`anthropic/claude-sonnet-5`, `anthropic/claude-opus-4-8`. Each run and the
+leaderboard show which model was used; standings are grouped per (prompt,
+model), so the same prompt on different models is compared separately.
 
 Ranking is binary, then single-axis:
 

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   budgetExceeded,
   buildContainerName,
+  buildModelsConfig,
   buildPiCommand,
   computeTotals,
   deliverTerminalStatus,
@@ -576,5 +577,17 @@ describe("deliverTerminalStatus", () => {
     expect(result).toBe(false);
     expect(writtenPath).toBe("/var/log/runner-terminal.json");
     expect(JSON.parse(writtenContent)).toEqual(payload);
+  });
+});
+
+describe("buildModelsConfig (anti-runaway output cap)", () => {
+  it("produces a pi models.json capping maxTokens for the arena model", () => {
+    const cfg = JSON.parse(buildModelsConfig(8192));
+    expect(cfg.providers["vercel-ai-gateway"].modelOverrides["zai/glm-5.2"].maxTokens).toBe(8192);
+  });
+
+  it("honors the configured cap value", () => {
+    const cfg = JSON.parse(buildModelsConfig(4096));
+    expect(cfg.providers["vercel-ai-gateway"].modelOverrides["zai/glm-5.2"].maxTokens).toBe(4096);
   });
 });
