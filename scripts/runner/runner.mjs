@@ -47,6 +47,13 @@ const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 // the task container; pi uses the one matching --provider.
 const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
+// DIRECT (non-gateway) provider support. For poolside/Laguna, sandbox.ts passes
+// a base64 pi models.json (custom-provider config) + the env-var name holding
+// that provider's key. We write the config into each task container and load it
+// via PI_CODING_AGENT_DIR; gateway runs leave both unset and behave as before.
+const RUNNER_MODELS_CONFIG_B64 = process.env.RUNNER_MODELS_CONFIG_B64 || null;
+const RUNNER_PROVIDER_KEY_ENV = process.env.RUNNER_PROVIDER_KEY_ENV || null;
+const PI_AGENT_DIR = process.env.RUNNER_PI_AGENT_DIR || "/opt/pi-agent";
 // Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
 // solution can complete the whole test instead of being killed mid-run, which
 // would deflate its pass rate. Sandbox.ts passes the real value; this default
@@ -371,15 +378,20 @@ async function runOneTask(task, index, systemPrompt) {
       sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
     }
 
-    // NOTE: an earlier version wrote a pi models.json here capping maxTokens
-    // (anti-runaway). It backfired badly: glm-5.2 does very heavy hidden
-    // thinking, and an 8192-token output cap starved its real work, so the
-    // agent quit after a few turns and the 16-task baseline scored 2/16
-    // instead of ~10/16 (a with/without-config A/B on fix-git showed 15 turns
-    // vanilla vs a few turns capped). The 16-task ranked set contains no
-    // runaway tasks, so the cap has no upside here. Removed — pi runs with its
-    // own defaults, matching harnessarena.xyz's vanilla baseline. Bound
-    // runaways at the runner level (agent timeout) instead if it recurs.
+    // DIRECT-provider models (poolside/Laguna) need a pi custom-provider config.
+    // Write the models.json (built app-side from the model registry) into the
+    // container and load it via PI_CODING_AGENT_DIR on the exec below. Gateway
+    // models leave RUNNER_MODELS_CONFIG_B64 unset and skip this entirely.
+    // (An earlier version wrote a models.json here to CAP maxTokens as an
+    // anti-runaway measure; that backfired — an 8192-token output cap starved
+    // glm-5.2's heavy hidden thinking and it quit after a few turns — so the cap
+    // is gone. This config only registers a provider; it sets no token cap.)
+    if (RUNNER_MODELS_CONFIG_B64) {
+      sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", PI_AGENT_DIR]);
+      const modelsHostFile = writeTempFile(decodeB64(RUNNER_MODELS_CONFIG_B64));
+      tempDirs.push(path.dirname(modelsHostFile));
+      sh(DOCKER_CMD, ["cp", modelsHostFile, `${containerName}:${PI_AGENT_DIR}/models.json`]);
+    }
     // An empty submitted prompt means "run vanilla pi with its own default
     // system prompt" (the baseline), matching harnessarena.xyz. Only write and
     // pass a prompt file when there's actually a submitted prompt.
@@ -409,24 +421,17 @@ async function runOneTask(task, index, systemPrompt) {
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
     // through from this process's own environment -- execFileSync inherits
-    // process.env by default, so no extra plumbing is needed here. maxBuffer is
-    // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
+    // process.env by default, so no extra plumbing is needed here. For a direct
+    // provider we also forward its key (RUNNER_PROVIDER_KEY_ENV, e.g.
+    // POOLSIDE_API_KEY) and point pi at the custom-provider config dir. maxBuffer
+    // is large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
     // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks.
+    const execEnvArgs = ["-e", "AI_GATEWAY_API_KEY", "-e", "OPENROUTER_API_KEY"];
+    if (RUNNER_MODELS_CONFIG_B64) execEnvArgs.push("-e", `PI_CODING_AGENT_DIR=${PI_AGENT_DIR}`);
+    if (RUNNER_PROVIDER_KEY_ENV) execEnvArgs.push("-e", RUNNER_PROVIDER_KEY_ENV);
     const execResult = sh(
       DOCKER_CMD,
-      [
-        "exec",
-        "-w",
-        "/app",
-        "-e",
-        "AI_GATEWAY_API_KEY",
-        "-e",
-        "OPENROUTER_API_KEY",
-        containerName,
-        "sh",
-        "-c",
-        piCommand,
-      ],
+      ["exec", "-w", "/app", ...execEnvArgs, containerName, "sh", "-c", piCommand],
       { maxBuffer: 64 * 1024 * 1024 },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
@@ -517,7 +522,11 @@ async function runOneTask(task, index, systemPrompt) {
     // own session/stdout, and these traces are uploaded publicly. The FULL
     // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
     // ~4.5MB callback body limit) -- no truncation.
-    const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
+    const secrets = [
+      process.env.AI_GATEWAY_API_KEY,
+      process.env.OPENROUTER_API_KEY,
+      RUNNER_PROVIDER_KEY_ENV ? process.env[RUNNER_PROVIDER_KEY_ENV] : null, // e.g. POOLSIDE_API_KEY
+    ].filter(Boolean);
     let traceBlobUrl;
     const redactedSession = redactSecrets(sessionText, secrets);
     const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));

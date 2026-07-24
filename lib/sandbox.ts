@@ -1,6 +1,7 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
 import { log } from "./log";
+import { runModel, providerFor, piModelsConfig } from "./models";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
 import type { Run } from "./types";
@@ -33,6 +34,7 @@ function sandboxTimeoutMs(): number {
 // allowlist entirely for local debugging.
 const NETWORK_ALLOWLIST = [
   "ai-gateway.vercel.sh",
+  "inference.poolside.ai", // poolside direct-provider endpoint (Laguna)
   "harness-arena-psi.vercel.app",
   "*.public.blob.vercel-storage.com",
   "astral.sh",
@@ -158,12 +160,21 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
-    // Model routing (default = Vercel AI Gateway). The run's own model wins so
-    // different runs can use different models (glm-5.2, Claude Sonnet 5, …);
-    // all resolve through the gateway, so the provider stays the default.
-    if (process.env.RUNNER_PROVIDER) runnerEnv.RUNNER_PROVIDER = process.env.RUNNER_PROVIDER;
-    const runnerModel = run.model ?? process.env.RUNNER_MODEL;
-    if (runnerModel) runnerEnv.RUNNER_MODEL = runnerModel;
+    // Model + provider routing, driven by the registry (lib/models.ts). Gateway
+    // models (glm-5.2, Claude, …) use pi's built-in vercel-ai-gateway provider.
+    // A DIRECT provider (poolside/Laguna) ships pi a custom-provider config
+    // (models.json, base64) plus its own API key — the runner writes the config
+    // into the task container and loads it via PI_CODING_AGENT_DIR.
+    const model = runModel(run.model);
+    const provider = providerFor(model);
+    runnerEnv.RUNNER_MODEL = model;
+    runnerEnv.RUNNER_PROVIDER = provider.piProvider;
+    const modelsConfig = piModelsConfig(model);
+    if (modelsConfig && provider.direct) {
+      runnerEnv.RUNNER_MODELS_CONFIG_B64 = Buffer.from(modelsConfig, "utf8").toString("base64");
+      runnerEnv.RUNNER_PROVIDER_KEY_ENV = provider.apiKeyEnv;
+      runnerEnv[provider.apiKeyEnv] = requireEnv(provider.apiKeyEnv); // e.g. POOLSIDE_API_KEY
+    }
     if (process.env.OPENROUTER_API_KEY) runnerEnv.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
     // sudo: the runner starts dockerd, which requires root; the docker CLI
     // it then drives also needs root to reach the root-owned socket. Running
