@@ -7,7 +7,7 @@ import { parseSubmitResponse } from "@/lib/submit-response";
 // Re-submits a leaderboard entry's exact prompt as a new run — another sample
 // toward its mean pass rate. It goes through the normal submit path (judge +
 // run), so it costs a run; a confirm guards accidental/public clicks.
-export function RerunButton({ agentName, prompt }: { agentName: string; prompt: string }) {
+export function RerunButton({ agentName, prompt, model }: { agentName: string; prompt: string; model?: string }) {
   const [state, setState] = useState<"idle" | "running" | "queued" | "error">("idle");
   const [runId, setRunId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -22,7 +22,7 @@ export function RerunButton({ agentName, prompt }: { agentName: string; prompt: 
       const res = await fetch("/api/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_name: agentName, prompt }),
+        body: JSON.stringify({ agent_name: agentName, prompt, ...(model ? { model } : {}) }),
       });
       const { result, error } = await parseSubmitResponse(res);
       if (error || !result?.run_id) {

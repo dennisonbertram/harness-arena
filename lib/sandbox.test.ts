@@ -215,7 +215,7 @@ describe("createRunSandbox", () => {
       expect(launchCall.env.CALLBACK_BASE).toBe("https://cb.example.test");
       expect(launchCall.env.RUNNER_CALLBACK_SECRET).toBe("test-secret");
       expect(launchCall.env.AI_GATEWAY_API_KEY).toBe("test-gw-key");
-      expect(launchCall.env.BUDGET_CAP_USD).toBe("10");
+      expect(launchCall.env.BUDGET_CAP_USD).toBe("15");
 
       const decodedPrompt = Buffer.from(launchCall.env.SYSTEM_PROMPT_B64, "base64").toString("utf8");
       expect(decodedPrompt).toBe("be extremely careful");

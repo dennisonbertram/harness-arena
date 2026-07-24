@@ -5,6 +5,7 @@ import { getTasks } from "@/lib/tasks";
 import { formatDuration, formatUsd } from "@/lib/format";
 import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { reconstructRunProgress, type TaskState } from "@/lib/run-progress";
+import { modelLabel } from "@/lib/models";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { CompletePromptModal } from "./CompletePromptModal";
 import { RunAutoRefresh } from "./RunAutoRefresh";
@@ -52,7 +53,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
   const liveDurationSec = progress ? progress.tasks.reduce((s, t) => s + (t.durationS ?? 0), 0) : 0;
 
   return (
-    <div style={{ maxWidth: 1000, margin: "0 auto", padding: "48px 24px" }}>
+    <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
       <RunAutoRefresh status={run.status} />
       <section style={{ marginBottom: 32 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
@@ -81,7 +82,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
             Terminal-Bench 2
           </a>{" "}
           · {benchmarkTaskCount}-task subset · model{" "}
-          <span className="mono">zai/glm-5.2</span> via AI Gateway
+          <span className="mono">{modelLabel(run.model)}</span> via AI Gateway
         </p>
       </section>
 

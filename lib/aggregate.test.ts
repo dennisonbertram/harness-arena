@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregatePrompts, aggregateTask } from "./aggregate";
+import { aggregateAllRunsByTask, aggregatePrompts, aggregateTask } from "./aggregate";
 import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
@@ -132,6 +132,26 @@ describe("aggregatePrompts", () => {
     expect(standings.find((s) => s.promptKey === "DIFFERENT")!.runs).toBe(1);
   });
 
+  it("groups by (prompt, model): the same prompt on different models is separate standings", () => {
+    const submissions = [
+      sub("s1", "glm", "SAME", "2026-07-20T00:00:00Z"),
+      sub("s2", "sonnet", "SAME", "2026-07-21T00:00:00Z"),
+    ];
+    const glmRun = { ...run("r1", "s1", [true, true, false, false]), model: "zai/glm-5.2" };
+    const sonnetRun = { ...run("r2", "s2", [true, true, true, false]), model: "anthropic/claude-sonnet-5" };
+    const standings = aggregatePrompts([glmRun, sonnetRun], submissions, TOTAL);
+    expect(standings).toHaveLength(2);
+    const byModel = Object.fromEntries(standings.map((s) => [s.model, s.meanTasksPassed]));
+    expect(byModel["zai/glm-5.2"]).toBe(2);
+    expect(byModel["anthropic/claude-sonnet-5"]).toBe(3);
+  });
+
+  it("defaults a run with no model to glm-5.2", () => {
+    const submissions = [sub("s1", "legacy", "P", "2026-07-20T00:00:00Z")];
+    const [st] = aggregatePrompts([run("r1", "s1", [true, false, false, false])], submissions, TOTAL);
+    expect(st.model).toBe("zai/glm-5.2");
+  });
+
   it("ranks by pass rate descending, cheaper median cost breaking ties", () => {
     const submissions = [
       sub("s1", "high", "P1", "2026-07-20T00:00:00Z"),
@@ -187,5 +207,33 @@ describe("aggregateTask", () => {
   it("returns null when no completed run recorded the task", () => {
     const runs = [run("r1", "s1", [true, false, false, false], undefined, "running")];
     expect(aggregateTask(runs, subs, "t0")).toBeNull();
+  });
+});
+
+describe("aggregateAllRunsByTask", () => {
+  const subs = [
+    sub("s1", "vanilla", "", "2026-07-20T00:00:00Z"),
+    sub("s2", "prompty", "P2", "2026-07-21T00:00:00Z"),
+  ];
+
+  it("pools per-task pass rate across every run of every prompt, each run equal", () => {
+    const runs = [
+      run("r1", "s1", [true, false, false, false]),
+      run("r2", "s2", [true, true, false, false]),
+    ];
+    const perTask = aggregateAllRunsByTask(runs, subs, ["t0", "t1", "t2", "t3"]);
+    const byId = Object.fromEntries(perTask.map((t) => [t.taskId, t]));
+    // t0 passed in both runs (2 prompts pooled), t1 in one, t2/t3 in neither.
+    expect(byId.t0).toMatchObject({ passed: 2, of: 2 });
+    expect(byId.t1).toMatchObject({ passed: 1, of: 2 });
+    expect(byId.t2).toMatchObject({ passed: 0, of: 2 });
+    // sorted by rate desc, then id: t0 (1.0), t1 (0.5), t2, t3
+    expect(perTask.map((t) => t.taskId)).toEqual(["t0", "t1", "t2", "t3"]);
+  });
+
+  it("omits tasks no completed run has recorded", () => {
+    const runs = [run("r1", "s1", [true, false, false, false])];
+    const perTask = aggregateAllRunsByTask(runs, subs, ["t0", "t9-never-run"]);
+    expect(perTask.map((t) => t.taskId)).toEqual(["t0"]);
   });
 });

@@ -4,6 +4,7 @@ import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, type TaskRate } from "@/lib/aggregate";
 import { ARENA_MODEL, ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
+import { modelLabel } from "@/lib/models";
 import { RerunButton } from "./RerunButton";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
@@ -97,6 +98,7 @@ export default async function LeaderboardPage() {
                 <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                   <th className="label" style={cellStyle}>Rank</th>
                   <th className="label" style={cellStyle}>Agent</th>
+                  <th className="label" style={cellStyle}>Model</th>
                   <th className="label" style={cellStyle}>Pass rate</th>
                   <th className="label" style={cellStyle}>Mean tasks</th>
                   <th className="label" style={cellStyle}>Runs</th>
@@ -116,6 +118,7 @@ export default async function LeaderboardPage() {
                         <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
                       )}
                     </td>
+                    <td style={cellStyle}>{modelLabel(s.model)}</td>
                     <td style={cellStyle} className="tabular-nums">
                       {(s.passRate * 100).toFixed(0)}%
                       {s.completesTest && (
@@ -132,7 +135,7 @@ export default async function LeaderboardPage() {
                       {s.medianCostUsd === null ? "—" : formatUsd(s.medianCostUsd)}
                     </td>
                     <td style={numCellStyle}>
-                      <RerunButton agentName={s.agentName} prompt={s.promptKey} />
+                      <RerunButton agentName={s.agentName} prompt={s.promptKey} model={s.model} />
                     </td>
                   </tr>
                 ))}
