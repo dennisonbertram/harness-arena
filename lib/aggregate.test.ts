@@ -196,12 +196,29 @@ describe("aggregateTask", () => {
     const stats = aggregateTask(runs, subs, "t0")!;
     expect(stats.attempts).toBe(2);
     expect(stats.passed).toBe(1);
-    expect(stats.passRate).toBeCloseTo(0.5);
-    expect(stats.meanTurns).toBeCloseTo(2.5); // (5 + 0) / 2
-    expect(stats.meanCostUsd).toBeCloseTo(0.02); // only the 5-turn run counts; 0-turn is unmeasured
-    // newest submission (bob, s2 2026-07-21) first
+    // both runs have no model -> one glm-5.2 group carrying the per-model stats
+    expect(stats.byModel).toHaveLength(1);
+    const glm = stats.byModel[0];
+    expect(glm.model).toBe("zai/glm-5.2");
+    expect(glm.passRate).toBeCloseTo(0.5);
+    expect(glm.meanTurns).toBeCloseTo(2.5); // (5 + 0) / 2
+    expect(glm.meanCostUsd).toBeCloseTo(0.02); // only the 5-turn run counts; 0-turn is unmeasured
+    // newest submission (bob, s2 2026-07-21) first, each stamped with its model
     expect(stats.results.map((r) => r.agentName)).toEqual(["bob", "alice"]);
+    expect(stats.results.every((r) => r.model === "zai/glm-5.2")).toBe(true);
     expect(stats.results.find((r) => r.agentName === "bob")!.costUsd).toBeNull();
+  });
+
+  it("splits a task's attempts by model (glm vs Claude never averaged)", () => {
+    const runs = [
+      { ...run("r1", "s1", [true, false, false, false], undefined, "completed", [0.02, 0, 0, 0], [5, 0, 0, 0]), model: "zai/glm-5.2" },
+      { ...run("r2", "s2", [false, false, false, false], undefined, "completed", [0.3, 0, 0, 0], [9, 0, 0, 0]), model: "anthropic/claude-sonnet-5" },
+    ];
+    const stats = aggregateTask(runs, subs, "t0")!;
+    const byModel = Object.fromEntries(stats.byModel.map((m) => [m.model, m]));
+    expect(byModel["zai/glm-5.2"].passRate).toBe(1);
+    expect(byModel["anthropic/claude-sonnet-5"].passRate).toBe(0);
+    expect(byModel["anthropic/claude-sonnet-5"].meanCostUsd).toBeCloseTo(0.3);
   });
 
   it("returns null when no completed run recorded the task", () => {
@@ -216,18 +233,21 @@ describe("aggregateAllRunsByTask", () => {
     sub("s2", "prompty", "P2", "2026-07-21T00:00:00Z"),
   ];
 
-  it("pools per-task pass rate across every run of every prompt, each run equal", () => {
+  it("totals per-task across runs and splits perModel; sorts by difficulty", () => {
     const runs = [
       run("r1", "s1", [true, false, false, false]),
       run("r2", "s2", [true, true, false, false]),
     ];
     const perTask = aggregateAllRunsByTask(runs, subs, ["t0", "t1", "t2", "t3"]);
     const byId = Object.fromEntries(perTask.map((t) => [t.taskId, t]));
-    // t0 passed in both runs (2 prompts pooled), t1 in one, t2/t3 in neither.
+    // t0 passed in both runs, t1 in one, t2/t3 in neither.
     expect(byId.t0).toMatchObject({ passed: 2, of: 2 });
     expect(byId.t1).toMatchObject({ passed: 1, of: 2 });
     expect(byId.t2).toMatchObject({ passed: 0, of: 2 });
-    // sorted by rate desc, then id: t0 (1.0), t1 (0.5), t2, t3
+    // both runs are glm (no model) -> a single glm perModel entry
+    expect(byId.t0.perModel).toHaveLength(1);
+    expect(byId.t0.perModel[0]).toMatchObject({ model: "zai/glm-5.2", passed: 2, attempts: 2 });
+    // sorted by overall rate desc, then id: t0 (1.0), t1 (0.5), t2, t3
     expect(perTask.map((t) => t.taskId)).toEqual(["t0", "t1", "t2", "t3"]);
   });
 

@@ -5,6 +5,7 @@ import { aggregateTask } from "@/lib/aggregate";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
 import { ARENA_BENCHMARK, ARENA_BENCHMARK_URL } from "@/lib/arena-params";
+import { modelLabel, modelColor } from "@/lib/models";
 
 export const revalidate = 15;
 
@@ -61,14 +62,39 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
         <p style={{ fontSize: 15, color: "var(--gray-900)" }}>No completed runs have recorded this task yet.</p>
       ) : (
         <>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 40px", margin: "20px 0 36px" }}>
-            <Stat label="Pass rate" value={`${(stats.passRate * 100).toFixed(0)}%`} />
-            <Stat label="Passed" value={`${stats.passed}/${stats.attempts} runs`} />
-            <Stat label="Mean turns" value={stats.meanTurns.toFixed(1)} />
-            <Stat
-              label="Mean cost"
-              value={stats.meanCostUsd === null ? "unmeasured" : `${formatUsd(stats.meanCostUsd)}/attempt`}
-            />
+          <h2 className="label" style={{ margin: "20px 0 10px" }}>
+            By model <span style={{ color: "var(--gray-700)" }}>· pass rate per model, never averaged together</span>
+          </h2>
+          <div style={{ overflowX: "auto", marginBottom: 36 }}>
+            <table style={{ width: "100%", maxWidth: 640, borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                  <th className="label" style={cell}>Model</th>
+                  <th className="label" style={cell}>Pass rate</th>
+                  <th className="label" style={cell}>Mean turns</th>
+                  <th className="label" style={cell}>Mean cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.byModel.map((m) => (
+                  <tr key={m.model} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                    <td style={cell}>
+                      <span style={{ color: modelColor(m.model), marginRight: 6 }}>●</span>
+                      {modelLabel(m.model)}
+                    </td>
+                    <td style={cell} className="tabular-nums">
+                      {(m.passRate * 100).toFixed(0)}% <span style={{ color: "var(--gray-700)" }}>({m.passed}/{m.attempts})</span>
+                    </td>
+                    <td style={cell} className="tabular-nums">
+                      {m.meanTurns.toFixed(1)}
+                    </td>
+                    <td style={cell} className="tabular-nums">
+                      {m.meanCostUsd === null ? "unmeasured" : `${formatUsd(m.meanCostUsd)}/attempt`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           <h2 className="label" style={{ marginBottom: 12 }}>
@@ -79,6 +105,7 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                   <th className="label" style={cell}>Agent</th>
+                  <th className="label" style={cell}>Model</th>
                   <th className="label" style={cell}>Result</th>
                   <th className="label" style={cell}>Turns</th>
                   <th className="label" style={cell}>Cost</th>
@@ -93,6 +120,10 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
                       {r.isBaseline && (
                         <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
                       )}
+                    </td>
+                    <td style={cell}>
+                      <span style={{ color: modelColor(r.model), marginRight: 6 }}>●</span>
+                      {modelLabel(r.model)}
                     </td>
                     <td style={cell}>
                       <Link

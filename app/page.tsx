@@ -2,9 +2,9 @@ import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
-import { aggregatePrompts, aggregateAllRunsByTask, type TaskRate } from "@/lib/aggregate";
+import { aggregatePrompts, aggregateAllRunsByTask, type TaskModelBreakdown } from "@/lib/aggregate";
 import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
-import { modelLabel, MODEL_LABELS } from "@/lib/models";
+import { modelLabel, modelColor, MODEL_LABELS } from "@/lib/models";
 import { RerunButton } from "./RerunButton";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
@@ -173,55 +173,55 @@ function Param({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Per-task pass rate — where the variance actually lives: which tasks are
-// solved reliably, which are flaky, which are walls the harness never clears.
-// Pooled across every completed run of every prompt (task-difficulty overview).
-function PerTaskPanel({ perTask, runCount }: { perTask: TaskRate[]; runCount: number }) {
+// Per-task pass rate, BROKEN OUT PER MODEL (one colored bar per model per task)
+// — where the variance lives: reliable tasks, flaky tasks, and walls, without
+// averaging glm and Claude into one number.
+function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; runCount: number }) {
+  const modelsPresent = Array.from(new Set(perTask.flatMap((t) => t.perModel.map((m) => m.model))));
   return (
     <section>
       <h2 className="label" style={{ marginBottom: 8 }}>
         Per-task pass rate
         <span style={{ color: "var(--gray-700)" }}>
-          {" · across all "}
+          {" · by model, across "}
           {runCount} run{runCount === 1 ? "" : "s"}
         </span>
       </h2>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12 }}>
+        {modelsPresent.map((m) => (
+          <span key={m}>
+            <span style={{ color: modelColor(m), marginRight: 5 }}>●</span>
+            {modelLabel(m)}
+          </span>
+        ))}
+      </div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <tbody>
-          {perTask.map((t) => {
-            const rate = t.of > 0 ? t.passed / t.of : 0;
-            return (
-              <tr key={t.taskId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                <td className="mono" style={{ padding: "6px 12px 6px 0" }}>
-                  <Link href={`/tasks/${t.taskId}`}>{t.taskId}</Link>
-                </td>
-                <td style={{ padding: "6px 0", width: "45%" }}>
-                  <div style={{ background: "var(--gray-alpha-200)", borderRadius: 4, height: 8 }}>
-                    <div
-                      style={{
-                        width: `${rate * 100}%`,
-                        background: rate === 1 ? "var(--blue-700)" : rate === 0 ? "var(--gray-alpha-400)" : "var(--gray-900)",
-                        height: 8,
-                        borderRadius: 4,
-                      }}
-                    />
-                  </div>
-                </td>
-                <td
-                  className="tabular-nums"
-                  style={{ padding: "6px 12px", width: 90, textAlign: "right", whiteSpace: "nowrap" }}
-                >
-                  {t.passed}/{t.of} · {(rate * 100).toFixed(0)}%
-                </td>
-                <td className="tabular-nums" style={{ padding: "6px 8px", width: 70, textAlign: "right", color: "var(--gray-700)" }}>
-                  {t.meanTurns.toFixed(0)} turns
-                </td>
-                <td className="tabular-nums" style={{ padding: "6px 0", width: 96, textAlign: "right", color: "var(--gray-700)" }}>
-                  {t.meanCostUsd === null ? "unmeasured" : `${formatUsd(t.meanCostUsd)}/task`}
-                </td>
-              </tr>
-            );
-          })}
+          {perTask.map((t) => (
+            <tr key={t.taskId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+              <td className="mono" style={{ padding: "8px 12px 8px 0", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                <Link href={`/tasks/${t.taskId}`}>{t.taskId}</Link>
+              </td>
+              <td style={{ padding: "8px 0" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {t.perModel.map((m) => (
+                    <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
+                      <div style={{ flex: 1, minWidth: 0, background: "var(--gray-alpha-200)", borderRadius: 4, height: 7 }}>
+                        <div style={{ width: `${m.passRate * 100}%`, background: modelColor(m.model), height: 7, borderRadius: 4 }} />
+                      </div>
+                      <span
+                        className="tabular-nums"
+                        style={{ width: 108, textAlign: "right", fontSize: 12, color: "var(--gray-700)", whiteSpace: "nowrap" }}
+                      >
+                        {(m.passRate * 100).toFixed(0)}% ({m.passed}/{m.attempts})
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </section>
