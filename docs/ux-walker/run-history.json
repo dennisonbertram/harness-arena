@@ -1,0 +1,47 @@
+{
+  "runs": [
+    {
+      "timestamp": "2026-07-24T20:10:00Z",
+      "url": "http://localhost:3100",
+      "stories_walked": 4,
+      "stories_skipped": 1,
+      "findings_total": 5,
+      "quick_fixes_applied": 3,
+      "issues_filed": 0,
+      "stories_passed": 4,
+      "stories_failed": 0
+    }
+  ],
+  "stories": {
+    "STORY-001": {
+      "last_walked": "2026-07-24T20:10:00Z",
+      "status": "pass",
+      "findings_count": 2,
+      "fixes_merged_since": false
+    },
+    "STORY-005": {
+      "last_walked": "2026-07-24T20:10:00Z",
+      "status": "pass",
+      "findings_count": 1,
+      "fixes_merged_since": false
+    },
+    "STORY-008": {
+      "last_walked": "2026-07-24T20:10:00Z",
+      "status": "pass",
+      "findings_count": 0,
+      "fixes_merged_since": false
+    },
+    "STORY-010": {
+      "last_walked": "2026-07-24T20:10:00Z",
+      "status": "skipped",
+      "findings_count": 0,
+      "fixes_merged_since": false
+    },
+    "STORY-014": {
+      "last_walked": "2026-07-24T20:10:00Z",
+      "status": "pass",
+      "findings_count": 2,
+      "fixes_merged_since": false
+    }
+  }
+}
