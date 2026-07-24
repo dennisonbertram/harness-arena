@@ -1,12 +1,15 @@
 // The models a run can execute on, by Vercel AI Gateway id. glm-5.2 is the
 // default and the reference the leaderboard was built around; the Claude models
-// are for cross-model comparison on the same tasks/harness.
+// and poolside's Laguna are for cross-model comparison on the same
+// tasks/harness. All route through the Vercel AI Gateway (one endpoint, one
+// key) — the gateway serves Laguna too, so no separate provider is needed.
 export const DEFAULT_MODEL = "zai/glm-5.2";
 
 export const MODEL_LABELS: Record<string, string> = {
   "zai/glm-5.2": "glm-5.2",
   "anthropic/claude-sonnet-5": "Claude Sonnet 5",
   "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+  "poolside/laguna-s-2.1": "Laguna S 2.1",
 };
 
 // One shared model->color map so the chart, per-task bars, and any per-model
@@ -16,6 +19,7 @@ export const MODEL_COLORS: Record<string, string> = {
   "zai/glm-5.2": "#4f9bf5", // blue
   "anthropic/claude-sonnet-5": "#e8912a", // amber
   "anthropic/claude-opus-4-8": "#a06fe0", // violet
+  "poolside/laguna-s-2.1": "#2bb0a0", // teal
 };
 const FALLBACK_MODEL_COLOR = "#9aa0a6"; // gray for any unknown/legacy id
 
