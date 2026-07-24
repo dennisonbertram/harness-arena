@@ -9,6 +9,25 @@ export const MODEL_LABELS: Record<string, string> = {
   "anthropic/claude-opus-4-8": "Claude Opus 4.8",
 };
 
+// One shared model->color map so the chart, per-task bars, and any per-model
+// labels use the SAME color for a model everywhere. Chosen to be distinct on
+// the dark UI and reasonably colorblind-distinguishable.
+export const MODEL_COLORS: Record<string, string> = {
+  "zai/glm-5.2": "#4f9bf5", // blue
+  "anthropic/claude-sonnet-5": "#e8912a", // amber
+  "anthropic/claude-opus-4-8": "#a06fe0", // violet
+};
+const FALLBACK_MODEL_COLOR = "#9aa0a6"; // gray for any unknown/legacy id
+
+export function modelColor(model: string | undefined): string {
+  return MODEL_COLORS[runModel(model)] ?? FALLBACK_MODEL_COLOR;
+}
+
+/** Ordered list of supported models (default first) for selectors/legends. */
+export function modelOptions(): { id: string; label: string; color: string }[] {
+  return Object.keys(MODEL_LABELS).map((id) => ({ id, label: MODEL_LABELS[id], color: MODEL_COLORS[id] ?? FALLBACK_MODEL_COLOR }));
+}
+
 /** Gateway ids a submission is allowed to request. */
 export const ALLOWED_MODELS = new Set(Object.keys(MODEL_LABELS));
 

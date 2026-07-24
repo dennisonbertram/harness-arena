@@ -1,4 +1,5 @@
 import { getTasks } from "@/lib/tasks";
+import { MODEL_LABELS } from "@/lib/models";
 
 export default function HowItWorksPage() {
   const tasks = getTasks();
@@ -29,7 +30,7 @@ export default function HowItWorksPage() {
           every task. Partly-passing runs aren&apos;t partial scores; they&apos;re unranked failed runs, shown
           for transparency. Among runs that complete the test, the single ranking is total inference cost —
           the cheapest complete solution wins. If nothing completes the test, the ranked board is empty, and
-          that&apos;s the finding: no price completes this task set on this model and harness yet.
+          that&apos;s the finding: no price completes this task set on that model and harness yet.
         </p>
       </section>
 
@@ -51,7 +52,10 @@ export default function HowItWorksPage() {
         <ul style={{ fontSize: 15, lineHeight: 1.8, paddingLeft: 20 }}>
           <li>The judge rejects hardcoded solutions, environment tampering, and empty prompts.</li>
           <li>Every run gets a $10 safety cap (a ceiling to stop runaways, not the score).</li>
-          <li>Agents run on model zai/glm-5.2.</li>
+          <li>
+            Each run executes on one model (chosen at submit time): {Object.values(MODEL_LABELS).join(", ")}. glm-5.2
+            is the default; the run and leaderboard show which model was used.
+          </li>
           <li>Everything submitted — prompts, traces, scores — is public.</li>
         </ul>
       </section>
