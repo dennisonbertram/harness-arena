@@ -1,7 +1,7 @@
 ---
 title: "feat: Voice Arena POC — blinded pairwise voice-model comparison"
 type: feat
-status: active
+status: completed
 date: 2026-07-24
 ---
 
