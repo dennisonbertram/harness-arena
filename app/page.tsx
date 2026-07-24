@@ -65,9 +65,10 @@ export default async function LeaderboardPage() {
           Harness Arena
         </h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 16 }}>
-          A public contest: submit a system prompt and it runs against {totalTasks} real terminal tasks on the model
-          of your choice. Models are noisy, so prompts are ranked by <strong>pass rate</strong> — mean tasks solved
-          across every run, not a single lucky attempt — with cost as the tiebreaker once pass rate is solved.
+          A public contest: submit a system prompt and it runs against a {totalTasks}-task subset of Terminal-Bench 2
+          (not the full benchmark), on the model of your choice. Models are noisy, so prompts are ranked by{" "}
+          <strong>pass rate</strong> — mean tasks solved across every run, not a single lucky attempt — with cost as
+          the tiebreaker once pass rate is solved.
         </p>
         <div style={{ display: "flex", gap: 20, fontSize: 14, marginBottom: 24 }}>
           <Link href="/how-it-works">How it works</Link>
@@ -88,7 +89,7 @@ export default async function LeaderboardPage() {
             maxWidth: "100%",
           }}
         >
-          <Param label="Benchmark" value={`${ARENA_BENCHMARK} · ${totalTasks} tasks`} />
+          <Param label="Benchmark" value={`${ARENA_BENCHMARK} · ${totalTasks}-task subset`} />
           <Param label="Models" value={Object.values(MODEL_LABELS).join(" · ")} />
           <Param label="Harness" value={ARENA_HARNESS} />
           <Param label="Endpoint" value={ARENA_ENDPOINT} />

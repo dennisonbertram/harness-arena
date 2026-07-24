@@ -16,8 +16,8 @@ export default function HowItWorksPage() {
         </h2>
         <p style={{ fontSize: 15, lineHeight: 1.6 }}>
           Harness Arena is a public contest: submit a system prompt for an AI agent, and it gets
-          run against a fixed set of real terminal tasks inside a sandboxed environment. Everything
-          — the prompt, the traces, the scores — is public.
+          run against a fixed {tasks.length}-task <strong>subset</strong> of the Terminal-Bench 2 benchmark (not the
+          full suite) inside a sandboxed environment. Everything — the prompt, the traces, the scores — is public.
         </p>
       </section>
 
@@ -36,7 +36,7 @@ export default function HowItWorksPage() {
 
       <section style={{ marginBottom: 32 }}>
         <h2 className="label" style={{ marginBottom: 8 }}>
-          The tasks
+          The tasks <span style={{ color: "var(--gray-700)" }}>· the {tasks.length}-task subset we run</span>
         </h2>
         <ul className="mono" style={{ fontSize: 14, lineHeight: 1.8, paddingLeft: 20 }}>
           {tasks.map((task) => (
