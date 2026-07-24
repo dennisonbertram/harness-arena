@@ -9,7 +9,7 @@
 //   {
 //     "models":    [{ "key": "gpt-voice", "name": "GPT Voice" }, ...],
 //     "prompts":   [{ "key": "greeting", "text"?: "...", "category"?: "...", "file": "audio/greeting.wav" }, ...],
-//     "responses": [{ "prompt": "greeting", "model": "gpt-voice", "file": "audio/greeting-gpt.wav" }, ...]
+//     "responses": [{ "prompt": "greeting", "model": "gpt-voice", "file": "audio/greeting-gpt.wav", "transcript"?: "..." }, ...]
 //   }
 //
 // `key` values are stable, researcher-chosen strings (not the final blob
@@ -264,6 +264,7 @@ export function assembleManifest(input, priorManifestRaw, hashesByFile = new Map
       model_id: modelIdByKey.get(r.model),
       audio_url: blobKeyFor("response", id),
       audio_sha256: hash,
+      transcript: r.transcript,
       _file: r.file,
     };
   });
