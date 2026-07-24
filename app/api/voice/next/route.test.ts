@@ -153,6 +153,55 @@ describe("GET /api/voice/next", () => {
     });
   });
 
+  describe("mint rate limit", () => {
+    it("returns 429 on the 31st cookie-less GET from one IP after 30 successful mints", async () => {
+      const ip = "9.9.9.1";
+      for (let i = 0; i < 30; i++) {
+        const response = await GET(getRequest({ ip }));
+        expect(response.status).toBe(200);
+        expect(response.cookies.get("voice_evaluator")).toBeDefined();
+      }
+
+      const over = await GET(getRequest({ ip }));
+      expect(over.status).toBe(429);
+      const body = await over.json();
+      expect(body).toEqual({ error: "too many new evaluator sessions from this IP, try again later" });
+      expect(over.cookies.get("voice_evaluator")).toBeUndefined();
+    });
+  });
+
+  describe("orphaned judgment keys", () => {
+    it("does not count judgment keys absent from the current manifest toward progress", async () => {
+      const manifest = buildManifest();
+      await voiceStorageRef.current.putManifest(manifest);
+      const evaluatorId = randomUUID();
+      // Simulate a re-seed: keys from a prior manifest's comparison set that
+      // no longer exist in the current one.
+      const orphan1: VoiceJudgment = {
+        comparison_id: "orphan-resp-x_orphan-resp-y",
+        evaluator_id: evaluatorId,
+        prompt_id: "old-prompt",
+        response_a_id: "orphan-resp-x",
+        response_b_id: "orphan-resp-y",
+        outcome: "a",
+        play_counts: { prompt: 1, a: 1, b: 1 },
+        time_to_judgment_ms: 1000,
+        created_at: "2026-07-01T00:00:00.000Z",
+      };
+      const orphan2: VoiceJudgment = { ...orphan1, comparison_id: "orphan-resp-z_orphan-resp-w" };
+      await voiceStorageRef.current.putJudgment(orphan1);
+      await voiceStorageRef.current.putJudgment(orphan2);
+
+      const response = await GET(getRequest({ evaluatorId, ip: "3.3.3.9" }));
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.progress.judged).toBe(0);
+      expect(body.progress.total).toBe(ALL_COMPARISON_IDS.length);
+      expect(body.progress.judged).toBeLessThanOrEqual(body.progress.total);
+    });
+  });
+
   describe("seeding state", () => {
     it("returns not_seeded when no manifest exists", async () => {
       const response = await GET(getRequest({ ip: "3.3.3.1" }));

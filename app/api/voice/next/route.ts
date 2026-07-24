@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { log } from "@/lib/log";
 import type { NextComparison, Progress } from "@/lib/voice-session";
-import { pickNext, progress } from "@/lib/voice-session";
+import { enumerateComparisons, pickNext, progress } from "@/lib/voice-session";
 import type { VoiceManifest } from "@/lib/voice-types";
 import { getVoiceStorage } from "@/lib/voice-storage";
 
@@ -111,7 +111,12 @@ export async function GET(request: NextRequest) {
     return response;
   }
 
-  const judged = await storage.listJudgmentKeys(evaluatorId);
+  // A re-seed can orphan judgment keys from a prior manifest's comparison
+  // set; counting those would report judged > total. Filter to the current
+  // manifest's comparisons before using the count (cheap: one enumeration,
+  // already O(prompts×models²) tiny).
+  const currentComparisonIds = new Set(enumerateComparisons(manifest).map((c) => c.comparisonId));
+  const judged = (await storage.listJudgmentKeys(evaluatorId)).filter((id) => currentComparisonIds.has(id));
   const exclude = parseExclude(request);
   // Routes are the composition root: pickNext/progress are pure over an
   // injected rng, and Math.random is supplied here rather than baked in.

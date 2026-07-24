@@ -112,6 +112,23 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
     10000,
   );
 
+  it(
+    "putJudgment resolves created:false (not a throw) when the initial write fails transiently but the retry recovery then hits an 'already exists' conflict",
+    async () => {
+      const storage = new BlobVoiceStorage();
+      vi.mocked(put)
+        .mockRejectedValueOnce(new Error("network blip"))
+        .mockRejectedValue(new Error("This blob already exists"));
+
+      const result = await storage.putJudgment(makeJudgment());
+
+      expect(result).toEqual({ created: false });
+      // 1 initial attempt (transient) + withRetry's default 4 attempts (all "already exists").
+      expect(put).toHaveBeenCalledTimes(5);
+    },
+    10000,
+  );
+
   it("listJudgmentKeys returns only the given evaluator's comparison IDs and never fetches judgment bodies", async () => {
     const storage = new BlobVoiceStorage();
     vi.mocked(list).mockResolvedValueOnce({
