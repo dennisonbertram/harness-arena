@@ -7,17 +7,23 @@ import {
   buildResponseRequest,
   buildSayExactlyRequest,
   buildSpeechRequest,
+  checkModelSlugCollisions,
+  checkSayExactlyFidelity,
+  checkVoiceSeparation,
   fetchWithRetry,
+  generatePromptClip,
   isValidWavFile,
   parseArgs,
   parseSseAudioStream,
   pcmToWav,
   planWork,
+  shouldPrintSeedCommand,
   slugifyModel,
   summarizeByModel,
   validatePromptSet,
   wavStats,
 } from "./generate-voice-clips.mjs";
+import { validateInput } from "./seed-voice.mjs";
 
 const REQUIRED_CATEGORIES = [
   "factual",
@@ -126,6 +132,18 @@ describe("validatePromptSet", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/"p1"/);
   });
+
+  it("throws naming the offending key for a missing category", () => {
+    const set = validSet();
+    delete (set.prompts[0] as { category?: string }).category;
+    expect(() => validatePromptSet(set)).toThrow(/"p1".*category/);
+  });
+
+  it("throws naming the offending key for an empty category", () => {
+    const set = validSet();
+    set.prompts[0].category = "";
+    expect(() => validatePromptSet(set)).toThrow(/"p1".*category/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -229,6 +247,29 @@ describe("parseSseAudioStream", () => {
     const sseText = sseChunk({ audio: { data: Buffer.from([1]).toString("base64"), transcript: "hi" } }) + SSE_DONE;
     expect(() => parseSseAudioStream(sseText, { expectedVoice: "alloy" })).not.toThrow();
   });
+
+  it("throws when a chunk carries an error field after an audio chunk, naming the model and prompt key", () => {
+    const sseText =
+      sseChunk({ audio: { data: Buffer.from([1]).toString("base64") } }) +
+      `data: ${JSON.stringify({ error: { message: "content policy violation" } })}\n` +
+      SSE_DONE;
+    expect(() => parseSseAudioStream(sseText, { model: "openai/gpt-audio", promptKey: "diagnosis-news" })).toThrow(
+      /content policy violation/,
+    );
+    expect(() => parseSseAudioStream(sseText, { model: "openai/gpt-audio", promptKey: "diagnosis-news" })).toThrow(
+      /openai\/gpt-audio/,
+    );
+  });
+
+  it("throws when the stream ends without a [DONE] terminator, naming what was received", () => {
+    const sseText = sseChunk({ audio: { data: Buffer.from([1]).toString("base64") } }); // no SSE_DONE -- dropped mid-stream
+    expect(() => parseSseAudioStream(sseText)).toThrow(/\[DONE\]/);
+  });
+
+  it("still passes for a well-terminated stream", () => {
+    const sseText = sseChunk({ audio: { data: Buffer.from([1]).toString("base64"), transcript: "hi" } }) + SSE_DONE;
+    expect(() => parseSseAudioStream(sseText)).not.toThrow();
+  });
 });
 
 describe("pcmToWav", () => {
@@ -294,6 +335,26 @@ describe("fetchWithRetry", () => {
       fetchWithRetry("https://example.test", {}, { attempts: 3, fetchImpl: fetchMock, retryDelayMs: 0 }),
     ).rejects.toThrow(/failed after 3 attempts/);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries when readBody (res.text()/arrayBuffer()) fails mid-transfer, then succeeds", async () => {
+    let readAttempts = 0;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => {
+        readAttempts++;
+        if (readAttempts === 1) throw new Error("stream reset");
+        return "second-attempt body";
+      },
+    });
+    const result = await fetchWithRetry(
+      "https://example.test",
+      {},
+      { attempts: 3, fetchImpl: fetchMock, retryDelayMs: 0, readBody: (res: { text: () => Promise<string> }) => res.text() },
+    );
+    expect(result).toBe("second-attempt body");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -469,6 +530,66 @@ describe("assembleGenerationManifest", () => {
       expect(entry).not.toHaveProperty("transcript");
     });
   });
+
+  describe("full-set coverage independent of a --limit window", () => {
+    // Simulates what main() builds: p1/p2 are this run's --limit window
+    // (freshly generated), p3 is OUTSIDE the window -- its ok/false comes
+    // straight from a cache probe, never from an actual generation this run.
+    const promptSet3 = {
+      prompts: [
+        { key: "p1", text: "one", category: "factual" },
+        { key: "p2", text: "two", category: "factual" },
+        { key: "p3", text: "three", category: "factual" },
+      ],
+    };
+
+    function windowResults() {
+      return [
+        { type: "prompt", promptKey: "p1", ok: true },
+        { type: "response", promptKey: "p1", model: "openai/gpt-audio", ok: true, transcript: "A1" },
+        { type: "response", promptKey: "p1", model: "openai/gpt-audio-mini", ok: true, transcript: "A1m" },
+        { type: "prompt", promptKey: "p2", ok: true },
+        { type: "response", promptKey: "p2", model: "openai/gpt-audio", ok: true, transcript: "A2" },
+        { type: "response", promptKey: "p2", model: "openai/gpt-audio-mini", ok: true, transcript: "A2m" },
+      ];
+    }
+
+    it("a limited run's manifest still covers a prompt outside the window when the cache probe reports it complete", () => {
+      const results = [
+        ...windowResults(),
+        { type: "prompt", promptKey: "p3", ok: true },
+        { type: "response", promptKey: "p3", model: "openai/gpt-audio", ok: true },
+        { type: "response", promptKey: "p3", model: "openai/gpt-audio-mini", ok: true },
+      ];
+      const { manifest, fullCoverage } = assembleGenerationManifest(promptSet3, models, results, "voice-dataset");
+      expect(manifest!.prompts.map((p) => p.key)).toEqual(["p1", "p2", "p3"]);
+      expect(fullCoverage).toBe(true);
+      expect(shouldPrintSeedCommand(fullCoverage, 0)).toBe(true);
+    });
+
+    it("excludes an out-of-window prompt the cache probe reports incomplete, and the seed-command decision comes out false", () => {
+      const results = [
+        ...windowResults(),
+        { type: "prompt", promptKey: "p3", ok: true },
+        { type: "response", promptKey: "p3", model: "openai/gpt-audio", ok: true },
+        { type: "response", promptKey: "p3", model: "openai/gpt-audio-mini", ok: false }, // not cached -- incomplete
+      ];
+      const { manifest, warnings, fullCoverage } = assembleGenerationManifest(promptSet3, models, results, "voice-dataset");
+      expect(manifest!.prompts.map((p) => p.key)).toEqual(["p1", "p2"]);
+      expect(warnings.some((w) => w.includes('"p3"'))).toBe(true);
+      expect(fullCoverage).toBe(false);
+      expect(shouldPrintSeedCommand(fullCoverage, 0)).toBe(false);
+    });
+  });
+});
+
+describe("shouldPrintSeedCommand", () => {
+  it("is true only when coverage is full and nothing failed this run", () => {
+    expect(shouldPrintSeedCommand(true, 0)).toBe(true);
+    expect(shouldPrintSeedCommand(true, 1)).toBe(false);
+    expect(shouldPrintSeedCommand(false, 0)).toBe(false);
+    expect(shouldPrintSeedCommand(false, 2)).toBe(false);
+  });
 });
 
 describe("wavStats", () => {
@@ -492,10 +613,11 @@ describe("summarizeByModel", () => {
       { model: "model-a", durationSeconds: 1.2, rmsDb: -11 },
       { model: "model-b", durationSeconds: 1, rmsDb: -25 },
     ];
-    const { perModel, levelGapFlag } = summarizeByModel(entries);
+    const { perModel, levelGapFlags } = summarizeByModel(entries);
     expect(perModel.find((m) => m.model === "model-a")!.avgRmsDb).toBeCloseTo(-10.5, 5);
-    expect(levelGapFlag).toMatch(/model-a/);
-    expect(levelGapFlag).toMatch(/model-b/);
+    expect(levelGapFlags).toHaveLength(1);
+    expect(levelGapFlags[0]).toMatch(/model-a/);
+    expect(levelGapFlags[0]).toMatch(/model-b/);
   });
 
   it("does not flag a gap of 6dB or less", () => {
@@ -503,7 +625,17 @@ describe("summarizeByModel", () => {
       { model: "model-a", durationSeconds: 1, rmsDb: -10 },
       { model: "model-b", durationSeconds: 1, rmsDb: -13 },
     ];
-    expect(summarizeByModel(entries).levelGapFlag).toBeNull();
+    expect(summarizeByModel(entries).levelGapFlags).toEqual([]);
+  });
+
+  it("collects a gap flag for every offending pair, not just the last one found", () => {
+    const entries = [
+      { model: "a", durationSeconds: 1, rmsDb: 0 },
+      { model: "b", durationSeconds: 1, rmsDb: -10 },
+      { model: "c", durationSeconds: 1, rmsDb: -20 },
+    ];
+    // a-b gap=10, a-c gap=20, b-c gap=10 -- all three pairs exceed 6dB.
+    expect(summarizeByModel(entries).levelGapFlags).toHaveLength(3);
   });
 });
 
@@ -548,5 +680,98 @@ describe("parseArgs", () => {
 
   it("throws a usage error when no prompts path is given", () => {
     expect(() => parseArgs(["--force"])).toThrow(/usage/i);
+  });
+
+  it("throws when fewer than 2 models are resolved", () => {
+    expect(() => parseArgs(["prompts.json", "--models", "openai/gpt-audio"])).toThrow(/usage/i);
+  });
+
+  it("throws when models resolve to fewer than 2 after whitespace-only entries are filtered", () => {
+    expect(() => parseArgs(["prompts.json", "--models", "openai/gpt-audio, ,"])).toThrow(/usage/i);
+  });
+
+  it("throws when two model ids slug-collide", () => {
+    expect(() => parseArgs(["prompts.json", "--models", "openai/gpt.audio,openai/gpt-audio"])).toThrow(/slugify/i);
+  });
+
+  it("throws when --limit is not a positive integer", () => {
+    expect(() => parseArgs(["prompts.json", "--limit", "0"])).toThrow(/usage/i);
+    expect(() => parseArgs(["prompts.json", "--limit", "-3"])).toThrow(/usage/i);
+    expect(() => parseArgs(["prompts.json", "--limit", "1.5"])).toThrow(/usage/i);
+    expect(() => parseArgs(["prompts.json", "--limit", "abc"])).toThrow(/usage/i);
+  });
+});
+
+describe("checkModelSlugCollisions", () => {
+  it("throws naming both colliding model ids", () => {
+    expect(() => checkModelSlugCollisions(["openai/gpt.audio", "openai/gpt-audio"])).toThrow(/openai\/gpt\.audio/);
+    expect(() => checkModelSlugCollisions(["openai/gpt.audio", "openai/gpt-audio"])).toThrow(/openai\/gpt-audio/);
+  });
+
+  it("does not throw for models with distinct slugs", () => {
+    expect(() => checkModelSlugCollisions(["openai/gpt-audio", "openai/gpt-audio-mini"])).not.toThrow();
+  });
+});
+
+describe("checkVoiceSeparation", () => {
+  it("warns naming the voice when --voice equals --prompt-voice", () => {
+    expect(checkVoiceSeparation("alloy", "alloy")).toMatch(/alloy/);
+  });
+
+  it("returns null when the voices differ", () => {
+    expect(checkVoiceSeparation("alloy", "nova")).toBeNull();
+  });
+});
+
+describe("checkSayExactlyFidelity", () => {
+  it("returns null for a faithful verbatim transcript", () => {
+    const text = "What's the tallest mountain in the world?";
+    expect(checkSayExactlyFidelity(text, text, "p1")).toBeNull();
+  });
+
+  it("warns naming the prompt key for an empty or wildly divergent (refusal-ish) transcript", () => {
+    const prompt = "What's the tallest mountain in the world?";
+    const empty = checkSayExactlyFidelity(prompt, "", "p1");
+    expect(empty).toMatch(/"p1"/);
+
+    const refusal = checkSayExactlyFidelity(prompt, "I can't help with that request.", "p1");
+    expect(refusal).toMatch(/"p1"/);
+  });
+});
+
+describe("generatePromptClip (gateway branch WAV validation)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("throws a clear error instead of writing garbage when the gateway returns non-WAV bytes", async () => {
+    const badBytes = Buffer.from("not a wav file at all", "utf8");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => badBytes.buffer.slice(badBytes.byteOffset, badBytes.byteOffset + badBytes.byteLength),
+      }),
+    );
+
+    await expect(
+      generatePromptClip(
+        { promptKey: "p1", text: "hi" },
+        { promptVoice: "nova", mode: "gateway", sayExactlyModel: undefined, apiKeys: { gateway: "k" } },
+      ),
+    ).rejects.toThrow(/invalid|non-wav/i);
+  });
+});
+
+describe("cross-script contract: assembleGenerationManifest output satisfies seed-voice.mjs's validateInput", () => {
+  it("a fully-covered manifest passes seed-voice's own validation", () => {
+    const promptSet = { prompts: [{ key: "p1", text: "one", category: "factual" }] };
+    const models = ["openai/gpt-audio", "openai/gpt-audio-mini"];
+    const results = [
+      { type: "prompt", promptKey: "p1", ok: true },
+      { type: "response", promptKey: "p1", model: "openai/gpt-audio", ok: true, transcript: "A1" },
+      { type: "response", promptKey: "p1", model: "openai/gpt-audio-mini", ok: true, transcript: "A2" },
+    ];
+    const { manifest } = assembleGenerationManifest(promptSet, models, results, "voice-dataset");
+    expect(() => validateInput(manifest!)).not.toThrow();
   });
 });
