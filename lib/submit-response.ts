@@ -1,9 +1,6 @@
 export interface SubmitResponse {
   submission_id?: string;
-  /** First of the submission's runs (for a "view your run" link). */
   run_id?: string;
-  /** All runs spawned for this submission (RUNS_PER_SUBMISSION of them). */
-  run_ids?: string[];
   status?: string;
   judge_reason?: string;
   /** Error message from a non-2xx response (e.g. judge unavailable, rate limit). */

@@ -12,11 +12,6 @@ import type { Run, Submission } from "@/lib/types";
 const MAX_PROMPT_CHARS = 32768;
 const MAX_BODY_BYTES = 262144;
 
-// Fixed sample size per submission: each approved (prompt, model) runs this many
-// times so pass rate is a mean over a uniform n, not a single noisy run.
-// Override via RUNS_PER_SUBMISSION; floored at 1.
-const RUNS_PER_SUBMISSION = Math.max(1, Math.floor(Number(process.env.RUNS_PER_SUBMISSION ?? 5)) || 5);
-
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
   // Empty prompt is allowed and means "run vanilla pi with its built-in
@@ -132,30 +127,21 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // Every approved submission runs the same (prompt, model) RUNS_PER_SUBMISSION
-  // times, so pass rate is a mean over a fixed sample rather than a single noisy
-  // run. The leaderboard already aggregates over multiple runs of the same
-  // (prompt, model), so these N runs pool naturally into that mean.
-  const now = new Date().toISOString();
-  const runs: Run[] = Array.from({ length: RUNS_PER_SUBMISSION }, () => ({
+  const run: Run = {
     id: randomUUID(),
     submission_id: submission.id,
-    status: "queued" as const,
+    status: "queued",
     model,
     task_results: [],
-    created_at: now,
-  }));
-  for (const run of runs) {
-    await storage.putRun(run);
-    await storage.appendRunEvents(run.id, [
-      { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
-    ]);
-  }
-  const runIds = runs.map((r) => r.id);
+    created_at: new Date().toISOString(),
+  };
+  await storage.putRun(run);
+  await storage.appendRunEvents(run.id, [
+    { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
+  ]);
 
   submission.status = "queued";
-  submission.run_id = runIds[0]; // first run, kept for backward-compatible readers
-  submission.run_ids = runIds;
+  submission.run_id = run.id;
   await storage.putSubmission(submission);
 
   // Run the trigger via after() so it executes once the response has been
@@ -166,24 +152,18 @@ export async function POST(request: NextRequest) {
   // do) -- fall back to the original ticket #4 fire-and-forget contract in
   // that case so the trigger still runs. Either way, a failing/stubbed
   // trigger must never fail the submission response.
-  // ponytail: no queue — all N sandboxes spawn ~concurrently on approval. Fine
-  // at POC traffic; add a concurrency cap / worker if sandbox limits or cost bite.
-  const startAll = () =>
-    runs.map((run) =>
-      startRun(run, submission.prompt).catch((err: unknown) =>
-        log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message }),
-      ),
-    );
+  const onTriggerFailure = (err: unknown) => {
+    log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message });
+  };
   try {
-    after(() => void Promise.all(startAll()));
+    after(() => startRun(run, submission.prompt).catch(onTriggerFailure));
   } catch {
-    void Promise.all(startAll());
+    void startRun(run, submission.prompt).catch(onTriggerFailure);
   }
 
   return NextResponse.json({
     submission_id: submission.id,
-    run_id: runIds[0],
-    run_ids: runIds,
+    run_id: run.id,
     status: submission.status,
     judge_reason: verdict.reason,
   });
