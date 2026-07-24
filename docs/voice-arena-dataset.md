@@ -28,6 +28,8 @@ Keys are stable researcher-chosen slugs; they drive filenames, caching, and (via
 
 **Keep `voice-dataset/` — it is committed to the repo on purpose.** Generation is nondeterministic: a cold-cache re-run produces new audio bytes for every clip, seed-voice's content-hash check then re-mints every ID, and ALL collected judgments become orphans (not just fixtures). The committed dataset directory is simultaneously the research artifact and the only protection against that. Adding prompts is safe: new keys generate, existing keys stay cached and keep their IDs.
 
+**Editing a prompt's TEXT under an existing key, without deleting its WAVs, silently desyncs the displayed text from the cached audio** — the cache probe only checks the WAV files, so old audio gets reused, and since the key didn't change, seed-voice reuses its existing ID too (audio_sha256 only changes if the *audio* bytes change). After editing a prompt's text, delete that key's clips under `voice-dataset/prompts/` and `voice-dataset/responses/` (or run with `--force`) so they regenerate against the new text.
+
 ## Environment keys
 
 - `OPENROUTER_API_KEY` (responses + fallback prompt TTS) — from `.env`. Gotcha: `node --env-file` does NOT override a key already exported by your shell profile; if a stale `OPENROUTER_API_KEY` lives in your profile, export the `.env` value explicitly before running.

@@ -11,8 +11,11 @@
 //     --voice alloy --prompt-voice nova \
 //     --limit N --force
 //
-// Env: OPENROUTER_API_KEY (model responses), AI_GATEWAY_API_KEY (tts-1
-// prompt audio; falls back to a say-exactly OpenRouter call on failure).
+// Env: OPENROUTER_API_KEY -- required whenever there's prompt or response
+// audio to generate (responses always need it; prompt audio needs it too
+// since the say-exactly fallback is an OpenRouter call). AI_GATEWAY_API_KEY
+// is optional -- only used for the first-choice tts-1 attempt, which falls
+// back to say-exactly on failure.
 //
 // The output directory IS the cache: a re-run skips any prompt/response
 // file that already passes isValidWavFile, so an interrupted or partial run
@@ -39,7 +42,7 @@
 // upgrade to reading a rate from provider response metadata if OpenAI ever
 // exposes one.
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -141,22 +144,31 @@ export function buildSpeechRequest(text, voice) {
  * concatenated the same way, falling back to accumulated delta.content when
  * the stream never carried an audio transcript. Unparseable lines are
  * ignored (skipped, not fatal). Throws clearly (naming model/promptKey when
- * given, and what the model said instead) when the stream yields zero audio
- * bytes -- a refusal or a text-only reply both look like this. Throws naming
+ * given, and what the model said instead) when: a chunk carries an `error`
+ * field (the stream errored out mid-transfer, even after audio already
+ * arrived); the stream ends without ever seeing "data: [DONE]" (a dropped
+ * connection can silently truncate this); or the stream yields zero audio
+ * bytes (a refusal or a text-only reply both look like this). Throws naming
  * both voices if any chunk echoes a voice different from expectedVoice; a
  * stream that never carries a voice field passes (observed live behavior).
  */
 export function parseSseAudioStream(sseText, { expectedVoice, model, promptKey } = {}) {
+  const errContext = () => [model && `model "${model}"`, promptKey && `prompt "${promptKey}"`].filter(Boolean).join(", ");
+
   const pcmChunks = [];
   let transcript = "";
   let contentAccum = "";
   let voiceField;
+  let sawDone = false;
 
   for (const rawLine of sseText.split("\n")) {
     const line = rawLine.trim();
     if (!line.startsWith("data:")) continue;
     const payload = line.slice("data:".length).trim();
-    if (payload === "[DONE]") break;
+    if (payload === "[DONE]") {
+      sawDone = true;
+      break;
+    }
 
     let chunk;
     try {
@@ -164,6 +176,13 @@ export function parseSseAudioStream(sseText, { expectedVoice, model, promptKey }
     } catch {
       continue; // ignore unparseable lines
     }
+
+    if (chunk?.error) {
+      const ctx = errContext();
+      const errMsg = typeof chunk.error === "string" ? chunk.error : (chunk.error.message ?? JSON.stringify(chunk.error));
+      throw new Error(`SSE stream error${ctx ? ` (${ctx})` : ""}: ${errMsg}`);
+    }
+
     const delta = chunk?.choices?.[0]?.delta;
     if (!delta) continue;
 
@@ -177,11 +196,18 @@ export function parseSseAudioStream(sseText, { expectedVoice, model, promptKey }
     }
   }
 
+  if (!sawDone) {
+    const ctx = errContext();
+    throw new Error(
+      `SSE stream ended without a [DONE] terminator${ctx ? ` (${ctx})` : ""} -- likely a dropped connection; received: ${JSON.stringify(sseText.slice(-200))}`,
+    );
+  }
+
   const pcm = Buffer.concat(pcmChunks);
   if (pcm.length === 0) {
-    const context = [model && `model "${model}"`, promptKey && `prompt "${promptKey}"`].filter(Boolean).join(", ");
+    const ctx = errContext();
     throw new Error(
-      `no audio in SSE stream${context ? ` (${context})` : ""} -- refusal or text-only reply: ${JSON.stringify(contentAccum || sseText.slice(0, 200))}`,
+      `no audio in SSE stream${ctx ? ` (${ctx})` : ""} -- refusal or text-only reply: ${JSON.stringify(contentAccum || sseText.slice(0, 200))}`,
     );
   }
 
@@ -227,9 +253,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * fetch with a per-attempt AbortSignal.timeout deadline. Retries (with
  * linear backoff) on 429, 5xx, and network/timeout errors; fails fast on any
  * other 4xx. Throws a clear error naming the attempt count on final failure.
+ *
+ * `readBody(res)`, when given, is called INSIDE the same retried attempt
+ * (only once res.ok) and its result becomes fetchWithRetry's return value
+ * instead of the raw Response. A body read that fails mid-transfer (e.g. a
+ * connection dropped while streaming) is just as retryable as the fetch
+ * itself -- without this, a successful HTTP response whose body later fails
+ * to read would throw uncaught, never retried. Omit readBody to get the raw
+ * Response back (existing callers/tests).
  */
 export async function fetchWithRetry(url, init = {}, opts = {}) {
-  const { attempts = 4, timeoutMs = 30000, fetchImpl = fetch, retryDelayMs = 500 } = opts;
+  const { attempts = 4, timeoutMs = 30000, fetchImpl = fetch, retryDelayMs = 500, readBody } = opts;
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let res;
@@ -240,7 +274,16 @@ export async function fetchWithRetry(url, init = {}, opts = {}) {
       if (attempt < attempts) await sleep(retryDelayMs * attempt);
       continue;
     }
-    if (res.ok) return res;
+    if (res.ok) {
+      if (!readBody) return res;
+      try {
+        return await readBody(res);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < attempts) await sleep(retryDelayMs * attempt);
+        continue;
+      }
+    }
     if (res.status !== 429 && res.status < 500) {
       const bodyText = await res.text().catch(() => "");
       throw new Error(`${url} failed: HTTP ${res.status}${bodyText ? ` — ${bodyText}` : ""}`);
@@ -337,9 +380,10 @@ export function wavStats(buffer) {
 }
 
 /**
- * Averages { durationSeconds, rmsDb } per model and flags a >6dB average RMS
- * gap between any two models (the PRD's loudness confound stays visible
- * until normalization lands).
+ * Averages { durationSeconds, rmsDb } per model and flags every pair of
+ * models with a >6dB average RMS gap (the PRD's loudness confound stays
+ * visible until normalization lands) -- one entry per offending pair, not
+ * just the last one found.
  */
 export function summarizeByModel(entries) {
   const byModel = new Map();
@@ -354,16 +398,16 @@ export function summarizeByModel(entries) {
     count: stats.length,
   }));
 
-  let levelGapFlag = null;
+  const levelGapFlags = [];
   for (let i = 0; i < perModel.length; i++) {
     for (let j = i + 1; j < perModel.length; j++) {
       const gap = Math.abs(perModel[i].avgRmsDb - perModel[j].avgRmsDb);
       if (gap > 6) {
-        levelGapFlag = `level gap: "${perModel[i].model}" vs "${perModel[j].model}" differ by ${gap.toFixed(1)} dB (>6 dB)`;
+        levelGapFlags.push(`level gap: "${perModel[i].model}" vs "${perModel[j].model}" differ by ${gap.toFixed(1)} dB (>6 dB)`);
       }
     }
   }
-  return { perModel, levelGapFlag };
+  return { perModel, levelGapFlags };
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +417,56 @@ export function summarizeByModel(entries) {
 /** "openai/gpt-audio-mini" -> "openai-gpt-audio-mini" -- stable, filename/key-safe. */
 export function slugifyModel(modelId) {
   return modelId.replace(/[/.]/g, "-");
+}
+
+/** Throws naming the colliding model ids if two configured models slugify to the same key (would corrupt shared filenames/manifest keys). */
+export function checkModelSlugCollisions(models) {
+  const seenBySlug = new Map();
+  for (const m of models) {
+    const slug = slugifyModel(m);
+    if (seenBySlug.has(slug)) {
+      throw new Error(`models "${seenBySlug.get(slug)}" and "${m}" both slugify to "${slug}" -- rename one or pick a different --models list`);
+    }
+    seenBySlug.set(slug, m);
+  }
+}
+
+/** Warning string (or null) when --voice and --prompt-voice match -- collapses the prompt/response speaker-separation cue the PRD relies on. */
+export function checkVoiceSeparation(voice, promptVoice) {
+  return voice === promptVoice
+    ? `--voice and --prompt-voice are both "${voice}" -- prompts and responses will sound identical, collapsing the speaker-separation cue`
+    : null;
+}
+
+function normalizeForComparison(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * Say-exactly fidelity check: the say-exactly fallback asks a model to speak
+ * prompt text verbatim, but it can still paraphrase or refuse instead.
+ * Returns a warning string (naming promptKey) when the transcript is empty
+ * or covers less than half the prompt's words after normalizing (lowercase,
+ * strip punctuation) -- null when it looks like a faithful verbatim read.
+ * Never fails the clip -- it's a signal for the researcher, not a guarantee.
+ */
+export function checkSayExactlyFidelity(promptText, transcript, promptKey) {
+  const promptWords = normalizeForComparison(promptText);
+  if (promptWords.length === 0) return null;
+  const transcriptWords = new Set(normalizeForComparison(transcript ?? ""));
+  if (transcriptWords.size === 0) {
+    return `say-exactly fidelity: prompt "${promptKey}" got an empty transcript -- likely a refusal, not a verbatim read`;
+  }
+  const matched = promptWords.filter((w) => transcriptWords.has(w)).length;
+  const coverage = matched / promptWords.length;
+  if (coverage < 0.5) {
+    return `say-exactly fidelity: prompt "${promptKey}" transcript covers only ${Math.round(coverage * 100)}% of the prompt's words -- likely paraphrased, not verbatim`;
+  }
+  return null;
 }
 
 function promptFilePath(outDir, key) {
@@ -454,6 +548,12 @@ export function planWork(promptSet, models, cacheProbe, options = {}) {
  * regenerate it) from its `.txt` sidecar file; injectable for pure testing,
  * defaults to a real file read. Returns undefined (transcript omitted) when
  * the sidecar is missing or unreadable.
+ *
+ * `promptSet` must be the caller's FULL prompt set, not a --limit window --
+ * results for prompts outside the window should come from a cache probe
+ * (see planWork's cacheProbe) so the manifest always reflects the whole
+ * dataset's coverage. The returned `fullCoverage` is true only when every
+ * prompt in `promptSet` made it into the manifest (see shouldPrintSeedCommand).
  */
 export function assembleGenerationManifest(promptSet, models, results, outDir, readSidecar = defaultSidecarReader) {
   const promptResults = new Map();
@@ -493,12 +593,19 @@ export function assembleGenerationManifest(promptSet, models, results, outDir, r
     }
   }
 
+  const fullCoverage = prompts.length === promptSet.prompts.length;
+
   if (prompts.length === 0) {
-    return { manifest: null, warnings };
+    return { manifest: null, warnings, fullCoverage };
   }
 
   const modelEntries = models.map((m) => ({ key: slugifyModel(m), name: m }));
-  return { manifest: { models: modelEntries, prompts, responses }, warnings };
+  return { manifest: { models: modelEntries, prompts, responses }, warnings, fullCoverage };
+}
+
+/** Pure gate for printing the seed-voice command: only when every prompt in the full set has complete coverage AND nothing failed this run. */
+export function shouldPrintSeedCommand(fullCoverage, failedCount) {
+  return fullCoverage === true && failedCount === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,19 +624,30 @@ export function parseArgs(argv) {
     return idx === -1 ? undefined : argv[idx + 1];
   };
   const modelsRaw = flagValue("models");
+  const models = modelsRaw
+    ? modelsRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : DEFAULT_MODELS;
+  if (models.length < 2) {
+    throw new Error(`usage: --models needs at least 2 comma-separated model ids to compare (got: ${JSON.stringify(models)})`);
+  }
+  checkModelSlugCollisions(models);
+
   const limitRaw = flagValue("limit");
+  const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+  if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+    throw new Error(`usage: --limit must be a positive integer (got "${limitRaw}")`);
+  }
+
   return {
     promptsPath,
     outDir: flagValue("out") ?? DEFAULT_OUT_DIR,
-    models: modelsRaw
-      ? modelsRaw
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : DEFAULT_MODELS,
+    models,
     voice: flagValue("voice") ?? DEFAULT_VOICE,
     promptVoice: flagValue("prompt-voice") ?? DEFAULT_PROMPT_VOICE,
-    limit: limitRaw !== undefined ? Number(limitRaw) : undefined,
+    limit,
     force: argv.includes("--force"),
   };
 }
@@ -539,39 +657,51 @@ function writeFileAtomic(filePath, data) {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.tmp-${randomUUID()}`;
   writeFileSync(tmpPath, data);
-  renameSync(tmpPath, filePath);
+  try {
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup -- the rename error below is what matters
+    }
+    throw err;
+  }
 }
 
+// readBody runs INSIDE fetchWithRetry's retry loop so a body read that fails
+// mid-transfer (dropped connection) is retried, not just the initial fetch.
 async function callGatewaySpeech(text, voice, apiKey) {
-  const res = await fetchWithRetry(
+  return fetchWithRetry(
     GATEWAY_SPEECH_URL,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(buildSpeechRequest(text, voice)),
     },
-    { attempts: 4, timeoutMs: 30000 },
+    { attempts: 4, timeoutMs: 30000, readBody: async (res) => Buffer.from(await res.arrayBuffer()) },
   );
-  return Buffer.from(await res.arrayBuffer());
 }
 
 /** POSTs a streamed (stream:true) audio chat-completions body and returns the raw SSE response text -- see parseSseAudioStream. */
 async function callOpenRouterChatStream(body, apiKey) {
-  const res = await fetchWithRetry(
+  return fetchWithRetry(
     OPENROUTER_URL,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
     },
-    { attempts: 4, timeoutMs: 60000 },
+    { attempts: 4, timeoutMs: 60000, readBody: (res) => res.text() },
   );
-  return res.text();
 }
 
-async function generatePromptClip(job, { promptVoice, mode, sayExactlyModel, apiKeys }) {
+export async function generatePromptClip(job, { promptVoice, mode, sayExactlyModel, apiKeys }) {
   if (mode === "gateway") {
     const wav = await callGatewaySpeech(job.text, promptVoice, apiKeys.gateway);
+    if (!isValidWavFile(wav)) {
+      throw new Error(`gateway tts-1 returned invalid/non-WAV bytes (${wav.length} bytes) for prompt "${job.promptKey}"`);
+    }
     return { wav, transcript: job.text };
   }
   const sseText = await callOpenRouterChatStream(buildSayExactlyRequest(sayExactlyModel, promptVoice, job.text), apiKeys.openrouter);
@@ -592,22 +722,32 @@ export async function main(argv = process.argv.slice(2)) {
   const { warnings: lengthWarnings } = validatePromptSet(promptSetRaw);
   for (const w of lengthWarnings) console.warn(`[warn] ${w}`);
 
-  const activePrompts = applyLimit(promptSetRaw.prompts, limit);
+  const voiceWarning = checkVoiceSeparation(voice, promptVoice);
+  if (voiceWarning) console.warn(`[warn] ${voiceWarning}`);
+
+  // `fullPromptSet` (ALL prompts in the input file) is what the manifest
+  // gets assembled against -- `activePrompts` (--limit-windowed) is only
+  // what THIS run may generate. A prompt outside the window still needs to
+  // land in the manifest if it's already fully cached from a prior run.
+  const fullPrompts = promptSetRaw.prompts;
+  const fullPromptSet = { prompts: fullPrompts };
+  const activePrompts = applyLimit(fullPrompts, limit);
+  const activeKeys = new Set(activePrompts.map((p) => p.key));
   const activePromptSet = { prompts: activePrompts };
 
-  const plan = planWork(activePromptSet, models, (file) => isValidWavFile(file), { outDir, force, limit: undefined });
+  const cacheProbe = (file) => isValidWavFile(file);
+  const plan = planWork(activePromptSet, models, cacheProbe, { outDir, force });
 
   const apiKeys = { openrouter: process.env.OPENROUTER_API_KEY, gateway: process.env.AI_GATEWAY_API_KEY };
-  if (plan.responseJobs.length > 0 && !apiKeys.openrouter) {
-    throw new Error("OPENROUTER_API_KEY is required to generate model responses");
-  }
-  if (plan.promptJobs.length > 0 && !apiKeys.gateway && !apiKeys.openrouter) {
-    throw new Error("AI_GATEWAY_API_KEY (or OPENROUTER_API_KEY, for the say-exactly fallback) is required to generate prompt audio");
+  if ((plan.responseJobs.length > 0 || plan.promptJobs.length > 0) && !apiKeys.openrouter) {
+    throw new Error(
+      "OPENROUTER_API_KEY is required whenever there is prompt or response audio to generate (the say-exactly prompt-audio fallback needs it too -- the gateway TTS endpoint alone can't produce prompt audio today)",
+    );
   }
 
-  // Seed results with everything the plan did NOT include -- i.e. clips
-  // already cached-valid from a prior run -- so the manifest reflects full
-  // dataset coverage, not just this run's work.
+  // Seed results for THIS run's --limit window: cache-valid clips count as
+  // ok immediately (no regeneration needed); everything else gets filled in
+  // as jobs execute below.
   const results = [];
   let skippedCached = 0;
   for (const p of activePrompts) {
@@ -652,6 +792,10 @@ export async function main(argv = process.argv.slice(2)) {
       } else {
         outcome = await generatePromptClip(job, { promptVoice, mode: promptMode, sayExactlyModel, apiKeys });
       }
+      if (promptMode === "say-exactly") {
+        const fidelityWarning = checkSayExactlyFidelity(job.text, outcome.transcript, job.promptKey);
+        if (fidelityWarning) console.warn(`[warn] ${fidelityWarning}`);
+      }
       writeFileAtomic(job.file, outcome.wav);
       results.push({ type: "prompt", promptKey: job.promptKey, ok: true, transcript: outcome.transcript });
       generated++;
@@ -666,8 +810,11 @@ export async function main(argv = process.argv.slice(2)) {
     await throttle();
     try {
       const outcome = await generateResponseClip(job, { voice, apiKeys });
-      writeFileAtomic(job.file, outcome.wav);
+      // Sidecar BEFORE the WAV: the WAV's rename is the cache marker a
+      // re-run trusts, so writing the sidecar first closes the crash window
+      // where a "done" WAV exists but its transcript never landed.
       writeFileAtomic(responseSidecarPath(outDir, job.promptKey, slugifyModel(job.model)), outcome.transcript ?? "");
+      writeFileAtomic(job.file, outcome.wav);
       results.push({ type: "response", promptKey: job.promptKey, model: job.model, ok: true, transcript: outcome.transcript, wav: outcome.wav });
       generated++;
     } catch (err) {
@@ -677,7 +824,24 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  const { manifest, warnings: exclusionWarnings } = assembleGenerationManifest(activePromptSet, models, results, outDir);
+  // Prompts outside this run's --limit window were never touched -- read
+  // their coverage straight from the cache probe (+ sidecar lookup inside
+  // assembleGenerationManifest) so the manifest reflects the FULL dataset,
+  // not just this run's window.
+  for (const p of fullPrompts) {
+    if (activeKeys.has(p.key)) continue;
+    results.push({ type: "prompt", promptKey: p.key, ok: cacheProbe(promptFilePath(outDir, p.key)) });
+    for (const model of models) {
+      results.push({
+        type: "response",
+        promptKey: p.key,
+        model,
+        ok: cacheProbe(responseFilePath(outDir, p.key, slugifyModel(model))),
+      });
+    }
+  }
+
+  const { manifest, warnings: exclusionWarnings, fullCoverage } = assembleGenerationManifest(fullPromptSet, models, results, outDir);
   for (const w of exclusionWarnings) console.warn(`[warn] ${w}`);
 
   if (!manifest) {
@@ -689,24 +853,31 @@ export async function main(argv = process.argv.slice(2)) {
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
   console.log(`\ngenerated: ${generated}, skipped (cached): ${skippedCached}, failed: ${failed}`);
-  console.log(`manifest: ${manifest.prompts.length} prompts, ${manifest.responses.length} responses -> ${manifestPath}`);
+  console.log(`manifest: ${manifest.prompts.length}/${fullPrompts.length} prompts, ${manifest.responses.length} responses -> ${manifestPath}`);
 
   const responseStats = results
     .filter((r) => r.type === "response" && r.ok && r.wav)
     .map((r) => ({ model: r.model, ...wavStats(r.wav) }));
   if (responseStats.length > 0) {
-    const { perModel, levelGapFlag } = summarizeByModel(responseStats);
+    const { perModel, levelGapFlags } = summarizeByModel(responseStats);
     for (const m of perModel) {
       console.log(`  ${m.model}: avg ${m.avgDurationSeconds.toFixed(1)}s, ${m.avgRmsDb.toFixed(1)} dBFS (n=${m.count})`);
     }
-    if (levelGapFlag) console.warn(`[warn] ${levelGapFlag}`);
+    for (const flag of levelGapFlags) console.warn(`[warn] ${flag}`);
   }
 
   if (failed > 0) {
     console.warn(`\n${failed} clip(s) failed this run -- re-run to fill the gaps (cache makes it cheap) before seeding.`);
     throw new Error(`${failed} clip(s) failed to generate`);
   }
-  console.log(`\nNext: node scripts/seed-voice.mjs ${manifestPath}`);
+
+  if (shouldPrintSeedCommand(fullCoverage, failed)) {
+    console.log(`\nNext: node --env-file=.env.local scripts/seed-voice.mjs ${manifestPath}`);
+  } else {
+    console.warn(
+      "\nseed command withheld: the dataset has incomplete prompt coverage outside this run's --limit window (see warnings above) -- re-run without --limit (or widen it) to fill the gaps before seeding.",
+    );
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
