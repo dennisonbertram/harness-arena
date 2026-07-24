@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { aggregate } from "@/lib/voice-results";
 
@@ -27,9 +28,14 @@ export default async function VoiceResultsPage() {
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "48px 24px" }}>
-      <h1 style={{ fontSize: 32, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
+      <h1 style={{ fontSize: 32, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
         Voice Arena results
       </h1>
+      <p style={{ fontSize: 12, marginBottom: 12 }}>
+        <Link href="/voice" style={{ color: "var(--blue-700)" }}>
+          ← Back to the arena
+        </Link>
+      </p>
 
       {judgments.length === 0 ? (
         <div

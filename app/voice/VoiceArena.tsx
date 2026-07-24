@@ -230,7 +230,7 @@ export default function VoiceArena() {
       <div aria-live="polite" style={srOnlyStyle}>
         {`Comparison ${comparison.progress.judged + 1}`}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
         <h2 ref={headingRef} tabIndex={-1} style={{ fontSize: 18, fontWeight: 600, outline: "none" }}>
           Comparison {comparison.progress.batch.position} of {comparison.progress.batch.size}
         </h2>
@@ -283,11 +283,11 @@ export default function VoiceArena() {
         Play both
       </button>
 
-      <p style={{ fontSize: 12, color: "var(--gray-700)", margin: "12px 0 4px" }}>
+      <p style={{ fontSize: 12, color: "var(--gray-700)", margin: "8px 0 2px" }}>
         Played: prompt {playCounts.prompt} · A {playCounts.a} · B {playCounts.b}
       </p>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "12px 0 8px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0 4px" }}>
         {(["a", "b", "tie", "both_bad"] as const).map((o) => (
           <button
             key={o}
@@ -302,11 +302,11 @@ export default function VoiceArena() {
       </div>
 
       {outcome ? (
-        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--gray-alpha-400)" }}>
-          <p className="label" style={{ marginBottom: 8 }}>
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--gray-alpha-400)" }}>
+          <p className="label" style={{ marginBottom: 6 }}>
             What most influenced your choice?
           </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
             {VOICE_JUDGMENT_REASONS.map((r) => (
               <button
                 key={r}
@@ -319,7 +319,7 @@ export default function VoiceArena() {
               </button>
             ))}
           </div>
-          <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13, marginBottom: 16 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, marginBottom: 10 }}>
             Anything else? (optional)
             <textarea
               rows={2}
@@ -421,7 +421,9 @@ function PendingPlaceholder() {
 const panelStyle: React.CSSProperties = {
   border: "1px solid var(--gray-alpha-400)",
   borderRadius: 12,
-  padding: 24,
+  // 18 (not 24): with the diagnostic panel open, the whole card has to fit an
+  // ~800px-tall laptop viewport with Submit above the fold.
+  padding: 18,
 };
 
 const skeletonStyle: React.CSSProperties = {
