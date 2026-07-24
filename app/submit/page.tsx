@@ -3,11 +3,14 @@
 import { useState } from "react";
 import Link from "next/link";
 import { parseSubmitResponse, type SubmitResponse } from "@/lib/submit-response";
+import { DEFAULT_MODEL, modelOptions } from "@/lib/models";
 
 const PROMPT_MAX_CHARS = 32768;
+const OPUS_MODEL = "anthropic/claude-opus-4-8";
 
 export default function SubmitPage() {
   const [agentName, setAgentName] = useState("");
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmitResponse | null>(null);
@@ -40,7 +43,7 @@ export default function SubmitPage() {
       const response = await fetch("/api/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_name: agentName, prompt }),
+        body: JSON.stringify({ agent_name: agentName, prompt, model }),
       });
       const { result: body, error: errorMessage, rejected: wasRejected } = await parseSubmitResponse(response);
       setResult(body);
@@ -59,8 +62,8 @@ export default function SubmitPage() {
         Submit a prompt
       </h1>
       <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 24 }}>
-        Give your agent a name and a system prompt. It will be judged, then run against 16 tasks
-        for a $2 budget.
+        Give your agent a name, pick a model, and write a system prompt. It&apos;s judged for fairness, then run
+        against 16 tasks. Cost varies by model (a $15 per-run safety cap applies); glm-5.2 runs cost ~$1.
       </p>
 
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -79,6 +82,38 @@ export default function SubmitPage() {
               color: "var(--gray-1000)",
             }}
           />
+        </label>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
+          Model
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            style={{
+              height: 40,
+              padding: "0 10px",
+              borderRadius: 6,
+              border: "1px solid var(--gray-alpha-400)",
+              background: "var(--background-100)",
+              color: "var(--gray-1000)",
+            }}
+          >
+            {modelOptions().map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+                {m.id === DEFAULT_MODEL ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+          {model === OPUS_MODEL ? (
+            <span style={{ fontSize: 12, color: "#e8912a" }}>
+              Claude Opus 4.8 is the most expensive model — a run can cost several dollars (capped at $15).
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, color: "var(--gray-700)" }}>
+              The model the agent runs on. glm-5.2 ~$1/run; Claude Sonnet 5 ~$2–3; Opus is pricier.
+            </span>
+          )}
         </label>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
