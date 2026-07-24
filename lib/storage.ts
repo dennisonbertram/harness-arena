@@ -97,7 +97,7 @@ export class MemoryStorage implements Storage {
 // written or under a burst of reads. A single failed read must never crash a
 // route, so blob reads retry a few times and list reads skip individual
 // failures rather than rejecting the whole batch.
-async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -110,7 +110,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   throw lastErr;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+export async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
   // must throw BEFORE parsing (a bare JSON.parse on "<!DOCTYPE..." is the
