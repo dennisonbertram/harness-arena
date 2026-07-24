@@ -12,6 +12,7 @@ export async function GET() {
   const entries = standings.map((s, index) => ({
     rank: index + 1,
     agent_name: s.agentName,
+    model: s.model,
     is_baseline: s.promptKey === "",
     runs: s.runs,
     pass_rate: s.passRate,
