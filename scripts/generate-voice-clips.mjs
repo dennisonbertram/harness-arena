@@ -26,6 +26,18 @@
 // A re-run's manifest reads the sidecar for any response the cache skipped
 // regenerating, so re-seeding never drops a transcript from the remote
 // manifest (which is fully replaced on every seed).
+//
+// OpenRouter audio-output chat completions REJECT non-streaming requests
+// ("Audio output requires stream: true") and reject wav as a streamed audio
+// format ("audio.format does not support 'wav' when stream=true" -- only
+// pcm16 is accepted while streaming; verified against the live API).
+// Response/say-exactly requests are therefore stream:true + audio.format
+// "pcm16": the SSE body is parsed for base64 PCM16 + transcript deltas, and
+// the raw PCM is wrapped in a WAV header locally (pcmToWav) before writing
+// to disk. ponytail: sample rate is hardcoded to 24000 (empirically
+// verified: "Hi there!" -> 36000 PCM bytes = 0.75s at 24kHz mono 16-bit) --
+// upgrade to reading a rate from provider response metadata if OpenAI ever
+// exposes one.
 import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -86,11 +98,15 @@ export function validatePromptSet(input) {
 // Pure: provider request builders
 // ---------------------------------------------------------------------------
 
+// OpenRouter audio output requires stream:true, and rejects "wav" as a
+// streamed audio.format (pcm16 is the only accepted streamed format) --
+// see the header comment.
 function buildAudioChatRequest(model, voice, systemContent, userContent) {
   return {
     model,
+    stream: true,
     modalities: ["text", "audio"],
-    audio: { voice, format: "wav" },
+    audio: { voice, format: "pcm16" },
     messages: [
       { role: "system", content: systemContent },
       { role: "user", content: userContent },
@@ -98,7 +114,7 @@ function buildAudioChatRequest(model, voice, systemContent, userContent) {
   };
 }
 
-/** OpenRouter chat-completions body: the model answers the prompt as speech. */
+/** OpenRouter chat-completions body (streamed, pcm16): the model answers the prompt as speech. */
 export function buildResponseRequest(model, voice, promptText) {
   return buildAudioChatRequest(model, voice, RESPONSE_SYSTEM_PROMPT, promptText);
 }
@@ -114,34 +130,91 @@ export function buildSpeechRequest(text, voice) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure: response parsing
+// Pure: SSE audio-stream parsing + PCM -> WAV
 // ---------------------------------------------------------------------------
 
 /**
- * Extracts { wav: Buffer, transcript } from an OpenRouter chat-completions
- * JSON body. Throws clearly (naming model/promptKey when given, and what the
- * model said instead) when no audio came back -- a refusal or a text-only
- * reply both look like this. Throws naming both voices if the payload echoes
- * a voice different from expectedVoice; a payload with no voice field passes.
+ * Parses an OpenRouter streamed chat-completions body ("data: {json}" lines,
+ * ending "data: [DONE]") into { pcm: Buffer, transcript }. Each chunk's
+ * choices[0].delta.audio.data is a base64 PCM16 segment -- decoded and
+ * concatenated in order; delta.audio.transcript is incremental and
+ * concatenated the same way, falling back to accumulated delta.content when
+ * the stream never carried an audio transcript. Unparseable lines are
+ * ignored (skipped, not fatal). Throws clearly (naming model/promptKey when
+ * given, and what the model said instead) when the stream yields zero audio
+ * bytes -- a refusal or a text-only reply both look like this. Throws naming
+ * both voices if any chunk echoes a voice different from expectedVoice; a
+ * stream that never carries a voice field passes (observed live behavior).
  */
-export function parseResponseCompletion(json, { expectedVoice, model, promptKey } = {}) {
-  const message = json?.choices?.[0]?.message;
-  const audio = message?.audio;
-  const content = typeof message?.content === "string" ? message.content : undefined;
+export function parseSseAudioStream(sseText, { expectedVoice, model, promptKey } = {}) {
+  const pcmChunks = [];
+  let transcript = "";
+  let contentAccum = "";
+  let voiceField;
 
-  if (!audio || typeof audio.data !== "string" || !audio.data) {
+  for (const rawLine of sseText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice("data:".length).trim();
+    if (payload === "[DONE]") break;
+
+    let chunk;
+    try {
+      chunk = JSON.parse(payload);
+    } catch {
+      continue; // ignore unparseable lines
+    }
+    const delta = chunk?.choices?.[0]?.delta;
+    if (!delta) continue;
+
+    if (typeof delta.content === "string") contentAccum += delta.content;
+    if (delta.audio) {
+      if (typeof delta.audio.data === "string" && delta.audio.data) {
+        pcmChunks.push(Buffer.from(delta.audio.data, "base64"));
+      }
+      if (typeof delta.audio.transcript === "string") transcript += delta.audio.transcript;
+      if (delta.audio.voice !== undefined) voiceField = delta.audio.voice;
+    }
+  }
+
+  const pcm = Buffer.concat(pcmChunks);
+  if (pcm.length === 0) {
     const context = [model && `model "${model}"`, promptKey && `prompt "${promptKey}"`].filter(Boolean).join(", ");
     throw new Error(
-      `no audio in response${context ? ` (${context})` : ""} -- refusal or text-only reply: ${JSON.stringify(content ?? message ?? json)}`,
+      `no audio in SSE stream${context ? ` (${context})` : ""} -- refusal or text-only reply: ${JSON.stringify(contentAccum || sseText.slice(0, 200))}`,
     );
   }
 
-  if (expectedVoice && audio.voice !== undefined && audio.voice !== expectedVoice) {
-    throw new Error(`voice mismatch: requested "${expectedVoice}" but response audio reports "${audio.voice}"`);
+  if (expectedVoice && voiceField !== undefined && voiceField !== expectedVoice) {
+    throw new Error(`voice mismatch: requested "${expectedVoice}" but response audio reports "${voiceField}"`);
   }
 
-  const transcript = typeof audio.transcript === "string" && audio.transcript ? audio.transcript : (content ?? "");
-  return { wav: Buffer.from(audio.data, "base64"), transcript };
+  return { pcm, transcript: transcript || contentAccum };
+}
+
+/** Wraps raw PCM16 samples in a canonical 44-byte RIFF/WAVE header (mirrors seed-voice.mjs's generateToneWav header math). */
+export function pcmToWav(pcmBuffer, { sampleRate = 24000, channels = 1 } = {}) {
+  const bytesPerSample = 2;
+  const dataSize = pcmBuffer.length;
+  const byteRate = sampleRate * channels * bytesPerSample;
+  const blockAlign = channels * bytesPerSample;
+
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write("RIFF", 0, "ascii");
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write("WAVE", 8, "ascii");
+  buffer.write("fmt ", 12, "ascii");
+  buffer.writeUInt32LE(16, 16); // PCM fmt chunk size
+  buffer.writeUInt16LE(1, 20); // PCM format tag
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(blockAlign, 32);
+  buffer.writeUInt16LE(16, 34); // bits per sample
+  buffer.write("data", 36, "ascii");
+  buffer.writeUInt32LE(dataSize, 40);
+  pcmBuffer.copy(buffer, 44);
+  return buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +555,8 @@ async function callGatewaySpeech(text, voice, apiKey) {
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function callOpenRouterChat(body, apiKey) {
+/** POSTs a streamed (stream:true) audio chat-completions body and returns the raw SSE response text -- see parseSseAudioStream. */
+async function callOpenRouterChatStream(body, apiKey) {
   const res = await fetchWithRetry(
     OPENROUTER_URL,
     {
@@ -492,7 +566,7 @@ async function callOpenRouterChat(body, apiKey) {
     },
     { attempts: 4, timeoutMs: 60000 },
   );
-  return res.json();
+  return res.text();
 }
 
 async function generatePromptClip(job, { promptVoice, mode, sayExactlyModel, apiKeys }) {
@@ -500,13 +574,15 @@ async function generatePromptClip(job, { promptVoice, mode, sayExactlyModel, api
     const wav = await callGatewaySpeech(job.text, promptVoice, apiKeys.gateway);
     return { wav, transcript: job.text };
   }
-  const json = await callOpenRouterChat(buildSayExactlyRequest(sayExactlyModel, promptVoice, job.text), apiKeys.openrouter);
-  return parseResponseCompletion(json, { expectedVoice: promptVoice, model: sayExactlyModel, promptKey: job.promptKey });
+  const sseText = await callOpenRouterChatStream(buildSayExactlyRequest(sayExactlyModel, promptVoice, job.text), apiKeys.openrouter);
+  const { pcm, transcript } = parseSseAudioStream(sseText, { expectedVoice: promptVoice, model: sayExactlyModel, promptKey: job.promptKey });
+  return { wav: pcmToWav(pcm), transcript };
 }
 
 async function generateResponseClip(job, { voice, apiKeys }) {
-  const json = await callOpenRouterChat(buildResponseRequest(job.model, voice, job.text), apiKeys.openrouter);
-  return parseResponseCompletion(json, { expectedVoice: voice, model: job.model, promptKey: job.promptKey });
+  const sseText = await callOpenRouterChatStream(buildResponseRequest(job.model, voice, job.text), apiKeys.openrouter);
+  const { pcm, transcript } = parseSseAudioStream(sseText, { expectedVoice: voice, model: job.model, promptKey: job.promptKey });
+  return { wav: pcmToWav(pcm), transcript };
 }
 
 export async function main(argv = process.argv.slice(2)) {

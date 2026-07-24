@@ -10,7 +10,8 @@ import {
   fetchWithRetry,
   isValidWavFile,
   parseArgs,
-  parseResponseCompletion,
+  parseSseAudioStream,
+  pcmToWav,
   planWork,
   slugifyModel,
   summarizeByModel,
@@ -132,11 +133,12 @@ describe("validatePromptSet", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildResponseRequest", () => {
-  it("carries both modalities, wav format, the configured voice, and a <=2-sentence system prompt", () => {
+  it("carries stream:true, both modalities, pcm16 format, the configured voice, and a <=2-sentence system prompt", () => {
     const body = buildResponseRequest("openai/gpt-audio", "alloy", "What's the weather?");
     expect(body.model).toBe("openai/gpt-audio");
+    expect(body.stream).toBe(true);
     expect(body.modalities).toEqual(["text", "audio"]);
-    expect(body.audio).toEqual({ voice: "alloy", format: "wav" });
+    expect(body.audio).toEqual({ voice: "alloy", format: "pcm16" });
     expect(body.messages[0].role).toBe("system");
     expect(body.messages[0].content).toMatch(/two.*sentence/i);
     expect(body.messages[1]).toEqual({ role: "user", content: "What's the weather?" });
@@ -144,11 +146,12 @@ describe("buildResponseRequest", () => {
 });
 
 describe("buildSayExactlyRequest", () => {
-  it("embeds the prompt text verbatim under the say-exactly instruction", () => {
+  it("embeds the prompt text verbatim under the say-exactly instruction, streamed as pcm16", () => {
     const body = buildSayExactlyRequest("openai/gpt-audio-mini", "nova", "Read this exactly.");
     expect(body.messages[0].content).toBe("Say exactly the following, with natural delivery — nothing else:");
     expect(body.messages[1]).toEqual({ role: "user", content: "Read this exactly." });
-    expect(body.audio).toEqual({ voice: "nova", format: "wav" });
+    expect(body.stream).toBe(true);
+    expect(body.audio).toEqual({ voice: "nova", format: "pcm16" });
     expect(body.modalities).toEqual(["text", "audio"]);
   });
 });
@@ -164,41 +167,99 @@ describe("buildSpeechRequest", () => {
   });
 });
 
-describe("parseResponseCompletion", () => {
-  it("decodes base64 audio to a matching Buffer and prefers audio.transcript", () => {
-    const wavBytes = Buffer.from("some wav bytes", "utf8");
-    const json = {
-      choices: [{ message: { content: "fallback text", audio: { data: wavBytes.toString("base64"), transcript: "Hi there." } } }],
-    };
-    const { wav, transcript } = parseResponseCompletion(json, { expectedVoice: "alloy" });
-    expect(wav.equals(wavBytes)).toBe(true);
-    expect(transcript).toBe("Hi there.");
+describe("parseSseAudioStream", () => {
+  function sseChunk(delta: Record<string, unknown>) {
+    return `data: ${JSON.stringify({ choices: [{ delta }] })}\n`;
+  }
+  const SSE_DONE = "data: [DONE]\n";
+
+  it("reassembles base64 PCM across multiple chunks into one Buffer, in order", () => {
+    const chunkA = Buffer.from([1, 2, 3, 4]);
+    const chunkB = Buffer.from([5, 6, 7, 8]);
+    const sseText =
+      sseChunk({ audio: { data: chunkA.toString("base64") } }) +
+      sseChunk({ audio: { data: chunkB.toString("base64") } }) +
+      SSE_DONE;
+
+    const { pcm } = parseSseAudioStream(sseText);
+    expect(pcm.equals(Buffer.concat([chunkA, chunkB]))).toBe(true);
   });
 
-  it("falls back to message.content when audio.transcript is absent", () => {
-    const json = { choices: [{ message: { content: "Hi there.", audio: { data: Buffer.from("abc").toString("base64") } } }] };
-    expect(parseResponseCompletion(json, { expectedVoice: "alloy" }).transcript).toBe("Hi there.");
+  it("accumulates an incremental audio.transcript across chunks", () => {
+    const sseText =
+      sseChunk({ audio: { data: Buffer.from([1]).toString("base64"), transcript: "Hi " } }) +
+      sseChunk({ audio: { data: Buffer.from([2]).toString("base64"), transcript: "there!" } }) +
+      SSE_DONE;
+
+    expect(parseSseAudioStream(sseText).transcript).toBe("Hi there!");
   });
 
-  it("throws naming the model and prompt key when no audio is returned (refusal)", () => {
-    const json = { choices: [{ message: { content: "I can't help with that." } }] };
-    expect(() =>
-      parseResponseCompletion(json, { expectedVoice: "alloy", model: "openai/gpt-audio", promptKey: "diagnosis-news" }),
-    ).toThrow(/openai\/gpt-audio/);
-    expect(() =>
-      parseResponseCompletion(json, { expectedVoice: "alloy", model: "openai/gpt-audio", promptKey: "diagnosis-news" }),
-    ).toThrow(/diagnosis-news/);
+  it("falls back to accumulated delta.content when no chunk carries an audio transcript", () => {
+    const sseText =
+      sseChunk({ content: "Hi " }) +
+      sseChunk({ audio: { data: Buffer.from([1]).toString("base64") } }) +
+      sseChunk({ content: "there!" }) +
+      SSE_DONE;
+
+    expect(parseSseAudioStream(sseText).transcript).toBe("Hi there!");
   });
 
-  it("throws naming both voices when the response echoes a different voice than requested", () => {
-    const json = { choices: [{ message: { audio: { data: Buffer.from("x").toString("base64"), voice: "verse" } } }] };
-    expect(() => parseResponseCompletion(json, { expectedVoice: "alloy" })).toThrow(/alloy/);
-    expect(() => parseResponseCompletion(json, { expectedVoice: "alloy" })).toThrow(/verse/);
+  it("ignores unparseable lines instead of failing the whole stream", () => {
+    const sseText = "data: not json at all\n" + sseChunk({ audio: { data: Buffer.from([9]).toString("base64") } }) + SSE_DONE;
+    expect(parseSseAudioStream(sseText).pcm.equals(Buffer.from([9]))).toBe(true);
   });
 
-  it("passes when the response has no voice field at all", () => {
-    const json = { choices: [{ message: { audio: { data: Buffer.from("x").toString("base64"), transcript: "hi" } } }] };
-    expect(() => parseResponseCompletion(json, { expectedVoice: "alloy" })).not.toThrow();
+  it("throws naming the model and prompt key when the stream yields zero audio bytes (refusal/text-only)", () => {
+    const sseText = sseChunk({ content: "I can't help with that." }) + SSE_DONE;
+    expect(() => parseSseAudioStream(sseText, { model: "openai/gpt-audio", promptKey: "diagnosis-news" })).toThrow(
+      /openai\/gpt-audio/,
+    );
+    expect(() => parseSseAudioStream(sseText, { model: "openai/gpt-audio", promptKey: "diagnosis-news" })).toThrow(
+      /diagnosis-news/,
+    );
+  });
+
+  it("throws naming both voices when a chunk echoes a different voice than requested", () => {
+    const sseText = sseChunk({ audio: { data: Buffer.from([1]).toString("base64"), voice: "verse" } }) + SSE_DONE;
+    expect(() => parseSseAudioStream(sseText, { expectedVoice: "alloy" })).toThrow(/alloy/);
+    expect(() => parseSseAudioStream(sseText, { expectedVoice: "alloy" })).toThrow(/verse/);
+  });
+
+  it("passes when no chunk carries a voice field at all", () => {
+    const sseText = sseChunk({ audio: { data: Buffer.from([1]).toString("base64"), transcript: "hi" } }) + SSE_DONE;
+    expect(() => parseSseAudioStream(sseText, { expectedVoice: "alloy" })).not.toThrow();
+  });
+});
+
+describe("pcmToWav", () => {
+  it("wraps PCM16 samples in a correct RIFF/WAVE header: magic, chunk sizes, sample rate, byteRate, blockAlign", () => {
+    const pcm = Buffer.from([1, 0, 2, 0, 3, 0, 4, 0]); // 4 int16 samples
+    const wav = pcmToWav(pcm, { sampleRate: 24000, channels: 1 });
+
+    expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(wav.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    expect(wav.subarray(12, 16).toString("ascii")).toBe("fmt ");
+    expect(wav.subarray(36, 40).toString("ascii")).toBe("data");
+    expect(wav.readUInt32LE(4)).toBe(36 + pcm.length); // RIFF chunk size
+    expect(wav.readUInt32LE(40)).toBe(pcm.length); // data chunk size
+    expect(wav.readUInt32LE(24)).toBe(24000); // sample rate
+    expect(wav.readUInt32LE(28)).toBe(24000 * 1 * 2); // byte rate
+    expect(wav.readUInt16LE(32)).toBe(1 * 2); // block align
+    expect(wav.readUInt16LE(34)).toBe(16); // bits per sample
+    expect(wav.length).toBe(44 + pcm.length);
+  });
+
+  it("round-trips through wavStats to the expected duration/RMS for a synthetic tone", () => {
+    const sampleRate = 24000;
+    const amplitude = 8192;
+    const numSamples = 12000; // 0.5s, alternating +/-amplitude
+    const pcm = Buffer.alloc(numSamples * 2);
+    for (let i = 0; i < numSamples; i++) pcm.writeInt16LE(i % 2 === 0 ? amplitude : -amplitude, i * 2);
+    const wav = pcmToWav(pcm, { sampleRate });
+
+    const { durationSeconds, rmsDb } = wavStats(wav);
+    expect(durationSeconds).toBeCloseTo(0.5, 5);
+    expect(rmsDb).toBeCloseTo(20 * Math.log10(amplitude / 32768), 2);
   });
 });
 
