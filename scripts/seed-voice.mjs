@@ -233,11 +233,17 @@ export function assembleManifest(input, priorManifestRaw) {
     models,
     // Strip the local file path -- it must never land in what gets written
     // to voice/manifest.json (only the UUID-keyed audio_url does).
-    prompts: prompts.map(({ _file, ...p }) => p),
-    responses: responses.map(({ _file, ...r }) => r),
+    prompts: prompts.map((p) => stripFile(p)),
+    responses: responses.map((r) => stripFile(r)),
   };
 
   return { manifest, uploads, counts };
+}
+
+function stripFile(entry) {
+  const copy = { ...entry };
+  delete copy._file;
+  return copy;
 }
 
 // ---------------------------------------------------------------------------
