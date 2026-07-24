@@ -246,7 +246,7 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
           {runCount} run{runCount === 1 ? "" : "s"}
         </span>
       </h2>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 6, fontSize: 12 }}>
         {modelsPresent.map((m) => (
           <span key={m}>
             <span style={{ color: modelColor(m), marginRight: 5 }}>●</span>
@@ -254,6 +254,9 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
           </span>
         ))}
       </div>
+      <p style={{ fontSize: 11, color: "var(--gray-700)", marginTop: 0, marginBottom: 14 }}>
+        Fainter bars = fewer runs, so less certain — a single 100% (1/1) is weaker evidence than a solid 80% (8/10).
+      </p>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <tbody>
           {perTask.map((t) => (
@@ -263,20 +266,43 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
               </td>
               <td style={{ padding: "8px 0" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {t.perModel.map((m) => (
-                    <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
-                      <div style={{ flex: 1, minWidth: 0, background: "var(--gray-alpha-200)", borderRadius: 4, height: 7 }}>
-                        <div style={{ width: `${m.passRate * 100}%`, background: modelColor(m.model), height: 7, borderRadius: 4 }} />
+                  {t.perModel.map((m) => {
+                    // Sample-size confidence: a lone run is weak evidence, so fade
+                    // its bar. Full opacity by ~8 runs. Bar LENGTH stays = pass
+                    // rate (matches the % text); opacity carries how much to trust
+                    // it, so 100% (1/1) reads as tentative next to a solid 80% (8/10).
+                    const conf = Math.min(1, m.attempts / 8);
+                    const barOpacity = 0.28 + 0.72 * conf;
+                    return (
+                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
+                        <span
+                          style={{
+                            width: 96,
+                            fontSize: 11,
+                            color: "var(--gray-700)",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {modelLabel(m.model)}
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0, background: "var(--gray-alpha-200)", borderRadius: 4, height: 7 }}>
+                          <div
+                            style={{ width: `${m.passRate * 100}%`, background: modelColor(m.model), height: 7, borderRadius: 4, opacity: barOpacity }}
+                          />
+                        </div>
+                        <span
+                          className="tabular-nums"
+                          style={{ width: 108, textAlign: "right", fontSize: 12, color: "var(--gray-700)", whiteSpace: "nowrap", opacity: 0.55 + 0.45 * conf }}
+                          title={m.attempts === 1 ? "single run — weak evidence" : `${m.attempts} runs`}
+                        >
+                          {(m.passRate * 100).toFixed(0)}% ({m.passed}/{m.attempts})
+                        </span>
                       </div>
-                      <span
-                        className="tabular-nums"
-                        style={{ width: 108, textAlign: "right", fontSize: 12, color: "var(--gray-700)", whiteSpace: "nowrap" }}
-                      >
-                        {(m.passRate * 100).toFixed(0)}% ({m.passed}/{m.attempts})
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </td>
             </tr>
