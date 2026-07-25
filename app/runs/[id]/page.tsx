@@ -6,8 +6,10 @@ import { formatDuration, formatUsd } from "@/lib/format";
 import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { reconstructRunProgress, type TaskState } from "@/lib/run-progress";
 import { modelLabel } from "@/lib/models";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { CompletePromptModal } from "./CompletePromptModal";
+import { PromptDiff } from "./PromptDiff";
 import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
 
@@ -235,6 +237,21 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         >
           {submission?.prompt ?? "Prompt unavailable."}
         </pre>
+      </section>
+
+      <section style={{ marginBottom: 40 }}>
+        <h2 className="label" style={{ marginBottom: 4 }}>
+          Diff vs vanilla baseline
+        </h2>
+        <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 12 }}>
+          What this prompt changed from the{" "}
+          <a href="/api/baseline-prompt" target="_blank" rel="noopener noreferrer">
+            vanilla baseline
+          </a>{" "}
+          — <span style={{ color: "#16a34a" }}>green added</span>,{" "}
+          <span style={{ color: "#dc2626" }}>red removed</span>.
+        </p>
+        <PromptDiff baseline={getBaselinePrompt()} submitted={submission?.prompt ?? ""} />
       </section>
 
       <section>

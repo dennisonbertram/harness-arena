@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { readVanillaPrompt } from "@/lib/vanilla-prompt";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 
 export async function GET() {
-  return new NextResponse(readVanillaPrompt(), {
+  return new NextResponse(getBaselinePrompt(), {
     headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }

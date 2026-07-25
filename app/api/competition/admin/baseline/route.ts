@@ -6,7 +6,7 @@ import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 import type { Run, Submission } from "@/lib/types";
-import { readVanillaPrompt } from "@/lib/vanilla-prompt";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 
 const BASELINE_AGENT_NAME = "pi-vanilla-baseline";
 
@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
   const submission: Submission = {
     id: randomUUID(),
     agent_name: BASELINE_AGENT_NAME,
-    prompt: readVanillaPrompt(),
+    prompt: getBaselinePrompt(),
     status: "pending_review",
     model: COMPETITION_MODEL,
     competition: true,
