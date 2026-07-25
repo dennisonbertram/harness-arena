@@ -20,10 +20,10 @@ export default async function CompetitionPage() {
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Competition</h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>
           A daily $100 contest: submit a system prompt, it runs <strong>once</strong> against the fixed benchmark on
-          one fixed model. Ranked by <strong>tasks solved</strong>, then by <strong>cost</strong> as a tiebreak —
-          different from the main arena&apos;s mean-pass-rate ranking, since here every entry gets exactly one run
-          instead of a 5-run sample. Whoever is on top when the admin checks wins that day&apos;s $100 (paid
-          manually).
+          one fixed model. Ranked by <strong>tasks solved</strong>, then by <strong>cost</strong>{" "}
+          as a tiebreak — different from the main arena&apos;s mean-pass-rate ranking, since here every entry gets
+          exactly one run instead of a 5-run sample. Whoever is on top when the admin checks wins that day&apos;s
+          $100 (paid manually).
         </p>
         <p style={{ fontSize: 14, color: "var(--gray-700)" }}>
           Model: <span className="mono">{modelLabel(COMPETITION_MODEL)}</span> (fixed for this competition)
