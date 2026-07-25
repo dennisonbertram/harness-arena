@@ -34,7 +34,7 @@ describe("RUN_EVENT_TYPES: task.cost_tamper_signal (runner-emitted, issue #24)",
       seq: 1,
       ts: "2026-07-21T00:00:00.000Z",
       type: "task.cost_tamper_signal",
-      payload: { task_id: "t1", reason: "session_unreadable" },
+      payload: { task_id: "t1", reason: "cost_unmeasured" },
     });
 
     expect(result.success).toBe(true);

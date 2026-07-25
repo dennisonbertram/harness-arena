@@ -3,7 +3,8 @@
 # but a huge amount of stdout -- reproducing the live-run 413 (run
 # 9f4a1b3e: "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
 # HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). The
-# runner must cap the UPLOADED pi-stdout.txt to RUNNER_TRACE_UPLOAD_MAX_BYTES.
+# runner must now upload the FULL pi-stdout.txt gzip-compressed (no truncation),
+# which keeps it well under the body limit.
 set -e
 
 mkdir -p /logs/agent/sessions

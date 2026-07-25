@@ -53,6 +53,9 @@ export const SubmissionSchema = z.object({
   judge_model: z.string().optional(),
   judged_at: z.iso.datetime().optional(),
   run_id: z.string().optional(),
+  // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
+  // for legacy submissions made before multi-model support.
+  model: z.string().optional(),
   created_at: z.iso.datetime(),
 });
 export type Submission = z.infer<typeof SubmissionSchema>;
@@ -63,6 +66,10 @@ export const TaskResultSchema = z.object({
   passed: z.boolean(),
   reward: z.number().optional(),
   cost_usd: z.number().optional(),
+  // How cost_usd was derived: "session" | "stdout" | "unmeasured". Absent
+  // cost_usd with cost_source "unmeasured" means no cost record existed — we
+  // report it as unknown rather than inventing a number.
+  cost_source: z.string().optional(),
   duration_s: z.number().optional(),
   turns: z.number().optional(),
   trace_blob_url: z.string().optional(),
@@ -79,6 +86,8 @@ export const RunSchema = z.object({
   total_cost_usd: z.number().optional(),
   over_budget: z.boolean().optional(),
   sandbox_id: z.string().optional(),
+  // The model this run executed on (gateway id). Absent = default glm-5.2.
+  model: z.string().optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),
 });

@@ -22,6 +22,7 @@ export interface ScatterInput {
   runId: string;
   totalCostUsd: number;
   tasksPassed: number;
+  model: string; // gateway id — drives the dot color (per-model comparison)
 }
 
 export interface ScatterPoint extends ScatterInput {
@@ -33,6 +34,7 @@ export interface ScatterScaleOptions {
   width: number;
   height: number;
   padding: number;
+  yMax?: number; // top of the tasks-passed axis (the benchmark's task count)
 }
 
 export interface ScatterScale {
@@ -44,11 +46,7 @@ export interface ScatterScale {
   padding: number;
 }
 
-const DEFAULT_SCALE_OPTIONS: ScatterScaleOptions = { width: 640, height: 320, padding: 40 };
-
-// Fixed 0-10 scale for tasks_passed — the harness always runs the same 10
-// tasks, so the y-axis range doesn't depend on the data.
-const Y_MAX = 10;
+const DEFAULT_SCALE_OPTIONS: ScatterScaleOptions = { width: 640, height: 320, padding: 40, yMax: 16 };
 
 /**
  * Maps (totalCostUsd, tasksPassed) pairs to SVG coordinates for a scatter
@@ -68,21 +66,22 @@ export function scaleScatterPoints(
   options: ScatterScaleOptions = DEFAULT_SCALE_OPTIONS,
 ): ScatterScale {
   const { width, height, padding } = options;
+  const yMax = options.yMax ?? 16;
   const highestCost = runs.reduce((max, run) => Math.max(max, run.totalCostUsd), 0);
   const xScaleDivisor = highestCost > 0 ? highestCost : 1;
   const plotWidth = width - 2 * padding;
   const plotHeight = height - 2 * padding;
 
   const points: ScatterPoint[] = runs.map((run) => {
-    const clampedTasksPassed = Math.min(Y_MAX, Math.max(0, run.tasksPassed));
+    const clampedTasksPassed = Math.min(yMax, Math.max(0, run.tasksPassed));
     return {
       ...run,
       cx: padding + (run.totalCostUsd / xScaleDivisor) * plotWidth,
-      cy: height - padding - (clampedTasksPassed / Y_MAX) * plotHeight,
+      cy: height - padding - (clampedTasksPassed / yMax) * plotHeight,
     };
   });
 
-  return { points, xMax: highestCost, yMax: Y_MAX, width, height, padding };
+  return { points, xMax: highestCost, yMax, width, height, padding };
 }
 
 /**
