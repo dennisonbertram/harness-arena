@@ -63,6 +63,10 @@ export default async function VoicePromptsPage() {
           <section>
             {manifest.prompts.map((prompt) => {
               const count = countsByPrompt[prompt.id] ?? 0;
+              // The pairwise matchup, audible but UNLABELED: which model made
+              // which clip stays hidden (blinding), and both models share one
+              // pinned voice, so listening here reveals no identity signal.
+              const responses = manifest.responses.filter((r) => r.prompt_id === prompt.id);
               return (
                 <div
                   key={prompt.id}
@@ -73,6 +77,18 @@ export default async function VoicePromptsPage() {
                   </p>
                   {prompt.text && <p style={{ fontSize: 14, marginBottom: 8 }}>{prompt.text}</p>}
                   <audio controls preload="none" src={prompt.audio_url} style={{ display: "block", width: "100%" }} />
+                  {responses.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 10 }}>
+                      {responses.map((r, i) => (
+                        <div key={r.id} style={{ flex: "1 1 260px" }}>
+                          <p className="label" style={{ color: "var(--gray-700)", marginBottom: 4 }}>
+                            Response {i + 1} (model hidden)
+                          </p>
+                          <audio controls preload="none" src={r.audio_url} style={{ display: "block", width: "100%" }} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <p
                     className="tabular-nums"
                     style={{
