@@ -121,7 +121,7 @@ describe("POST /api/runs/[id]/callback", () => {
             {
               ts: "2026-07-21T00:01:00.000Z",
               type: "task.cost_tamper_signal",
-              payload: { task_id: "t1", reason: "session_unreadable" },
+              payload: { task_id: "t1", reason: "cost_unmeasured" },
             },
           ],
         }),

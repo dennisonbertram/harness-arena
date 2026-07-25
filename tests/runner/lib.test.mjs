@@ -21,7 +21,6 @@ import {
   safeCleanup,
   sh,
   shQuote,
-  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -146,66 +145,23 @@ describe("parseStdoutCost", () => {
   });
 });
 
-describe("resolveTaskCost (cost-source priority: session > stdout > floor)", () => {
+describe("resolveTaskCost (cost-source priority: session > stdout > unmeasured)", () => {
   it("uses the session cost when the session is usable, ignoring stdout entirely", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: false,
-      sessionCost: 0.02,
-      stdoutCost: 999,
-      floorUsd: 0.05,
-    });
+    const result = resolveTaskCost({ sessionUnreadable: false, sessionCost: 0.02, stdoutCost: 999 });
     expect(result).toEqual({ totalCost: 0.02, costSource: "session" });
   });
 
   // Regression for the exact live-run bug (9f4a1b3e): session unreadable
   // (agent-timeout SIGTERM before flush) but stdout has a real recovered
-  // cost -- must use the real stdout cost, not the floor.
-  it("falls back to the real stdout cost (not the floor) when the session is unreadable but stdout has a positive cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0.018,
-      floorUsd: 0.05,
-    });
+  // cost -- must use the real stdout cost.
+  it("falls back to the real stdout cost when the session is unreadable but stdout has a positive cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0.018 });
     expect(result).toEqual({ totalCost: 0.018, costSource: "stdout" });
   });
 
-  it("falls back to the floor when the session is unreadable and stdout has no usable cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0,
-      floorUsd: 0.05,
-    });
-    expect(result).toEqual({ totalCost: 0.05, costSource: "floor (session unreadable)" });
-  });
-});
-
-describe("truncateForUpload (trace-upload byte cap, HTTP 413 fix)", () => {
-  it("returns the buffer unchanged when it is already under the max", () => {
-    const buf = Buffer.from("small trace body", "utf8");
-    const result = truncateForUpload(buf, 262144);
-    expect(result.equals(buf)).toBe(true);
-  });
-
-  it("caps oversized input to exactly maxBytes, keeping the END (tail) prefixed with a truncation marker", () => {
-    const maxBytes = 1000;
-    const big = Buffer.from("A".repeat(500) + "END-MARKER-CONTENT" + "B".repeat(5000), "utf8");
-    const result = truncateForUpload(big, maxBytes);
-
-    expect(result.length).toBeLessThanOrEqual(maxBytes);
-    expect(result.length).toBe(maxBytes);
-    const text = result.toString("utf8");
-    expect(text).toMatch(/^\[trace truncated: showing last \d+ bytes of \d+ bytes\]\n/);
-    // Keeps the tail, not the head -- the truncation marker text itself
-    // must not swallow the real end-of-output content.
-    expect(text.endsWith("B".repeat(50))).toBe(true);
-    expect(text).not.toContain("END-MARKER-CONTENT");
-  });
-
-  it("accepts a plain string the same as a Buffer", () => {
-    const result = truncateForUpload("hello world", 262144);
-    expect(result.toString("utf8")).toBe("hello world");
+  it("reports UNMEASURED (null, never a fabricated floor) when neither session nor stdout has a cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0 });
+    expect(result).toEqual({ totalCost: null, costSource: "unmeasured" });
   });
 });
 

@@ -44,7 +44,7 @@ describe("scaleScatterPoints", () => {
 
   it("places a single run's point within the plot bounds", () => {
     const result = scaleScatterPoints(
-      [{ runId: "run-1", totalCostUsd: 2, tasksPassed: 10 }],
+      [{ runId: "run-1", totalCostUsd: 2, tasksPassed: 10, model: "zai/glm-5.2" }],
       opts,
     );
 
@@ -52,13 +52,14 @@ describe("scaleScatterPoints", () => {
     const [point] = result.points;
     expect(point.cx).toBeGreaterThanOrEqual(opts.padding);
     expect(point.cx).toBeLessThanOrEqual(opts.width - opts.padding);
-    // tasksPassed=10 is the max of the fixed 0-10 y-scale, so it sits at the top (smallest cy).
-    expect(point.cy).toBeCloseTo(opts.padding, 5);
+    // tasksPassed=10 on the 0-16 scale sits inside the plot, not at either edge.
+    expect(point.cy).toBeGreaterThanOrEqual(opts.padding);
+    expect(point.cy).toBeLessThanOrEqual(opts.height - opts.padding);
   });
 
   it("does not divide by zero when every run has zero cost", () => {
     const result = scaleScatterPoints(
-      [{ runId: "run-1", totalCostUsd: 0, tasksPassed: 3 }],
+      [{ runId: "run-1", totalCostUsd: 0, tasksPassed: 3, model: "zai/glm-5.2" }],
       opts,
     );
 
@@ -70,7 +71,7 @@ describe("scaleScatterPoints", () => {
 
   it("maps tasksPassed=0 to the bottom of the fixed 0-10 y-scale", () => {
     const result = scaleScatterPoints(
-      [{ runId: "run-1", totalCostUsd: 1, tasksPassed: 0 }],
+      [{ runId: "run-1", totalCostUsd: 1, tasksPassed: 0, model: "zai/glm-5.2" }],
       opts,
     );
 
@@ -86,9 +87,9 @@ describe("scaleScatterPoints", () => {
       // regresses to that behavior, this test fails.
       const result = scaleScatterPoints(
         [
-          { runId: "cheap", totalCostUsd: 1, tasksPassed: 5 },
-          { runId: "free", totalCostUsd: 0, tasksPassed: 5 },
-          { runId: "expensive", totalCostUsd: 3, tasksPassed: 5 },
+          { runId: "cheap", totalCostUsd: 1, tasksPassed: 5, model: "zai/glm-5.2" },
+          { runId: "free", totalCostUsd: 0, tasksPassed: 5, model: "zai/glm-5.2" },
+          { runId: "expensive", totalCostUsd: 3, tasksPassed: 5, model: "zai/glm-5.2" },
         ],
         opts,
       );
@@ -99,15 +100,22 @@ describe("scaleScatterPoints", () => {
     });
   });
 
-  it("clamps an out-of-range tasksPassed (>10) to the top of the fixed 0-10 y-scale", () => {
-    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 1, tasksPassed: 11 }], opts);
+  it("clamps an out-of-range tasksPassed (> yMax) to the top of the y-scale", () => {
+    // yMax defaults to 16; 17 is out of range and must clamp to the top.
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 1, tasksPassed: 17, model: "zai/glm-5.2" }], opts);
 
     const [point] = result.points;
     expect(point.cy).toBeCloseTo(opts.padding, 5);
   });
 
+  it("uses the yMax option for the tasks-passed axis (16-task benchmark)", () => {
+    const result = scaleScatterPoints([{ runId: "r", totalCostUsd: 1, tasksPassed: 16, model: "zai/glm-5.2" }], opts);
+    expect(result.yMax).toBe(16);
+    expect(result.points[0].cy).toBeCloseTo(opts.padding, 5); // 16/16 -> top
+  });
+
   it("returns a real (zero) xMax for display when every run costs $0, instead of a fabricated non-zero value", () => {
-    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 3 }], opts);
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 3, model: "zai/glm-5.2" }], opts);
 
     expect(result.xMax).toBe(0);
     expect(Number.isFinite(result.points[0].cx)).toBe(true);
@@ -118,7 +126,7 @@ describe("scaleScatterPoints", () => {
     // tasksPassed by mutating the shared scale state in a way that also
     // resets xMax back to the fallback divisor (1) instead of the real (0)
     // max cost.
-    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 15 }], opts);
+    const result = scaleScatterPoints([{ runId: "run-1", totalCostUsd: 0, tasksPassed: 17, model: "zai/glm-5.2" }], opts);
 
     expect(result.xMax).toBe(0);
     const [point] = result.points;

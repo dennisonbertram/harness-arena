@@ -3,6 +3,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
 import { log } from "@/lib/log";
+import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 import { startRun } from "@/lib/run-trigger";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
@@ -18,6 +19,9 @@ const SubmissionInputSchema = z.object({
   // baseline, which passes no --system-prompt. Non-empty prompts go through
   // the fraud judge as usual.
   prompt: z.string().max(MAX_PROMPT_CHARS),
+  // Optional model (gateway id); defaults to glm-5.2. Must be on the allowlist
+  // so a public submitter can't route to an arbitrary/expensive model.
+  model: z.string().optional(),
 });
 
 // ponytail: naive in-memory per-IP rate limit — explicitly POC-level, not a
@@ -67,12 +71,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const model = parsedInput.data.model ?? DEFAULT_MODEL;
+  if (!isAllowedModel(model)) {
+    return NextResponse.json({ error: `model "${model}" is not allowed` }, { status: 400 });
+  }
+
   const storage = getStorage();
   const submission: Submission = {
     id: randomUUID(),
     agent_name: parsedInput.data.agent_name,
     prompt: parsedInput.data.prompt,
     status: "pending_review",
+    model,
     created_at: new Date().toISOString(),
   };
   await storage.putSubmission(submission);
@@ -85,8 +95,14 @@ export async function POST(request: NextRequest) {
     try {
       verdict = await judgeSubmission(submission.prompt, getTasks());
     } catch (err) {
-      log("error", "judge.unavailable", { submission_id: submission.id, error: (err as Error).message });
-      return NextResponse.json({ error: "judge unavailable, retry later" }, { status: 503 });
+      const detail = (err as Error).message;
+      log("error", "judge.unavailable", { submission_id: submission.id, error: detail });
+      return NextResponse.json(
+        {
+          error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${detail})`,
+        },
+        { status: 503 },
+      );
     }
   }
 
@@ -115,6 +131,7 @@ export async function POST(request: NextRequest) {
     id: randomUUID(),
     submission_id: submission.id,
     status: "queued",
+    model,
     task_results: [],
     created_at: new Date().toISOString(),
   };
@@ -144,7 +161,12 @@ export async function POST(request: NextRequest) {
     void startRun(run, submission.prompt).catch(onTriggerFailure);
   }
 
-  return NextResponse.json({ submission_id: submission.id, run_id: run.id, status: submission.status });
+  return NextResponse.json({
+    submission_id: submission.id,
+    run_id: run.id,
+    status: submission.status,
+    judge_reason: verdict.reason,
+  });
 }
 
 export async function GET() {

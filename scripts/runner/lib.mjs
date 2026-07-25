@@ -110,37 +110,27 @@ export function parseStdoutCost(stdoutText) {
   return 0;
 }
 
-// Cost-source priority used by the runner for each task: (a) the session
-// JSONL cost if the session parsed as usable, (b) else the real cost
-// recovered from stdout via parseStdoutCost if it's a genuine positive
-// number, (c) else the (tamper/missing-cost-signaled) floor. Extracted as
-// a pure function so the priority order itself -- specifically that (b)
-// beats (c) -- is unit-testable without Docker.
-export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost, floorUsd }) {
+// Cost-source priority for each task: (a) the session JSONL cost if the
+// session parsed as usable, (b) else the real cost recovered from stdout via
+// parseStdoutCost if it's a genuine positive number, (c) else UNMEASURED.
+//
+// We do NOT fabricate a floor value: an invented dollar amount that isn't real
+// is worse than an honest "unknown" on a public leaderboard. Reaching (c)
+// means neither the session nor stdout carried any cost record — which happens
+// when the agent produced no billable turn (a real ~$0) OR when the cost data
+// was genuinely lost; we can't tell those apart from here, so we report null
+// (unmeasured) rather than claim a number. Note real spend almost always
+// leaves a trace in stdout even if the session file is deleted (tamper), so it
+// is caught by branch (b); (c) is truly "no signal". totalCost null is carried
+// through as an absent cost_usd, and the aggregation treats it as unmeasured.
+export function resolveTaskCost({ sessionUnreadable, sessionCost, stdoutCost }) {
   if (!sessionUnreadable) {
     return { totalCost: sessionCost, costSource: "session" };
   }
   if (typeof stdoutCost === "number" && stdoutCost > 0) {
     return { totalCost: stdoutCost, costSource: "stdout" };
   }
-  return { totalCost: floorUsd, costSource: "floor (session unreadable)" };
-}
-
-// Cap a trace's bytes to `maxBytes` before upload (live-run evidence: run
-// 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
-// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit).
-// Keeps the TAIL (errors/final output live at the end), prefixed with a
-// one-line marker so a truncated trace is self-evident. Cost/other local
-// parsing must always happen on the FULL text before calling this --
-// this only shrinks what gets uploaded.
-export function truncateForUpload(text, maxBytes) {
-  const buf = Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8");
-  if (buf.length <= maxBytes) return buf;
-  const marker = `[trace truncated: showing last ${maxBytes} bytes of ${buf.length} bytes]\n`;
-  const markerBuf = Buffer.from(marker, "utf8").subarray(0, maxBytes);
-  const keepBytes = Math.max(0, maxBytes - markerBuf.length);
-  const tail = buf.subarray(buf.length - keepBytes);
-  return Buffer.concat([markerBuf, tail]);
+  return { totalCost: null, costSource: "unmeasured" };
 }
 
 // Pure core of the runner's event-flush retry logic (live-run evidence:

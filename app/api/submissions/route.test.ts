@@ -9,7 +9,7 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 
 vi.mock("@/lib/judge", () => ({
   judgeSubmission: vi.fn(),
-  JUDGE_MODEL: "zai/glm-5.2",
+  JUDGE_MODEL: "anthropic/claude-sonnet-5",
 }));
 
 vi.mock("@/lib/run-trigger", () => ({
@@ -140,6 +140,8 @@ describe("POST /api/submissions", () => {
       expect(body.status).toBe("queued");
       expect(typeof body.submission_id).toBe("string");
       expect(typeof body.run_id).toBe("string");
+      // The judge's feedback is returned on approval too, so the submitter sees it.
+      expect(body.judge_reason).toBe("looks fair");
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
       expect(submission?.status).toBe("queued");
@@ -208,7 +210,8 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       expect(response.status).toBe(503);
-      expect(body.error).toBe("judge unavailable, retry later");
+      expect(body.error).toContain("temporarily unavailable");
+      expect(body.error).toContain("gateway 500");
 
       const submissions = await storageRef.current.listSubmissions();
       expect(submissions).toHaveLength(1);
@@ -281,7 +284,7 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
-      expect(submission?.judge_model).toBe("zai/glm-5.2");
+      expect(submission?.judge_model).toBe("anthropic/claude-sonnet-5");
       expect(submission?.judged_at).toBeDefined();
     });
 
@@ -292,7 +295,7 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
-      expect(submission?.judge_model).toBe("zai/glm-5.2");
+      expect(submission?.judge_model).toBe("anthropic/claude-sonnet-5");
     });
 
     it("never calls the sandbox run-trigger when the judge rejects the submission", async () => {

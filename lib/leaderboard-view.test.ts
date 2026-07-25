@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { getLeaderboardView, partitionBaseline, type LeaderboardRow } from "./leaderboard-view";
+import {
+  getLeaderboardSections,
+  getLeaderboardView,
+  partitionBaseline,
+  type LeaderboardRow,
+} from "./leaderboard-view";
 import { MemoryStorage } from "./storage";
-import type { Run, Submission } from "./types";
+import { getTasks } from "./tasks";
+import type { Run, Submission, TaskResult } from "./types";
+
+const TASK_COUNT = getTasks().length;
+
+// A result set that completes the whole test (every task passed) — the only
+// kind of run that gets ranked. `failOne` drops the last task to a fail, i.e.
+// an incomplete run.
+function fullResults(failOne = false): TaskResult[] {
+  return getTasks().map((task, i) => ({
+    task_id: task.id,
+    attempted: true,
+    passed: !(failOne && i === TASK_COUNT - 1),
+  }));
+}
 
 function row(over: Partial<LeaderboardRow>): LeaderboardRow {
   return {
@@ -70,18 +89,14 @@ describe("getLeaderboardView", () => {
     expect(rows).toEqual([]);
   });
 
-  it("joins a completed run with its submission's agent name and rank", async () => {
+  it("joins a complete-test run with its submission's agent name and rank", async () => {
     const storage = new MemoryStorage();
     await storage.putSubmission(submission("sub-1", "agent-x", "2026-07-19T00:00:00.000Z"));
     await storage.putRun(
       run("run-1", "sub-1", "completed", {
-        tasks_passed: 8,
+        tasks_passed: TASK_COUNT,
         total_cost_usd: 2.0,
-        task_results: new Array(10).fill(0).map((_, i) => ({
-          task_id: `t${i}`,
-          attempted: true,
-          passed: i < 8,
-        })),
+        task_results: fullResults(),
       }),
     );
 
@@ -92,21 +107,25 @@ describe("getLeaderboardView", () => {
         rank: 1,
         runId: "run-1",
         agentName: "agent-x",
-        tasksPassed: 8,
-        totalTasks: 10,
-        costPerTaskUsd: 0.2,
+        tasksPassed: TASK_COUNT,
+        totalTasks: TASK_COUNT,
+        costPerTaskUsd: 2.0 / TASK_COUNT,
         totalCostUsd: 2.0,
         submittedAt: "2026-07-19T00:00:00.000Z",
       },
     ]);
   });
 
-  it("ranks multiple completed runs using the same order as sortLeaderboard", async () => {
+  it("ranks multiple complete-test runs by cost ascending", async () => {
     const storage = new MemoryStorage();
     await storage.putSubmission(submission("sub-1", "agent-a", "2026-07-19T00:00:00.000Z"));
     await storage.putSubmission(submission("sub-2", "agent-b", "2026-07-18T00:00:00.000Z"));
-    await storage.putRun(run("run-1", "sub-1", "completed", { tasks_passed: 5, total_cost_usd: 3.0 }));
-    await storage.putRun(run("run-2", "sub-2", "completed", { tasks_passed: 7, total_cost_usd: 1.0 }));
+    await storage.putRun(
+      run("run-1", "sub-1", "completed", { tasks_passed: TASK_COUNT, total_cost_usd: 3.0, task_results: fullResults() }),
+    );
+    await storage.putRun(
+      run("run-2", "sub-2", "completed", { tasks_passed: TASK_COUNT, total_cost_usd: 1.0, task_results: fullResults() }),
+    );
 
     const rows = await getLeaderboardView(storage);
 
@@ -114,6 +133,23 @@ describe("getLeaderboardView", () => {
       { rank: 1, agentName: "agent-b" },
       { rank: 2, agentName: "agent-a" },
     ]);
+  });
+
+  it("excludes runs that didn't complete the whole test (ranked is empty, incomplete holds them)", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(submission("sub-1", "agent-a", "2026-07-19T00:00:00.000Z"));
+    await storage.putRun(
+      run("run-1", "sub-1", "completed", {
+        tasks_passed: TASK_COUNT - 1,
+        total_cost_usd: 0.1,
+        task_results: fullResults(true),
+      }),
+    );
+
+    const { ranked, incomplete } = await getLeaderboardSections(storage);
+
+    expect(ranked).toEqual([]);
+    expect(incomplete.map((r) => r.runId)).toEqual(["run-1"]);
   });
 
   it("excludes runs that are not completed", async () => {
@@ -130,7 +166,11 @@ describe("getLeaderboardView", () => {
     it("falls back to a placeholder agent name instead of throwing", async () => {
       const storage = new MemoryStorage();
       await storage.putRun(
-        run("run-1", "sub-does-not-exist", "completed", { tasks_passed: 2, total_cost_usd: 0.5 }),
+        run("run-1", "sub-does-not-exist", "completed", {
+          tasks_passed: TASK_COUNT,
+          total_cost_usd: 0.5,
+          task_results: fullResults(),
+        }),
       );
 
       const rows = await getLeaderboardView(storage);

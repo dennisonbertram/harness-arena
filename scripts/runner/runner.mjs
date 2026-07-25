@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import {
   budgetExceeded,
   buildContainerName,
@@ -33,7 +34,6 @@ import {
   resolveTaskCost,
   safeCleanup,
   sh,
-  truncateForUpload,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -47,17 +47,17 @@ const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 // the task container; pi uses the one matching --provider.
 const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
-const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
-// A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
-// reality and dominated the leaderboard whenever it was hit (live-run
-// evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the
-// $1.06 total run cost vs. $0.32 real gateway spend).
-const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.05");
-// Cap on the bytes of a trace actually UPLOADED to the callback (live-run
-// evidence: run 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
-// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). Does
-// not affect the local 5MB capture used for cost parsing.
-const TRACE_UPLOAD_MAX_BYTES = parseInt(process.env.RUNNER_TRACE_UPLOAD_MAX_BYTES ?? "262144", 10);
+// Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
+// solution can complete the whole test instead of being killed mid-run, which
+// would deflate its pass rate. Sandbox.ts passes the real value; this default
+// is the fallback.
+const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
+// Upper bound on the pi stdout we hold in memory (cost parsing + trace). Traces
+// are gzip-uploaded in full, so this is only a memory-safety ceiling for a
+// runaway-verbose process, not a routine trace cut -- a real per-task stdout is
+// well under this. gzip keeps even this bound's worth of text far below the
+// callback body limit.
+const STDOUT_CAP_BYTES = parseInt(process.env.RUNNER_STDOUT_CAP_BYTES ?? String(16 * 1024 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -212,9 +212,57 @@ async function flushEvents(extra = {}) {
   return result;
 }
 
+// Fetch grading materials (tests/*) from the authenticated /api/runner-tests
+// route and write them under RUNNER_TASKS_DIR/<id>/tests, where runOneTask's
+// verify step docker-cp's them into each task container AFTER the agent's turn.
+// These are NOT in the public runner bundle (that would let any harness read
+// the assertions it's graded against); only this runner, which holds
+// RUNNER_CALLBACK_SECRET, can fetch them. Fails closed: a run cannot be scored
+// without tests, so a fetch failure aborts the run rather than silently passing.
+async function fetchTaskTests() {
+  const url = `${CALLBACK_BASE}/api/runner-tests`;
+  const delays = [0, 500, 1500];
+  let lastErr;
+  for (const delay of delays) {
+    if (delay) await sleep(delay);
+    try {
+      const res = await fetchWithTimeout(
+        fetch,
+        url,
+        { method: "GET", headers: { "x-runner-secret": RUNNER_CALLBACK_SECRET } },
+        HTTP_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const { tests } = await res.json();
+      let fileCount = 0;
+      for (const [taskId, files] of Object.entries(tests ?? {})) {
+        for (const [rel, b64] of Object.entries(files)) {
+          const dst = path.join(RUNNER_TASKS_DIR, taskId, "tests", rel);
+          mkdirSync(path.dirname(dst), { recursive: true });
+          writeFileSync(dst, Buffer.from(b64, "base64"));
+          fileCount += 1;
+        }
+      }
+      log(`fetched tests for ${Object.keys(tests ?? {}).length} task(s), ${fileCount} file(s)`);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`fetch task tests failed after retries: ${lastErr?.message ?? lastErr}`);
+}
+
+// Traces are uploaded gzip-compressed so the FULL, untruncated trace fits
+// under the callback's request-body limit (a JSONL/text trace compresses
+// ~10x). The server stores the bytes as-is; the trace-view route decompresses
+// on read. We never truncate — cutting data out of a trace is not allowed.
 async function uploadTrace(taskId, name, buffer) {
   const url = `${CALLBACK_BASE}/api/runs/${RUN_ID}/trace?task_id=${encodeURIComponent(taskId)}&name=${encodeURIComponent(name)}`;
-  return postWithRetry(url, buffer, false);
+  const gz = gzipSync(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
+  return postWithRetry(url, gz, false);
 }
 
 // Terminal status delivery (status completed/failed + totals) is the one
@@ -381,7 +429,7 @@ async function runOneTask(task, index, systemPrompt) {
       ],
       { maxBuffer: 64 * 1024 * 1024 },
     );
-    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
+    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
 
     const sessionText = extractNewestSessionJsonl(containerName);
@@ -406,17 +454,17 @@ async function runOneTask(task, index, systemPrompt) {
       sessionUnreadable,
       sessionCost: parsed.totalCost,
       stdoutCost,
-      floorUsd: MISSING_COST_FLOOR_USD,
     });
 
     if (sessionUnreadable) {
       log(`task ${task.id}: cost_source: ${costSource}`);
-      if (costSource === "floor (session unreadable)") {
+      if (costSource === "unmeasured") {
+        // Neither session nor stdout carried a cost — reported as unmeasured
+        // (no fabricated number). Surfaced as a signal for visibility.
         queueEvent("task.cost_tamper_signal", {
           task_id: task.id,
-          reason: "session_unreadable",
+          reason: "cost_unmeasured",
           cost_source: costSource,
-          floor_usd: MISSING_COST_FLOOR_USD,
         });
       }
     } else if (parsed.negativeCostCount > 0) {
@@ -449,7 +497,7 @@ async function runOneTask(task, index, systemPrompt) {
     await flushEvents();
 
     const verifyStart = Date.now();
-    sh(
+    const verifyResult = sh(
       DOCKER_CMD,
       ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
       { maxBuffer: 20 * 1024 * 1024 },
@@ -466,31 +514,35 @@ async function runOneTask(task, index, systemPrompt) {
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
     // finding 1): a root agent could printenv AI_GATEWAY_API_KEY into its
-    // own session/stdout, and these traces are uploaded publicly. Cost was
-    // already parsed from the FULL piStdout above; the bytes actually
-    // uploaded are capped to TRACE_UPLOAD_MAX_BYTES (live-run evidence: run
-    // 9f4a1b3e, HTTP 413 uploading pi-stdout.txt past Vercel's ~4.5MB
-    // function body limit).
+    // own session/stdout, and these traces are uploaded publicly. The FULL
+    // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
+    // ~4.5MB callback body limit) -- no truncation.
     const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
     let traceBlobUrl;
     const redactedSession = redactSecrets(sessionText, secrets);
-    const sessionUpload = await uploadTrace(
-      task.id,
-      "session.jsonl",
-      truncateForUpload(Buffer.from(redactedSession, "utf8"), TRACE_UPLOAD_MAX_BYTES),
-    );
+    const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));
     if (sessionUpload?.url) {
       traceBlobUrl = sessionUpload.url;
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
     }
     const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
-    const stdoutUpload = await uploadTrace(
-      task.id,
-      "pi-stdout.txt",
-      truncateForUpload(redactedStdout, TRACE_UPLOAD_MAX_BYTES),
-    );
+    const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
     if (stdoutUpload?.url) {
       queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
+    }
+    // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
+    // Verifier tab shows WHY a task passed or failed, not just the reward.
+    const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
+    const verifyStderr = verifyResult.stderr?.toString("utf8") ?? "";
+    if (verifyStderr.trim()) verifierParts.push(`\n[stderr]\n${verifyStderr}`);
+    verifierParts.push(`\n[reward.txt] ${rewardText ?? "(missing)"}`);
+    const verifierUpload = await uploadTrace(
+      task.id,
+      "verifier.txt",
+      Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
+    );
+    if (verifierUpload?.url) {
+      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: verifierUpload.url });
     }
     await flushEvents();
 
@@ -499,7 +551,9 @@ async function runOneTask(task, index, systemPrompt) {
       attempted: true,
       passed,
       reward,
-      cost_usd: totalCost,
+      // null (unmeasured) is carried as an absent cost_usd, never a fabricated
+      // number; cost_source records why (unmeasured vs session/stdout).
+      cost_usd: totalCost === null ? undefined : totalCost,
       cost_source: costSource,
       duration_s: (Date.now() - taskStart) / 1000,
       turns,
@@ -545,6 +599,17 @@ async function main() {
       // top of flushEvents' own carried-forward pendingStatus retry on
       // every later flush.
       await flushEvents();
+    }
+
+    // Pull grading materials before any task runs. Fail closed (see
+    // fetchTaskTests): without tests we cannot verify, so abort rather than
+    // report unscored passes.
+    try {
+      await fetchTaskTests();
+    } catch (err) {
+      queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
     }
 
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));

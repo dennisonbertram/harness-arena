@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
-import { getLeaderboardView, partitionBaseline } from "@/lib/leaderboard-view";
+import { getTasks } from "@/lib/tasks";
 import { formatUsd, scaleScatterPoints } from "@/lib/format";
+import { aggregatePrompts, aggregateAllRunsByTask, type TaskModelBreakdown } from "@/lib/aggregate";
+import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
+import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
+import { RerunButton } from "./RerunButton";
 import { ScatterChart, type ScatterItem } from "./ScatterChart";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
-// Full-width plot; detail shows on hover so the tightly-clustered dots don't
-// need static labels.
-const CHART_OPTIONS = { width: 960, height: 420, padding: 56 };
 
 // The leaderboard reads from shared storage, so a build-time-cached page
 // would never show new submissions. ISR re-renders it at most every 15s.
@@ -15,28 +16,47 @@ export const revalidate = 15;
 
 export default async function LeaderboardPage() {
   const storage = getStorage();
-  const rows = await getLeaderboardView(storage);
-  const { baseline, competitors } = partitionBaseline(rows);
+  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
+  const tasks = getTasks();
+  const totalTasks = tasks.length;
+  const standings = aggregatePrompts(runs, submissions, totalTasks);
+  // Homepage per-task view pools EVERY completed run across ALL prompts — a
+  // task-difficulty overview, not one agent's profile.
+  const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
+  const completedRuns = runs.filter((r) => r.status === "completed" && r.tasks_passed !== undefined).length;
+  const pendingRuns = runs.filter((r) => r.status === "running" || r.status === "queued").length;
 
-  const { points, xMax, yMax, width, height, padding } = scaleScatterPoints(
-    rows.map((row) => ({ runId: row.runId, totalCostUsd: row.totalCostUsd, tasksPassed: row.tasksPassed })),
-    CHART_OPTIONS,
+  // Cost-vs-tasks scatter: one dot per completed run, colored by model.
+  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  const chartRuns = runs.filter(
+    (r) => r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined,
   );
-  const leaderRunId = rows.find((row) => row.runId !== baseline?.runId)?.runId;
-  const chartItems: ScatterItem[] = points.map((point) => {
-    const row = rows.find((r) => r.runId === point.runId)!;
+  const scale = scaleScatterPoints(
+    chartRuns.map((r) => ({
+      runId: r.id,
+      totalCostUsd: r.total_cost_usd!,
+      tasksPassed: r.tasks_passed!,
+      model: runModel(r.model ?? submissionById.get(r.submission_id)?.model),
+    })),
+    { width: 960, height: 400, padding: 52, yMax: totalTasks },
+  );
+  const runById = new Map(chartRuns.map((r) => [r.id, r]));
+  const scatterItems: ScatterItem[] = scale.points.map((p) => {
+    const run = runById.get(p.runId)!;
+    const sub = submissionById.get(run.submission_id);
     return {
-      runId: point.runId,
-      cx: point.cx,
-      cy: point.cy,
-      agentName: row.agentName,
-      tasksPassed: row.tasksPassed,
-      totalTasks: row.totalTasks,
-      totalCostUsd: row.totalCostUsd,
-      isBaseline: point.runId === baseline?.runId,
-      isLeader: point.runId === leaderRunId,
+      runId: p.runId,
+      cx: p.cx,
+      cy: p.cy,
+      agentName: sub?.agent_name ?? "unknown",
+      model: p.model,
+      tasksPassed: p.tasksPassed,
+      totalTasks,
+      totalCostUsd: p.totalCostUsd,
+      isBaseline: (sub?.prompt ?? "") === "",
     };
   });
+  const chartModels = Array.from(new Set(scatterItems.map((i) => i.model)));
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -44,20 +64,39 @@ export default async function LeaderboardPage() {
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
           Harness Arena
         </h1>
-        <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 640, marginBottom: 16 }}>
-          A public contest: submit a system prompt, run it against 10 real terminal tasks, and see
-          how it ranks on cost and correctness.
+        <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 16 }}>
+          A public contest: submit a system prompt and it runs against a {totalTasks}-task subset of Terminal-Bench 2
+          (not the full benchmark), on the model of your choice. Models are noisy, so prompts are ranked by{" "}
+          <strong>pass rate</strong> — mean tasks solved across every run, not a single lucky attempt — with cost as
+          the tiebreaker once pass rate is solved.
         </p>
-        <div style={{ display: "flex", gap: 20, fontSize: 14 }}>
+        <div style={{ display: "flex", gap: 20, fontSize: 14, marginBottom: 24 }}>
           <Link href="/how-it-works">How it works</Link>
           <Link href="/submit">Submit a prompt</Link>
           <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
             GitHub repo
           </a>
         </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "12px 32px",
+            padding: "16px 20px",
+            border: "1px solid var(--gray-alpha-400)",
+            borderRadius: 10,
+            width: "fit-content",
+            maxWidth: "100%",
+          }}
+        >
+          <Param label="Benchmark" value={`${ARENA_BENCHMARK} · ${totalTasks}-task subset`} />
+          <Param label="Models" value={Object.values(MODEL_LABELS).join(" · ")} />
+          <Param label="Harness" value={ARENA_HARNESS} />
+          <Param label="Endpoint" value={ARENA_ENDPOINT} />
+        </div>
       </section>
 
-      {rows.length === 0 ? (
+      {standings.length === 0 ? (
         <div
           style={{
             border: "1px solid var(--gray-alpha-400)",
@@ -74,116 +113,103 @@ export default async function LeaderboardPage() {
             </Link>{" "}
             or read <code className="mono">/skill.md</code> for the agent-facing contest rules.
           </p>
+          {pendingRuns > 0 && (
+            <p style={{ fontSize: 14, marginTop: 8 }}>
+              <Link href="/pending" style={{ color: "var(--blue-700)" }}>
+                {pendingRuns} run{pendingRuns === 1 ? "" : "s"} in progress — see live status →
+              </Link>
+            </p>
+          )}
         </div>
       ) : (
         <>
-          {baseline && (
-            <section style={{ marginBottom: 40 }}>
-              <h2 className="label" style={{ marginBottom: 12 }}>
-                Baseline to beat
-              </h2>
-              <Link
-                href={`/runs/${baseline.runId}`}
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "baseline",
-                  gap: "8px 32px",
-                  border: "1px solid var(--gray-alpha-400)",
-                  borderRadius: 12,
-                  padding: "20px 24px",
-                  background: "var(--gray-alpha-100)",
-                  textDecoration: "none",
-                  color: "inherit",
-                }}
-              >
-                <div style={{ flex: "1 1 240px" }}>
-                  <div style={{ fontSize: 16, fontWeight: 600 }}>Vanilla pi harness</div>
-                  <div style={{ fontSize: 13, color: "var(--gray-900)" }}>
-                    Stock pi system prompt, nothing added — the reference every submission tries to beat.
-                  </div>
-                </div>
-                <BaselineStat label="Tasks passed" value={`${baseline.tasksPassed}/${baseline.totalTasks}`} />
-                <BaselineStat label="Total cost" value={formatUsd(baseline.totalCostUsd)} />
-                <BaselineStat label="Cost / task" value={formatUsd(baseline.costPerTaskUsd)} />
-              </Link>
-            </section>
-          )}
-
           <section style={{ marginBottom: 48, overflowX: "auto" }}>
             <h2 className="label" style={{ marginBottom: 16 }}>
-              Leaderboard
+              Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by pass rate</span>
             </h2>
-            {competitors.length === 0 ? (
-              <p style={{ fontSize: 14, color: "var(--gray-900)" }}>
-                No competitor submissions yet.{" "}
-                <Link href="/submit" style={{ color: "var(--blue-700)" }}>
-                  Be the first to beat the baseline.
-                </Link>
-              </p>
-            ) : (
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                  <th className="label" style={cellStyle}>
-                    Rank
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Agent
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Tasks passed
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Cost / task
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Total cost
-                  </th>
-                  <th className="label" style={cellStyle}>
-                    Submitted
-                  </th>
+                  <th className="label" style={cellStyle}>Rank</th>
+                  <th className="label" style={cellStyle}>Agent</th>
+                  <th className="label" style={cellStyle}>Model</th>
+                  <th className="label" style={cellStyle}>Pass rate</th>
+                  <th className="label" style={cellStyle}>Mean tasks</th>
+                  <th className="label" style={cellStyle}>Runs</th>
+                  <th className="label" style={numCellStyle}>Median cost</th>
+                  <th className="label" style={numCellStyle}></th>
                 </tr>
               </thead>
               <tbody>
-                {competitors.map((row) => (
-                  <tr key={row.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                {standings.map((s, i) => (
+                  <tr key={s.promptKey || "baseline"} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>
-                      <Link href={`/runs/${row.runId}`}>{row.rank}</Link>
+                      <Link href={`/runs/${s.runIds[0]}`}>{i + 1}</Link>
                     </td>
                     <td style={cellStyle}>
-                      <Link href={`/runs/${row.runId}`}>{row.agentName}</Link>
+                      <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
+                      {s.promptKey === "" && (
+                        <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
+                      )}
+                    </td>
+                    <td style={cellStyle}>{modelLabel(s.model)}</td>
+                    <td style={cellStyle} className="tabular-nums">
+                      {(s.passRate * 100).toFixed(0)}%
+                      {s.completesTest && (
+                        <span style={{ marginLeft: 6, fontSize: 12, color: "var(--blue-700)" }}>· complete</span>
+                      )}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {row.tasksPassed}/{row.totalTasks}
+                      {s.meanTasksPassed.toFixed(1)}/{s.totalTaskCount}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {formatUsd(row.costPerTaskUsd)}
+                      {s.runs}
                     </td>
-                    <td style={cellStyle} className="tabular-nums">
-                      {formatUsd(row.totalCostUsd)}
+                    <td style={numCellStyle} className="tabular-nums">
+                      {s.medianCostUsd === null ? "—" : formatUsd(s.medianCostUsd)}
                     </td>
-                    <td style={cellStyle}>{new Date(row.submittedAt).toLocaleDateString()}</td>
+                    <td style={numCellStyle}>
+                      <RerunButton agentName={s.agentName} prompt={s.promptKey} model={s.model} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            )}
+            <p style={{ fontSize: 14, marginTop: 12 }}>
+              <Link href="/pending" style={{ color: pendingRuns > 0 ? "var(--blue-700)" : "var(--gray-700)" }}>
+                {pendingRuns > 0
+                  ? `${pendingRuns} run${pendingRuns === 1 ? "" : "s"} in progress — see live status →`
+                  : "See pending runs"}
+              </Link>
+            </p>
           </section>
 
-          <section>
-            <h2 className="label" style={{ marginBottom: 16 }}>
-              Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· hover a point for detail</span>
-            </h2>
-            <ScatterChart
-              items={chartItems}
-              width={width}
-              height={height}
-              padding={padding}
-              xMax={xMax}
-              yMax={yMax}
-            />
-          </section>
+          {taskOverview.length > 0 && <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />}
+
+          {scatterItems.length > 0 && (
+            <section style={{ marginTop: 48, overflowX: "auto" }}>
+              <h2 className="label" style={{ marginBottom: 8 }}>
+                Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per run, colored by model</span>
+              </h2>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12, fontSize: 12 }}>
+                {chartModels.map((m) => (
+                  <span key={m}>
+                    <span style={{ color: modelColor(m), marginRight: 5 }}>●</span>
+                    {modelLabel(m)}
+                  </span>
+                ))}
+                <span style={{ color: "var(--gray-700)" }}>◌ dashed = baseline (vanilla prompt)</span>
+              </div>
+              <ScatterChart
+                items={scatterItems}
+                width={scale.width}
+                height={scale.height}
+                padding={scale.padding}
+                xMax={scale.xMax}
+                yMax={scale.yMax}
+              />
+            </section>
+          )}
         </>
       )}
     </div>
@@ -191,16 +217,98 @@ export default async function LeaderboardPage() {
 }
 
 const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
+const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
 
-function BaselineStat({ label, value }: { label: string; value: string }) {
+function Param({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <div className="label" style={{ marginBottom: 2 }}>
         {label}
       </div>
-      <div className="tabular-nums" style={{ fontSize: 20, fontWeight: 600 }}>
+      <div className="mono" style={{ fontSize: 14 }}>
         {value}
       </div>
     </div>
+  );
+}
+
+// Per-task pass rate, BROKEN OUT PER MODEL (one colored bar per model per task)
+// — where the variance lives: reliable tasks, flaky tasks, and walls, without
+// averaging glm and Claude into one number.
+function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; runCount: number }) {
+  const modelsPresent = Array.from(new Set(perTask.flatMap((t) => t.perModel.map((m) => m.model))));
+  return (
+    <section>
+      <h2 className="label" style={{ marginBottom: 8 }}>
+        Per-task pass rate
+        <span style={{ color: "var(--gray-700)" }}>
+          {" · by model, across "}
+          {runCount} run{runCount === 1 ? "" : "s"}
+        </span>
+      </h2>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 6, fontSize: 12 }}>
+        {modelsPresent.map((m) => (
+          <span key={m}>
+            <span style={{ color: modelColor(m), marginRight: 5 }}>●</span>
+            {modelLabel(m)}
+          </span>
+        ))}
+      </div>
+      <p style={{ fontSize: 11, color: "var(--gray-700)", marginTop: 0, marginBottom: 14 }}>
+        Fainter bars = fewer runs, so less certain — a single 100% (1/1) is weaker evidence than a solid 80% (8/10).
+      </p>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+        <tbody>
+          {perTask.map((t) => (
+            <tr key={t.taskId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+              <td className="mono" style={{ padding: "8px 12px 8px 0", verticalAlign: "top", whiteSpace: "nowrap" }}>
+                <Link href={`/tasks/${t.taskId}`}>{t.taskId}</Link>
+              </td>
+              <td style={{ padding: "8px 0" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {t.perModel.map((m) => {
+                    // Sample-size confidence: a lone run is weak evidence, so fade
+                    // its bar. Full opacity by ~8 runs. Bar LENGTH stays = pass
+                    // rate (matches the % text); opacity carries how much to trust
+                    // it, so 100% (1/1) reads as tentative next to a solid 80% (8/10).
+                    const conf = Math.min(1, m.attempts / 8);
+                    const barOpacity = 0.28 + 0.72 * conf;
+                    return (
+                      <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
+                        <span
+                          style={{
+                            width: 96,
+                            fontSize: 11,
+                            color: "var(--gray-700)",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {modelLabel(m.model)}
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0, background: "var(--gray-alpha-200)", borderRadius: 4, height: 7 }}>
+                          <div
+                            style={{ width: `${m.passRate * 100}%`, background: modelColor(m.model), height: 7, borderRadius: 4, opacity: barOpacity }}
+                          />
+                        </div>
+                        <span
+                          className="tabular-nums"
+                          style={{ width: 108, textAlign: "right", fontSize: 12, color: "var(--gray-700)", whiteSpace: "nowrap", opacity: 0.55 + 0.45 * conf }}
+                          title={m.attempts === 1 ? "single run — weak evidence" : `${m.attempts} runs`}
+                        >
+                          {(m.passRate * 100).toFixed(0)}% ({m.passed}/{m.attempts})
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }

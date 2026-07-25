@@ -107,7 +107,9 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const callbackBase = process.env.CALLBACK_BASE ?? DEFAULT_CALLBACK_BASE;
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
-    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "2";
+    // Safety ceiling per run (not the metric). Headroom for pricier models like
+    // Claude; glm-5.2 runs cost ~$1 and never approach it.
+    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "15";
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
     const tasksJsonB64 = Buffer.from(JSON.stringify(buildRunnerTasks()), "utf8").toString("base64");
 
@@ -156,10 +158,12 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
-    // Optional model-routing overrides (default = Vercel AI Gateway). Set to
-    // route the fixed board through OpenRouter, matching harnessarena.xyz.
+    // Model routing (default = Vercel AI Gateway). The run's own model wins so
+    // different runs can use different models (glm-5.2, Claude Sonnet 5, …);
+    // all resolve through the gateway, so the provider stays the default.
     if (process.env.RUNNER_PROVIDER) runnerEnv.RUNNER_PROVIDER = process.env.RUNNER_PROVIDER;
-    if (process.env.RUNNER_MODEL) runnerEnv.RUNNER_MODEL = process.env.RUNNER_MODEL;
+    const runnerModel = run.model ?? process.env.RUNNER_MODEL;
+    if (runnerModel) runnerEnv.RUNNER_MODEL = runnerModel;
     if (process.env.OPENROUTER_API_KEY) runnerEnv.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
     // sudo: the runner starts dockerd, which requires root; the docker CLI
     // it then drives also needs root to reach the root-owned socket. Running
