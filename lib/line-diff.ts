@@ -46,6 +46,42 @@ export function diffLines(baseline: string, submitted: string): DiffLine[] {
   return out;
 }
 
+// A side-by-side row: baseline on the left, submission on the right. Either
+// side is null when there is no corresponding line (padding). A change (a "del"
+// immediately paired with an "add") lands on one row so the before/after align.
+export interface DiffRow {
+  left: { text: string; type: "same" | "del" } | null;
+  right: { text: string; type: "same" | "add" } | null;
+}
+
+/** Convert a unified diff into aligned side-by-side rows. */
+export function diffRows(lines: DiffLine[]): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].type === "same") {
+      rows.push({ left: { text: lines[i].text, type: "same" }, right: { text: lines[i].text, type: "same" } });
+      i++;
+      continue;
+    }
+    // Collect a contiguous block of changes, then pair dels with adds row-by-row.
+    const dels: string[] = [];
+    const adds: string[] = [];
+    while (i < lines.length && lines[i].type !== "same") {
+      if (lines[i].type === "del") dels.push(lines[i].text);
+      else adds.push(lines[i].text);
+      i++;
+    }
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+      rows.push({
+        left: k < dels.length ? { text: dels[k], type: "del" } : null,
+        right: k < adds.length ? { text: adds[k], type: "add" } : null,
+      });
+    }
+  }
+  return rows;
+}
+
 /** Count of added / removed lines in a diff (unchanged lines excluded). */
 export function diffStat(lines: DiffLine[]): { added: number; removed: number } {
   let added = 0;
