@@ -16,9 +16,19 @@ vi.mock("@/lib/run-trigger", () => ({
   startRun: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@/auth", () => ({ auth: vi.fn() }));
+
+import type { Session } from "next-auth";
 import { judgeSubmission } from "@/lib/judge";
 import { startRun } from "@/lib/run-trigger";
+import { auth } from "@/auth";
 import { GET, POST } from "./route";
+
+// Same overload-confusion workaround as app/api/submissions/route.test.ts.
+const mockAuth = auth as unknown as {
+  mockReset: () => void;
+  mockResolvedValue: (value: Session | null) => void;
+};
 
 function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   return new NextRequest("http://localhost/api/competition/submissions", {
@@ -28,11 +38,62 @@ function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   });
 }
 
+function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
+  mockAuth.mockResolvedValue({
+    user: { githubId, githubLogin },
+    expires: "2099-01-01T00:00:00.000Z",
+  } as never);
+}
+
 describe("POST /api/competition/submissions", () => {
+  // Same rationale as the main arena's test file: one strictly-increasing
+  // counter backs every github_id used anywhere in this file so unrelated
+  // tests never collide on the new github_id rate-limit bucket.
+  let githubIdCounter = 2000;
+  function freshGithubId(): number {
+    githubIdCounter += 1;
+    return githubIdCounter;
+  }
+
   beforeEach(() => {
     resetStorage();
     vi.mocked(judgeSubmission).mockReset();
     vi.mocked(startRun).mockClear();
+    mockAuth.mockReset();
+    mockSession(freshGithubId());
+  });
+
+  describe("auth gating", () => {
+    it("returns 401 and stores nothing when there is no session", async () => {
+      mockAuth.mockResolvedValue(null);
+
+      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "hi" }, "20.0.0.1"));
+
+      expect(response.status).toBe(401);
+      expect(judgeSubmission).not.toHaveBeenCalled();
+      expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+    });
+
+    it("returns 401 when the session is missing the githubId claim", async () => {
+      mockAuth.mockResolvedValue({ user: {}, expires: "2099-01-01T00:00:00.000Z" } as never);
+
+      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "hi" }, "20.0.0.2"));
+
+      expect(response.status).toBe(401);
+      expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+    });
+
+    it("stamps the session's github_id/github_login on the stored submission", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+      mockSession(777, "real-login");
+
+      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "hi" }, "20.0.0.3"));
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.github_id).toBe(777);
+      expect(submission?.github_login).toBe("real-login");
+    });
   });
 
   it("rejects with 413 before reading the body when content-length exceeds 262144 bytes", async () => {
@@ -72,6 +133,8 @@ describe("POST /api/competition/submissions", () => {
     expect(submission?.competition).toBe(true);
     expect(submission?.model).toBe("zai/glm-5.2");
     expect(submission?.competition_baseline).toBeUndefined();
+    expect(typeof submission?.github_id).toBe("number");
+    expect(typeof submission?.github_login).toBe("string");
 
     const runs = await storageRef.current.listRuns();
     expect(runs).toHaveLength(1);
@@ -180,15 +243,18 @@ describe("POST /api/competition/submissions", () => {
     vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
     const ip = "9.9.9.9";
     for (let i = 0; i < 5; i++) {
+      mockSession(freshGithubId());
       const response = await POST(postRequest({ agent_name: `agent-${i}`, prompt: `p-${i}` }, ip));
       expect(response.status).toBe(200);
     }
+    mockSession(freshGithubId());
     const sixth = await POST(postRequest({ agent_name: "agent-over", prompt: "p-over" }, ip));
     expect(sixth.status).toBe(429);
   });
 
-  it("returns 429 once the per-agent-name limit is exceeded, even across different IPs", async () => {
+  it("returns 429 once the per-github-id limit is exceeded, even across different IPs (agent_name is no longer the identity axis)", async () => {
     vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
+    mockSession(freshGithubId());
     for (let i = 0; i < 5; i++) {
       const response = await POST(postRequest({ agent_name: "grinder", prompt: `p-${i}` }, `10.10.10.${i}`));
       expect(response.status).toBe(200);
@@ -203,13 +269,15 @@ describe("GET /api/competition/submissions", () => {
     resetStorage();
   });
 
-  it("excludes rejected submissions and never returns raw prompt text", async () => {
+  it("excludes rejected submissions, never returns raw prompt text, and includes github_login", async () => {
     await storageRef.current.putSubmission({
       id: "s-ok",
       agent_name: "alice",
       prompt: "secret prompt text",
       status: "queued",
       competition: true,
+      github_id: 42,
+      github_login: "octocat",
       created_at: "2026-07-25T00:00:00.000Z",
     });
     await storageRef.current.putSubmission({
@@ -232,6 +300,7 @@ describe("GET /api/competition/submissions", () => {
     const body = await response.json();
 
     expect(body.map((e: { submission_id: string }) => e.submission_id)).toEqual(["s-ok"]);
+    expect(body[0].github_login).toBe("octocat");
     expect(JSON.stringify(body)).not.toContain("secret prompt text");
     expect(JSON.stringify(body)).not.toContain("jailbreak attempt text");
   });
