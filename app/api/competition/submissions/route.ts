@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
-import { judgeAndDispatch } from "@/lib/competition-dispatch";
+import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
-import type { Run, Submission } from "@/lib/types";
+import type { Submission } from "@/lib/types";
 
 const MAX_PROMPT_CHARS = 32768;
 const MAX_BODY_BYTES = 262144;
@@ -22,17 +22,6 @@ const isIpRateLimited = createRateLimiter(5);
 // second bucket on agent_name so either limit alone is enough to throttle.
 const isAgentNameRateLimited = createRateLimiter(5);
 
-/**
- * Whether an existing competition submission with this prompt blocks a new
- * submission of the identical prompt (per R4/KTD5): blocks regardless of
- * judge outcome (an already-rejected duplicate is still a duplicate), EXCEPT
- * when the submission's only run ended in an infra failure (failed/reaped) —
- * that's not the submitter's fault and must not permanently burn the prompt.
- */
-function blocksDuplicate(run: Run | undefined): boolean {
-  return !(run && (run.status === "failed" || run.status === "reaped"));
-}
-
 export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {
@@ -44,7 +33,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "request body too large" }, { status: 413 });
   }
 
+  // IP-based check runs before the body is even read (matches the main
+  // arena's /api/submissions ordering) so a flood of malformed/oversized
+  // requests still burns rate-limit budget instead of getting a free 400.
+  // The agent_name bucket necessarily waits until after parsing — the name
+  // isn't known before then.
   const ip = clientIp(request);
+  if (isIpRateLimited(ip)) {
+    log("warn", "competition.submission.rate_limited", { ip });
+    return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
+  }
+
   const rawBody = await request.json().catch(() => null);
   const parsedInput = SubmissionInputSchema.safeParse(rawBody);
   if (!parsedInput.success) {
@@ -55,7 +54,7 @@ export async function POST(request: NextRequest) {
   }
   const { agent_name: agentName, prompt } = parsedInput.data;
 
-  if (isIpRateLimited(ip) || isAgentNameRateLimited(agentName)) {
+  if (isAgentNameRateLimited(agentName)) {
     log("warn", "competition.submission.rate_limited", { ip, agent_name: agentName });
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
@@ -71,7 +70,12 @@ export async function POST(request: NextRequest) {
   // storage is not concurrency-safe — two near-simultaneous submissions of the
   // same prompt can both pass it. Acceptable v1 scope (see plan KTD5); a more
   // robust normalized/atomic dedup is deferred to a later pass.
-  const duplicate = candidates.some((_, i) => blocksDuplicate(candidateRuns[i]));
+  //
+  // Blocks regardless of judge outcome (per R4/KTD5) — a duplicate of an
+  // already-rejected prompt is still a duplicate — EXCEPT when the match's
+  // only run infra-failed (failed/reaped): that's not the submitter's fault
+  // and must not permanently burn the prompt.
+  const duplicate = candidates.some((_, i) => !isInfraFailedRun(candidateRuns[i]));
   if (duplicate) {
     return NextResponse.json({ error: "this prompt has already been submitted" }, { status: 409 });
   }
@@ -106,6 +110,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     submission_id: result.submission.id,
     run_id: result.run.id,
+    run_ids: result.submission.run_ids,
     status: result.submission.status,
     judge_reason: result.verdict.reason,
   });

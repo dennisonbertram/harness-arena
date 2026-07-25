@@ -7,6 +7,11 @@ import type { Storage } from "./storage";
 import { getTasks } from "./tasks";
 import type { Run, Submission } from "./types";
 
+/** A run that ended in infra failure (not the submitter's/admin's fault) — shared by both competition routes' duplicate/retry guards. */
+export function isInfraFailedRun(run: Run | undefined): boolean {
+  return run?.status === "failed" || run?.status === "reaped";
+}
+
 export type JudgeAndDispatchResult =
   | { kind: "judge_unavailable"; error: string }
   | { kind: "rejected"; submission: Submission; verdict: JudgeVerdict }

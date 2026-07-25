@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { COMPETITION_MODEL, competitionAdminToken } from "@/lib/competition-config";
-import { judgeAndDispatch } from "@/lib/competition-dispatch";
+import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -11,8 +11,20 @@ import { readVanillaPrompt } from "@/lib/vanilla-prompt";
 const BASELINE_AGENT_NAME = "pi-vanilla-baseline";
 
 // Same POC-level limiter shape as the main submission endpoints — throttles
-// repeated admin-token-guessing attempts, not just legitimate use.
+// repeated admin-token-guessing attempts, not just legitimate use. Must run
+// BEFORE the token check below (not after) or a wrong-token request never
+// reaches this call and guessing goes completely unthrottled.
 const isRateLimited = createRateLimiter(5);
+
+function isValidToken(token: string | null, expected: string): boolean {
+  if (!token) return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(expected);
+  // timingSafeEqual throws on a length mismatch; a length difference isn't
+  // secret, so a plain false there is fine (still not a timing leak of the
+  // token's actual bytes).
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /**
  * Whether an existing competition_baseline submission should block a new
@@ -24,17 +36,13 @@ const isRateLimited = createRateLimiter(5);
 function blocksNewBaseline(submission: Submission, run: Run | undefined): boolean {
   if (submission.status === "rejected") return false;
   if (!run) return false;
-  return run.status === "queued" || run.status === "running" || run.status === "completed";
+  return !isInfraFailedRun(run);
 }
 
 export async function POST(request: NextRequest) {
-  const token = request.headers.get("x-competition-admin-token");
   const expected = competitionAdminToken();
   if (!expected) {
     return NextResponse.json({ error: "COMPETITION_ADMIN_TOKEN is not configured on the server" }, { status: 500 });
-  }
-  if (!token || token !== expected) {
-    return NextResponse.json({ error: "invalid or missing admin token" }, { status: 401 });
   }
 
   const ip = clientIp(request);
@@ -43,9 +51,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
   }
 
+  const token = request.headers.get("x-competition-admin-token");
+  if (!isValidToken(token, expected)) {
+    return NextResponse.json({ error: "invalid or missing admin token" }, { status: 401 });
+  }
+
   const storage = getStorage();
   const submissions = await storage.listSubmissions();
   const existingBaselines = submissions.filter((s) => s.competition_baseline === true);
+  // ponytail: same list-then-point-fetch TOCTOU gap as the submissions
+  // route's dedup check (not concurrency-safe against Blob's eventual
+  // consistency) — two near-simultaneous admin triggers could both pass this
+  // and create two baseline submissions. Low-likelihood (single admin,
+  // deliberate rare action) and low-impact (getCompetitionBoard only ever
+  // surfaces the first baseline it finds; a second would just sit unused).
   const baselineRuns = await Promise.all(
     existingBaselines.map((s) => (s.run_id ? storage.getRun(s.run_id) : Promise.resolve(undefined))),
   );
@@ -88,6 +107,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     submission_id: result.submission.id,
     run_id: result.run.id,
+    run_ids: result.submission.run_ids,
     status: result.submission.status,
     judge_reason: result.verdict.reason,
   });

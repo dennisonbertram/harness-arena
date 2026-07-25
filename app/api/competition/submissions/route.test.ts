@@ -67,6 +67,7 @@ describe("POST /api/competition/submissions", () => {
 
     expect(response.status).toBe(200);
     expect(body.status).toBe("queued");
+    expect(body.run_ids).toEqual([body.run_id]);
     const submission = await storageRef.current.getSubmission(body.submission_id);
     expect(submission?.competition).toBe(true);
     expect(submission?.model).toBe("zai/glm-5.2");

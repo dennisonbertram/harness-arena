@@ -69,6 +69,7 @@ describe("POST /api/competition/admin/baseline", () => {
     expect(body.status).toBe("queued");
     expect(typeof body.submission_id).toBe("string");
     expect(typeof body.run_id).toBe("string");
+    expect(body.run_ids).toEqual([body.run_id]);
 
     const submission = await storageRef.current.getSubmission(body.submission_id);
     expect(submission?.competition).toBe(true);
@@ -178,5 +179,27 @@ describe("POST /api/competition/admin/baseline", () => {
     }
     const sixth = await POST(adminRequest({}, ip));
     expect(sixth.status).toBe(429);
+  });
+
+  it("rate-limits repeated WRONG-token requests too, not just valid ones (regression: token-guessing must be throttled)", async () => {
+    const ip = "9.9.9.10";
+    for (let i = 0; i < 5; i++) {
+      const response = await POST(adminRequest({ "x-competition-admin-token": "guess" }, ip));
+      expect(response.status).toBe(401);
+    }
+    const sixth = await POST(adminRequest({ "x-competition-admin-token": "guess" }, ip));
+    expect(sixth.status).toBe(429);
+    expect(judgeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("accepts the correct token (timing-safe comparison doesn't break the happy path)", async () => {
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+    const response = await POST(adminRequest({}, "9.9.9.11"));
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects a token of a different length than expected without throwing", async () => {
+    const response = await POST(adminRequest({ "x-competition-admin-token": "short" }, "9.9.9.12"));
+    expect(response.status).toBe(401);
   });
 });

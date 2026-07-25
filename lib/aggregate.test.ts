@@ -239,6 +239,17 @@ describe("aggregateTask", () => {
     const runs = [run("r1", "s1", [true, false, false, false], undefined, "running")];
     expect(aggregateTask(runs, subs, "t0")).toBeNull();
   });
+
+  it("excludes competition submissions from the per-task view too", () => {
+    const compSubs = [
+      { ...sub("s1", "arena-entrant", "P1", "2026-07-20T00:00:00Z") },
+      { ...sub("s2", "comp-entrant", "P2", "2026-07-21T00:00:00Z"), competition: true },
+    ];
+    const runs = [run("r1", "s1", [true, false, false, false]), run("r2", "s2", [true, true, true, true])];
+    const stats = aggregateTask(runs, compSubs, "t0")!;
+    expect(stats.attempts).toBe(1);
+    expect(stats.results[0].agentName).toBe("arena-entrant");
+  });
 });
 
 describe("aggregateAllRunsByTask", () => {
@@ -269,5 +280,15 @@ describe("aggregateAllRunsByTask", () => {
     const runs = [run("r1", "s1", [true, false, false, false])];
     const perTask = aggregateAllRunsByTask(runs, subs, ["t0", "t9-never-run"]);
     expect(perTask.map((t) => t.taskId)).toEqual(["t0"]);
+  });
+
+  it("excludes competition submissions from the homepage per-task overview", () => {
+    const compSubs = [
+      { ...sub("s1", "arena-entrant", "P1", "2026-07-20T00:00:00Z") },
+      { ...sub("s2", "comp-entrant", "P2", "2026-07-21T00:00:00Z"), competition: true },
+    ];
+    const runs = [run("r1", "s1", [true, false, false, false]), run("r2", "s2", [true, true, true, true])];
+    const perTask = aggregateAllRunsByTask(runs, compSubs, ["t0"]);
+    expect(perTask[0]).toMatchObject({ passed: 1, of: 1 });
   });
 });
