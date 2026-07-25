@@ -35,6 +35,23 @@ describe("POST /api/competition/submissions", () => {
     vi.mocked(startRun).mockClear();
   });
 
+  it("rejects with 413 before reading the body when content-length exceeds 262144 bytes", async () => {
+    const oversized = "a".repeat(300000);
+    const response = await POST(
+      new NextRequest("http://localhost/api/competition/submissions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(oversized.length),
+          "x-forwarded-for": "2.2.2.0",
+        },
+        body: oversized,
+      }),
+    );
+    expect(response.status).toBe(413);
+    expect(judgeSubmission).not.toHaveBeenCalled();
+  });
+
   it("rejects with 400 when agent_name or prompt is empty", async () => {
     const noAgent = await POST(postRequest({ agent_name: "", prompt: "hi" }, "2.2.2.1"));
     expect(noAgent.status).toBe(400);

@@ -1,16 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { after, NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
-import { dispatchQueuedRuns } from "@/lib/dispatch";
-import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
+import { judgeAndDispatch } from "@/lib/competition-dispatch";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
-import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
 
 const MAX_PROMPT_CHARS = 32768;
+const MAX_BODY_BYTES = 262144;
 
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
@@ -40,6 +39,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "content-type must be application/json" }, { status: 415 });
   }
 
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "request body too large" }, { status: 413 });
+  }
+
   const ip = clientIp(request);
   const rawBody = await request.json().catch(() => null);
   const parsedInput = SubmissionInputSchema.safeParse(rawBody);
@@ -57,17 +61,17 @@ export async function POST(request: NextRequest) {
   }
 
   const storage = getStorage();
-  const [submissions, runs] = await Promise.all([storage.listSubmissions(), storage.listRuns()]);
-  const runById = new Map(runs.map((r) => [r.id, r]));
-  const competitionSubmissions = submissions.filter((s) => s.competition === true);
-  // ponytail: exact byte-match only (no whitespace/case normalization), and
-  // list-then-compare against Vercel Blob's eventually-consistent storage is
-  // not concurrency-safe — two near-simultaneous submissions of the same
-  // prompt can both pass this check. Acceptable v1 scope (see plan KTD5); a
-  // more robust normalized/atomic dedup is deferred to a later pass.
-  const duplicate = competitionSubmissions.find(
-    (s) => s.prompt === prompt && blocksDuplicate(s.run_id ? runById.get(s.run_id) : undefined),
+  const competitionSubmissions = (await storage.listSubmissions()).filter((s) => s.competition === true);
+  const candidates = competitionSubmissions.filter((s) => s.prompt === prompt);
+  const candidateRuns = await Promise.all(
+    candidates.map((s) => (s.run_id ? storage.getRun(s.run_id) : Promise.resolve(undefined))),
   );
+  // ponytail: exact byte-match only (no whitespace/case normalization), and
+  // this list-then-point-fetch check against Vercel Blob's eventually-consistent
+  // storage is not concurrency-safe — two near-simultaneous submissions of the
+  // same prompt can both pass it. Acceptable v1 scope (see plan KTD5); a more
+  // robust normalized/atomic dedup is deferred to a later pass.
+  const duplicate = candidates.some((_, i) => blocksDuplicate(candidateRuns[i]));
   if (duplicate) {
     return NextResponse.json({ error: "this prompt has already been submitted" }, { status: 409 });
   }
@@ -83,74 +87,27 @@ export async function POST(request: NextRequest) {
   };
   await storage.putSubmission(submission);
 
-  let verdict;
-  try {
-    verdict = await judgeSubmission(submission.prompt, getTasks());
-  } catch (err) {
-    const detail = (err as Error).message;
-    log("error", "competition.judge.unavailable", { submission_id: submission.id, error: detail });
+  const result = await judgeAndDispatch(storage, submission, "competition");
+  if (result.kind === "judge_unavailable") {
     return NextResponse.json(
       {
-        error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${detail})`,
+        error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${result.error})`,
       },
       { status: 503 },
     );
   }
-
-  log("info", "competition.judge.verdict", {
-    submission_id: submission.id,
-    verdict: verdict.verdict,
-    reason: verdict.reason,
-  });
-  submission.judge_verdict = verdict.verdict;
-  submission.judge_reason = verdict.reason;
-  submission.judge_model = JUDGE_MODEL;
-  submission.judged_at = new Date().toISOString();
-
-  if (verdict.verdict === "rejected") {
-    submission.status = "rejected";
-    await storage.putSubmission(submission);
+  if (result.kind === "rejected") {
     return NextResponse.json({
-      submission_id: submission.id,
-      status: submission.status,
-      judge_reason: verdict.reason,
+      submission_id: result.submission.id,
+      status: result.submission.status,
+      judge_reason: result.verdict.reason,
     });
   }
-
-  const now = new Date().toISOString();
-  const run: Run = {
-    id: randomUUID(),
-    submission_id: submission.id,
-    status: "queued",
-    model: COMPETITION_MODEL,
-    task_results: [],
-    created_at: now,
-  };
-  await storage.putRun(run);
-  await storage.appendRunEvents(run.id, [
-    { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
-  ]);
-
-  submission.status = "queued";
-  submission.run_id = run.id;
-  submission.run_ids = [run.id];
-  await storage.putSubmission(submission);
-
-  const kickDispatch = () =>
-    dispatchQueuedRuns(storage).catch((err: unknown) =>
-      log("warn", "competition.dispatch.failed", { submission_id: submission.id, error: (err as Error).message }),
-    );
-  try {
-    after(kickDispatch);
-  } catch {
-    void kickDispatch();
-  }
-
   return NextResponse.json({
-    submission_id: submission.id,
-    run_id: run.id,
-    status: submission.status,
-    judge_reason: verdict.reason,
+    submission_id: result.submission.id,
+    run_id: result.run.id,
+    status: result.submission.status,
+    judge_reason: result.verdict.reason,
   });
 }
 

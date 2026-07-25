@@ -158,6 +158,17 @@ describe("POST /api/competition/admin/baseline", () => {
     expect(await storageRef.current.listRuns()).toHaveLength(0);
   });
 
+  it("returns 503 (not a crash) and creates no run when the judge throws", async () => {
+    vi.mocked(judgeSubmission).mockRejectedValueOnce(new Error("gateway 500"));
+
+    const response = await POST(adminRequest({}, "6.6.6.1"));
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body.error).toContain("gateway 500");
+    expect(await storageRef.current.listRuns()).toHaveLength(0);
+  });
+
   it("rate-limits repeated admin requests from the same IP", async () => {
     vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "rejected", reason: "throwaway" });
     const ip = "9.9.9.9";
