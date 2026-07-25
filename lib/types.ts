@@ -60,6 +60,11 @@ export const SubmissionSchema = z.object({
   // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
   // for legacy submissions made before multi-model support.
   model: z.string().optional(),
+  // Marks this submission as belonging to the /competition pool rather than
+  // the main arena. Absent/false = main arena (the default, unaffected).
+  competition: z.boolean().optional(),
+  // Marks the one competition submission that is the reference baseline.
+  competition_baseline: z.boolean().optional(),
   created_at: z.iso.datetime(),
 });
 export type Submission = z.infer<typeof SubmissionSchema>;
