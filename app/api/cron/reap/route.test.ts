@@ -6,6 +6,11 @@ vi.mock("@/lib/storage", async (importOriginal) => {
   return { ...actual, getStorage: () => storageRef.current };
 });
 
+// The cron also kicks the dispatcher; stub it so this test stays about reaping.
+vi.mock("@/lib/dispatch", () => ({
+  dispatchQueuedRuns: vi.fn().mockResolvedValue([]),
+}));
+
 import { GET } from "./route";
 
 describe("GET /api/cron/reap", () => {
@@ -21,10 +26,12 @@ describe("GET /api/cron/reap", () => {
     vi.useFakeTimers();
     // Reap threshold raised to 20 minutes (issue #23 finding F5).
     vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
+    // Dispatched (claimed) but its sandbox stalled -> a genuinely stuck run.
     await storageRef.current.putRun({
       id: "run-stale",
       submission_id: "sub-1",
       status: "queued",
+      dispatched_at: "2026-07-21T00:00:00.000Z",
       task_results: [],
       created_at: "2026-07-21T00:00:00.000Z",
     });

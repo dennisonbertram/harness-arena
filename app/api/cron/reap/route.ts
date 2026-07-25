@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { log } from "@/lib/log";
 import { reapStaleRuns } from "@/lib/reaper";
 import { getStorage } from "@/lib/storage";
@@ -11,6 +12,14 @@ import { getStorage } from "@/lib/storage";
 export async function GET() {
   const storage = getStorage();
   const reaped = await reapStaleRuns(storage);
-  log("info", "cron.reap", { reaped_count: reaped.length, reaped_run_ids: reaped.map((r) => r.id) });
-  return NextResponse.json({ reaped: reaped.length });
+  // Reaping frees concurrency slots (stuck runs), so dispatch right after to
+  // start queued runs. This is the daily backstop for the lazy dispatch on
+  // GET /api/runs and the run-completion trigger.
+  const started = await dispatchQueuedRuns(storage).catch(() => [] as string[]);
+  log("info", "cron.reap", {
+    reaped_count: reaped.length,
+    reaped_run_ids: reaped.map((r) => r.id),
+    dispatched_count: started.length,
+  });
+  return NextResponse.json({ reaped: reaped.length, dispatched: started.length });
 }

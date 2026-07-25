@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
+import { ARENA_ENDPOINT } from "@/lib/arena-params";
+import { MODEL_LABELS } from "@/lib/models";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -76,7 +78,9 @@ export default function RootLayout({
               GitHub
             </a>
             <Link href="/status">Status</Link>
-            <span>runs on Vercel Sandbox · zai/glm-5.2 via AI Gateway</span>
+            <span>
+              runs on Vercel Sandbox · {Object.values(MODEL_LABELS).join(" · ")} via {ARENA_ENDPOINT}
+            </span>
           </div>
         </footer>
       </body>

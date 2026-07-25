@@ -17,11 +17,24 @@ function makeRun(overrides: Partial<Run> = {}): Run {
 }
 
 describe("shouldReap (pure)", () => {
-  it("is true for a queued run whose last event is over 20 minutes old", () => {
-    const run = makeRun({ status: "queued" });
+  it("is true for a DISPATCHED queued run silent over 20 minutes (stalled sandbox)", () => {
+    const run = makeRun({ status: "queued", dispatched_at: "2026-07-21T00:00:00.000Z" });
     const lastEventTs = "2026-07-21T00:00:00.000Z";
     const now = new Date(lastEventTs).getTime() + TWENTY_MIN_MS + 1000;
     expect(shouldReap(run, lastEventTs, now)).toBe(true);
+  });
+
+  it("is false for an UNDISPATCHED queued run no matter how old (waiting for a slot, not stuck)", () => {
+    const run = makeRun({ status: "queued" }); // no dispatched_at
+    expect(shouldReap(run, "2020-01-01T00:00:00.000Z", Date.now())).toBe(false);
+  });
+
+  it("is false for a just-dispatched queued run whose last EVENT is old (dispatch resets the clock)", () => {
+    const lastEventTs = "2026-07-21T00:00:00.000Z"; // old: the run waited in the queue
+    const now = new Date(lastEventTs).getTime() + TWENTY_MIN_MS + 5000;
+    // Claimed a second ago -> its sandbox is spinning up; must not be reaped yet.
+    const run = makeRun({ status: "queued", dispatched_at: new Date(now - 1000).toISOString() });
+    expect(shouldReap(run, lastEventTs, now)).toBe(false);
   });
 
   it("is true for a running run whose last event is over 20 minutes old", () => {
@@ -55,9 +68,14 @@ describe("shouldReap (pure)", () => {
 });
 
 describe("reapIfStale (integration against MemoryStorage)", () => {
-  it("marks a stale queued run reaped and appends a run.reaped event", async () => {
+  it("marks a stale dispatched-queued run reaped and appends a run.reaped event", async () => {
     const storage = new MemoryStorage();
-    const run = makeRun({ status: "queued", created_at: "2026-07-21T00:00:00.000Z" });
+    // Dispatched (claimed) but its sandbox stalled -> a real stuck run to reap.
+    const run = makeRun({
+      status: "queued",
+      dispatched_at: "2026-07-21T00:00:00.000Z",
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
     await storage.putRun(run);
 
     const now = new Date("2026-07-21T00:21:00.000Z").getTime();

@@ -7,22 +7,37 @@ import type { Run } from "./types";
 // zero margin. Override via REAP_STALE_MINUTES; read per-call (not cached
 // at module load) so tests/ops can override without a process restart.
 const DEFAULT_REAP_STALE_MINUTES = 20;
-const REAPABLE_STATUSES = new Set<Run["status"]>(["queued", "running"]);
 
 function reapThresholdMs(): number {
   const minutes = Number(process.env.REAP_STALE_MINUTES ?? DEFAULT_REAP_STALE_MINUTES);
   return minutes * 60 * 1000;
 }
 
+// A run is a reap candidate only if it's actively occupying a sandbox slot: a
+// running run, or a QUEUED run that the dispatcher has claimed (dispatched_at
+// set) and whose sandbox may have stalled. An undispatched queued run is simply
+// WAITING for a concurrency slot behind the global cap -- not stuck -- so it is
+// never reaped; it starts when a slot frees. (Before the dispatcher, every
+// queued run was already being started inline, so "queued + silent" meant stuck;
+// with a real queue that's no longer true.)
+function isReapCandidate(run: Run): boolean {
+  return run.status === "running" || (run.status === "queued" && !!run.dispatched_at);
+}
+
 /**
- * Pure predicate: a run is stale once it's been silent (no new events) for
- * over the stale threshold (default 20 minutes) while still in a
- * non-terminal status. Terminal statuses (completed/failed/reaped) are
- * never reaped, no matter how old.
+ * Pure predicate: a reap-candidate run is stale once it's been silent for over
+ * the threshold (default 20 min). Dispatch resets the clock — a freshly-claimed
+ * run whose last EVENT is old (it waited in the queue) counts its dispatch time
+ * as activity, so it isn't reaped before its sandbox posts its first event.
+ * Terminal runs and undispatched-queued (waiting) runs are never reaped.
  */
 export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now()): boolean {
-  if (!REAPABLE_STATUSES.has(run.status)) return false;
-  return now - new Date(lastEventTs).getTime() > reapThresholdMs();
+  if (!isReapCandidate(run)) return false;
+  const lastActivity = Math.max(
+    new Date(lastEventTs).getTime(),
+    run.dispatched_at ? new Date(run.dispatched_at).getTime() : 0,
+  );
+  return now - lastActivity > reapThresholdMs();
 }
 
 /**
@@ -30,7 +45,7 @@ export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now
  * Idempotent: a run already in a terminal status is returned untouched.
  */
 export async function reapIfStale(storage: Storage, run: Run, now: number = Date.now()): Promise<Run> {
-  if (!REAPABLE_STATUSES.has(run.status)) return run;
+  if (!isReapCandidate(run)) return run;
 
   // Cheap staleness probe (list metadata only). Using listRunEvents here
   // would fetch every event blob's content on every run read — a fetch-storm

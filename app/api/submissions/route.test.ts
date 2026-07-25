@@ -12,12 +12,12 @@ vi.mock("@/lib/judge", () => ({
   JUDGE_MODEL: "anthropic/claude-sonnet-5",
 }));
 
-vi.mock("@/lib/run-trigger", () => ({
-  startRun: vi.fn().mockResolvedValue(undefined),
+vi.mock("@/lib/dispatch", () => ({
+  dispatchQueuedRuns: vi.fn().mockResolvedValue([]),
 }));
 
 import { judgeSubmission } from "@/lib/judge";
-import { startRun } from "@/lib/run-trigger";
+import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { GET, POST } from "./route";
 
 function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
@@ -44,7 +44,7 @@ describe("POST /api/submissions", () => {
   beforeEach(() => {
     resetStorage();
     vi.mocked(judgeSubmission).mockReset();
-    vi.mocked(startRun).mockClear();
+    vi.mocked(dispatchQueuedRuns).mockClear();
   });
 
   describe("validation", () => {
@@ -128,7 +128,7 @@ describe("POST /api/submissions", () => {
   });
 
   describe("approved path", () => {
-    it("creates a queued run and returns submission_id, run_id, status=queued", async () => {
+    it("creates 5 queued runs (not started inline) and kicks the dispatcher", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "looks fair" });
 
       const response = await POST(
@@ -139,34 +139,38 @@ describe("POST /api/submissions", () => {
       expect(response.status).toBe(200);
       expect(body.status).toBe("queued");
       expect(typeof body.submission_id).toBe("string");
-      expect(typeof body.run_id).toBe("string");
+      // A submission now spawns a fixed sample of 5 runs; run_id is the first.
+      expect(Array.isArray(body.run_ids)).toBe(true);
+      expect(body.run_ids).toHaveLength(5);
+      expect(body.run_id).toBe(body.run_ids[0]);
       // The judge's feedback is returned on approval too, so the submitter sees it.
       expect(body.judge_reason).toBe("looks fair");
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
       expect(submission?.status).toBe("queued");
       expect(submission?.run_id).toBe(body.run_id);
+      expect(submission?.run_ids).toEqual(body.run_ids);
       expect(submission?.judge_reason).toBe("looks fair");
 
-      const run = await storageRef.current.getRun(body.run_id);
-      expect(run?.status).toBe("queued");
-      expect(run?.submission_id).toBe(body.submission_id);
+      // Each of the 5 runs is queued (NOT started inline), linked to the
+      // submission, with a run.created event.
+      for (const runId of body.run_ids) {
+        const run = await storageRef.current.getRun(runId);
+        expect(run?.status).toBe("queued");
+        expect(run?.submission_id).toBe(body.submission_id);
+        const events = await storageRef.current.listRunEvents(runId);
+        expect(events).toHaveLength(1);
+        expect(events[0].type).toBe("run.created");
+        expect(events[0].payload).toEqual({ submission_id: body.submission_id });
+      }
 
-      const events = await storageRef.current.listRunEvents(body.run_id);
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe("run.created");
-      expect(events[0].payload).toEqual({ submission_id: body.submission_id });
-
-      expect(startRun).toHaveBeenCalledTimes(1);
-      expect(startRun).toHaveBeenCalledWith(
-        expect.objectContaining({ id: body.run_id }),
-        "Plan carefully before acting.",
-      );
+      // The dispatcher is kicked to start runs under the global cap.
+      expect(dispatchQueuedRuns).toHaveBeenCalled();
     });
 
-    it("a failing run-trigger stub does not fail the submission response", async () => {
+    it("a failing dispatch does not fail the submission response", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
-      vi.mocked(startRun).mockRejectedValueOnce(new Error("not implemented"));
+      vi.mocked(dispatchQueuedRuns).mockRejectedValueOnce(new Error("dispatch boom"));
 
       const response = await POST(postRequest({ agent_name: "agent-y", prompt: "Be careful." }, "3.3.3.2"));
 
@@ -298,17 +302,17 @@ describe("POST /api/submissions", () => {
       expect(submission?.judge_model).toBe("anthropic/claude-sonnet-5");
     });
 
-    it("never calls the sandbox run-trigger when the judge rejects the submission", async () => {
+    it("never kicks the dispatcher when the judge rejects the submission", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "rejected", reason: "cheat detected" });
 
       await POST(postRequest({ agent_name: "agent-reject-trigger", prompt: "cheat" }, "6.6.6.3"));
 
-      expect(startRun).not.toHaveBeenCalled();
+      expect(dispatchQueuedRuns).not.toHaveBeenCalled();
     });
   });
 
-  describe("regression: run trigger still fires outside a live Next.js request scope", () => {
-    it("invokes startRun via the fire-and-forget fallback when next/server's after() throws " +
+  describe("regression: dispatch still fires outside a live Next.js request scope", () => {
+    it("invokes the dispatcher via the fire-and-forget fallback when next/server's after() throws " +
       "(as it does when a route handler is invoked directly, e.g. by this test harness, " +
       "instead of through a real Next.js request lifecycle)", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
@@ -318,7 +322,7 @@ describe("POST /api/submissions", () => {
       );
 
       expect(response.status).toBe(200);
-      expect(startRun).toHaveBeenCalledWith(expect.anything(), "hello there");
+      expect(dispatchQueuedRuns).toHaveBeenCalled();
     });
   });
 });

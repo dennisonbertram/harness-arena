@@ -52,7 +52,11 @@ export const SubmissionSchema = z.object({
   judge_reason: z.string().optional(),
   judge_model: z.string().optional(),
   judged_at: z.iso.datetime().optional(),
+  // First of the submission's runs, kept for backward-compatible readers.
   run_id: z.string().optional(),
+  // All runs spawned for this submission (RUNS_PER_SUBMISSION of them). Absent
+  // for legacy single-run submissions.
+  run_ids: z.array(z.string()).optional(),
   // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
   // for legacy submissions made before multi-model support.
   model: z.string().optional(),
@@ -86,6 +90,10 @@ export const RunSchema = z.object({
   total_cost_usd: z.number().optional(),
   over_budget: z.boolean().optional(),
   sandbox_id: z.string().optional(),
+  // When the dispatcher claimed this run and fired its sandbox. Set BEFORE the
+  // sandbox call so concurrency accounting counts it as active and a second
+  // dispatch is less likely to double-start it. Absent = not yet dispatched.
+  dispatched_at: z.iso.datetime().optional(),
   // The model this run executed on (gateway id). Absent = default glm-5.2.
   model: z.string().optional(),
   task_results: z.array(TaskResultSchema),
