@@ -26,6 +26,9 @@ export default async function VoicePromptsPage() {
   const { judgments } = await storage.listAllJudgments();
   const countsByPrompt = countJudgmentsByPrompt(judgments);
   const pairLabel = manifest.models.map((m) => m.name).join(" vs ");
+  // Header total counts only judgments attached to CURRENT prompts, so a
+  // re-seed's orphans can't make the header disagree with the rows below.
+  const matchedJudgments = manifest.prompts.reduce((sum, p) => sum + (countsByPrompt[p.id] ?? 0), 0);
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "48px 24px" }}>
@@ -54,8 +57,8 @@ export default async function VoicePromptsPage() {
         <>
           <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 24 }}>
             Comparing {pairLabel} · {manifest.prompts.length} prompt
-            {manifest.prompts.length === 1 ? "" : "s"} · {judgments.length} judgment
-            {judgments.length === 1 ? "" : "s"}
+            {manifest.prompts.length === 1 ? "" : "s"} · {matchedJudgments} judgment
+            {matchedJudgments === 1 ? "" : "s"}
           </p>
           <section>
             {manifest.prompts.map((prompt) => {
