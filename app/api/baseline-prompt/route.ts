@@ -1,11 +1,8 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 
 export async function GET() {
-  const filePath = path.join(process.cwd(), "docs", "pi-vanilla-system-prompt.txt");
-  const content = readFileSync(filePath, "utf8");
-  return new NextResponse(content, {
+  return new NextResponse(getBaselinePrompt(), {
     headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }
