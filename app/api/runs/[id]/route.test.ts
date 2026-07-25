@@ -46,14 +46,17 @@ describe("GET /api/runs/[id]", () => {
       vi.useRealTimers();
     });
 
-    it("marks a stale queued run reaped and returns the reaped status, persisting the change", async () => {
+    it("marks a stale dispatched-queued run reaped and returns the reaped status, persisting the change", async () => {
       vi.useFakeTimers();
       // Reap threshold raised to 20 minutes (issue #23 finding F5).
       vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
+      // Dispatched (claimed) but its sandbox stalled -> a genuinely stuck run.
+      // (An undispatched queued run is just waiting for a slot and is never reaped.)
       await storageRef.current.putRun({
         id: "run-stale",
         submission_id: "sub-1",
         status: "queued",
+        dispatched_at: "2026-07-21T00:00:00.000Z",
         task_results: [],
         created_at: "2026-07-21T00:00:00.000Z",
       });
