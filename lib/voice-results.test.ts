@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregate } from "./voice-results";
+import { aggregate, countJudgmentsByPrompt } from "./voice-results";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
 
 function manifest(
@@ -25,12 +25,13 @@ function judgment(
   responseAId: string,
   responseBId: string,
   outcome: VoiceJudgment["outcome"],
+  promptId = "p1",
 ): VoiceJudgment {
   seq++;
   return {
     comparison_id: `cmp-${seq}`,
     evaluator_id: "eval-1",
-    prompt_id: "p1",
+    prompt_id: promptId,
     response_a_id: responseAId,
     response_b_id: responseBId,
     outcome,
@@ -193,5 +194,29 @@ describe("aggregate", () => {
     expect(echoVsZeta).toHaveLength(2);
     expect(echoVsZeta.map((p) => p.n).sort()).toEqual([1, 2]); // not merged into one n=3 row
     expect(pairs.find((p) => p.pairKey === "Echo vs Echo")?.n).toBe(0);
+  });
+});
+
+describe("countJudgmentsByPrompt", () => {
+  it("counts judgments per prompt across mixed distribution", () => {
+    const judgments: VoiceJudgment[] = [
+      judgment("r-alpha", "r-beta", "a", "p1"),
+      judgment("r-alpha", "r-beta", "tie", "p1"),
+      judgment("r-alpha", "r-beta", "b", "p2"),
+      judgment("r-alpha", "r-beta", "a", "p3"),
+      judgment("r-alpha", "r-beta", "both_bad", "p3"),
+      judgment("r-alpha", "r-beta", "a", "p3"),
+    ];
+
+    expect(countJudgmentsByPrompt(judgments)).toEqual({ p1: 2, p2: 1, p3: 3 });
+  });
+
+  it("returns an empty object for empty input", () => {
+    expect(countJudgmentsByPrompt([])).toEqual({});
+  });
+
+  it("still counts a judgment whose prompt_id has no matching manifest prompt", () => {
+    const judgments: VoiceJudgment[] = [judgment("r-alpha", "r-beta", "a", "p-unknown")];
+    expect(countJudgmentsByPrompt(judgments)).toEqual({ "p-unknown": 1 });
   });
 });

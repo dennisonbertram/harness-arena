@@ -178,13 +178,50 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
 
   it("getManifest returns undefined when the stored content fails manifest schema validation", async () => {
     const storage = new BlobVoiceStorage();
-    vi.mocked(get).mockResolvedValueOnce({
-      stream: new Response(JSON.stringify({ not: "a manifest" })).body,
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
+      hasMore: false,
     } as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ not: "a manifest" }), { status: 200 })),
+    );
 
     const manifest = await storage.getManifest();
 
     expect(manifest).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("getManifest returns undefined (without fetching) when no manifest blob exists", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const manifest = await storage.getManifest();
+
+    expect(manifest).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("getManifest reads via list + public URL fetch, never the authenticated get() endpoint", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
+      hasMore: false,
+    } as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(makeManifest()), { status: 200 })),
+    );
+
+    const manifest = await storage.getManifest();
+
+    expect(manifest?.version).toBe("1");
+    expect(vi.mocked(get)).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("putManifest writes voice/manifest.json with allowOverwrite:true", async () => {

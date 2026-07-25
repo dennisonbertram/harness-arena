@@ -35,19 +35,16 @@ export default function RootLayout({
           }}
         >
           <nav
+            className="site-nav"
             style={{
               maxWidth: 1200,
               margin: "0 auto",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 24,
             }}
           >
-            <Link href="/" style={{ fontWeight: 600, fontSize: 16, letterSpacing: "-0.02em" }}>
+            <Link href="/" style={{ fontWeight: 600, fontSize: 16, letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>
               Harness Arena
             </Link>
-            <div style={{ display: "flex", gap: 24, fontSize: 14 }}>
+            <div className="site-nav-links">
               <Link href="/">Leaderboard</Link>
               <Link href="/how-it-works">How it works</Link>
               <Link href="/submit">Submit</Link>
