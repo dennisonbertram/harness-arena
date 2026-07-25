@@ -3,14 +3,22 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
 import { log } from "@/lib/log";
+import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
-import { startRun } from "@/lib/run-trigger";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
 
 const MAX_PROMPT_CHARS = 32768;
 const MAX_BODY_BYTES = 262144;
+
+// Fixed sample size per submission: each approved (prompt, model) runs this many
+// times so pass rate is a mean over a uniform n, not a single noisy run. The
+// runs are created queued and started by the dispatcher under a global
+// concurrency cap (lib/dispatch.ts) — NOT spawned inline, which is what
+// overwhelmed the serverless budget when several submissions landed at once.
+// Override via RUNS_PER_SUBMISSION; floored at 1.
+const RUNS_PER_SUBMISSION = Math.max(1, Math.floor(Number(process.env.RUNS_PER_SUBMISSION ?? 5)) || 5);
 
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
@@ -127,43 +135,51 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const run: Run = {
+  // Create the fixed sample of runs as `queued`. They are NOT started inline —
+  // the dispatcher (kicked below and on every run-list poll / run completion)
+  // starts them under a global concurrency cap so a burst of submissions can't
+  // overwhelm the sandbox/serverless budget.
+  const now = new Date().toISOString();
+  const runs: Run[] = Array.from({ length: RUNS_PER_SUBMISSION }, () => ({
     id: randomUUID(),
     submission_id: submission.id,
-    status: "queued",
+    status: "queued" as const,
     model,
     task_results: [],
-    created_at: new Date().toISOString(),
-  };
-  await storage.putRun(run);
-  await storage.appendRunEvents(run.id, [
-    { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
-  ]);
+    created_at: now,
+  }));
+  for (const run of runs) {
+    await storage.putRun(run);
+    await storage.appendRunEvents(run.id, [
+      { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
+    ]);
+  }
+  const runIds = runs.map((r) => r.id);
 
   submission.status = "queued";
-  submission.run_id = run.id;
+  submission.run_id = runIds[0]; // first run, kept for backward-compatible readers
+  submission.run_ids = runIds;
   await storage.putSubmission(submission);
 
-  // Run the trigger via after() so it executes once the response has been
-  // sent but is still awaited within the function's lifetime (a bare
-  // fire-and-forget setTimeout would get killed once the invocation ends).
-  // after() throws synchronously if there's no live Next.js request scope
-  // (e.g. this route handler invoked directly, as this repo's route tests
-  // do) -- fall back to the original ticket #4 fire-and-forget contract in
-  // that case so the trigger still runs. Either way, a failing/stubbed
-  // trigger must never fail the submission response.
-  const onTriggerFailure = (err: unknown) => {
-    log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message });
-  };
+  // Kick the dispatcher via after() so it runs once the response has been sent
+  // but is still awaited within the invocation's lifetime. after() throws
+  // synchronously if there's no live request scope (e.g. this handler invoked
+  // directly, as the route tests do) -- fall back to a direct call so the
+  // dispatch still fires. A failing dispatch must never fail the response.
+  const kickDispatch = () =>
+    dispatchQueuedRuns(storage).catch((err: unknown) =>
+      log("warn", "dispatch.failed", { submission_id: submission.id, error: (err as Error).message }),
+    );
   try {
-    after(() => startRun(run, submission.prompt).catch(onTriggerFailure));
+    after(kickDispatch);
   } catch {
-    void startRun(run, submission.prompt).catch(onTriggerFailure);
+    void kickDispatch();
   }
 
   return NextResponse.json({
     submission_id: submission.id,
-    run_id: run.id,
+    run_id: runIds[0],
+    run_ids: runIds,
     status: submission.status,
     judge_reason: verdict.reason,
   });
