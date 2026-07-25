@@ -9,6 +9,10 @@ export const MODEL_LABELS: Record<string, string> = {
   "zai/glm-5.2": "glm-5.2",
   "anthropic/claude-sonnet-5": "Claude Sonnet 5",
   "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+  // Slug verified against the live gateway catalog 2026-07-24 (note: the
+  // catalog lists versioned Anthropic slugs with dots, e.g. claude-opus-4.8 —
+  // the 4-8 entry above may want the same check before its first run).
+  "anthropic/claude-opus-5": "Claude Opus 5",
   "poolside/laguna-s-2.1": "Laguna S 2.1",
 };
 
@@ -19,6 +23,7 @@ export const MODEL_COLORS: Record<string, string> = {
   "zai/glm-5.2": "#4f9bf5", // blue
   "anthropic/claude-sonnet-5": "#e8912a", // amber
   "anthropic/claude-opus-4-8": "#a06fe0", // violet
+  "anthropic/claude-opus-5": "#e0566f", // rose
   "poolside/laguna-s-2.1": "#2bb0a0", // teal
 };
 const FALLBACK_MODEL_COLOR = "#9aa0a6"; // gray for any unknown/legacy id
