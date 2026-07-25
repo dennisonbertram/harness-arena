@@ -57,6 +57,21 @@ describe("parseSubmitResponse", () => {
       result: null,
       error: "The server returned HTTP 503.",
       rejected: false,
+      sessionExpired: false,
     });
+  });
+
+  it("flags sessionExpired (not rejected) for a 401", async () => {
+    const response = fakeResponse(401, false, async () => ({ error: "sign in with GitHub to submit" }));
+    const parsed = await parseSubmitResponse(response);
+    expect(parsed.sessionExpired).toBe(true);
+    expect(parsed.rejected).toBe(false);
+    expect(parsed.error).toBe("sign in with GitHub to submit");
+  });
+
+  it("does not flag sessionExpired for a non-401 infra failure", async () => {
+    const response = fakeResponse(503, false, async () => ({ error: "unavailable" }));
+    const parsed = await parseSubmitResponse(response);
+    expect(parsed.sessionExpired).toBe(false);
   });
 });

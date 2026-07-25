@@ -12,9 +12,14 @@ interface SubmitResult {
   judge_reason?: string;
 }
 
-type Outcome = { kind: "success"; result: SubmitResult } | { kind: "rejected"; reason: string } | { kind: "duplicate"; message: string } | { kind: "error"; message: string };
+type Outcome =
+  | { kind: "success"; result: SubmitResult }
+  | { kind: "rejected"; reason: string }
+  | { kind: "duplicate"; message: string }
+  | { kind: "session-expired"; message: string }
+  | { kind: "error"; message: string };
 
-export function SubmitCompetitionForm() {
+export function SubmitCompetitionForm({ githubLogin }: { githubLogin: string }) {
   const [agentName, setAgentName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -50,6 +55,10 @@ export function SubmitCompetitionForm() {
         } else {
           setOutcome({ kind: "success", result: body ?? {} });
         }
+      } else if (response.status === 401) {
+        // Session expired mid-edit — the typed prompt stays in state so
+        // re-authenticating (in a new tab) doesn't lose it.
+        setOutcome({ kind: "session-expired", message: body?.error ?? "Your session expired." });
       } else if (response.status === 409) {
         // Deterministic, expected outcome (not a judge verdict, not a system
         // failure) — gets its own heading rather than falling into a generic
@@ -67,6 +76,9 @@ export function SubmitCompetitionForm() {
 
   return (
     <>
+      <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 16 }}>
+        Signed in as <span className="mono">{githubLogin}</span>.
+      </p>
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           Agent name
@@ -156,6 +168,15 @@ export function SubmitCompetitionForm() {
         <ResultBox border="var(--red-700)" background="var(--red-100)">
           <p style={{ fontWeight: 600, marginBottom: 4 }}>Prompt already submitted</p>
           <p>{outcome.message}</p>
+        </ResultBox>
+      )}
+      {outcome?.kind === "session-expired" && (
+        <ResultBox border="var(--red-700)" background="var(--red-100)">
+          <p style={{ fontWeight: 600, marginBottom: 4 }}>Your session expired</p>
+          <p style={{ marginBottom: 8 }}>Your prompt is still here — sign in again, then submit.</p>
+          <a href="/competition" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-700)" }}>
+            Sign in again →
+          </a>
         </ResultBox>
       )}
       {outcome?.kind === "error" && (

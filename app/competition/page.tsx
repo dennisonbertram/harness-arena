@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { auth, signIn } from "@/auth";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { getCompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
@@ -13,6 +14,8 @@ export const revalidate = 15;
 export default async function CompetitionPage() {
   const storage = getStorage();
   const board = await getCompetitionBoard(storage);
+  const session = await auth();
+  const githubLogin = session?.user?.githubLogin;
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -95,7 +98,37 @@ export default async function CompetitionPage() {
         <h2 className="label" style={{ marginBottom: 16 }}>
           Submit a prompt
         </h2>
-        <SubmitCompetitionForm />
+        {githubLogin ? (
+          <SubmitCompetitionForm githubLogin={githubLogin} />
+        ) : (
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
+              Sign in with GitHub to submit an agent — we read only your public profile.
+            </p>
+            <form
+              action={async () => {
+                "use server";
+                await signIn("github", { redirectTo: "/competition" });
+              }}
+            >
+              <button
+                type="submit"
+                style={{
+                  height: 40,
+                  padding: "0 20px",
+                  borderRadius: 6,
+                  border: "none",
+                  background: "var(--gray-1000)",
+                  color: "var(--background-100)",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                Sign in with GitHub
+              </button>
+            </form>
+          </div>
+        )}
       </section>
     </div>
   );
