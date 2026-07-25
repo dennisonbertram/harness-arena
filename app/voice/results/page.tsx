@@ -60,8 +60,8 @@ export default async function VoiceResultsPage() {
             </p>
           )}
           <section>
-            {pairs.map((p) => (
-              <PairBlock key={p.pairKey} pair={p} />
+            {pairs.map((p, i) => (
+              <PairBlock key={`${i}-${p.pairKey}`} pair={p} />
             ))}
             <p style={{ fontSize: 12, color: "var(--gray-700)", marginTop: 12 }}>
               Percentages are shares of n, rounded independently, so a block&apos;s bars may not sum to exactly
