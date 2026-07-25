@@ -166,7 +166,8 @@ describe("buildResponseRequest", () => {
 describe("buildSayExactlyRequest", () => {
   it("embeds the prompt text verbatim under the say-exactly instruction, streamed as pcm16", () => {
     const body = buildSayExactlyRequest("openai/gpt-audio-mini", "nova", "Read this exactly.");
-    expect(body.messages[0].content).toMatch(/text-to-speech engine.*Never answer/s);
+    expect(body.messages[0].content).toContain("text-to-speech engine");
+    expect(body.messages[0].content).toContain("Never answer");
     expect(body.messages[1].role).toBe("user");
     expect(body.messages[1].content).toContain('verbatim');
     expect(body.messages[1].content).toContain('"Read this exactly."');

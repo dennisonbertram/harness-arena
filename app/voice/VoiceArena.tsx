@@ -225,24 +225,30 @@ export default function VoiceArena() {
   const submitting = phase === "submitting";
   const readyToSubmit = phase === "diagnostic";
 
+  const judgedPct = (comparison.progress.judged / comparison.progress.total) * 100;
+
   return (
     <div style={panelStyle}>
+      <div style={{ background: "var(--gray-alpha-400)", height: 4, borderRadius: 2, marginBottom: 8 }}>
+        <div style={{ width: `${judgedPct}%`, height: 4, borderRadius: 2, background: "var(--blue-700)" }} />
+      </div>
+      <p className="tabular-nums" style={{ fontSize: 12, color: "var(--gray-700)", marginBottom: 10 }}>
+        Comparison {comparison.progress.batch.position} of {comparison.progress.batch.size} · {comparison.progress.judged}{" "}
+        of {comparison.progress.total} judged
+      </p>
+
       <div aria-live="polite" style={srOnlyStyle}>
-        {/* Must match the visible heading — outside single-batch sessions a
-            cumulative count would diverge from what sighted users see. */}
+        {/* Must match the visible counter line above — outside single-batch
+            sessions a cumulative count would diverge from what sighted users see. */}
         {`Comparison ${comparison.progress.batch.position} of ${comparison.progress.batch.size}`}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
-        <h2 ref={headingRef} tabIndex={-1} style={{ fontSize: 18, fontWeight: 600, outline: "none" }}>
-          Comparison {comparison.progress.batch.position} of {comparison.progress.batch.size}
-        </h2>
-        <span className="tabular-nums" style={{ fontSize: 12, color: "var(--gray-700)" }}>
-          {comparison.progress.judged} of {comparison.progress.total} judged
-        </span>
-      </div>
+      <h2 ref={headingRef} tabIndex={-1} style={{ fontSize: 18, fontWeight: 600, outline: "none", marginBottom: 10 }}>
+        Which response would you rather get from a voice assistant?
+      </h2>
 
       <ClipPlayer
-        label="Prompt"
+        label="The prompt"
+        labelColor="var(--gray-700)"
         audioRef={audioPromptRef}
         src={comparison.prompt.audioUrl}
         error={audioError === "prompt"}
@@ -252,44 +258,49 @@ export default function VoiceArena() {
         onSkip={handleSkip}
       />
       {comparison.prompt.text ? (
-        <p style={{ fontSize: 13, color: "var(--gray-700)", margin: "4px 0 16px" }}>&quot;{comparison.prompt.text}&quot;</p>
+        <p style={{ fontSize: 13, color: "var(--gray-700)", margin: "6px 0 10px" }}>&quot;{comparison.prompt.text}&quot;</p>
       ) : (
-        <div style={{ marginBottom: 16 }} />
+        <div style={{ marginBottom: 10 }} />
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 12 }}>
-        <ClipPlayer
-          label="Response A"
-          audioRef={audioARef}
-          src={comparison.clipA.audioUrl}
-          error={audioError === "a"}
-          onPlay={() => dispatch({ type: "played", clip: "a" })}
-          onEnded={handleAEnded}
-          onError={handleAError}
-          onRetry={() => retryClip("a")}
-          onSkip={handleSkip}
-        />
-        <ClipPlayer
-          label="Response B"
-          audioRef={audioBRef}
-          src={comparison.clipB.audioUrl}
-          error={audioError === "b"}
-          onPlay={handleBPlay}
-          onError={() => dispatch({ type: "audioErrored", clip: "b" })}
-          onRetry={() => retryClip("b")}
-          onSkip={handleSkip}
-        />
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+        <div style={responseRowStyle(outcome === "a")}>
+          <ClipPlayer
+            label="Response A"
+            audioRef={audioARef}
+            src={comparison.clipA.audioUrl}
+            error={audioError === "a"}
+            onPlay={() => dispatch({ type: "played", clip: "a" })}
+            onEnded={handleAEnded}
+            onError={handleAError}
+            onRetry={() => retryClip("a")}
+            onSkip={handleSkip}
+          />
+        </div>
+        <div style={responseRowStyle(outcome === "b")}>
+          <ClipPlayer
+            label="Response B"
+            audioRef={audioBRef}
+            src={comparison.clipB.audioUrl}
+            error={audioError === "b"}
+            onPlay={handleBPlay}
+            onError={() => dispatch({ type: "audioErrored", clip: "b" })}
+            onRetry={() => retryClip("b")}
+            onSkip={handleSkip}
+          />
+        </div>
       </div>
 
-      <button type="button" onClick={handlePlayBoth} style={secondaryButtonStyle}>
-        Play both
-      </button>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+        <button type="button" onClick={handlePlayBoth} style={secondaryButtonStyle}>
+          Play both
+        </button>
+        <p style={{ fontSize: 12, color: "var(--gray-700)" }}>
+          Played: prompt {playCounts.prompt} · A {playCounts.a} · B {playCounts.b}
+        </p>
+      </div>
 
-      <p style={{ fontSize: 12, color: "var(--gray-700)", margin: "8px 0 2px" }}>
-        Played: prompt {playCounts.prompt} · A {playCounts.a} · B {playCounts.b}
-      </p>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "8px 0 4px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
         {(["a", "b", "tie", "both_bad"] as const).map((o) => (
           <button
             key={o}
@@ -304,7 +315,7 @@ export default function VoiceArena() {
       </div>
 
       {outcome ? (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--gray-alpha-400)" }}>
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--gray-alpha-400)" }}>
           <p className="label" style={{ marginBottom: 6 }}>
             What most influenced your choice?
           </p>
@@ -321,17 +332,15 @@ export default function VoiceArena() {
               </button>
             ))}
           </div>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13, marginBottom: 10 }}>
-            Anything else? (optional)
-            <textarea
-              rows={2}
-              maxLength={2000}
-              value={freeText}
-              disabled={submitting}
-              onChange={(e) => dispatch({ type: "setFreeText", text: e.target.value })}
-              style={textareaStyle}
-            />
-          </label>
+          <textarea
+            rows={1}
+            maxLength={2000}
+            placeholder="Optional: what stood out?"
+            value={freeText}
+            disabled={submitting}
+            onChange={(e) => dispatch({ type: "setFreeText", text: e.target.value })}
+            style={textareaStyle}
+          />
 
           {submitError ? (
             <div style={{ marginBottom: 12 }}>
@@ -351,7 +360,7 @@ export default function VoiceArena() {
                   : primaryButtonStyle
               }
             >
-              {submitting ? "Submitting…" : "Submit"}
+              {submitting ? "Submitting…" : "Submit judgment"}
             </button>
           )}
         </div>
@@ -362,6 +371,7 @@ export default function VoiceArena() {
 
 function ClipPlayer({
   label,
+  labelColor,
   audioRef,
   src,
   error,
@@ -372,6 +382,7 @@ function ClipPlayer({
   onSkip,
 }: {
   label: string;
+  labelColor?: string;
   audioRef: React.RefObject<HTMLAudioElement | null>;
   src: string;
   error: boolean;
@@ -383,7 +394,7 @@ function ClipPlayer({
 }) {
   return (
     <div>
-      <p className="label" style={{ marginBottom: 6 }}>
+      <p className="label" style={labelColor ? { marginBottom: 6, color: labelColor } : { marginBottom: 6 }}>
         {label}
       </p>
       <audio
@@ -415,12 +426,11 @@ function ClipPlayer({
 function PendingPlaceholder() {
   return (
     <div aria-hidden="true">
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-        <div style={{ ...skeletonStyle, width: 160, height: 22 }} />
-        <div style={{ ...skeletonStyle, width: 90, height: 16 }} />
-      </div>
+      <div style={{ ...skeletonStyle, height: 4, borderRadius: 2, marginBottom: 8 }} />
+      <div style={{ ...skeletonStyle, width: 220, height: 14, marginBottom: 10 }} />
+      <div style={{ ...skeletonStyle, width: 320, height: 22, marginBottom: 16 }} />
       <div style={{ ...skeletonStyle, height: 32, marginBottom: 16 }} />
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
         <div style={{ ...skeletonStyle, height: 32 }} />
         <div style={{ ...skeletonStyle, height: 32 }} />
       </div>
@@ -495,6 +505,15 @@ const secondaryButtonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+function responseRowStyle(selected: boolean): React.CSSProperties {
+  return {
+    borderRadius: 8,
+    padding: 8,
+    border: selected ? "1px solid var(--blue-700)" : "1px solid transparent",
+    background: selected ? "var(--blue-100)" : "transparent",
+  };
+}
+
 const inlineButtonStyle: React.CSSProperties = {
   height: 24,
   padding: "0 8px",
@@ -507,7 +526,8 @@ const inlineButtonStyle: React.CSSProperties = {
 };
 
 const textareaStyle: React.CSSProperties = {
-  padding: 10,
+  width: "100%",
+  padding: 8,
   borderRadius: 6,
   border: "1px solid var(--gray-alpha-400)",
   background: "var(--background-100)",
@@ -515,4 +535,5 @@ const textareaStyle: React.CSSProperties = {
   resize: "vertical",
   fontFamily: "inherit",
   fontSize: 13,
+  marginBottom: 10,
 };

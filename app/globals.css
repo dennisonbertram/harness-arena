@@ -132,3 +132,28 @@ a {
   text-transform: uppercase;
   color: var(--gray-900);
 }
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.site-nav-links {
+  display: flex;
+  gap: 24px;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+
+.site-nav-links a {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .site-nav-links {
+    gap: 12px;
+    font-size: 13px;
+  }
+}

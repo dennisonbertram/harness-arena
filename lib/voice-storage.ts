@@ -1,4 +1,4 @@
-import { get, list, put } from "@vercel/blob";
+import { list, put } from "@vercel/blob";
 import { fetchJson, withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
@@ -76,13 +76,16 @@ export class BlobVoiceStorage implements VoiceStorage {
   }
 
   async getManifest(): Promise<VoiceManifest | undefined> {
-    return withRetry(async () => {
-      const result = await get(MANIFEST_PATH, { access: "public" });
-      if (!result) return undefined;
-      const text = await new Response(result.stream).text();
-      const parsed = VoiceManifestSchema.safeParse(JSON.parse(text));
-      return parsed.success ? parsed.data : undefined;
-    });
+    // list() + public-URL fetch, NOT get(): the authenticated get() endpoint
+    // has been observed 403-blocking a valid token (2026-07-24 incident,
+    // list() and public URLs unaffected), and the rest of this layer already
+    // reads via list+fetch for exactly this class of reason.
+    const blobs = await withRetry(() => list({ prefix: MANIFEST_PATH, limit: 1 }));
+    const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
+    if (!blob) return undefined;
+    const raw = await withRetry(() => fetchJson<unknown>(blob.url));
+    const parsed = VoiceManifestSchema.safeParse(raw);
+    return parsed.success ? parsed.data : undefined;
   }
 
   async putManifest(manifest: VoiceManifest): Promise<void> {

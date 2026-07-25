@@ -1,0 +1,92 @@
+import Link from "next/link";
+import { getVoiceStorage } from "@/lib/voice-storage";
+import { countJudgmentsByPrompt } from "@/lib/voice-results";
+
+// Mirrors app/voice/results/page.tsx: shared storage means a build-time-cached
+// page would never show new judgments, so ISR re-renders it at most every 15s.
+export const revalidate = 15;
+
+export default async function VoicePromptsPage() {
+  const storage = getVoiceStorage();
+  const manifest = await storage.getManifest();
+
+  if (!manifest) {
+    return (
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "48px 24px" }}>
+        <h1 style={{ fontSize: 32, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
+          The prompt set
+        </h1>
+        <p style={{ color: "var(--gray-900)" }}>
+          Not seeded yet — run <code className="mono">scripts/seed-voice.mjs</code> to load prompts and responses.
+        </p>
+      </div>
+    );
+  }
+
+  const { judgments } = await storage.listAllJudgments();
+  const countsByPrompt = countJudgmentsByPrompt(judgments);
+  const pairLabel = manifest.models.map((m) => m.name).join(" vs ");
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "48px 24px" }}>
+      <h1 style={{ fontSize: 32, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 4 }}>
+        The prompt set
+      </h1>
+      <p style={{ fontSize: 12, marginBottom: 12 }}>
+        <Link href="/voice" style={{ color: "var(--blue-700)" }}>
+          ← Back to the arena
+        </Link>
+      </p>
+
+      {manifest.prompts.length === 0 ? (
+        <div
+          style={{
+            border: "1px solid var(--gray-alpha-400)",
+            borderRadius: 12,
+            padding: 32,
+            textAlign: "center",
+            color: "var(--gray-900)",
+          }}
+        >
+          No prompts yet.
+        </div>
+      ) : (
+        <>
+          <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 24 }}>
+            Comparing {pairLabel} · {manifest.prompts.length} prompt
+            {manifest.prompts.length === 1 ? "" : "s"} · {judgments.length} judgment
+            {judgments.length === 1 ? "" : "s"}
+          </p>
+          <section>
+            {manifest.prompts.map((prompt) => {
+              const count = countsByPrompt[prompt.id] ?? 0;
+              return (
+                <div
+                  key={prompt.id}
+                  style={{ borderBottom: "1px solid var(--gray-alpha-400)", padding: "16px 0" }}
+                >
+                  <p className="label" style={{ color: "var(--gray-700)", marginBottom: 6 }}>
+                    {prompt.category ?? "Uncategorized"}
+                  </p>
+                  {prompt.text && <p style={{ fontSize: 14, marginBottom: 8 }}>{prompt.text}</p>}
+                  <audio controls preload="none" src={prompt.audio_url} style={{ display: "block", width: "100%" }} />
+                  <p
+                    className="tabular-nums"
+                    style={{
+                      fontSize: 12,
+                      color: "var(--gray-700)",
+                      marginTop: 8,
+                      fontStyle: count === 0 ? "italic" : "normal",
+                    }}
+                  >
+                    {count === 0 ? "No judgments yet" : `${count} judgment${count === 1 ? "" : "s"}`}
+                  </p>
+                </div>
+              );
+            })}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}

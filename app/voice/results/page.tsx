@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getVoiceStorage } from "@/lib/voice-storage";
-import { aggregate } from "@/lib/voice-results";
+import { aggregate, type VoicePairResult } from "@/lib/voice-results";
 
 // Mirrors app/page.tsx: shared storage means a build-time-cached page would
 // never show new judgments, so ISR re-renders it at most every 15s.
@@ -59,62 +59,95 @@ export default async function VoiceResultsPage() {
               {unreadable > 0 && `${unreadable} judgment${unreadable === 1 ? "" : "s"} unreadable`}
             </p>
           )}
-          <section style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                  <th className="label" style={cellStyle}>
-                    Pair
-                  </th>
-                  <th className="label" style={numCellStyle}>
-                    n
-                  </th>
-                  <th className="label" style={numCellStyle}>
-                    Left wins
-                  </th>
-                  <th className="label" style={numCellStyle}>
-                    Right wins
-                  </th>
-                  <th className="label" style={numCellStyle}>
-                    Tie
-                  </th>
-                  <th className="label" style={numCellStyle}>
-                    Both bad
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {pairs.map((p) => (
-                  <tr key={p.pairKey} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                    <td style={cellStyle}>{p.pairKey}</td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.n}
-                    </td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.xWins} ({(p.xWinRate * 100).toFixed(0)}%)
-                    </td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.yWins} ({(p.yWinRate * 100).toFixed(0)}%)
-                    </td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.ties} ({(p.tieRate * 100).toFixed(0)}%)
-                    </td>
-                    <td style={numCellStyle} className="tabular-nums">
-                      {p.bothBad} ({(p.bothBadRate * 100).toFixed(0)}%)
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <section>
+            {pairs.map((p) => (
+              <PairBlock key={p.pairKey} pair={p} />
+            ))}
             <p style={{ fontSize: 12, color: "var(--gray-700)", marginTop: 12 }}>
-              Percentages are shares of n and are rounded independently, so a row may not sum to exactly 100%.
+              Percentages are shares of n, rounded independently, so a block&apos;s bars may not sum to exactly
+              100%.
             </p>
           </section>
+        </>
+      )}
+
+      <p style={{ fontSize: 12, marginTop: 8 }}>
+        <Link href="/voice/prompts" style={{ color: "var(--blue-700)" }}>
+          Browse the prompt set →
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+function PairBlock({ pair }: { pair: VoicePairResult }) {
+  const xPct = Math.round(pair.xWinRate * 100);
+  const yPct = Math.round(pair.yWinRate * 100);
+  const tiePct = Math.round(pair.tieRate * 100);
+  const bothBadPct = Math.round(pair.bothBadRate * 100);
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--gray-alpha-400)",
+        borderRadius: 12,
+        padding: "16px 18px",
+        marginBottom: 16,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span style={{ fontSize: 15, fontWeight: 600 }}>{pair.modelX}</span>
+        <span className="tabular-nums" style={{ fontSize: 12, color: "var(--gray-700)", whiteSpace: "nowrap", margin: "0 8px" }}>
+          n = {pair.n}
+        </span>
+        <span style={{ fontSize: 15, fontWeight: 600, textAlign: "right" }}>{pair.modelY}</span>
+      </div>
+
+      {pair.n === 0 ? (
+        <p style={{ fontSize: 13, color: "var(--gray-700)", marginTop: 8 }}>No judgments yet.</p>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", marginTop: 10 }}>
+            <div style={{ width: "50%" }}>
+              <div className="tabular-nums" style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
+                {pair.xWins} ({xPct}%)
+              </div>
+              <div
+                style={{
+                  height: 8,
+                  borderRadius: 4,
+                  background: "var(--blue-700)",
+                  width: `${xPct}%`,
+                }}
+              />
+            </div>
+            <div style={{ width: 2, alignSelf: "stretch", background: "var(--gray-alpha-400)", margin: "0 8px" }} />
+            <div style={{ width: "50%", display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+              <div
+                className="tabular-nums"
+                style={{ fontSize: 13, fontWeight: 500, marginBottom: 4, textAlign: "right" }}
+              >
+                {pair.yWins} ({yPct}%)
+              </div>
+              <div
+                style={{
+                  height: 8,
+                  borderRadius: 4,
+                  background: "var(--gray-900)",
+                  width: `${yPct}%`,
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="tabular-nums" style={{ fontSize: 13, color: "var(--gray-700)", marginTop: 10 }}>
+            Tie — {pair.ties} ({tiePct}%)
+          </div>
+          <div className="tabular-nums" style={{ fontSize: 13, color: "var(--gray-700)", marginTop: 2 }}>
+            Both bad — {pair.bothBad} ({bothBadPct}%)
+          </div>
         </>
       )}
     </div>
   );
 }
-
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
-const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };

@@ -131,3 +131,14 @@ export function aggregate(
 
   return { pairs, orphans, unreadable };
 }
+
+/** Pure per-prompt judgment tally for the prompts index page. Counts by
+ *  prompt_id as given — an id with no matching manifest prompt is still
+ *  counted (the page simply won't render an unmatched id). */
+export function countJudgmentsByPrompt(judgments: VoiceJudgment[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const j of judgments) {
+    counts[j.prompt_id] = (counts[j.prompt_id] ?? 0) + 1;
+  }
+  return counts;
+}
