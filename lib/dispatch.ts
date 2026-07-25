@@ -65,6 +65,7 @@ export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = st
   const runs = await storage.listRuns();
   const toStart = selectRunsToStart(runs);
   const started: string[] = [];
+  const starts: Promise<void>[] = [];
   for (const run of toStart) {
     const submission = await storage.getSubmission(run.submission_id);
     if (!submission) {
@@ -75,11 +76,19 @@ export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = st
     // concurrent dispatch is less likely to double-start it.
     const claimed: Run = { ...run, dispatched_at: new Date().toISOString() };
     await storage.putRun(claimed);
-    void startFn(claimed, submission.prompt).catch((err: unknown) =>
-      log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message }),
-    );
     started.push(run.id);
+    starts.push(
+      startFn(claimed, submission.prompt).catch((err: unknown) =>
+        log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message }),
+      ),
+    );
   }
+  // AWAIT the sandbox creations. Callers invoke dispatch inside next/server's
+  // after(), which keeps the invocation alive only until the callback resolves.
+  // Fire-and-forget here let the function terminate mid-Sandbox.create, leaving
+  // runs claimed-but-never-started (holding a slot until the reaper frees it).
+  // Bounded by MAX_STARTS_PER_TICK so one invocation never awaits too many.
+  await Promise.all(starts);
   if (started.length > 0) log("info", "dispatch.started", { count: started.length, run_ids: started });
   return started;
 }
