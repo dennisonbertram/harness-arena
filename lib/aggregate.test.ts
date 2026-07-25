@@ -179,6 +179,20 @@ describe("aggregatePrompts", () => {
     expect(st.passRate).toBe(1);
     expect(st.completesTest).toBe(true);
   });
+
+  it("excludes competition submissions from the main-arena standings entirely", () => {
+    const submissions = [
+      sub("s1", "arena-entrant", "ARENA PROMPT", "2026-07-20T00:00:00Z"),
+      { ...sub("s2", "comp-entrant", "ARENA PROMPT", "2026-07-21T00:00:00Z"), competition: true },
+    ];
+    const runs = [run("r1", "s1", [true, true, false, false]), run("r2", "s2", [true, true, true, true])];
+    const standings = aggregatePrompts(runs, submissions, TOTAL);
+    // Only the main-arena run counts, even though the competition submission
+    // shares the identical (model, prompt) key and would otherwise average in.
+    expect(standings).toHaveLength(1);
+    expect(standings[0].runs).toBe(1);
+    expect(standings[0].agentName).toBe("arena-entrant");
+  });
 });
 
 describe("aggregateTask", () => {
