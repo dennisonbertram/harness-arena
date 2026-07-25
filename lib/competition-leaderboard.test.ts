@@ -13,6 +13,7 @@ function row(tasksPassed: number, totalCostUsd: number, overrides: Partial<Compe
     totalTasks: 16,
     totalCostUsd,
     submittedAt: "2026-07-25T00:00:00.000Z",
+    githubLogin: "unknown",
     ...overrides,
   };
 }
@@ -86,6 +87,15 @@ describe("getCompetitionBoard", () => {
     expect(board.ranked).toHaveLength(1);
     expect(board.ranked[0].submissionId).toBe("s1");
     expect(board.pending).toBe(1);
+  });
+
+  it("carries the entrant's github_login onto the ranked row, falling back to 'unknown' when unset", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(sub("s1", { run_id: "r1", github_login: "octocat" }));
+    await storage.putRun(run("r1", { submission_id: "s1", tasks_passed: 10, total_cost_usd: 1.0, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }) }));
+
+    const board = await getCompetitionBoard(storage);
+    expect(board.ranked[0].githubLogin).toBe("octocat");
   });
 
   it("excludes a non-competition submission entirely, even with a great score", async () => {

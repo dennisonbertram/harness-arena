@@ -56,7 +56,7 @@ export default async function CompetitionPage() {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                 <th className="label" style={cellStyle}>Rank</th>
-                <th className="label" style={cellStyle}>Entry</th>
+                <th className="label" style={cellStyle}>Entrant</th>
                 <th className="label" style={cellStyle}>Tasks solved</th>
                 <th className="label" style={numCellStyle}>Cost</th>
                 <th className="label" style={numCellStyle}>Submitted</th>
@@ -70,7 +70,7 @@ export default async function CompetitionPage() {
                   </td>
                   <td style={cellStyle}>
                     <Link href={`/runs/${row.runId}`} className="mono">
-                      {row.submissionId.slice(0, 8)}
+                      {row.githubLogin}
                     </Link>
                   </td>
                   <td style={cellStyle} className="tabular-nums">

@@ -193,6 +193,36 @@ describe("aggregatePrompts", () => {
     expect(standings[0].runs).toBe(1);
     expect(standings[0].agentName).toBe("arena-entrant");
   });
+
+  it("carries the most recent submission's github_login, falling back to 'unknown' when none has ever been set", () => {
+    const withLogin = { ...sub("s1", "alice", "SAME", "2026-07-20T00:00:00Z"), github_login: "octocat" };
+    const withoutLogin = sub("s2", "bob", "SAME", "2026-07-21T00:00:00Z"); // newer, no login (pre-login submission)
+    const runs = [run("r1", "s1", [true, true, false, false]), run("r2", "s2", [true, true, true, false])];
+    const [standing] = aggregatePrompts(runs, [withLogin, withoutLogin], TOTAL);
+    // s2 is more recent and sets agentName, but its missing github_login must
+    // not regress a known-good login back to "unknown" (same `?? previous`
+    // convention already used for agentName).
+    expect(standing.agentName).toBe("bob");
+    expect(standing.githubLogin).toBe("octocat");
+
+    // No submission in the group has ever had a login -> "unknown".
+    const noLoginOnly = aggregatePrompts(
+      [run("r0", "s0", [true, false, false, false])],
+      [sub("s0", "eve", "NEVER LOGGED IN", "2026-07-20T00:00:00Z")],
+      TOTAL,
+    );
+    expect(noLoginOnly[0].githubLogin).toBe("unknown");
+
+    // Reversed recency: the newer submission DOES have a login -> that one wins.
+    const withoutLoginOlder = sub("s3", "carol", "SAME2", "2026-07-20T00:00:00Z");
+    const withLoginNewer = { ...sub("s4", "dave", "SAME2", "2026-07-21T00:00:00Z"), github_login: "hubcat" };
+    const [standing2] = aggregatePrompts(
+      [run("r3", "s3", [true, false, false, false]), run("r4", "s4", [true, true, false, false])],
+      [withoutLoginOlder, withLoginNewer],
+      TOTAL,
+    );
+    expect(standing2.githubLogin).toBe("hubcat");
+  });
 });
 
 describe("aggregateTask", () => {
