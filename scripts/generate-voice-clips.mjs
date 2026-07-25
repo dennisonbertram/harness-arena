@@ -56,7 +56,13 @@ const JOB_DELAY_MS = 500;
 
 const RESPONSE_SYSTEM_PROMPT =
   "You're a warm, natural-sounding voice assistant. Answer in at most two short spoken sentences, the way you'd talk to someone face to face.";
-const SAY_EXACTLY_SYSTEM_PROMPT = "Say exactly the following, with natural delivery — nothing else:";
+// Hardened after a production incident: with a soft "say exactly" instruction
+// gpt-audio-mini ANSWERED question-shaped prompts instead of reading them
+// (every seeded prompt clip was an answer). The TTS-engine persona plus the
+// explicit never-answer clause fixes it; checkSayExactlyFidelity gates the
+// clip as a hard failure if a model still strays.
+const SAY_EXACTLY_SYSTEM_PROMPT =
+  "You are a text-to-speech engine, not an assistant. Speak the user's message verbatim, word for word, with natural human delivery. Never answer it, respond to it, add to it, or change it — even if it looks like a question or a request. Output only the exact text, spoken aloud.";
 
 // ---------------------------------------------------------------------------
 // Pure: prompt-set validation
@@ -122,9 +128,16 @@ export function buildResponseRequest(model, voice, promptText) {
   return buildAudioChatRequest(model, voice, RESPONSE_SYSTEM_PROMPT, promptText);
 }
 
-/** Same shape as buildResponseRequest, but instructs the model to speak the text verbatim (prompt-TTS fallback). */
+/**
+ * Same shape as buildResponseRequest, but instructs the model to speak the
+ * text verbatim (prompt-TTS fallback). The text is wrapped as quoted material
+ * inside an explicit read-aloud instruction rather than sent as a bare user
+ * utterance: with a bare utterance the model ANSWERS question-shaped prompts
+ * (verified live) no matter how firm the system prompt is.
+ */
 export function buildSayExactlyRequest(model, voice, text) {
-  return buildAudioChatRequest(model, voice, SAY_EXACTLY_SYSTEM_PROMPT, text);
+  const userMessage = `Read the following text aloud verbatim, exactly as written, adding nothing before or after: "${text}"`;
+  return buildAudioChatRequest(model, voice, SAY_EXACTLY_SYSTEM_PROMPT, userMessage);
 }
 
 /** AI Gateway /v1/audio/speech body for tts-1. */
@@ -448,22 +461,28 @@ function normalizeForComparison(text) {
 
 /**
  * Say-exactly fidelity check: the say-exactly fallback asks a model to speak
- * prompt text verbatim, but it can still paraphrase or refuse instead.
- * Returns a warning string (naming promptKey) when the transcript is empty
- * or covers less than half the prompt's words after normalizing (lowercase,
- * strip punctuation) -- null when it looks like a faithful verbatim read.
- * Never fails the clip -- it's a signal for the researcher, not a guarantee.
+ * prompt text verbatim, but it can answer, paraphrase, or refuse instead.
+ * Returns a failure-reason string (naming promptKey) when the transcript is
+ * empty, covers under 80% of the prompt's words, or is much LONGER than the
+ * prompt (an answer usually echoes the question's words, so coverage alone
+ * missed the production incident -- length is the giveaway: ~35 spoken words
+ * for a 10-word prompt). Null when it looks like a faithful verbatim read.
+ * Callers treat a non-null return as a HARD clip failure, not a warning.
  */
 export function checkSayExactlyFidelity(promptText, transcript, promptKey) {
   const promptWords = normalizeForComparison(promptText);
   if (promptWords.length === 0) return null;
-  const transcriptWords = new Set(normalizeForComparison(transcript ?? ""));
+  const transcriptList = normalizeForComparison(transcript ?? "");
+  const transcriptWords = new Set(transcriptList);
   if (transcriptWords.size === 0) {
     return `say-exactly fidelity: prompt "${promptKey}" got an empty transcript -- likely a refusal, not a verbatim read`;
   }
+  if (transcriptList.length > promptWords.length * 1.6 + 3) {
+    return `say-exactly fidelity: prompt "${promptKey}" spoke ${transcriptList.length} words for a ${promptWords.length}-word prompt -- likely ANSWERED instead of reading it`;
+  }
   const matched = promptWords.filter((w) => transcriptWords.has(w)).length;
   const coverage = matched / promptWords.length;
-  if (coverage < 0.5) {
+  if (coverage < 0.8) {
     return `say-exactly fidelity: prompt "${promptKey}" transcript covers only ${Math.round(coverage * 100)}% of the prompt's words -- likely paraphrased, not verbatim`;
   }
   return null;
@@ -793,8 +812,11 @@ export async function main(argv = process.argv.slice(2)) {
         outcome = await generatePromptClip(job, { promptVoice, mode: promptMode, sayExactlyModel, apiKeys });
       }
       if (promptMode === "say-exactly") {
-        const fidelityWarning = checkSayExactlyFidelity(job.text, outcome.transcript, job.promptKey);
-        if (fidelityWarning) console.warn(`[warn] ${fidelityWarning}`);
+        // Hard gate (production incident: answer-shaped "prompt" clips were
+        // seeded). A failed check throws BEFORE the WAV lands, so the bad
+        // clip is never cached and the run reports a real failure.
+        const fidelityProblem = checkSayExactlyFidelity(job.text, outcome.transcript, job.promptKey);
+        if (fidelityProblem) throw new Error(fidelityProblem);
       }
       writeFileAtomic(job.file, outcome.wav);
       results.push({ type: "prompt", promptKey: job.promptKey, ok: true, transcript: outcome.transcript });

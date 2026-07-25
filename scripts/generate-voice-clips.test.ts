@@ -166,8 +166,10 @@ describe("buildResponseRequest", () => {
 describe("buildSayExactlyRequest", () => {
   it("embeds the prompt text verbatim under the say-exactly instruction, streamed as pcm16", () => {
     const body = buildSayExactlyRequest("openai/gpt-audio-mini", "nova", "Read this exactly.");
-    expect(body.messages[0].content).toBe("Say exactly the following, with natural delivery — nothing else:");
-    expect(body.messages[1]).toEqual({ role: "user", content: "Read this exactly." });
+    expect(body.messages[0].content).toMatch(/text-to-speech engine.*Never answer/s);
+    expect(body.messages[1].role).toBe("user");
+    expect(body.messages[1].content).toContain('verbatim');
+    expect(body.messages[1].content).toContain('"Read this exactly."');
     expect(body.stream).toBe(true);
     expect(body.audio).toEqual({ voice: "nova", format: "pcm16" });
     expect(body.modalities).toEqual(["text", "audio"]);
@@ -729,13 +731,28 @@ describe("checkSayExactlyFidelity", () => {
     expect(checkSayExactlyFidelity(text, text, "p1")).toBeNull();
   });
 
-  it("warns naming the prompt key for an empty or wildly divergent (refusal-ish) transcript", () => {
+  it("flags an empty or wildly divergent (refusal-ish) transcript, naming the prompt key", () => {
     const prompt = "What's the tallest mountain in the world?";
     const empty = checkSayExactlyFidelity(prompt, "", "p1");
     expect(empty).toMatch(/"p1"/);
 
     const refusal = checkSayExactlyFidelity(prompt, "I can't help with that request.", "p1");
     expect(refusal).toMatch(/"p1"/);
+  });
+
+  it("flags an ANSWER-shaped transcript even when it echoes most of the prompt's words (production incident)", () => {
+    const prompt = "Hey, quick one — what's the tallest mountain in the world?";
+    const answer =
+      "Sure, the tallest mountain in the world is Mount Everest, standing at about 8,848 meters, or roughly 29,029 feet above sea level. It's located in the Himalayas, on the border of Nepal and China.";
+    const result = checkSayExactlyFidelity(prompt, answer, "tallest-mountain");
+    expect(result).toMatch(/ANSWERED/);
+    expect(result).toMatch(/"tallest-mountain"/);
+  });
+
+  it("flags a paraphrase that stays short but drops too many of the prompt's words", () => {
+    const prompt = "Can you walk me through how wifi actually works at home?";
+    const paraphrase = "Here is an explanation of wireless networking.";
+    expect(checkSayExactlyFidelity(prompt, paraphrase, "how-wifi-works")).toMatch(/covers only/);
   });
 });
 
