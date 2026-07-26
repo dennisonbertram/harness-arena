@@ -8,6 +8,23 @@ import { UNKNOWN_GITHUB_LOGIN, type CompetitionRow } from "@/lib/competition-lea
 const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
 const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
 
+// Fixed locale/UTC so server and client render identical text — a
+// viewer-locale-dependent format here would mismatch during hydration.
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 const avatarStyle: React.CSSProperties = {
   width: 24,
   height: 24,
@@ -138,7 +155,7 @@ export function CompetitionLeaderboardTable({
                   </div>
                 </td>
                 <td style={numCellStyle} className="tabular-nums">
-                  {new Date(row.submittedAt).toLocaleDateString()}
+                  {dateFormatter.format(new Date(row.submittedAt))}
                 </td>
               </tr>
             );
@@ -175,9 +192,12 @@ export function CompetitionLeaderboardTable({
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 id="competition-entry-modal-heading" className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
-                {openRow.githubLogin}
-              </h3>
+              <span style={{ display: "inline-flex", alignItems: "center" }}>
+                <AvatarOrPlaceholder githubLogin={openRow.githubLogin} />
+                <h3 id="competition-entry-modal-heading" className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
+                  {openRow.githubLogin}
+                </h3>
+              </span>
               <button
                 ref={closeButtonRef}
                 type="button"
@@ -204,7 +224,7 @@ export function CompetitionLeaderboardTable({
               </div>
               <div className="tabular-nums">{formatUsd(openRow.totalCostUsd)}</div>
               <div style={{ color: "var(--gray-700)" }}>
-                Submitted {new Date(openRow.submittedAt).toLocaleString()}
+                Submitted {dateTimeFormatter.format(new Date(openRow.submittedAt))}
               </div>
               <Link href={`/runs/${openRow.runId}`} style={{ color: "var(--blue-700)", marginTop: 8 }}>
                 View full run →
