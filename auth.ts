@@ -1,8 +1,14 @@
+import { cache } from "react";
 import NextAuth from "next-auth";
 import GitHub from "next-auth/providers/github";
 import { jwtCallback, sessionCallback } from "@/lib/auth-callbacks";
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+const {
+  handlers,
+  auth: uncachedAuth,
+  signIn,
+  signOut,
+} = NextAuth({
   providers: [GitHub],
   session: { strategy: "jwt" },
   pages: {
@@ -15,3 +21,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     session: sessionCallback,
   },
 });
+
+// The root layout and every gated page/route call auth() independently; wrap
+// with React's cache() so a single request only decrypts the session once.
+export const auth = cache(uncachedAuth);
+export { handlers, signIn, signOut };

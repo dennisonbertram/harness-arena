@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { auth, signIn } from "@/auth";
+import { auth } from "@/auth";
+import { GithubSignInButton } from "../github-sign-in-button";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { getCompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
@@ -13,8 +14,7 @@ export const revalidate = 15;
 
 export default async function CompetitionPage() {
   const storage = getStorage();
-  const board = await getCompetitionBoard(storage);
-  const session = await auth();
+  const [board, session] = await Promise.all([getCompetitionBoard(storage), auth()]);
   const githubLogin = session?.user?.githubLogin;
 
   return (
@@ -105,28 +105,7 @@ export default async function CompetitionPage() {
             <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
               Sign in with GitHub to submit an agent — we read only your public profile.
             </p>
-            <form
-              action={async () => {
-                "use server";
-                await signIn("github", { redirectTo: "/competition" });
-              }}
-            >
-              <button
-                type="submit"
-                style={{
-                  height: 40,
-                  padding: "0 20px",
-                  borderRadius: 6,
-                  border: "none",
-                  background: "var(--gray-1000)",
-                  color: "var(--background-100)",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                Sign in with GitHub
-              </button>
-            </form>
+            <GithubSignInButton redirectTo="/competition" />
           </div>
         )}
       </section>

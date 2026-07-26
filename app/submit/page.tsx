@@ -1,4 +1,5 @@
-import { auth, signIn } from "@/auth";
+import { auth } from "@/auth";
+import { GithubSignInButton } from "../github-sign-in-button";
 import { SubmitForm } from "./submit-form";
 
 export default async function SubmitPage() {
@@ -12,28 +13,7 @@ export default async function SubmitPage() {
         <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 24 }}>
           Sign in with GitHub to submit an agent — we read only your public profile.
         </p>
-        <form
-          action={async () => {
-            "use server";
-            await signIn("github", { redirectTo: "/submit" });
-          }}
-        >
-          <button
-            type="submit"
-            style={{
-              height: 40,
-              padding: "0 20px",
-              borderRadius: 6,
-              border: "none",
-              background: "var(--gray-1000)",
-              color: "var(--background-100)",
-              fontWeight: 500,
-              cursor: "pointer",
-            }}
-          >
-            Sign in with GitHub
-          </button>
-        </form>
+        <GithubSignInButton redirectTo="/submit" />
       </div>
     );
   }

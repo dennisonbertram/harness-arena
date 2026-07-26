@@ -22,6 +22,9 @@
 import { del, list } from "@vercel/blob";
 
 const PREFIXES_IN_DELETE_ORDER = ["events/", "traces/", "runs/", "submissions/"];
+// Vercel's own "deleting all blobs" example batches del() calls rather than
+// passing an unbounded URL array in one request.
+const DELETE_BATCH_SIZE = 100;
 
 async function listAllBlobs(prefix) {
   const blobs = [];
@@ -32,6 +35,12 @@ async function listAllBlobs(prefix) {
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
   return blobs;
+}
+
+function chunk(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
 }
 
 /**
@@ -48,14 +57,22 @@ export async function wipeBlobData({ confirm = false } = {}) {
 
   const results = [];
   for (const prefix of PREFIXES_IN_DELETE_ORDER) {
-    const blobs = await listAllBlobs(prefix);
+    let blobs;
+    try {
+      blobs = await listAllBlobs(prefix);
+    } catch (err) {
+      results.push({ prefix, count: 0, sampleUrl: undefined, deleted: false, error: err.message });
+      continue;
+    }
     const sampleUrl = blobs[0]?.url;
     if (!confirm || blobs.length === 0) {
       results.push({ prefix, count: blobs.length, sampleUrl, deleted: false });
       continue;
     }
     try {
-      await del(blobs.map((b) => b.url));
+      for (const batch of chunk(blobs.map((b) => b.url), DELETE_BATCH_SIZE)) {
+        await del(batch);
+      }
       results.push({ prefix, count: blobs.length, sampleUrl, deleted: true });
     } catch (err) {
       results.push({ prefix, count: blobs.length, sampleUrl, deleted: false, error: err.message });

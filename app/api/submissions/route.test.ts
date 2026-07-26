@@ -18,21 +18,13 @@ vi.mock("@/lib/dispatch", () => ({
 
 vi.mock("@/auth", () => ({ auth: vi.fn() }));
 
-import type { Session } from "next-auth";
 import { judgeSubmission } from "@/lib/judge";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { auth } from "@/auth";
+import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import { GET, POST } from "./route";
 
-// next-auth v5's `auth()` export is overloaded (bare call for reading a
-// session vs. a middleware-wrapping call), which confuses vi.mocked()'s
-// overload resolution against a plain vi.fn(). This app only ever calls the
-// bare, session-reading form — cast once here rather than at every call site.
-const mockAuth = auth as unknown as {
-  mockReset: () => void;
-  mockResolvedValue: (value: Session | null) => void;
-  mockResolvedValueOnce: (value: Session | null) => void;
-};
+const mockAuth = asMockAuth(auth);
 
 function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   return new NextRequest("http://localhost/api/submissions", {
@@ -55,10 +47,7 @@ function postRequestRaw(
 }
 
 function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
-  mockAuth.mockResolvedValue({
-    user: { githubId, githubLogin },
-    expires: "2099-01-01T00:00:00.000Z",
-  } as never);
+  mockAuth.mockResolvedValue(githubSession(githubId, githubLogin));
 }
 
 describe("POST /api/submissions", () => {

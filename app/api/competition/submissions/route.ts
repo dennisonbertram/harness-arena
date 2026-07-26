@@ -141,7 +141,7 @@ export async function GET() {
       status: s.status,
       model: s.model,
       is_baseline: s.competition_baseline === true,
-      github_login: s.github_login,
+      github_login: s.github_login ?? "unknown",
       run_id: s.run_id,
       created_at: s.created_at,
     }));

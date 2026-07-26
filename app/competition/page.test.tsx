@@ -9,12 +9,11 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
 
-import type { Session } from "next-auth";
 import { auth } from "@/auth";
+import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import * as CompetitionPage from "./page";
 
-// Same overload-confusion workaround as the route test files.
-const mockAuth = auth as unknown as { mockReset: () => void; mockResolvedValue: (v: Session | null) => void };
+const mockAuth = asMockAuth(auth);
 
 describe("competition page revalidation", () => {
   it("exports a 15-second ISR revalidate window, matching the main leaderboard", () => {
@@ -37,10 +36,7 @@ describe("CompetitionPage", () => {
   });
 
   it("renders the submit form and the signed-in login when signed in", async () => {
-    mockAuth.mockResolvedValue({
-      user: { githubId: 1, githubLogin: "octocat" },
-      expires: "2099-01-01T00:00:00.000Z",
-    } as never);
+    mockAuth.mockResolvedValue(githubSession(1, "octocat"));
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
     expect(html).toContain("Signed in as");

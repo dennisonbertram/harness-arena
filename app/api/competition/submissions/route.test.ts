@@ -18,17 +18,13 @@ vi.mock("@/lib/run-trigger", () => ({
 
 vi.mock("@/auth", () => ({ auth: vi.fn() }));
 
-import type { Session } from "next-auth";
 import { judgeSubmission } from "@/lib/judge";
 import { startRun } from "@/lib/run-trigger";
 import { auth } from "@/auth";
+import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import { GET, POST } from "./route";
 
-// Same overload-confusion workaround as app/api/submissions/route.test.ts.
-const mockAuth = auth as unknown as {
-  mockReset: () => void;
-  mockResolvedValue: (value: Session | null) => void;
-};
+const mockAuth = asMockAuth(auth);
 
 function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   return new NextRequest("http://localhost/api/competition/submissions", {
@@ -39,10 +35,7 @@ function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
 }
 
 function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
-  mockAuth.mockResolvedValue({
-    user: { githubId, githubLogin },
-    expires: "2099-01-01T00:00:00.000Z",
-  } as never);
+  mockAuth.mockResolvedValue(githubSession(githubId, githubLogin));
 }
 
 describe("POST /api/competition/submissions", () => {
@@ -303,5 +296,23 @@ describe("GET /api/competition/submissions", () => {
     expect(body[0].github_login).toBe("octocat");
     expect(JSON.stringify(body)).not.toContain("secret prompt text");
     expect(JSON.stringify(body)).not.toContain("jailbreak attempt text");
+  });
+
+  it("falls back to 'unknown' github_login for an entry that lacks one (e.g. the admin-triggered baseline)", async () => {
+    await storageRef.current.putSubmission({
+      id: "s-baseline",
+      agent_name: "pi-vanilla-baseline",
+      prompt: "",
+      status: "queued",
+      competition: true,
+      competition_baseline: true,
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(body).toHaveLength(1);
+    expect(body[0].github_login).toBe("unknown");
   });
 });

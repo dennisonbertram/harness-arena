@@ -104,4 +104,42 @@ describe("wipeBlobData", () => {
     // Every other prefix still got its delete attempt.
     expect(results.filter((r) => r.prefix !== "traces/").every((r) => r.deleted)).toBe(true);
   });
+
+  it("a list() failure on one prefix is reported but does not stop the remaining prefixes", async () => {
+    vi.mocked(list).mockImplementation(async ({ prefix }) => {
+      if (prefix === "runs/") throw new Error("list timed out");
+      return { blobs: [blob(`https://store.example/${prefix}x.json`)], hasMore: false, cursor: undefined };
+    });
+    vi.mocked(del).mockResolvedValue(undefined);
+
+    const results = await wipeBlobData({ confirm: true });
+
+    const runs = results.find((r) => r.prefix === "runs/");
+    expect(runs.deleted).toBe(false);
+    expect(runs.count).toBe(0);
+    expect(runs.error).toContain("timed out");
+    // Every other prefix (listed before and after runs/) still got attempted.
+    expect(results.filter((r) => r.prefix !== "runs/").every((r) => r.deleted)).toBe(true);
+  });
+
+  it("chunks del() calls at 100 URLs so a large prefix isn't deleted in one unbounded request", async () => {
+    const manyBlobs = Array.from({ length: 250 }, (_, i) => blob(`https://store.example/events/${i}.json`));
+    vi.mocked(list).mockImplementation(async ({ prefix }) => ({
+      blobs: prefix === "events/" ? manyBlobs : [],
+      hasMore: false,
+      cursor: undefined,
+    }));
+    const delCalls = [];
+    vi.mocked(del).mockImplementation(async (urls) => {
+      delCalls.push(urls.length);
+    });
+
+    const results = await wipeBlobData({ confirm: true });
+
+    // 250 blobs at a 100-URL batch size -> three calls of 100, 100, 50.
+    expect(delCalls).toEqual([100, 100, 50]);
+    const events = results.find((r) => r.prefix === "events/");
+    expect(events.deleted).toBe(true);
+    expect(events.count).toBe(250);
+  });
 });

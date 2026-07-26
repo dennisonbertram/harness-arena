@@ -3,12 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
 
-import type { Session } from "next-auth";
 import { auth } from "@/auth";
+import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import SubmitPage from "./page";
 
-// Same overload-confusion workaround as the route test files.
-const mockAuth = auth as unknown as { mockReset: () => void; mockResolvedValue: (v: Session | null) => void };
+const mockAuth = asMockAuth(auth);
 
 describe("SubmitPage", () => {
   beforeEach(() => {
@@ -25,10 +24,7 @@ describe("SubmitPage", () => {
   });
 
   it("renders the submission form and the signed-in login when signed in", async () => {
-    mockAuth.mockResolvedValue({
-      user: { githubId: 1, githubLogin: "octocat" },
-      expires: "2099-01-01T00:00:00.000Z",
-    } as never);
+    mockAuth.mockResolvedValue(githubSession(1, "octocat"));
     const html = renderToStaticMarkup(await SubmitPage());
 
     expect(html).toContain("Submit a prompt");

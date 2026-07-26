@@ -93,6 +93,16 @@ export default async function RootLayout({
   );
 }
 
+const authButtonStyle: React.CSSProperties = {
+  border: "1px solid var(--gray-alpha-400)",
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--gray-1000)",
+  fontSize: 13,
+  padding: "4px 10px",
+  cursor: "pointer",
+};
+
 function SessionBlock({ githubLogin }: { githubLogin?: string }) {
   if (githubLogin) {
     return (
@@ -106,18 +116,7 @@ function SessionBlock({ githubLogin }: { githubLogin?: string }) {
         <span className="mono" style={{ color: "var(--gray-900)" }}>
           {githubLogin}
         </span>
-        <button
-          type="submit"
-          style={{
-            border: "1px solid var(--gray-alpha-400)",
-            borderRadius: 6,
-            background: "transparent",
-            color: "var(--gray-1000)",
-            fontSize: 13,
-            padding: "4px 10px",
-            cursor: "pointer",
-          }}
-        >
+        <button type="submit" style={authButtonStyle}>
           Sign out
         </button>
       </form>
@@ -130,18 +129,7 @@ function SessionBlock({ githubLogin }: { githubLogin?: string }) {
         await signIn("github");
       }}
     >
-      <button
-        type="submit"
-        style={{
-          border: "1px solid var(--gray-alpha-400)",
-          borderRadius: 6,
-          background: "transparent",
-          color: "var(--gray-1000)",
-          fontSize: 13,
-          padding: "4px 10px",
-          cursor: "pointer",
-        }}
-      >
+      <button type="submit" style={authButtonStyle}>
         Sign in with GitHub
       </button>
     </form>
