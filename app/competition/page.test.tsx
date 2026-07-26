@@ -42,4 +42,11 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Signed in as");
     expect(html).toContain("octocat");
   });
+
+  it("renders the empty-leaderboard message, not the table, when there are no ranked entries", async () => {
+    mockAuth.mockResolvedValue(null);
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("No entries yet — beat the baseline.");
+  });
 });
