@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { formatUsd } from "@/lib/format";
 import type { CompetitionRow } from "@/lib/competition-leaderboard";
 
@@ -55,52 +56,156 @@ export function CompetitionLeaderboardTable({
   ranked: CompetitionRow[];
   currentGithubLogin: string | undefined;
 }) {
+  const [openRow, setOpenRow] = useState<CompetitionRow | null>(null);
+  const triggerRef = useRef<HTMLTableRowElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  function openModal(row: CompetitionRow, trigger: HTMLTableRowElement) {
+    triggerRef.current = trigger;
+    setOpenRow(row);
+  }
+
+  function closeModal() {
+    setOpenRow(null);
+    triggerRef.current?.focus();
+  }
+
+  useEffect(() => {
+    if (!openRow) return;
+    closeButtonRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeModal();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openRow]);
+
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-      <thead>
-        <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-          <th className="label" style={cellStyle}>Rank</th>
-          <th className="label" style={cellStyle}>Entrant</th>
-          <th className="label" style={cellStyle}>Tasks solved</th>
-          <th className="label" style={numCellStyle}>Submitted</th>
-        </tr>
-      </thead>
-      <tbody>
-        {ranked.map((row) => {
-          const isCurrentUser = currentGithubLogin !== undefined && row.githubLogin === currentGithubLogin;
-          return (
-            <tr
-              key={row.submissionId}
-              style={{
-                borderBottom: "1px solid var(--gray-alpha-400)",
-                background: isCurrentUser ? "var(--blue-100)" : undefined,
-              }}
-            >
-              <td style={cellStyle} className="tabular-nums">
-                {row.rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
-                {row.tied ? `Tied for #${row.rank}` : `#${row.rank}`}
-              </td>
-              <td style={cellStyle}>
-                <span style={{ display: "inline-flex", alignItems: "center" }}>
-                  <AvatarOrPlaceholder githubLogin={row.githubLogin} />
-                  <span className="mono">{row.githubLogin}</span>
-                </span>
-              </td>
-              <td style={cellStyle}>
-                <div className="tabular-nums" style={{ fontWeight: 600 }}>
-                  {row.tasksPassed}/{row.totalTasks}
-                </div>
-                <div className="tabular-nums" style={{ fontSize: 12, color: "var(--gray-700)" }}>
-                  {formatUsd(row.totalCostUsd)}
-                </div>
-              </td>
-              <td style={numCellStyle} className="tabular-nums">
-                {new Date(row.submittedAt).toLocaleDateString()}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+            <th className="label" style={cellStyle}>Rank</th>
+            <th className="label" style={cellStyle}>Entrant</th>
+            <th className="label" style={cellStyle}>Tasks solved</th>
+            <th className="label" style={numCellStyle}>Submitted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ranked.map((row) => {
+            const isCurrentUser = currentGithubLogin !== undefined && row.githubLogin === currentGithubLogin;
+            return (
+              <tr
+                key={row.submissionId}
+                className="clickable-row"
+                tabIndex={0}
+                onClick={(e) => openModal(row, e.currentTarget)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    if (e.key === " ") e.preventDefault();
+                    openModal(row, e.currentTarget);
+                  }
+                }}
+                style={{
+                  borderBottom: "1px solid var(--gray-alpha-400)",
+                  background: isCurrentUser ? "var(--blue-100)" : undefined,
+                }}
+              >
+                <td style={cellStyle} className="tabular-nums">
+                  {row.rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
+                  {row.tied ? `Tied for #${row.rank}` : `#${row.rank}`}
+                </td>
+                <td style={cellStyle}>
+                  <span style={{ display: "inline-flex", alignItems: "center" }}>
+                    <AvatarOrPlaceholder githubLogin={row.githubLogin} />
+                    <span className="mono">{row.githubLogin}</span>
+                  </span>
+                </td>
+                <td style={cellStyle}>
+                  <div className="tabular-nums" style={{ fontWeight: 600 }}>
+                    {row.tasksPassed}/{row.totalTasks}
+                  </div>
+                  <div className="tabular-nums" style={{ fontSize: 12, color: "var(--gray-700)" }}>
+                    {formatUsd(row.totalCostUsd)}
+                  </div>
+                </td>
+                <td style={numCellStyle} className="tabular-nums">
+                  {new Date(row.submittedAt).toLocaleDateString()}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {openRow && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="competition-entry-modal-heading"
+          onClick={closeModal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            zIndex: 50,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--background-100)",
+              border: "1px solid var(--gray-alpha-400)",
+              borderRadius: 12,
+              maxWidth: 420,
+              width: "100%",
+              padding: 20,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 id="competition-entry-modal-heading" className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
+                {openRow.githubLogin}
+              </h3>
+              <button
+                ref={closeButtonRef}
+                type="button"
+                onClick={closeModal}
+                aria-label="Close"
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--gray-900)",
+                  fontSize: 18,
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
+              <div>
+                {openRow.rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
+                {openRow.tied ? `Tied for #${openRow.rank}` : `Rank #${openRow.rank}`}
+              </div>
+              <div className="tabular-nums">
+                {openRow.tasksPassed}/{openRow.totalTasks} tasks solved
+              </div>
+              <div className="tabular-nums">{formatUsd(openRow.totalCostUsd)}</div>
+              <div style={{ color: "var(--gray-700)" }}>
+                Submitted {new Date(openRow.submittedAt).toLocaleString()}
+              </div>
+              <Link href={`/runs/${openRow.runId}`} style={{ color: "var(--blue-700)", marginTop: 8 }}>
+                View full run →
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

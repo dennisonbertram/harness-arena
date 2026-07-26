@@ -96,4 +96,13 @@ describe("CompetitionLeaderboardTable", () => {
 
     expect(html).toContain("Tied for #2");
   });
+
+  it("initial (closed) markup has a focusable row but no open dialog", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable ranked={[row()]} currentGithubLogin={undefined} />,
+    );
+
+    expect(html).toContain('tabindex="0"');
+    expect(html).not.toContain('role="dialog"');
+  });
 });
