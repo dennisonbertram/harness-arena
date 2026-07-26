@@ -76,6 +76,9 @@ export default async function StatusPage() {
                     <tr key={row.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                       <td style={cellStyle}>
                         <Link href={`/runs/${row.runId}`}>{row.agentName}</Link>
+                        <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
+                          {row.githubLogin}
+                        </span>
                       </td>
                       <td style={cellStyle}>
                         <span

@@ -16,6 +16,10 @@ export interface ParsedSubmitResponse {
   /** true when the judge rejected the prompt (a content verdict), false when
    *  the error is a system/infra failure — lets the UI use the right heading. */
   rejected: boolean;
+  /** true on a 401 (session expired or never signed in) — distinct from a
+   *  content rejection or a system failure, so the UI can offer a re-auth
+   *  path instead of a generic error. */
+  sessionExpired: boolean;
 }
 
 export interface MinimalFetchResponse {
@@ -38,21 +42,33 @@ export async function parseSubmitResponse(response: MinimalFetchResponse): Promi
     body = null;
   }
 
-  // Non-2xx: an infra/system error (judge unavailable, rate limit, too large).
-  // Surface the server's own message (body.error), never a bare "HTTP 503".
+  // Non-2xx: an infra/system error (judge unavailable, rate limit, too large)
+  // or a 401 (no/expired session). Surface the server's own message
+  // (body.error), never a bare "HTTP 503".
   if (!response.ok) {
     return {
       result: body,
       error: body?.error ?? body?.judge_reason ?? `The server returned HTTP ${response.status}.`,
       rejected: false,
+      sessionExpired: response.status === 401,
     };
   }
   // A content rejection comes back 200 with status "rejected" — show its reason.
   if (body?.status === "rejected") {
-    return { result: body, error: body.judge_reason ?? "The fairness judge rejected this prompt.", rejected: true };
+    return {
+      result: body,
+      error: body.judge_reason ?? "The fairness judge rejected this prompt.",
+      rejected: true,
+      sessionExpired: false,
+    };
   }
   if (body) {
-    return { result: body, error: null, rejected: false };
+    return { result: body, error: null, rejected: false, sessionExpired: false };
   }
-  return { result: null, error: `The server returned HTTP ${response.status}.`, rejected: false };
+  return {
+    result: null,
+    error: `The server returned HTTP ${response.status}.`,
+    rejected: false,
+    sessionExpired: false,
+  };
 }

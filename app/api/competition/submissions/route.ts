@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { auth } from "@/auth";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { log } from "@/lib/log";
@@ -19,8 +20,10 @@ const SubmissionInputSchema = z.object({
 const isIpRateLimited = createRateLimiter(5);
 // Real cash prize + single-run (non-averaged) scoring makes per-IP-only
 // throttling too easy to route around (VPN/mobile IP rotation) — key a
-// second bucket on agent_name so either limit alone is enough to throttle.
-const isAgentNameRateLimited = createRateLimiter(5);
+// second bucket on the signed-in GitHub account (replaces the old
+// agent-name bucket now that github_id is the real identity axis) so either
+// limit alone is enough to throttle.
+const isGithubIdRateLimited = createRateLimiter(5);
 
 export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") ?? "";
@@ -36,11 +39,21 @@ export async function POST(request: NextRequest) {
   // IP-based check runs before the body is even read (matches the main
   // arena's /api/submissions ordering) so a flood of malformed/oversized
   // requests still burns rate-limit budget instead of getting a free 400.
-  // The agent_name bucket necessarily waits until after parsing — the name
-  // isn't known before then.
   const ip = clientIp(request);
   if (isIpRateLimited(ip)) {
     log("warn", "competition.submission.rate_limited", { ip });
+    return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
+  }
+
+  const session = await auth();
+  const githubId = session?.user?.githubId;
+  const githubLogin = session?.user?.githubLogin;
+  if (githubId === undefined || githubLogin === undefined) {
+    return NextResponse.json({ error: "sign in with GitHub to submit" }, { status: 401 });
+  }
+
+  if (isGithubIdRateLimited(String(githubId))) {
+    log("warn", "competition.submission.rate_limited", { ip, github_id: githubId });
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
 
@@ -53,11 +66,6 @@ export async function POST(request: NextRequest) {
     );
   }
   const { agent_name: agentName, prompt } = parsedInput.data;
-
-  if (isAgentNameRateLimited(agentName)) {
-    log("warn", "competition.submission.rate_limited", { ip, agent_name: agentName });
-    return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
-  }
 
   const storage = getStorage();
   const competitionSubmissions = (await storage.listSubmissions()).filter((s) => s.competition === true);
@@ -87,6 +95,8 @@ export async function POST(request: NextRequest) {
     status: "pending_review",
     model: COMPETITION_MODEL,
     competition: true,
+    github_id: githubId,
+    github_login: githubLogin,
     created_at: new Date().toISOString(),
   };
   await storage.putSubmission(submission);
@@ -131,6 +141,7 @@ export async function GET() {
       status: s.status,
       model: s.model,
       is_baseline: s.competition_baseline === true,
+      github_login: s.github_login ?? "unknown",
       run_id: s.run_id,
       created_at: s.created_at,
     }));

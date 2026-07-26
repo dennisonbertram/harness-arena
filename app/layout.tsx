@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
+import { auth, signIn, signOut } from "@/auth";
 import { ARENA_ENDPOINT } from "@/lib/arena-params";
 import { MODEL_LABELS } from "@/lib/models";
 import "./globals.css";
@@ -22,11 +23,13 @@ export const metadata: Metadata = {
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const session = await auth();
+
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
       <body>
@@ -53,6 +56,7 @@ export default function RootLayout({
               <Link href="/competition">Competition</Link>
               <Link href="/voice">Voice</Link>
             </div>
+            <SessionBlock githubLogin={session?.user?.githubLogin} />
           </nav>
         </header>
         <main style={{ flex: 1 }}>{children}</main>
@@ -86,5 +90,48 @@ export default function RootLayout({
         </footer>
       </body>
     </html>
+  );
+}
+
+const authButtonStyle: React.CSSProperties = {
+  border: "1px solid var(--gray-alpha-400)",
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--gray-1000)",
+  fontSize: 13,
+  padding: "4px 10px",
+  cursor: "pointer",
+};
+
+function SessionBlock({ githubLogin }: { githubLogin?: string }) {
+  if (githubLogin) {
+    return (
+      <form
+        action={async () => {
+          "use server";
+          await signOut();
+        }}
+        style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
+      >
+        <span className="mono" style={{ color: "var(--gray-900)" }}>
+          {githubLogin}
+        </span>
+        <button type="submit" style={authButtonStyle}>
+          Sign out
+        </button>
+      </form>
+    );
+  }
+  return (
+    <form
+      action={async () => {
+        "use server";
+        await signIn("github");
+      }}
+    >
+      <button type="submit" style={authButtonStyle}>
+        Sign in with GitHub
+      </button>
+    </form>
   );
 }

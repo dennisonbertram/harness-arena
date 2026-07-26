@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { auth } from "@/auth";
+import { GithubSignInButton } from "../github-sign-in-button";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { getCompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
@@ -12,7 +14,8 @@ export const revalidate = 15;
 
 export default async function CompetitionPage() {
   const storage = getStorage();
-  const board = await getCompetitionBoard(storage);
+  const [board, session] = await Promise.all([getCompetitionBoard(storage), auth()]);
+  const githubLogin = session?.user?.githubLogin;
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -53,7 +56,7 @@ export default async function CompetitionPage() {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                 <th className="label" style={cellStyle}>Rank</th>
-                <th className="label" style={cellStyle}>Entry</th>
+                <th className="label" style={cellStyle}>Entrant</th>
                 <th className="label" style={cellStyle}>Tasks solved</th>
                 <th className="label" style={numCellStyle}>Cost</th>
                 <th className="label" style={numCellStyle}>Submitted</th>
@@ -67,7 +70,7 @@ export default async function CompetitionPage() {
                   </td>
                   <td style={cellStyle}>
                     <Link href={`/runs/${row.runId}`} className="mono">
-                      {row.submissionId.slice(0, 8)}
+                      {row.githubLogin}
                     </Link>
                   </td>
                   <td style={cellStyle} className="tabular-nums">
@@ -95,7 +98,16 @@ export default async function CompetitionPage() {
         <h2 className="label" style={{ marginBottom: 16 }}>
           Submit a prompt
         </h2>
-        <SubmitCompetitionForm />
+        {githubLogin ? (
+          <SubmitCompetitionForm githubLogin={githubLogin} />
+        ) : (
+          <div style={{ textAlign: "center", padding: "24px 0" }}>
+            <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
+              Sign in with GitHub to submit an agent — we read only your public profile.
+            </p>
+            <GithubSignInButton redirectTo="/competition" />
+          </div>
+        )}
       </section>
     </div>
   );

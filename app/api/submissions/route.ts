@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { auth } from "@/auth";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
 import { log } from "@/lib/log";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
+import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
@@ -32,26 +34,12 @@ const SubmissionInputSchema = z.object({
   model: z.string().optional(),
 });
 
-// ponytail: naive in-memory per-IP rate limit — explicitly POC-level, not a
-// real abuse boundary. It's per-process state, so on serverless (each
-// invocation may be a separate instance/cold start) this does not actually
-// enforce a global 5/hour limit across all traffic to an IP; upgrade to a
-// shared store (e.g. Redis) if that ever matters.
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-const RATE_LIMIT_MAX = 5;
-const submissionTimestamps = new Map<string, number[]>();
-
-function isRateLimited(ip: string, now: number = Date.now()): boolean {
-  const recent = (submissionTimestamps.get(ip) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  const limited = recent.length >= RATE_LIMIT_MAX;
-  if (!limited) recent.push(now);
-  submissionTimestamps.set(ip, recent);
-  return limited;
-}
-
-function clientIp(request: NextRequest): string {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-}
+// A GitHub account is cheap to mint, so identity alone is a weak rate-limit
+// key — both buckets must admit the request (R3). Shares the naive
+// in-memory limiter with the competition submissions route (see
+// lib/rate-limit.ts for the POC-level caveat).
+const isIpRateLimited = createRateLimiter(5);
+const isGithubIdRateLimited = createRateLimiter(5);
 
 export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") ?? "";
@@ -64,9 +52,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "request body too large" }, { status: 413 });
   }
 
+  // IP-based check runs before auth() (matches the competition route's
+  // ordering) so a flood of malformed/oversized/unauthenticated requests is
+  // rejected via a cheap in-memory lookup before paying for a session decrypt.
   const ip = clientIp(request);
-  if (isRateLimited(ip)) {
+  if (isIpRateLimited(ip)) {
     log("warn", "submission.rate_limited", { ip });
+    return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
+  }
+
+  const session = await auth();
+  const githubId = session?.user?.githubId;
+  const githubLogin = session?.user?.githubLogin;
+  if (githubId === undefined || githubLogin === undefined) {
+    return NextResponse.json({ error: "sign in with GitHub to submit" }, { status: 401 });
+  }
+
+  if (isGithubIdRateLimited(String(githubId))) {
+    log("warn", "submission.rate_limited", { ip, github_id: githubId });
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
 
@@ -91,6 +94,8 @@ export async function POST(request: NextRequest) {
     prompt: parsedInput.data.prompt,
     status: "pending_review",
     model,
+    github_id: githubId,
+    github_login: githubLogin,
     created_at: new Date().toISOString(),
   };
   await storage.putSubmission(submission);

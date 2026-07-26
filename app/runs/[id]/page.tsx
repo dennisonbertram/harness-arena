@@ -62,6 +62,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <h1 style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em" }}>
             {submission?.agent_name ?? "Unknown agent"}
           </h1>
+          {submission?.github_login ? (
+            <span className="mono" style={{ fontSize: 14, color: "var(--gray-700)" }}>
+              {submission.github_login}
+            </span>
+          ) : null}
           <span
             style={{
               fontSize: 12,

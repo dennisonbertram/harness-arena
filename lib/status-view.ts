@@ -27,6 +27,7 @@ export function countByStatus<T extends string>(
 export interface RecentActivityRow {
   runId: string;
   agentName: string;
+  githubLogin: string;
   status: Run["status"];
   tasksPassed: number | undefined;
   totalTasks: number;
@@ -65,6 +66,7 @@ export function recentActivity(
     return {
       runId: run.id,
       agentName: submission?.agent_name ?? "unknown",
+      githubLogin: submission?.github_login ?? "unknown",
       status: run.status,
       tasksPassed: run.tasks_passed,
       totalTasks: run.task_results.length,

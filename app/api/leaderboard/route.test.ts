@@ -30,8 +30,15 @@ async function seed(sub: Submission, run: Partial<Run> & { id: string; passCount
   });
 }
 
-function submission(id: string, agent: string, prompt: string): Submission {
-  return { id, agent_name: agent, prompt, status: "scored", created_at: "2026-01-01T00:00:00.000Z" };
+function submission(id: string, agent: string, prompt: string, githubLogin?: string): Submission {
+  return {
+    id,
+    agent_name: agent,
+    prompt,
+    status: "scored",
+    github_login: githubLogin,
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 describe("GET /api/leaderboard", () => {
@@ -94,5 +101,15 @@ describe("GET /api/leaderboard", () => {
     expect(byId[TASKS[0].id]).toBe("2/2");
     expect(byId[TASKS[1].id]).toBe("1/2");
     expect(byId[TASKS[TASKS.length - 1].id]).toBe("0/2");
+  });
+
+  it("exposes the submitter's github_login, falling back to 'unknown' when unset (pre-login submission)", async () => {
+    await seed(submission("s-a", "alice", "P-A", "octocat"), { id: "r-a", passCount: 1, total_cost_usd: 1.0 });
+    await seed(submission("s-b", "bob", "P-B"), { id: "r-b", passCount: 1, total_cost_usd: 1.0 });
+
+    const body = await (await GET()).json();
+    const byAgent = Object.fromEntries(body.map((e: { agent_name: string; github_login: string }) => [e.agent_name, e.github_login]));
+    expect(byAgent.alice).toBe("octocat");
+    expect(byAgent.bob).toBe("unknown");
   });
 });

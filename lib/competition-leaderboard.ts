@@ -10,6 +10,11 @@ export interface CompetitionRow {
   totalTasks: number;
   totalCostUsd: number;
   submittedAt: string;
+  // The entrant's GitHub login (already-public GitHub data) — the leaderboard
+  // identity axis now that submissions require sign-in. Falls back to
+  // "unknown" for a pre-login stray blob; never applies to the baseline row
+  // (it has no submitting user and isn't rendered from a CompetitionRow).
+  githubLogin: string;
 }
 
 export type BaselineState = "none" | "running" | "rejected" | "ready";
@@ -51,6 +56,7 @@ function toRow(entry: JoinedEntry): CompetitionRow | null {
     totalTasks: run.task_results.length,
     totalCostUsd: run.total_cost_usd,
     submittedAt: submission.created_at,
+    githubLogin: submission.github_login ?? "unknown",
   };
 }
 

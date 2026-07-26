@@ -148,6 +148,9 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={cellStyle}>
                       <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
+                      <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
+                        {s.githubLogin}
+                      </span>
                       {s.promptKey === "" && (
                         <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
                       )}

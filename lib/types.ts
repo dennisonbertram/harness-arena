@@ -65,6 +65,13 @@ export const SubmissionSchema = z.object({
   competition: z.boolean().optional(),
   // Marks the one competition submission that is the reference baseline.
   competition_baseline: z.boolean().optional(),
+  // The submitter's GitHub identity, stamped server-side from the session —
+  // never from the request body. Optional at the schema level because the
+  // admin-triggered competition baseline has no submitting user; both
+  // user-facing submission routes (main arena and competition) require a
+  // session and always set these before storing.
+  github_id: z.number().optional(),
+  github_login: z.string().optional(),
   created_at: z.iso.datetime(),
 });
 export type Submission = z.infer<typeof SubmissionSchema>;
