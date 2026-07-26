@@ -74,7 +74,8 @@ describe("CompetitionLeaderboardTable", () => {
       />,
     );
 
-    expect(html).toContain("var(--blue-100)");
+    // Exactly one row (of the two rendered) carries the highlight -- not zero, not both.
+    expect(html.match(/var\(--blue-100\)/g) ?? []).toHaveLength(1);
   });
 
   it("applies no highlight when currentGithubLogin is undefined or matches no row", () => {
