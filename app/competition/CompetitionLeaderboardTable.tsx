@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { formatUsd } from "@/lib/format";
-import type { CompetitionRow } from "@/lib/competition-leaderboard";
+import { UNKNOWN_GITHUB_LOGIN, type CompetitionRow } from "@/lib/competition-leaderboard";
 
 const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
 const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
@@ -31,7 +31,7 @@ const avatarPlaceholderStyle: React.CSSProperties = {
 // placeholder for a real login whose avatar 404s (renamed/deleted account).
 function AvatarOrPlaceholder({ githubLogin }: { githubLogin: string }) {
   const [broken, setBroken] = useState(false);
-  if (githubLogin === "unknown" || broken) {
+  if (githubLogin === UNKNOWN_GITHUB_LOGIN || broken) {
     return (
       <span aria-hidden="true" style={avatarPlaceholderStyle}>
         ?
@@ -46,6 +46,15 @@ function AvatarOrPlaceholder({ githubLogin }: { githubLogin: string }) {
       style={avatarStyle}
       onError={() => setBroken(true)}
     />
+  );
+}
+
+function RankLabel({ rank, tied, prefix = "#" }: { rank: number; tied: boolean; prefix?: string }) {
+  return (
+    <>
+      {rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
+      {tied ? `Tied for #${rank}` : `${prefix}${rank}`}
+    </>
   );
 }
 
@@ -112,8 +121,7 @@ export function CompetitionLeaderboardTable({
                 }}
               >
                 <td style={cellStyle} className="tabular-nums">
-                  {row.rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
-                  {row.tied ? `Tied for #${row.rank}` : `#${row.rank}`}
+                  <RankLabel rank={row.rank} tied={row.tied} />
                 </td>
                 <td style={cellStyle}>
                   <span style={{ display: "inline-flex", alignItems: "center" }}>
@@ -189,8 +197,7 @@ export function CompetitionLeaderboardTable({
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
               <div>
-                {openRow.rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
-                {openRow.tied ? `Tied for #${openRow.rank}` : `Rank #${openRow.rank}`}
+                <RankLabel rank={openRow.rank} tied={openRow.tied} prefix="Rank #" />
               </div>
               <div className="tabular-nums">
                 {openRow.tasksPassed}/{openRow.totalTasks} tasks solved
