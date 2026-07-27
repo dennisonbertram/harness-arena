@@ -206,10 +206,8 @@ export default async function LeaderboardPage() {
             </p>
           </section>
 
-          {taskOverview.length > 0 && <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />}
-
           {scatterItems.length > 0 && (
-            <section style={{ marginTop: 48, overflowX: "auto" }}>
+            <section style={{ overflowX: "auto" }}>
               <h2 className="label" style={{ marginBottom: 8 }}>
                 Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per run, colored by model</span>
               </h2>
@@ -231,6 +229,12 @@ export default async function LeaderboardPage() {
                 yMax={scale.yMax}
               />
             </section>
+          )}
+
+          {taskOverview.length > 0 && (
+            <div style={{ marginTop: 48 }}>
+              <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />
+            </div>
           )}
         </>
       )}
@@ -298,6 +302,7 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
                     return (
                       <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
+                        <ModelLogo model={m.model} size={14} />
                         <span
                           style={{
                             width: 96,

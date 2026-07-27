@@ -7,9 +7,10 @@ import { useEffect, useState } from "react";
 // with a submitted `--system-prompt`, pi's assembled prompt is the submitted
 // text + appended context files + skills + a working-directory line. All 16
 // task containers are bare (no AGENTS.md/CLAUDE.md, no skills — verified), so
-// the only addition is the cwd line. The caller reconstructs that exact string
-// and passes it in as `prompt`.
-export function CompletePromptModal({ prompt }: { prompt: string }) {
+// the only addition is the cwd line. A baseline run passes no --system-prompt
+// at all, so pi uses its own built-in default instead of the submitted text.
+// The caller reconstructs the right one of those two and passes it as `prompt`.
+export function CompletePromptModal({ prompt, isBaseline }: { prompt: string; isBaseline: boolean }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -90,10 +91,13 @@ export function CompletePromptModal({ prompt }: { prompt: string }) {
               </button>
             </div>
             <p style={{ fontSize: 12, color: "var(--gray-700)", marginBottom: 12 }}>
-              Exactly what the model receives as its system prompt: the submitted text plus pi&apos;s
-              working-directory line. Nothing else is added — the task containers carry no context files or skills.
-              The read / bash / edit / write tools are supplied separately as tool definitions, and each task&apos;s
-              instruction is sent as the first user message. This system prompt is identical for every task in the run.
+              Exactly what the model receives as its system prompt:{" "}
+              {isBaseline
+                ? "no custom prompt was submitted, so this is pi's own built-in default plus its working-directory line."
+                : "the submitted text plus pi's working-directory line."}{" "}
+              Nothing else is added — the task containers carry no context files or skills. The read / bash / edit /
+              write tools are supplied separately as tool definitions, and each task&apos;s instruction is sent as the
+              first user message. This system prompt is identical for every task in the run.
             </p>
             <pre
               className="mono"
