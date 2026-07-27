@@ -1,6 +1,10 @@
 import type { Storage } from "./storage";
 import type { Run, Submission } from "./types";
 
+// The fallback identity for a submission recorded before GitHub login was
+// required (or any other stray blob missing github_login).
+export const UNKNOWN_GITHUB_LOGIN = "unknown";
+
 export interface CompetitionRow {
   submissionId: string;
   runId: string;
@@ -56,7 +60,7 @@ function toRow(entry: JoinedEntry): CompetitionRow | null {
     totalTasks: run.task_results.length,
     totalCostUsd: run.total_cost_usd,
     submittedAt: submission.created_at,
-    githubLogin: submission.github_login ?? "unknown",
+    githubLogin: submission.github_login ?? UNKNOWN_GITHUB_LOGIN,
   };
 }
 

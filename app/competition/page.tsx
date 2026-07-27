@@ -6,6 +6,7 @@ import { getCompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
 import { modelLabel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
+import { CompetitionLeaderboardTable } from "./CompetitionLeaderboardTable";
 import { SubmitCompetitionForm } from "./SubmitCompetitionForm";
 
 // Same rationale as the main leaderboard: reads shared storage, so a
@@ -52,40 +53,7 @@ export default async function CompetitionPage() {
             No entries yet — beat the baseline.
           </div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                <th className="label" style={cellStyle}>Rank</th>
-                <th className="label" style={cellStyle}>Entrant</th>
-                <th className="label" style={cellStyle}>Tasks solved</th>
-                <th className="label" style={numCellStyle}>Cost</th>
-                <th className="label" style={numCellStyle}>Submitted</th>
-              </tr>
-            </thead>
-            <tbody>
-              {board.ranked.map((row) => (
-                <tr key={row.submissionId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-                  <td style={cellStyle}>
-                    <Link href={`/runs/${row.runId}`}>{row.tied ? `Tied for #${row.rank}` : `#${row.rank}`}</Link>
-                  </td>
-                  <td style={cellStyle}>
-                    <Link href={`/runs/${row.runId}`} className="mono">
-                      {row.githubLogin}
-                    </Link>
-                  </td>
-                  <td style={cellStyle} className="tabular-nums">
-                    {row.tasksPassed}/{row.totalTasks}
-                  </td>
-                  <td style={numCellStyle} className="tabular-nums">
-                    {formatUsd(row.totalCostUsd)}
-                  </td>
-                  <td style={numCellStyle} className="tabular-nums">
-                    {new Date(row.submittedAt).toLocaleDateString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <CompetitionLeaderboardTable ranked={board.ranked} currentGithubLogin={githubLogin} />
         )}
         {board.pending > 0 && (
           <p style={{ fontSize: 14, marginTop: 12, color: "var(--gray-700)" }}>
@@ -145,6 +113,3 @@ function BaselineSection({ board }: { board: Awaited<ReturnType<typeof getCompet
     </section>
   );
 }
-
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
-const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
