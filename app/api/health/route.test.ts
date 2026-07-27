@@ -101,6 +101,18 @@ describe("GET /api/health", () => {
     });
   });
 
+  it("reports degraded when the SUBMISSION read is partial even though runs read cleanly", async () => {
+    // The incident was submission-side: a run whose submission failed to read
+    // becomes a fabricated `__unknown:<runId>` standing. Probing only runs/
+    // would report "up" through exactly that failure.
+    storageRef.current.listSubmissions = vi.fn().mockRejectedValue(new PartialReadError("submissions/", 1, 23));
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(body.storage).toBe("degraded");
+  });
+
   it("reports storage:degraded (not up, not down) when the read was incomplete", async () => {
     // A partial read is its own failure mode: storage answered, but not
     // completely, so anything aggregating over the result would be wrong.
