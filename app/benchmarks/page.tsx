@@ -26,7 +26,7 @@ export default async function LeaderboardPage() {
   const tasks = getTasks();
   const totalTasks = tasks.length;
   const standings = aggregatePrompts(runs, submissions, totalTasks);
-  // Homepage per-task view pools EVERY completed run across ALL prompts — a
+  // The /benchmarks per-task view pools EVERY completed run across ALL prompts — a
   // task-difficulty overview, not one agent's profile.
   const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
   const submissionById = new Map(submissions.map((s) => [s.id, s]));

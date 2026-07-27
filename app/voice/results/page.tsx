@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { aggregate, type VoicePairResult } from "@/lib/voice-results";
 
-// Mirrors app/page.tsx: shared storage means a build-time-cached page would
+// Mirrors app/benchmarks/page.tsx: shared storage means a build-time-cached page would
 // never show new judgments, so ISR re-renders it at most every 15s.
 export const revalidate = 15;
 

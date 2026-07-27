@@ -3,7 +3,7 @@
 // RUNNER_MODEL / RUNNER_PROVIDER); the harness is pi, driven via the agentkit
 // baked into the sandbox snapshot (lib/sandbox.ts); tasks are vendored from
 // Terminal-Bench 2.0 (scripts/vendor-tasks.sh). Kept in one place so the
-// homepage, footer, and task pages can't drift from each other.
+// /benchmarks board, footer, and task pages can't drift from each other.
 export const ARENA_MODEL = "zai/glm-5.2";
 export const ARENA_HARNESS = "pi";
 export const ARENA_ENDPOINT = "Vercel AI Gateway";

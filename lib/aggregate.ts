@@ -44,7 +44,7 @@ export interface PromptStanding {
   lastSubmittedAt: string;
 }
 
-// The homepage's empty-prompt ("run vanilla pi with its built-in default
+// The benchmarks board's empty-prompt ("run vanilla pi with its built-in default
 // system prompt") standings display as "<model> Baseline" -- a stray "p2" or
 // "restore-check" name from a manual baseline run is not meaningful to show,
 // and the submitter has no attached GitHub identity to show instead.
@@ -192,7 +192,7 @@ export function aggregatePrompts(
 }
 
 /**
- * Homepage task-difficulty overview, broken out PER MODEL so glm-5.2 and Claude
+ * /benchmarks task-difficulty overview, broken out PER MODEL so glm-5.2 and Claude
  * are never averaged into one misleading number. For each task, groups every
  * completed run's attempt by the model it ran on. Tasks with no completed run
  * are omitted; sorted by overall pass rate desc (task difficulty), then taskId.
@@ -242,7 +242,7 @@ export interface TaskStats {
   results: TaskAttempt[]; // every attempt, newest first, each stamped with model
 }
 
-/** A task's per-model breakdown for the homepage overview. */
+/** A task's per-model breakdown for the /benchmarks overview. */
 export interface TaskModelBreakdown {
   taskId: string;
   passed: number; // total across models (task-difficulty sort)
@@ -258,7 +258,7 @@ function taskAttempts(runs: Run[], submissions: Submission[], taskId: string): T
     if (run.status !== "completed") continue;
     const submission = submissionById.get(run.submission_id);
     // Same competition exclusion as aggregatePrompts above — this feeds the
-    // homepage per-task panel (aggregateAllRunsByTask) and the task detail
+    // /benchmarks per-task panel (aggregateAllRunsByTask) and the task detail
     // page (aggregateTask), both of which must stay main-arena-only too.
     if (submission?.competition) continue;
     const tr = run.task_results.find((t) => t.task_id === taskId);
