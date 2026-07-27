@@ -2,12 +2,16 @@ import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd, scaleScatterPoints } from "@/lib/format";
-import { aggregatePrompts, aggregateAllRunsByTask, type TaskModelBreakdown } from "@/lib/aggregate";
+import { aggregatePrompts, aggregateAllRunsByTask, baselineDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
 import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
+import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
+import { isBaselinePrompt } from "@/lib/prompt";
+import type { Run } from "@/lib/types";
 import { RerunButton } from "./RerunButton";
 import { ScatterChart, type ScatterItem } from "./ScatterChart";
 import { GithubAvatar } from "./GithubAvatar";
+import { ModelLogo } from "./ModelLogo";
 import { cellStyle, numCellStyle } from "./tableStyles";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
@@ -25,13 +29,20 @@ export default async function LeaderboardPage() {
   // Homepage per-task view pools EVERY completed run across ALL prompts — a
   // task-difficulty overview, not one agent's profile.
   const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
-  const completedRuns = runs.filter((r) => r.status === "completed" && r.tasks_passed !== undefined).length;
+  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  // Competition entries (see /competition) live in the same storage but must
+  // never surface on the main arena homepage -- matches aggregatePrompts's
+  // own exclusion, so the run count and scatter chart agree with the table.
+  const isMainArenaRun = (r: Run) => submissionById.get(r.submission_id)?.competition !== true;
+  const completedRuns = runs.filter(
+    (r) => r.status === "completed" && r.tasks_passed !== undefined && isMainArenaRun(r),
+  ).length;
   const pendingRuns = runs.filter((r) => r.status === "running" || r.status === "queued").length;
 
   // Cost-vs-tasks scatter: one dot per completed run, colored by model.
-  const submissionById = new Map(submissions.map((s) => [s.id, s]));
   const chartRuns = runs.filter(
-    (r) => r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined,
+    (r) =>
+      r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined && isMainArenaRun(r),
   );
   const scale = scaleScatterPoints(
     chartRuns.map((r) => ({
@@ -50,12 +61,12 @@ export default async function LeaderboardPage() {
       runId: p.runId,
       cx: p.cx,
       cy: p.cy,
-      agentName: sub?.agent_name ?? "unknown",
+      githubLogin: sub?.github_login ?? UNKNOWN_GITHUB_LOGIN,
       model: p.model,
       tasksPassed: p.tasksPassed,
       totalTasks,
       totalCostUsd: p.totalCostUsd,
-      isBaseline: (sub?.prompt ?? "") === "",
+      isBaseline: isBaselinePrompt(sub?.prompt ?? ""),
     };
   });
   const chartModels = Array.from(new Set(scatterItems.map((i) => i.model)));
@@ -144,20 +155,23 @@ export default async function LeaderboardPage() {
               </thead>
               <tbody>
                 {standings.map((s, i) => (
-                  <tr key={s.promptKey || "baseline"} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                  // A standing is unique per (model, promptKey) -- matches aggregatePrompts's own
+                  // grouping key, since promptKey alone collides across models (e.g. multiple "" rows).
+                  <tr key={`${s.model}::${s.promptKey}`} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>
                       <Link href={`/runs/${s.runIds[0]}`}>{i + 1}</Link>
                     </td>
                     <td style={cellStyle}>
-                      <span style={{ display: "inline-flex", alignItems: "center" }}>
-                        <GithubAvatar githubLogin={s.githubLogin} size={20} />
-                        <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
-                      </span>
-                      <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
-                        {s.githubLogin}
-                      </span>
-                      {s.promptKey === "" && (
-                        <span style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>baseline</span>
+                      {s.promptKey === "" ? (
+                        <span style={{ display: "inline-flex", alignItems: "center" }}>
+                          <ModelLogo model={s.model} size={20} />
+                          <Link href={`/runs/${s.runIds[0]}`}>{baselineDisplayName(s)}</Link>
+                        </span>
+                      ) : (
+                        <span style={{ display: "inline-flex", alignItems: "center" }}>
+                          <GithubAvatar githubLogin={s.githubLogin} size={20} />
+                          <Link href={`/runs/${s.runIds[0]}`}>{s.githubLogin}</Link>
+                        </span>
                       )}
                     </td>
                     <td style={cellStyle}>{modelLabel(s.model)}</td>
@@ -192,10 +206,8 @@ export default async function LeaderboardPage() {
             </p>
           </section>
 
-          {taskOverview.length > 0 && <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />}
-
           {scatterItems.length > 0 && (
-            <section style={{ marginTop: 48, overflowX: "auto" }}>
+            <section style={{ overflowX: "auto" }}>
               <h2 className="label" style={{ marginBottom: 8 }}>
                 Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per run, colored by model</span>
               </h2>
@@ -217,6 +229,12 @@ export default async function LeaderboardPage() {
                 yMax={scale.yMax}
               />
             </section>
+          )}
+
+          {taskOverview.length > 0 && (
+            <div style={{ marginTop: 48 }}>
+              <PerTaskPanel perTask={taskOverview} runCount={completedRuns} />
+            </div>
           )}
         </>
       )}
@@ -284,6 +302,7 @@ function PerTaskPanel({ perTask, runCount }: { perTask: TaskModelBreakdown[]; ru
                     return (
                       <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <span style={{ color: modelColor(m.model), fontSize: 10 }}>●</span>
+                        <ModelLogo model={m.model} size={14} />
                         <span
                           style={{
                             width: 96,

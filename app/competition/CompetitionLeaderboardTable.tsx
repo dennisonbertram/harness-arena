@@ -27,8 +27,8 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
 function RankLabel({ rank, tied, prefix = "#" }: { rank: number; tied: boolean; prefix?: string }) {
   return (
     <>
-      {rank === 1 ? <span aria-hidden="true" style={{ marginRight: 4 }}>👑</span> : null}
       {tied ? `Tied for #${rank}` : `${prefix}${rank}`}
+      {rank === 1 ? <span aria-hidden="true" style={{ marginLeft: 4 }}>👑</span> : null}
     </>
   );
 }

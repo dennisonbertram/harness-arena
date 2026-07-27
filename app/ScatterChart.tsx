@@ -3,12 +3,15 @@
 import { useState } from "react";
 import { formatUsd } from "@/lib/format";
 import { modelColor, modelLabel } from "@/lib/models";
+import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
 
 export interface ScatterItem {
   runId: string;
   cx: number;
   cy: number;
-  agentName: string;
+  // The submitter's GitHub login -- ignored for a baseline item, which
+  // labels by model instead (matches the leaderboard table's convention).
+  githubLogin: string;
   model: string;
   tasksPassed: number;
   totalTasks: number;
@@ -139,10 +142,14 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
   );
 }
 
+const AVATAR_SIZE = 16;
+
 function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; plotTop: number }) {
-  const line1 = item.agentName + (item.isBaseline ? "  (baseline)" : "");
+  const showAvatar = !item.isBaseline && item.githubLogin !== UNKNOWN_GITHUB_LOGIN;
+  const line1 = item.isBaseline ? `${modelLabel(item.model)} Baseline` : item.githubLogin;
   const line2 = `${modelLabel(item.model)} · ${item.tasksPassed}/${item.totalTasks} · ${formatUsd(item.totalCostUsd)}`;
-  const boxW = Math.max(line1.length, line2.length) * 7.2 + 24;
+  const avatarGap = showAvatar ? AVATAR_SIZE + 6 : 0;
+  const boxW = Math.max(line1.length * 7.2 + avatarGap, line2.length * 7.2) + 24;
   const boxH = 44;
   // Prefer above-right of the dot; flip left if it would overflow the right edge.
   const flipLeft = item.cx + 12 + boxW > width;
@@ -159,7 +166,22 @@ function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; p
         fill="var(--background-100)"
         stroke="var(--gray-alpha-500)"
       />
-      <text x={bx + 12} y={by + 18} fontSize={13} fontWeight={600} fill="var(--gray-1000)">
+      {showAvatar && (
+        <>
+          <clipPath id={`avatar-clip-${item.runId}`}>
+            <circle cx={bx + 12 + AVATAR_SIZE / 2} cy={by + 14} r={AVATAR_SIZE / 2} />
+          </clipPath>
+          <image
+            href={`https://github.com/${item.githubLogin}.png`}
+            x={bx + 12}
+            y={by + 6}
+            width={AVATAR_SIZE}
+            height={AVATAR_SIZE}
+            clipPath={`url(#avatar-clip-${item.runId})`}
+          />
+        </>
+      )}
+      <text x={bx + 12 + avatarGap} y={by + 18} fontSize={13} fontWeight={600} fill="var(--gray-1000)">
         {line1}
       </text>
       <text x={bx + 12} y={by + 34} fontSize={12} fill="var(--gray-900)" className="tabular-nums">

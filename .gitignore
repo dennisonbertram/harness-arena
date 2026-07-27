@@ -10,3 +10,5 @@ public/runner-bundle.tgz
 .env
 .env.*
 !.env.example
+.vercel
+.env*

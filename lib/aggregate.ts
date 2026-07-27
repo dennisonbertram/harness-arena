@@ -1,6 +1,7 @@
-import { runModel } from "./models";
+import { modelLabel, runModel } from "./models";
 import type { Run, Submission } from "./types";
 import { UNKNOWN_GITHUB_LOGIN } from "./github";
+import { isBaselinePrompt } from "./prompt";
 
 // v1 benchmarks PASS RATE, not cost. With glm-5.2's run-to-run variance
 // (the same vanilla prompt scored 7,7,5,4 of 16 across identical runs) a
@@ -43,6 +44,14 @@ export interface PromptStanding {
   lastSubmittedAt: string;
 }
 
+// The homepage's empty-prompt ("run vanilla pi with its built-in default
+// system prompt") standings display as "<model> Baseline" -- a stray "p2" or
+// "restore-check" name from a manual baseline run is not meaningful to show,
+// and the submitter has no attached GitHub identity to show instead.
+export function baselineDisplayName(standing: Pick<PromptStanding, "model">): string {
+  return `${modelLabel(standing.model)} Baseline`;
+}
+
 function median(nums: number[]): number | null {
   if (nums.length === 0) return null;
   const s = [...nums].sort((a, b) => a - b);
@@ -78,7 +87,15 @@ export function aggregatePrompts(
     // never surface on the main arena leaderboard or get averaged into a
     // main-arena standing that happens to share the same (model, prompt) key.
     if (submission?.competition) continue;
-    const promptKey = submission?.prompt ?? `__unknown:${run.submission_id}`;
+    // Whitespace-only prompts run baseline too (matches the submission
+    // route's isBaselinePrompt check) and must group under the same "" key
+    // as an actually-empty prompt, or they'd split into a duplicate standing.
+    const promptKey =
+      submission === undefined
+        ? `__unknown:${run.submission_id}`
+        : isBaselinePrompt(submission.prompt)
+          ? ""
+          : submission.prompt;
     const model = runModel(run.model ?? submission?.model);
     const key = `${model}\0${promptKey}`;
     const at = submission?.created_at ?? run.created_at;

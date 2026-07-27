@@ -14,6 +14,11 @@ export const MODEL_LABELS: Record<string, string> = {
   // the 4-8 entry above may want the same check before its first run).
   "anthropic/claude-opus-5": "Claude Opus 5",
   "poolside/laguna-s-2.1": "Laguna S 2.1",
+  // Slugs verified against the live gateway catalog (GET /v1/models) 2026-07-27.
+  "moonshotai/kimi-k3": "Kimi K3",
+  "nvidia/nemotron-3-super-120b-a12b": "Nemotron 3 Super",
+  "google/gemma-4-31b-it": "Gemma 4",
+  "google/gemini-3-flash": "Gemini 3 Flash",
 };
 
 // One shared model->color map so the chart, per-task bars, and any per-model
@@ -25,6 +30,10 @@ export const MODEL_COLORS: Record<string, string> = {
   "anthropic/claude-opus-4-8": "#a06fe0", // violet
   "anthropic/claude-opus-5": "#e0566f", // rose
   "poolside/laguna-s-2.1": "#2bb0a0", // teal
+  "moonshotai/kimi-k3": "#6b7fd7", // indigo
+  "nvidia/nemotron-3-super-120b-a12b": "#76b900", // nvidia green
+  "google/gemma-4-31b-it": "#f2c94c", // gold
+  "google/gemini-3-flash": "#00acc1", // cyan
 };
 const FALLBACK_MODEL_COLOR = "#9aa0a6"; // gray for any unknown/legacy id
 

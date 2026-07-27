@@ -7,6 +7,7 @@ import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { reconstructRunProgress, type TaskState } from "@/lib/run-progress";
 import { modelLabel } from "@/lib/models";
 import { getBaselinePrompt } from "@/lib/baseline-prompt";
+import { isBaselinePrompt } from "@/lib/prompt";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { CompletePromptModal } from "./CompletePromptModal";
 import { PromptDiff } from "./PromptDiff";
@@ -23,7 +24,14 @@ const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 // submitted text. This reconstructs the exact complete system prompt the model
 // receives, identical for every task in a run.
 const PI_CWD = "/app";
-function completeSystemPrompt(submittedPrompt: string): string {
+export function completeSystemPrompt(submittedPrompt: string): string {
+  // A baseline submission passes NO --system-prompt at all, so the model
+  // never received "" + the cwd line -- it received pi's own built-in
+  // default (captured in docs/pi-vanilla-system-prompt.txt, which already
+  // ends in the same "Current working directory: <cwd>" line).
+  if (isBaselinePrompt(submittedPrompt)) {
+    return getBaselinePrompt().replace("<cwd>", PI_CWD);
+  }
   return `${submittedPrompt}\nCurrent working directory: ${PI_CWD}`;
 }
 
@@ -224,7 +232,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <h2 className="label">Submitted system prompt</h2>
           {submission ? (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <CompletePromptModal prompt={completeSystemPrompt(submission.prompt)} />
+              <CompletePromptModal
+                prompt={completeSystemPrompt(submission.prompt)}
+                isBaseline={isBaselinePrompt(submission.prompt)}
+              />
               <CopyPromptButton text={submission.prompt} />
             </div>
           ) : null}
@@ -249,15 +260,27 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         <h2 className="label" style={{ marginBottom: 4 }}>
           Diff vs vanilla baseline
         </h2>
-        <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 12 }}>
-          What this prompt changed from the{" "}
-          <a href="/api/baseline-prompt" target="_blank" rel="noopener noreferrer">
-            vanilla baseline
-          </a>{" "}
-          — <span style={{ color: "#16a34a" }}>green added</span>,{" "}
-          <span style={{ color: "#dc2626" }}>red removed</span>.
-        </p>
-        <PromptDiff baseline={getBaselinePrompt()} submitted={submission?.prompt ?? ""} />
+        {submission && isBaselinePrompt(submission.prompt) ? (
+          <p style={{ fontSize: 13, color: "var(--gray-700)" }}>
+            This run submitted no custom prompt — it used the{" "}
+            <a href="/api/baseline-prompt" target="_blank" rel="noopener noreferrer">
+              vanilla baseline
+            </a>{" "}
+            exactly, so there&apos;s no diff to show.
+          </p>
+        ) : (
+          <>
+            <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 12 }}>
+              What this prompt changed from the{" "}
+              <a href="/api/baseline-prompt" target="_blank" rel="noopener noreferrer">
+                vanilla baseline
+              </a>{" "}
+              — <span style={{ color: "#16a34a" }}>green added</span>,{" "}
+              <span style={{ color: "#dc2626" }}>red removed</span>.
+            </p>
+            <PromptDiff baseline={getBaselinePrompt()} submitted={submission?.prompt ?? ""} />
+          </>
+        )}
       </section>
 
       <section>
