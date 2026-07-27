@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get, list, put } from "@vercel/blob";
-import { BlobStorage, getStorage, MemoryStorage } from "./storage";
+import { BlobStorage, getStorage, MemoryStorage, seqFromEventPathname } from "./storage";
 import type { Run, Submission } from "./types";
 
 vi.mock("@vercel/blob", () => ({
@@ -491,5 +491,109 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
         else process.env.BLOB_READ_WRITE_TOKEN = originalToken;
       }
     });
+  });
+});
+
+describe("incremental event reads (?since= cursor)", () => {
+  // This block is top-level, so it does NOT inherit the BlobStorage suite's
+  // mock reset -- without these, a leftover `list` mock or stubbed global
+  // fetch from another test leaks in and makes these order-dependent.
+  beforeEach(() => {
+    vi.mocked(get).mockReset();
+    vi.mocked(put).mockReset();
+    vi.mocked(list).mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("seqFromEventPathname", () => {
+    it("reads the seq out of a zero-padded event blob name", () => {
+      expect(seqFromEventPathname("events/run-1/0000000007.json")).toBe(7);
+      expect(seqFromEventPathname("events/run-1/0000000042.json")).toBe(42);
+    });
+
+    it("returns null for a name that isn't an event blob, so callers keep it rather than dropping it", () => {
+      expect(seqFromEventPathname("events/run-1/weird-name.json")).toBeNull();
+      expect(seqFromEventPathname("runs/run-1.json")).toBeNull();
+      expect(seqFromEventPathname(undefined)).toBeNull();
+    });
+  });
+
+  it("MemoryStorage returns only events after the cursor", async () => {
+    const storage = new MemoryStorage();
+    await storage.appendRunEvents("run-1", [
+      { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: {} },
+      { ts: "2026-07-21T00:00:01.000Z", type: "run.sandbox_ready", payload: {} },
+      { ts: "2026-07-21T00:00:02.000Z", type: "run.completed", payload: {} },
+    ]);
+
+    expect((await storage.listRunEventsSince("run-1", 0)).map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect((await storage.listRunEventsSince("run-1", 2)).map((e) => e.seq)).toEqual([3]);
+    expect(await storage.listRunEventsSince("run-1", 3)).toEqual([]);
+    // Unchanged full-listing behavior.
+    expect((await storage.listRunEvents("run-1")).map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("BlobStorage fetches ONLY the blobs after the cursor -- the whole point (no O(events) refetch per poll)", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [1, 2, 3, 4].map((n) => ({
+        url: `https://blob.example/events/run-1/${String(n).padStart(10, "0")}.json`,
+        pathname: `events/run-1/${String(n).padStart(10, "0")}.json`,
+      })),
+      hasMore: false,
+    } as never);
+
+    const fetchSpy = vi.fn().mockImplementation((url: string) => {
+      const seq = Number(/(\d+)\.json$/.exec(url)![1]);
+      return Promise.resolve({
+        text: async () => JSON.stringify({ run_id: "run-1", seq, ts: "2026-07-21T00:00:00.000Z", type: "task.started", payload: {} }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const events = await storage.listRunEventsSince("run-1", 2);
+
+    expect(events.map((e) => e.seq)).toEqual([3, 4]);
+    // 2 content fetches, not 4: seq 1 and 2 were excluded from the blob NAME
+    // alone, before any network read.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("BlobStorage keeps an unparseable blob name (fail-open) rather than silently dropping it", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [
+        { url: "https://blob.example/events/run-1/0000000001.json", pathname: "events/run-1/0000000001.json" },
+        { url: "https://blob.example/events/run-1/odd.json", pathname: "events/run-1/odd.json" },
+      ],
+      hasMore: false,
+    } as never);
+
+    const fetchSpy = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({
+        text: async () =>
+          JSON.stringify({
+            run_id: "run-1",
+            seq: url.includes("odd") ? 9 : 1,
+            ts: "2026-07-21T00:00:00.000Z",
+            type: "task.started",
+            payload: {},
+          }),
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Cursor 5 excludes seq 1 by name; the unparseable blob is still fetched,
+    // and its real seq (9) is what decides whether it's returned.
+    const events = await storage.listRunEventsSince("run-1", 5);
+    expect(events.map((e) => e.seq)).toEqual([9]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    vi.unstubAllGlobals();
   });
 });
