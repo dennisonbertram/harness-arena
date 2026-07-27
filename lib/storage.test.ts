@@ -1,7 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get, list, put } from "@vercel/blob";
 import { BlobStorage, getStorage, MemoryStorage, PartialReadError, seqFromEventPathname } from "./storage";
-import type { Run, Submission } from "./types";
+import type { Competition, Run, Submission } from "./types";
+
+function makeCompetition(id: string, overrides: Partial<Competition> = {}): Competition {
+  return {
+    id,
+    arena: "harness-arena",
+    harness: "pi",
+    model: "zai/glm-5.2",
+    prize_amount_usd: null,
+    prize_cadence: null,
+    status: "live",
+    created_at: "2026-07-27T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 vi.mock("@vercel/blob", () => ({
   get: vi.fn(),
@@ -128,6 +142,33 @@ describe("MemoryStorage", () => {
   it("listSubmissions returns an empty array when nothing has been stored", async () => {
     const storage = new MemoryStorage();
     expect(await storage.listSubmissions()).toEqual([]);
+  });
+
+  it("round-trips a Competition with prize fields left null (issue #75)", async () => {
+    const storage = new MemoryStorage();
+    const competition = makeCompetition("comp-1");
+
+    await storage.putCompetition(competition);
+    const result = await storage.getCompetition("comp-1");
+
+    expect(result).toEqual(competition);
+  });
+
+  it("getCompetition returns undefined for an id that was never stored", async () => {
+    const storage = new MemoryStorage();
+    expect(await storage.getCompetition("nope")).toBeUndefined();
+  });
+
+  it("listCompetitions returns competitions ordered by created_at descending", async () => {
+    const storage = new MemoryStorage();
+    const older = makeCompetition("comp-old", { created_at: "2026-07-01T00:00:00.000Z" });
+    const newer = makeCompetition("comp-new", { created_at: "2026-07-10T00:00:00.000Z" });
+
+    await storage.putCompetition(older);
+    await storage.putCompetition(newer);
+
+    const result = await storage.listCompetitions();
+    expect(result.map((c) => c.id)).toEqual(["comp-new", "comp-old"]);
   });
 
   describe("regression: seq isolation and backend selection", () => {
@@ -434,6 +475,55 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("putCompetition writes JSON with the same access/overwrite/content-type conventions as putSubmission", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/competitions/comp-1.json" } as never);
+
+    await storage.putCompetition(makeCompetition("comp-1"));
+
+    expect(put).toHaveBeenCalledWith("competitions/comp-1.json", expect.any(String), {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: "application/json",
+    });
+  });
+
+  it("listCompetitions follows list() pagination across multiple pages", async () => {
+    const storage = new BlobStorage();
+
+    vi.mocked(list)
+      .mockResolvedValueOnce({
+        blobs: [{ url: "https://blob.example/competitions/comp-1.json" } as never],
+        hasMore: true,
+        cursor: "cursor-1",
+      } as never)
+      .mockResolvedValueOnce({
+        blobs: [{ url: "https://blob.example/competitions/comp-2.json" } as never],
+        hasMore: false,
+      } as never);
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: async () => JSON.stringify(makeCompetition("comp-1")),
+        })
+        .mockResolvedValueOnce({
+          text: async () => JSON.stringify(makeCompetition("comp-2", { created_at: "2026-07-28T00:00:00.000Z" })),
+        }),
+    );
+
+    const result = await storage.listCompetitions();
+
+    expect(result.map((c) => c.id).sort()).toEqual(["comp-1", "comp-2"]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "cursor-1" }));
+
+    vi.unstubAllGlobals();
+  });
+
   describe("regression: pagination and misconfiguration are not partially fixed", () => {
     it("listRuns also follows list() pagination across multiple pages, not just listSubmissions", async () => {
       // Guards against a fix applied to listSubmissions only, leaving
@@ -699,6 +789,18 @@ describe("partial reads fail loud (regression: fabricated leaderboard standings)
 
     await expect(storage.listRuns()).rejects.toThrow(PartialReadError);
     await expect(storage.listRuns()).rejects.toThrow(/1 of 3/);
+  });
+
+  it("listCompetitions THROWS when a competition blob is unreadable, same as listSubmissions/listRuns", async () => {
+    // Same partial-read contract as submissions/runs -- see storage.ts comment
+    // on Storage.listCompetitions.
+    const storage = new BlobStorage();
+    const competition = (id: string) => makeCompetition(id);
+    vi.mocked(list).mockResolvedValue(blobs("competitions/", ["c1", "c2"]));
+    vi.stubGlobal("fetch", fetchWhereOneFails("c2", competition));
+
+    await expect(storage.listCompetitions()).rejects.toThrow(PartialReadError);
+    await expect(storage.listCompetitions()).rejects.toThrow(/1 of 2/);
   });
 
   it("listSubmissions THROWS when a submission blob is unreadable", async () => {
