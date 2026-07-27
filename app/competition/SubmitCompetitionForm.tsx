@@ -174,7 +174,7 @@ export function SubmitCompetitionForm({ githubLogin }: { githubLogin: string }) 
         <ResultBox border="var(--red-700)" background="var(--red-100)">
           <p style={{ fontWeight: 600, marginBottom: 4 }}>Your session expired</p>
           <p style={{ marginBottom: 8 }}>Your prompt is still here — sign in again, then submit.</p>
-          <a href="/competition" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-700)" }}>
+          <a href="/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-700)" }}>
             Sign in again →
           </a>
         </ResultBox>

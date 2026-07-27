@@ -83,7 +83,7 @@ export function aggregatePrompts(
   for (const run of runs) {
     if (run.status !== "completed" || run.tasks_passed === undefined) continue;
     const submission = submissionById.get(run.submission_id);
-    // Competition entries (see /competition) live in the same storage but must
+    // Competition entries (see the / homepage) live in the same storage but must
     // never surface on the main arena leaderboard or get averaged into a
     // main-arena standing that happens to share the same (model, prompt) key.
     if (submission?.competition) continue;

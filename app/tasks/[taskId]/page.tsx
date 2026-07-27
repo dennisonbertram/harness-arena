@@ -22,7 +22,7 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
       <div style={{ fontSize: 14, marginBottom: 16 }}>
-        <Link href="/">← Leaderboard</Link>
+        <Link href="/benchmarks">← Benchmarks</Link>
       </div>
       <h1 className="mono" style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.01em", marginBottom: 6 }}>
         {taskId}
