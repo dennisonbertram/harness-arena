@@ -5,6 +5,9 @@ import { formatUsd, scaleScatterPoints } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, baselineDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
 import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
+import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
+import { isBaselinePrompt } from "@/lib/prompt";
+import type { Run } from "@/lib/types";
 import { RerunButton } from "./RerunButton";
 import { ScatterChart, type ScatterItem } from "./ScatterChart";
 import { GithubAvatar } from "./GithubAvatar";
@@ -25,13 +28,20 @@ export default async function LeaderboardPage() {
   // Homepage per-task view pools EVERY completed run across ALL prompts — a
   // task-difficulty overview, not one agent's profile.
   const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
-  const completedRuns = runs.filter((r) => r.status === "completed" && r.tasks_passed !== undefined).length;
+  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  // Competition entries (see /competition) live in the same storage but must
+  // never surface on the main arena homepage -- matches aggregatePrompts's
+  // own exclusion, so the run count and scatter chart agree with the table.
+  const isMainArenaRun = (r: Run) => submissionById.get(r.submission_id)?.competition !== true;
+  const completedRuns = runs.filter(
+    (r) => r.status === "completed" && r.tasks_passed !== undefined && isMainArenaRun(r),
+  ).length;
   const pendingRuns = runs.filter((r) => r.status === "running" || r.status === "queued").length;
 
   // Cost-vs-tasks scatter: one dot per completed run, colored by model.
-  const submissionById = new Map(submissions.map((s) => [s.id, s]));
   const chartRuns = runs.filter(
-    (r) => r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined,
+    (r) =>
+      r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined && isMainArenaRun(r),
   );
   const scale = scaleScatterPoints(
     chartRuns.map((r) => ({
@@ -50,12 +60,12 @@ export default async function LeaderboardPage() {
       runId: p.runId,
       cx: p.cx,
       cy: p.cy,
-      agentName: sub?.agent_name ?? "unknown",
+      githubLogin: sub?.github_login ?? UNKNOWN_GITHUB_LOGIN,
       model: p.model,
       tasksPassed: p.tasksPassed,
       totalTasks,
       totalCostUsd: p.totalCostUsd,
-      isBaseline: (sub?.prompt ?? "") === "",
+      isBaseline: isBaselinePrompt(sub?.prompt ?? ""),
     };
   });
   const chartModels = Array.from(new Set(scatterItems.map((i) => i.model)));
@@ -144,7 +154,9 @@ export default async function LeaderboardPage() {
               </thead>
               <tbody>
                 {standings.map((s, i) => (
-                  <tr key={s.promptKey || "baseline"} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+                  // A standing is unique per (model, promptKey) -- matches aggregatePrompts's own
+                  // grouping key, since promptKey alone collides across models (e.g. multiple "" rows).
+                  <tr key={`${s.model}::${s.promptKey}`} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                     <td style={cellStyle}>
                       <Link href={`/runs/${s.runIds[0]}`}>{i + 1}</Link>
                     </td>
