@@ -24,7 +24,7 @@ describe("CompetitionLeaderboardTable", () => {
       <CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />,
     );
 
-    expect(html).toContain('src="https://github.com/octocat.png"');
+    expect(html).toContain("https://github.com/octocat.png");
     expect(html).toContain('alt="octocat"');
   });
 

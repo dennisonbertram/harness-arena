@@ -172,7 +172,9 @@ function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; p
             <circle cx={bx + 12 + AVATAR_SIZE / 2} cy={by + 14} r={AVATAR_SIZE / 2} />
           </clipPath>
           <image
-            href={`https://github.com/${item.githubLogin}.png`}
+            // Size-capped for the same reason as GithubAvatar: the uncapped
+            // URL serves a 460x460 image into this tooltip's small circle.
+            href={`https://github.com/${item.githubLogin}.png?size=${AVATAR_SIZE * 2}`}
             x={bx + 12}
             y={by + 6}
             width={AVATAR_SIZE}
