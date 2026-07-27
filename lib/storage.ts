@@ -1,10 +1,14 @@
 import { get, list, put } from "@vercel/blob";
-import type { NewRunEvent, Run, RunEvent, Submission } from "./types";
+import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
   getSubmission(id: string): Promise<Submission | undefined>;
   putSubmission(submission: Submission): Promise<void>;
   listSubmissions(): Promise<Submission[]>;
+  getCompetition(id: string): Promise<Competition | undefined>;
+  putCompetition(competition: Competition): Promise<void>;
+  /** Same partial-read contract as listSubmissions/listRuns -- see PartialReadError. */
+  listCompetitions(): Promise<Competition[]>;
   getRun(id: string): Promise<Run | undefined>;
   putRun(run: Run): Promise<void>;
   listRuns(): Promise<Run[]>;
@@ -35,6 +39,7 @@ export interface Storage {
 // local/test use. Nothing here survives a process restart.
 export class MemoryStorage implements Storage {
   private submissions = new Map<string, Submission>();
+  private competitions = new Map<string, Competition>();
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
   private traces = new Map<string, Buffer>();
@@ -49,6 +54,18 @@ export class MemoryStorage implements Storage {
 
   async listSubmissions(): Promise<Submission[]> {
     return [...this.submissions.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async getCompetition(id: string): Promise<Competition | undefined> {
+    return this.competitions.get(id);
+  }
+
+  async putCompetition(competition: Competition): Promise<void> {
+    this.competitions.set(competition.id, competition);
+  }
+
+  async listCompetitions(): Promise<Competition[]> {
+    return [...this.competitions.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async getRun(id: string): Promise<Run | undefined> {
@@ -226,6 +243,28 @@ export class BlobStorage implements Storage {
     // single blip.
     if (found.length !== results.length) {
       throw new PartialReadError("submissions/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async getCompetition(id: string): Promise<Competition | undefined> {
+    return this.readJson<Competition>(`competitions/${id}.json`);
+  }
+
+  async putCompetition(competition: Competition): Promise<void> {
+    await this.writeJson(`competitions/${competition.id}.json`, competition);
+  }
+
+  async listCompetitions(): Promise<Competition[]> {
+    const blobs = await this.listAllBlobs("competitions/");
+    const results = await Promise.all(
+      blobs.map((blob) => withRetry(() => fetchJson<Competition>(blob.url), 3).catch(() => undefined)),
+    );
+    const found = results.filter((c): c is Competition => c !== undefined);
+    // Fail loud on an incomplete read -- same contract as listSubmissions:
+    // a dropped competition must not silently vanish from a switcher/listing.
+    if (found.length !== results.length) {
+      throw new PartialReadError("competitions/", results.length - found.length, results.length);
     }
     return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }

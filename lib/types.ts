@@ -61,8 +61,16 @@ export const SubmissionSchema = z.object({
   // for legacy submissions made before multi-model support.
   model: z.string().optional(),
   // Marks this submission as belonging to the /competition pool rather than
-  // the main arena. Absent/false = main arena (the default, unaffected).
+  // the main arena. Absent/false = main arena (the default, unaffected). Kept
+  // (not repurposed) alongside competition_id: legacy rows predate the
+  // Competition entity and only ever set this boolean, and slice 2 still
+  // reads it as the fallback when competition_id is absent (issue #75/#76).
   competition: z.boolean().optional(),
+  // Which Competition entity (see CompetitionSchema) this submission belongs
+  // to. Absent on every row written before the backfill script ran (see
+  // scripts/seed-competition.mjs) -- those rows are identified by
+  // `competition: true` instead.
+  competition_id: z.string().optional(),
   // Marks the one competition submission that is the reference baseline.
   competition_baseline: z.boolean().optional(),
   // The submitter's GitHub identity, stamped server-side from the session —
@@ -91,6 +99,34 @@ export const TaskResultSchema = z.object({
   trace_blob_url: z.string().optional(),
 });
 export type TaskResult = z.infer<typeof TaskResultSchema>;
+
+export const PRIZE_CADENCES = ["daily", "weekly", "monthly", "one-time"] as const;
+
+// A (arena, harness, model) triple -- one leaderboard, one prize pot (epic
+// #74). "Harness Arena" is the one arena type that exists today, but arena is
+// deliberately an open string rather than a closed enum: a future arena type
+// (e.g. a bounty) is not a schema change, just a new value.
+export const CompetitionSchema = z.object({
+  id: z.string(),
+  // Slug for the competition TYPE, e.g. "harness-arena". Open string on
+  // purpose -- see comment above.
+  arena: z.string(),
+  harness: z.string(),
+  // Gateway id, e.g. "zai/glm-5.2" -- must pass isAllowedModel (lib/models.ts).
+  model: z.string(),
+  // Prize amount/cadence are data, not a constant, but deliberately UNSET at
+  // seed time (epic #74: "TBD, do not invent a figure"). Nullable because a
+  // seeded row explicitly carries "no value yet" rather than omitting the
+  // field, so callers can distinguish "seeded, TBD" from "field doesn't
+  // exist on this schema version."
+  prize_amount_usd: z.number().nullable().optional(),
+  prize_cadence: z.enum(PRIZE_CADENCES).nullable().optional(),
+  // Closing is manual (epic #74) -- no scheduled rollover computes this.
+  status: z.enum(["live", "closed"]),
+  created_at: z.iso.datetime(),
+  closed_at: z.iso.datetime().optional(),
+});
+export type Competition = z.infer<typeof CompetitionSchema>;
 
 export const RunSchema = z.object({
   id: z.string(),
