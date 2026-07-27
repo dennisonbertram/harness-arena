@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get, list, put } from "@vercel/blob";
-import { BlobStorage, getStorage, MemoryStorage } from "./storage";
+import { BlobStorage, getStorage, MemoryStorage, PartialReadError } from "./storage";
 import type { Run, Submission } from "./types";
 
 vi.mock("@vercel/blob", () => ({
@@ -491,5 +491,90 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
         else process.env.BLOB_READ_WRITE_TOKEN = originalToken;
       }
     });
+  });
+});
+
+describe("partial reads fail loud (regression: fabricated leaderboard standings)", () => {
+  beforeEach(() => {
+    vi.mocked(get).mockReset();
+    vi.mocked(put).mockReset();
+    vi.mocked(list).mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function blobs(prefix: string, ids: string[]) {
+    return {
+      blobs: ids.map((id) => ({ url: `https://blob.example/${prefix}${id}.json`, pathname: `${prefix}${id}.json` })),
+      hasMore: false,
+    } as never;
+  }
+
+  // Rate-limited Blob reads return an HTML error page, not JSON.
+  function fetchWhereOneFails(failingId: string, build: (id: string) => object) {
+    return vi.fn().mockImplementation((url: string) => {
+      const id = /\/([^/]+)\.json$/.exec(url)![1];
+      if (id === failingId) {
+        return Promise.resolve({ ok: false, status: 403, text: async () => "<!DOCTYPE html>Forbidden" });
+      }
+      return Promise.resolve({ text: async () => JSON.stringify(build(id)) });
+    });
+  }
+
+  const run = (id: string) => ({ id, submission_id: `sub-${id}`, status: "completed", task_results: [], created_at: "2026-07-21T00:00:00.000Z" });
+  const sub = (id: string) => ({ id, agent_name: "a", prompt: "p", status: "scored", created_at: "2026-07-21T00:00:00.000Z" });
+
+  it("listRuns THROWS when a run blob is unreadable, rather than returning a smaller list", async () => {
+    // The incident: a dropped run silently changes every aggregate computed
+    // from this list -- pass rate, run count, cost -- with no error anywhere.
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValue(blobs("runs/", ["r1", "r2", "r3"]));
+    vi.stubGlobal("fetch", fetchWhereOneFails("r2", run));
+
+    await expect(storage.listRuns()).rejects.toThrow(PartialReadError);
+    await expect(storage.listRuns()).rejects.toThrow(/1 of 3/);
+  });
+
+  it("listSubmissions THROWS when a submission blob is unreadable", async () => {
+    // This is the one that fabricated standings: aggregatePrompts keys a run
+    // whose submission is missing as `__unknown:<runId>` -- unique per run --
+    // so each orphan became its own bogus one-run standing labelled "unknown".
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce(blobs("submissions/", ["s1", "s2"]));
+    vi.stubGlobal("fetch", fetchWhereOneFails("s2", sub));
+
+    await expect(storage.listSubmissions()).rejects.toThrow(PartialReadError);
+  });
+
+  it("still returns the full list when every blob reads cleanly", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValue(blobs("runs/", ["r1", "r2", "r3"]));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const id = /\/([^/]+)\.json$/.exec(url)![1];
+        return Promise.resolve({ text: async () => JSON.stringify(run(id)) });
+      }),
+    );
+
+    expect((await storage.listRuns()).map((r) => r.id).sort()).toEqual(["r1", "r2", "r3"]);
+  });
+
+  it("carries the missing/total counts so an operator can see how bad it is", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce(blobs("runs/", ["r1", "r2"]));
+    vi.stubGlobal("fetch", fetchWhereOneFails("r1", run));
+
+    await storage.listRuns().then(
+      () => { throw new Error("expected a throw"); },
+      (err) => {
+        expect(err).toBeInstanceOf(PartialReadError);
+        expect(err.prefix).toBe("runs/");
+        expect(err.missing).toBe(1);
+        expect(err.total).toBe(2);
+      },
+    );
   });
 });

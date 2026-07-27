@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
+import { PartialReadError } from "@/lib/storage";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
@@ -98,6 +99,20 @@ describe("GET /api/health", () => {
 
       expect(body.sha).toBe("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     });
+  });
+
+  it("reports storage:degraded (not up, not down) when the read was incomplete", async () => {
+    // A partial read is its own failure mode: storage answered, but not
+    // completely, so anything aggregating over the result would be wrong.
+    storageRef.current.listRuns = vi.fn().mockRejectedValue(new PartialReadError("runs/", 3, 55));
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(body.storage).toBe("degraded");
+    // The {ok, sha} contract is untouched -- see the regression block below.
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
   });
 
   describe("regression: ok/sha stay present and unchanged regardless of the new checks' results", () => {

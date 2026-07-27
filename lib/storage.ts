@@ -116,6 +116,28 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
   throw lastErr;
 }
 
+/**
+ * Thrown when a list read could not return every stored item.
+ *
+ * Blob rate-limits reads, and a partial result is NOT a smaller valid answer
+ * here: aggregatePrompts groups runs by their submission, so a submission
+ * that failed to read turns its runs into `__unknown:<runId>` singletons and
+ * the leaderboard silently publishes fabricated standings (observed live:
+ * the same endpoint returned 17, then 16, then 10 standings within seconds,
+ * every one labelled "unknown"). Callers that aggregate must fail loudly
+ * rather than compute on a subset.
+ */
+export class PartialReadError extends Error {
+  constructor(
+    readonly prefix: string,
+    readonly missing: number,
+    readonly total: number,
+  ) {
+    super(`partial read of ${prefix}: ${missing} of ${total} blobs unreadable after retries`);
+    this.name = "PartialReadError";
+  }
+}
+
 export async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
@@ -174,9 +196,14 @@ export class BlobStorage implements Storage {
     const results = await Promise.all(
       blobs.map((blob) => withRetry(() => fetchJson<Submission>(blob.url), 3).catch(() => undefined)),
     );
-    return results
-      .filter((s): s is Submission => s !== undefined)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const found = results.filter((s): s is Submission => s !== undefined);
+    // Fail loud on an incomplete read -- see PartialReadError. Each entry
+    // already retried 3x, so reaching here means a genuine failure, not a
+    // single blip.
+    if (found.length !== results.length) {
+      throw new PartialReadError("submissions/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async getRun(id: string): Promise<Run | undefined> {
@@ -192,9 +219,13 @@ export class BlobStorage implements Storage {
     const results = await Promise.all(
       blobs.map((blob) => withRetry(() => fetchJson<Run>(blob.url), 3).catch(() => undefined)),
     );
-    return results
-      .filter((r): r is Run => r !== undefined)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const found = results.filter((r): r is Run => r !== undefined);
+    // Fail loud on an incomplete read -- a missing run silently changes every
+    // aggregate computed from this list (pass rate, run counts, cost).
+    if (found.length !== results.length) {
+      throw new PartialReadError("runs/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async appendRunEvents(runId: string, newEvents: NewRunEvent[]): Promise<RunEvent[]> {

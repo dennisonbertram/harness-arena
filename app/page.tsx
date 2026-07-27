@@ -149,7 +149,9 @@ export default async function LeaderboardPage() {
                   <th className="label" style={cellStyle}>Pass rate</th>
                   <th className="label" style={cellStyle}>Mean tasks</th>
                   <th className="label" style={cellStyle}>Runs</th>
-                  <th className="label" style={numCellStyle}>Median cost</th>
+                  {/* Median of each RUN's total_cost_usd -- the cost of one
+                      full 16-task run, not a per-task figure. */}
+                  <th className="label" style={numCellStyle}>Median run cost</th>
                   <th className="label" style={numCellStyle}></th>
                 </tr>
               </thead>
