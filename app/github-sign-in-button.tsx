@@ -1,6 +1,6 @@
 import { signIn } from "@/auth";
 
-// Shared by app/submit/page.tsx and app/competition/page.tsx, whose sign-in
+// Shared by app/submit/page.tsx and app/page.tsx, whose sign-in
 // gates are identical except for the redirectTo target and surrounding copy.
 export function GithubSignInButton({ redirectTo }: { redirectTo: string }) {
   return (

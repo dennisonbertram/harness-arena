@@ -35,12 +35,12 @@ export default async function PendingRunsPage() {
     <div style={{ maxWidth: 1100, margin: "0 auto", padding: "48px 24px" }}>
       {pending.length > 0 && <PendingAutoRefresh />}
       <div style={{ fontSize: 14, marginBottom: 16 }}>
-        <Link href="/">← Leaderboard</Link>
+        <Link href="/benchmarks">← Benchmarks</Link>
       </div>
       <h1 style={{ fontSize: 32, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 8 }}>Runs in progress</h1>
       <p style={{ fontSize: 15, color: "var(--gray-900)", marginBottom: 28 }}>
         Runs that haven&apos;t finished yet — live progress rebuilt from their event stream. Completed runs move to
-        the <Link href="/">leaderboard</Link>. {pending.length > 0 ? "Auto-refreshes every 15s." : ""}
+        the <Link href="/benchmarks">benchmarks leaderboard</Link>. {pending.length > 0 ? "Auto-refreshes every 15s." : ""}
       </p>
 
       {rows.length === 0 ? (
