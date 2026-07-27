@@ -13,6 +13,12 @@ import { UNKNOWN_GITHUB_LOGIN } from "./github";
 // Runs are grouped by prompt (the artifact being benchmarked) — resubmitting
 // the same prompt just adds samples and tightens its rate estimate.
 
+// The display name for every empty-prompt ("run vanilla pi with its built-in
+// default system prompt") standing, regardless of what the submitter typed as
+// agentName. Versioned so a future change to pi's actual default prompt can
+// be introduced as a new label (v2) without conflating it with v1's results.
+export const BASELINE_PROMPT_LABEL = "Baseline Prompt v1";
+
 export interface TaskRate {
   taskId: string;
   passed: number; // runs in which this task passed
@@ -41,6 +47,13 @@ export interface PromptStanding {
   medianCostUsd: number | null; // across the runs — secondary tiebreak
   completesTest: boolean; // passRate === 1: every task passed in every run
   lastSubmittedAt: string;
+}
+
+// Every empty-prompt standing displays as BASELINE_PROMPT_LABEL regardless
+// of what the submitter typed as agentName (a stray "p2" or "restore-check"
+// name from a manual baseline run is not meaningful to show).
+export function standingDisplayName(standing: Pick<PromptStanding, "promptKey" | "agentName">): string {
+  return standing.promptKey === "" ? BASELINE_PROMPT_LABEL : standing.agentName;
 }
 
 function median(nums: number[]): number | null {

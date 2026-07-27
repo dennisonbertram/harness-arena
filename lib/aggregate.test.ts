@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateAllRunsByTask, aggregatePrompts, aggregateTask } from "./aggregate";
+import { aggregateAllRunsByTask, aggregatePrompts, aggregateTask, standingDisplayName } from "./aggregate";
 import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
@@ -222,6 +222,17 @@ describe("aggregatePrompts", () => {
       TOTAL,
     );
     expect(standing2.githubLogin).toBe("hubcat");
+  });
+});
+
+describe("standingDisplayName", () => {
+  it("labels an empty-prompt standing 'Baseline Prompt v1' regardless of its submitted agentName", () => {
+    expect(standingDisplayName({ promptKey: "", agentName: "p2" })).toBe("Baseline Prompt v1");
+    expect(standingDisplayName({ promptKey: "", agentName: "restore-check" })).toBe("Baseline Prompt v1");
+  });
+
+  it("passes through the submitted agentName for a non-empty prompt", () => {
+    expect(standingDisplayName({ promptKey: "be terse", agentName: "test-terse-v1" })).toBe("test-terse-v1");
   });
 });
 
