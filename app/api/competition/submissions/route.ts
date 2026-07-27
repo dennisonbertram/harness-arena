@@ -8,6 +8,7 @@ import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 import type { Submission } from "@/lib/types";
+import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
 
 const MAX_PROMPT_CHARS = 32768;
 const MAX_BODY_BYTES = 262144;
@@ -141,7 +142,7 @@ export async function GET() {
       status: s.status,
       model: s.model,
       is_baseline: s.competition_baseline === true,
-      github_login: s.github_login ?? "unknown",
+      github_login: s.github_login ?? UNKNOWN_GITHUB_LOGIN,
       run_id: s.run_id,
       created_at: s.created_at,
     }));
