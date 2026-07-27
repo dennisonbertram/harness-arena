@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd, scaleScatterPoints } from "@/lib/format";
-import { aggregatePrompts, aggregateAllRunsByTask, standingDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
+import { aggregatePrompts, aggregateAllRunsByTask, baselineDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
 import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { RerunButton } from "./RerunButton";
@@ -150,17 +150,12 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={cellStyle}>
                       {s.promptKey === "" ? (
-                        <Link href={`/runs/${s.runIds[0]}`}>{standingDisplayName(s)}</Link>
+                        <Link href={`/runs/${s.runIds[0]}`}>{baselineDisplayName(s)}</Link>
                       ) : (
-                        <>
-                          <span style={{ display: "inline-flex", alignItems: "center" }}>
-                            <GithubAvatar githubLogin={s.githubLogin} size={20} />
-                            <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
-                          </span>
-                          <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
-                            {s.githubLogin}
-                          </span>
-                        </>
+                        <span style={{ display: "inline-flex", alignItems: "center" }}>
+                          <GithubAvatar githubLogin={s.githubLogin} size={20} />
+                          <Link href={`/runs/${s.runIds[0]}`}>{s.githubLogin}</Link>
+                        </span>
                       )}
                     </td>
                     <td style={cellStyle}>{modelLabel(s.model)}</td>

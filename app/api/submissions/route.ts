@@ -7,6 +7,7 @@ import { log } from "@/lib/log";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
+import { isBaselinePrompt } from "@/lib/prompt";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
@@ -101,7 +102,7 @@ export async function POST(request: NextRequest) {
   await storage.putSubmission(submission);
 
   let verdict;
-  if (submission.prompt.trim().length === 0) {
+  if (isBaselinePrompt(submission.prompt)) {
     // Vanilla baseline: no submitted prompt, nothing to judge for fraud.
     verdict = { verdict: "approved" as const, reason: "vanilla baseline (no custom system prompt)" };
   } else {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateAllRunsByTask, aggregatePrompts, aggregateTask, standingDisplayName } from "./aggregate";
+import { aggregateAllRunsByTask, aggregatePrompts, aggregateTask, baselineDisplayName } from "./aggregate";
 import type { Run, Submission, TaskResult } from "./types";
 
 const TOTAL = 4; // 4-task test in these fixtures
@@ -223,16 +223,28 @@ describe("aggregatePrompts", () => {
     );
     expect(standing2.githubLogin).toBe("hubcat");
   });
+
+  it("groups a whitespace-only prompt into the same baseline standing as an actually-empty prompt", () => {
+    const submissions = [
+      sub("s1", "restore-check", "", "2026-07-20T00:00:00Z"),
+      sub("s2", "p2", "   ", "2026-07-21T00:00:00Z"),
+    ];
+    const runs = [
+      run("r1", "s1", [true, true, false, false]),
+      run("r2", "s2", [true, true, true, false]),
+    ];
+    const standings = aggregatePrompts(runs, submissions, TOTAL);
+    // One standing, not two -- both runs count toward the same baseline mean.
+    expect(standings).toHaveLength(1);
+    expect(standings[0].promptKey).toBe("");
+    expect(standings[0].runs).toBe(2);
+  });
 });
 
-describe("standingDisplayName", () => {
-  it("labels an empty-prompt standing 'Baseline Prompt v1' regardless of its submitted agentName", () => {
-    expect(standingDisplayName({ promptKey: "", agentName: "p2" })).toBe("Baseline Prompt v1");
-    expect(standingDisplayName({ promptKey: "", agentName: "restore-check" })).toBe("Baseline Prompt v1");
-  });
-
-  it("passes through the submitted agentName for a non-empty prompt", () => {
-    expect(standingDisplayName({ promptKey: "be terse", agentName: "test-terse-v1" })).toBe("test-terse-v1");
+describe("baselineDisplayName", () => {
+  it("labels a baseline standing '<model label> Baseline'", () => {
+    expect(baselineDisplayName({ model: "anthropic/claude-sonnet-5" })).toBe("Claude Sonnet 5 Baseline");
+    expect(baselineDisplayName({ model: "zai/glm-5.2" })).toBe("glm-5.2 Baseline");
   });
 });
 
