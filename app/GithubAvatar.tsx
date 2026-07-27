@@ -50,10 +50,18 @@ export function GithubAvatar({ githubLogin, size = 24 }: { githubLogin: string; 
     // eslint-disable-next-line @next/next/no-img-element -- external GitHub-hosted avatar, not an optimizable local asset
     <img
       ref={imgRef}
-      src={`https://github.com/${githubLogin}.png`}
+      // ?size= matters a lot: without it GitHub serves the avatar at its full
+      // stored resolution (460x460 for a real account) into a 20-24px circle.
+      // 2x the rendered size covers retina and drops the payload ~99%.
+      src={`https://github.com/${githubLogin}.png?size=${size * 2}`}
       alt={githubLogin}
       style={baseStyle}
-      loading="lazy"
+      // Deliberately NOT lazy. These sit above the fold in the first rows of
+      // the leaderboard, and lazy defers the fetch past layout -- which is
+      // what made avatars visibly pop in and out on every render. At ~2KB
+      // each after the size cap, eager is the cheaper trade.
+      loading="eager"
+      decoding="async"
       onError={() => setBroken(true)}
     />
   );
