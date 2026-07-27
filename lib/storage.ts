@@ -13,6 +13,13 @@ export interface Storage {
   /** Returns all events for a run in strict seq order. Best-effort: skips any event that can't be read. */
   listRunEvents(runId: string): Promise<RunEvent[]>;
   /**
+   * Events with `seq > sinceSeq`, in strict seq order. Same best-effort
+   * contract as listRunEvents. Exists so a poller that already holds events
+   * up to N doesn't re-read the whole log every tick -- see BlobStorage's
+   * implementation for why that matters.
+   */
+  listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]>;
+  /**
    * Cheap staleness probe for the reaper: the timestamp of the most recent
    * event, or undefined if none. Must NOT fetch every event's content (the
    * reaper runs on every run read); Blob derives it from list() metadata.
@@ -68,7 +75,11 @@ export class MemoryStorage implements Storage {
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
-    return [...(this.events.get(runId) ?? [])].sort((a, b) => a.seq - b.seq);
+    return this.listRunEventsSince(runId, 0);
+  }
+
+  async listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]> {
+    return [...(this.events.get(runId) ?? [])].filter((e) => e.seq > sinceSeq).sort((a, b) => a.seq - b.seq);
   }
 
   async latestEventTimestamp(runId: string): Promise<string | undefined> {
@@ -116,6 +127,19 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
   throw lastErr;
 }
 
+/**
+ * The seq encoded in an event blob's pathname
+ * (`events/<runId>/0000000007.json` -> 7), or null when the name isn't that
+ * shape. Null means "can't tell" and callers keep the blob rather than
+ * dropping it, so a stray/renamed file is never silently lost.
+ */
+export function seqFromEventPathname(pathname: string | undefined): number | null {
+  const match = /(?:^|\/)(\d+)\.json$/.exec(pathname ?? "");
+  if (!match) return null;
+  const seq = Number(match[1]);
+  return Number.isSafeInteger(seq) ? seq : null;
+}
+
 export async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
@@ -158,8 +182,8 @@ export class BlobStorage implements Storage {
     await this.writeJson(`submissions/${submission.id}.json`, submission);
   }
 
-  private async listAllBlobs(prefix: string): Promise<{ url: string; uploadedAt: string | Date }[]> {
-    const blobs: { url: string; uploadedAt: string | Date }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string; uploadedAt: string | Date }[]> {
+    const blobs: { url: string; pathname: string; uploadedAt: string | Date }[] = [];
     let cursor: string | undefined;
     do {
       const page = await list({ prefix, cursor });
@@ -233,17 +257,53 @@ export class BlobStorage implements Storage {
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
+    return this.listRunEventsSince(runId, 0);
+  }
+
+  async listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]> {
     const blobs = await this.listAllBlobs(`events/${runId}/`);
+    // The seq is encoded in the blob NAME (zero-padded, see appendRunEvents),
+    // so filtering happens on list() metadata -- before any content fetch.
+    // That's the whole point: a 16-task run emits ~90 event blobs, and a
+    // poller re-reading all of them every tick is O(events) per poll and
+    // grows as the run progresses. With a cursor it fetches only what's new.
+    // A name that doesn't parse is kept (fail-open), so an unexpected blob is
+    // never silently dropped from the full listing.
+    const fresh = blobs.filter((b) => {
+      const seq = seqFromEventPathname(b.pathname);
+      return seq === null || seq > sinceSeq;
+    });
     const results = await Promise.all(
-      blobs.map(async (blob) => {
+      fresh.map(async (blob) => {
         try {
-          return await withRetry(() => fetchJson<RunEvent>(blob.url), 3);
+          return { event: await withRetry(() => fetchJson<RunEvent>(blob.url), 3), unreadableSeq: null };
         } catch {
-          return undefined; // skip an event we can't read rather than 500 the route
+          // Don't 500 the route -- but remember WHICH seq we couldn't read.
+          return { event: undefined, unreadableSeq: seqFromEventPathname(blob.pathname) };
         }
       }),
     );
-    return results.filter((e): e is RunEvent => e !== undefined).sort((a, b) => a.seq - b.seq);
+
+    // Never return an event from beyond a transient hole. Callers resume from
+    // the last seq they received, so handing back N+1 while N was merely
+    // unreadable-right-now (Blob is eventually consistent and rate-limits
+    // reads) would skip N FOREVER, even once it becomes readable.
+    //
+    // Only a blob that EXISTS but failed to read blocks. A seq with no blob at
+    // all is a permanent gap -- appendRunEvents advances seq on a write
+    // collision, so those are legitimate -- and must not block, or the cursor
+    // would stall on it for good. An unreadable blob whose name doesn't parse
+    // gives us no seq to truncate at, so it can't block either.
+    const firstUnreadable = results.reduce<number | null>(
+      (min, r) => (r.unreadableSeq === null ? min : min === null || r.unreadableSeq < min ? r.unreadableSeq : min),
+      null,
+    );
+
+    return results
+      .map((r) => r.event)
+      .filter((e): e is RunEvent => e !== undefined)
+      .filter((e) => e.seq > sinceSeq && (firstUnreadable === null || e.seq < firstUnreadable))
+      .sort((a, b) => a.seq - b.seq);
   }
 
   async latestEventTimestamp(runId: string): Promise<string | undefined> {
