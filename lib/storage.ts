@@ -276,15 +276,33 @@ export class BlobStorage implements Storage {
     const results = await Promise.all(
       fresh.map(async (blob) => {
         try {
-          return await withRetry(() => fetchJson<RunEvent>(blob.url), 3);
+          return { event: await withRetry(() => fetchJson<RunEvent>(blob.url), 3), unreadableSeq: null };
         } catch {
-          return undefined; // skip an event we can't read rather than 500 the route
+          // Don't 500 the route -- but remember WHICH seq we couldn't read.
+          return { event: undefined, unreadableSeq: seqFromEventPathname(blob.pathname) };
         }
       }),
     );
+
+    // Never return an event from beyond a transient hole. Callers resume from
+    // the last seq they received, so handing back N+1 while N was merely
+    // unreadable-right-now (Blob is eventually consistent and rate-limits
+    // reads) would skip N FOREVER, even once it becomes readable.
+    //
+    // Only a blob that EXISTS but failed to read blocks. A seq with no blob at
+    // all is a permanent gap -- appendRunEvents advances seq on a write
+    // collision, so those are legitimate -- and must not block, or the cursor
+    // would stall on it for good. An unreadable blob whose name doesn't parse
+    // gives us no seq to truncate at, so it can't block either.
+    const firstUnreadable = results.reduce<number | null>(
+      (min, r) => (r.unreadableSeq === null ? min : min === null || r.unreadableSeq < min ? r.unreadableSeq : min),
+      null,
+    );
+
     return results
+      .map((r) => r.event)
       .filter((e): e is RunEvent => e !== undefined)
-      .filter((e) => e.seq > sinceSeq)
+      .filter((e) => e.seq > sinceSeq && (firstUnreadable === null || e.seq < firstUnreadable))
       .sort((a, b) => a.seq - b.seq);
   }
 

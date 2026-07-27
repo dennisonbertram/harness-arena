@@ -564,6 +564,66 @@ describe("incremental event reads (?since= cursor)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("BlobStorage stops at a transiently-unreadable event instead of advancing the cursor past it", async () => {
+    // The regression this guards: with a cursor, returning seq 4 while seq 3
+    // merely failed to read means the caller resumes at 4 and never sees 3
+    // again. Before the cursor existed a full refetch self-healed this.
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [1, 2, 3, 4].map((n) => ({
+        url: `https://blob.example/events/run-1/${String(n).padStart(10, "0")}.json`,
+        pathname: `events/run-1/${String(n).padStart(10, "0")}.json`,
+      })),
+      hasMore: false,
+    } as never);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const seq = Number(/(\d+)\.json$/.exec(url)![1]);
+        // seq 3 is present in the listing but unreadable this poll.
+        if (seq === 3) return Promise.resolve({ ok: false, status: 403, text: async () => "<!DOCTYPE html>" });
+        return Promise.resolve({
+          text: async () =>
+            JSON.stringify({ run_id: "run-1", seq, ts: "2026-07-21T00:00:00.000Z", type: "task.started", payload: {} }),
+        });
+      }),
+    );
+
+    const events = await storage.listRunEventsSince("run-1", 0);
+
+    // 4 is withheld even though it read fine -- the caller's next cursor must
+    // not jump past 3.
+    expect(events.map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("BlobStorage does NOT stall on a permanent gap (a seq with no blob at all)", async () => {
+    // appendRunEvents advances seq on a write collision, so a missing seq can
+    // be permanent. Blocking on it would freeze the cursor there forever.
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [1, 2, 4, 5].map((n) => ({
+        url: `https://blob.example/events/run-1/${String(n).padStart(10, "0")}.json`,
+        pathname: `events/run-1/${String(n).padStart(10, "0")}.json`,
+      })),
+      hasMore: false,
+    } as never);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const seq = Number(/(\d+)\.json$/.exec(url)![1]);
+        return Promise.resolve({
+          text: async () =>
+            JSON.stringify({ run_id: "run-1", seq, ts: "2026-07-21T00:00:00.000Z", type: "task.started", payload: {} }),
+        });
+      }),
+    );
+
+    const events = await storage.listRunEventsSince("run-1", 0);
+    expect(events.map((e) => e.seq)).toEqual([1, 2, 4, 5]);
+  });
+
   it("BlobStorage keeps an unparseable blob name (fail-open) rather than silently dropping it", async () => {
     const storage = new BlobStorage();
     vi.mocked(list).mockResolvedValueOnce({
