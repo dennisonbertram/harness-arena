@@ -12,6 +12,7 @@ import { CompletePromptModal } from "./CompletePromptModal";
 import { PromptDiff } from "./PromptDiff";
 import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
+import { cellStyle } from "../../tableStyles";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 
@@ -324,4 +325,3 @@ function TaskStateBadge({ state }: { state: TaskState }) {
   return <span style={{ color: s.color, fontWeight: 600 }}>{s.label}</span>;
 }
 
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };

@@ -1,5 +1,6 @@
 import { runModel } from "./models";
 import type { Run, Submission } from "./types";
+import { UNKNOWN_GITHUB_LOGIN } from "./github";
 
 // v1 benchmarks PASS RATE, not cost. With glm-5.2's run-to-run variance
 // (the same vanilla prompt scored 7,7,5,4 of 16 across identical runs) a
@@ -95,7 +96,7 @@ export function aggregatePrompts(
         model,
         runs: [run],
         agentName: submission?.agent_name ?? "unknown",
-        githubLogin: submission?.github_login ?? "unknown",
+        githubLogin: submission?.github_login ?? UNKNOWN_GITHUB_LOGIN,
         lastAt: at,
       });
     }

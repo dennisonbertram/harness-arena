@@ -3,10 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { formatUsd } from "@/lib/format";
-import { UNKNOWN_GITHUB_LOGIN, type CompetitionRow } from "@/lib/competition-leaderboard";
-
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
-const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
+import type { CompetitionRow } from "@/lib/competition-leaderboard";
+import { GithubAvatar } from "../GithubAvatar";
+import { cellStyle, numCellStyle } from "../tableStyles";
 
 // Fixed locale/UTC so server and client render identical text — a
 // viewer-locale-dependent format here would mismatch during hydration.
@@ -24,47 +23,6 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
-
-const avatarStyle: React.CSSProperties = {
-  width: 24,
-  height: 24,
-  borderRadius: "50%",
-  verticalAlign: "middle",
-  marginRight: 8,
-};
-
-const avatarPlaceholderStyle: React.CSSProperties = {
-  ...avatarStyle,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  background: "var(--gray-alpha-400)",
-  color: "var(--gray-700)",
-  fontSize: 11,
-};
-
-// Skips the real-avatar request entirely for the "unknown" login (a
-// pre-login stray blob, not a real GitHub account); falls back to the same
-// placeholder for a real login whose avatar 404s (renamed/deleted account).
-function AvatarOrPlaceholder({ githubLogin }: { githubLogin: string }) {
-  const [broken, setBroken] = useState(false);
-  if (githubLogin === UNKNOWN_GITHUB_LOGIN || broken) {
-    return (
-      <span aria-hidden="true" style={avatarPlaceholderStyle}>
-        ?
-      </span>
-    );
-  }
-  return (
-    // eslint-disable-next-line @next/next/no-img-element -- external GitHub-hosted avatar, not an optimizable local asset
-    <img
-      src={`https://github.com/${githubLogin}.png`}
-      alt={githubLogin}
-      style={avatarStyle}
-      onError={() => setBroken(true)}
-    />
-  );
-}
 
 function RankLabel({ rank, tied, prefix = "#" }: { rank: number; tied: boolean; prefix?: string }) {
   return (
@@ -142,7 +100,7 @@ export function CompetitionLeaderboardTable({
                 </td>
                 <td style={cellStyle}>
                   <span style={{ display: "inline-flex", alignItems: "center" }}>
-                    <AvatarOrPlaceholder githubLogin={row.githubLogin} />
+                    <GithubAvatar githubLogin={row.githubLogin} />
                     <span className="mono">{row.githubLogin}</span>
                   </span>
                 </td>
@@ -193,7 +151,7 @@ export function CompetitionLeaderboardTable({
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <span style={{ display: "inline-flex", alignItems: "center" }}>
-                <AvatarOrPlaceholder githubLogin={openRow.githubLogin} />
+                <GithubAvatar githubLogin={openRow.githubLogin} />
                 <h3 id="competition-entry-modal-heading" className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
                   {openRow.githubLogin}
                 </h3>

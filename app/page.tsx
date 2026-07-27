@@ -7,6 +7,8 @@ import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-para
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { RerunButton } from "./RerunButton";
 import { ScatterChart, type ScatterItem } from "./ScatterChart";
+import { GithubAvatar } from "./GithubAvatar";
+import { cellStyle, numCellStyle } from "./tableStyles";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 
@@ -147,7 +149,10 @@ export default async function LeaderboardPage() {
                       <Link href={`/runs/${s.runIds[0]}`}>{i + 1}</Link>
                     </td>
                     <td style={cellStyle}>
-                      <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
+                      <span style={{ display: "inline-flex", alignItems: "center" }}>
+                        <GithubAvatar githubLogin={s.githubLogin} size={20} />
+                        <Link href={`/runs/${s.runIds[0]}`}>{s.agentName}</Link>
+                      </span>
                       <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
                         {s.githubLogin}
                       </span>
@@ -218,9 +223,6 @@ export default async function LeaderboardPage() {
     </div>
   );
 }
-
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };
-const numCellStyle: React.CSSProperties = { ...cellStyle, textAlign: "right" };
 
 function Param({ label, value }: { label: string; value: string }) {
   return (

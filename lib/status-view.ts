@@ -1,4 +1,5 @@
 import type { Run, RunEvent, Submission } from "./types";
+import { UNKNOWN_GITHUB_LOGIN } from "./github";
 
 // $25 total POC inference cap and $2 per-run hard cap — the same figures
 // ticket #8's proof-run budget enforcement uses. Defined once here (this
@@ -66,7 +67,7 @@ export function recentActivity(
     return {
       runId: run.id,
       agentName: submission?.agent_name ?? "unknown",
-      githubLogin: submission?.github_login ?? "unknown",
+      githubLogin: submission?.github_login ?? UNKNOWN_GITHUB_LOGIN,
       status: run.status,
       tasksPassed: run.tasks_passed,
       totalTasks: run.task_results.length,
