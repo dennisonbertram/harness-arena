@@ -11,6 +11,7 @@ import type { Run } from "@/lib/types";
 import { RerunButton } from "./RerunButton";
 import { ScatterChart, type ScatterItem } from "./ScatterChart";
 import { GithubAvatar } from "./GithubAvatar";
+import { ModelLogo } from "./ModelLogo";
 import { cellStyle, numCellStyle } from "./tableStyles";
 
 const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
@@ -162,7 +163,10 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={cellStyle}>
                       {s.promptKey === "" ? (
-                        <Link href={`/runs/${s.runIds[0]}`}>{baselineDisplayName(s)}</Link>
+                        <span style={{ display: "inline-flex", alignItems: "center" }}>
+                          <ModelLogo model={s.model} size={20} />
+                          <Link href={`/runs/${s.runIds[0]}`}>{baselineDisplayName(s)}</Link>
+                        </span>
                       ) : (
                         <span style={{ display: "inline-flex", alignItems: "center" }}>
                           <GithubAvatar githubLogin={s.githubLogin} size={20} />
