@@ -292,6 +292,29 @@ export function buildModelsConfig(maxOutputTokens) {
   });
 }
 
+/**
+ * pi models.json that routes the gateway provider through the pinning sidecar.
+ *
+ * pi cannot add arbitrary body fields, so it cannot send the gateway's
+ * `providerOptions.gateway.only` itself. It CAN point a provider at a
+ * different baseUrl, so we send it to the local proxy, which injects the pin
+ * and forwards. See scripts/runner/gateway-proxy.mjs for why this matters.
+ *
+ * `host.docker.internal` resolves via the --add-host=host-gateway mapping the
+ * runner adds to `docker run`: pi executes inside the task container, and the
+ * proxy runs on the sandbox VM outside it.
+ */
+export function buildPinnedModelsConfig({ proxyPort, model }) {
+  return JSON.stringify({
+    providers: {
+      "vercel-ai-gateway": {
+        baseUrl: `http://host.docker.internal:${proxyPort}/v1`,
+        modelOverrides: { [model]: {} },
+      },
+    },
+  });
+}
+
 export function buildPiCommand({
   agentTimeoutSec,
   sessionDir,

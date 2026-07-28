@@ -415,4 +415,30 @@ describe("POST /api/runs/[id]/callback", () => {
       expect((await second.json()).seq_assigned).toEqual([2, 3]);
     });
   });
+
+  // Absence of provider_pinned is the marker that a run predates pinning, so
+  // the field has to actually round-trip rather than being silently dropped.
+  it("records which gateway provider the run was pinned to", async () => {
+    await storageRef.current.putRun({
+      id: "run-pinned",
+      submission_id: "sub-1",
+      status: "running",
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      callbackRequest("run-pinned", {
+        events: [],
+        status: "completed",
+        totals: { tasks_passed: 3, total_cost_usd: 1, over_budget: false },
+        task_results: [],
+        provider_pinned: "zai",
+      }),
+      { params: Promise.resolve({ id: "run-pinned" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect((await storageRef.current.getRun("run-pinned"))?.provider_pinned).toBe("zai");
+  });
 });

@@ -182,6 +182,28 @@ describe("benchmarks board", () => {
 
     expect(html).toContain("Rerun");
   });
+
+  // Old runs sampled an unknown mix of gateway upstreams. Ranking them silently
+  // beside pinned runs would compare two different measurements.
+  it("marks a standing whose runs predate provider pinning", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun(run("r1", { submission_id: "s1" }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).toContain("unpinned");
+  });
+
+  it("does not mark a standing whose runs were pinned", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun({ ...run("r1", { submission_id: "s1" }), provider_pinned: "zai" });
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).not.toContain("unpinned");
+  });
 });
 
 function submission(id: string, overrides: Partial<Submission> = {}): Submission {

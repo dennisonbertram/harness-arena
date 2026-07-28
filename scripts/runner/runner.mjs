@@ -22,6 +22,7 @@ import {
   budgetExceeded,
   buildContainerName,
   buildPiCommand,
+  buildPinnedModelsConfig,
   computeTotals,
   deliverTerminalStatus,
   fetchWithTimeout,
@@ -46,6 +47,11 @@ const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 // harnessarena.xyz's exact provider. Both provider API keys are forwarded into
 // the task container; pi uses the one matching --provider.
 const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
+// Which upstream the gateway is pinned to for this run. Empty = unpinned, and
+// the run is recorded without provider_pinned so the board can mark it as not
+// comparable. See scripts/runner/gateway-proxy.mjs.
+const PINNED_PROVIDER = process.env.PINNED_PROVIDER || "";
+const GATEWAY_PROXY_PORT = Number(process.env.GATEWAY_PROXY_PORT || 4599);
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
 // Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
 // solution can complete the whole test instead of being killed mid-run, which
@@ -345,6 +351,23 @@ function readRewardFile(containerName) {
   }
 }
 
+let gatewayProxy = null;
+
+/**
+ * Starts the pinning sidecar on the sandbox VM. pi runs inside the task
+ * container and reaches this through the --add-host host-gateway mapping.
+ * Only started when a provider is actually pinned, so an unpinned run behaves
+ * exactly as before rather than gaining a new failure mode.
+ */
+async function startGatewayProxy() {
+  if (!PINNED_PROVIDER) return null;
+  const { createGatewayProxy } = await import("./gateway-proxy.mjs");
+  const server = createGatewayProxy({ only: [PINNED_PROVIDER] });
+  await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
+  log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER}`);
+  return server;
+}
+
 async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
@@ -358,6 +381,10 @@ async function runOneTask(task, index, systemPrompt) {
     sh(DOCKER_CMD, [
       "run",
       "-d",
+      // Lets pi inside the container reach the pinning sidecar running on the
+      // sandbox VM. Harmless when nothing is pinned.
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "--name",
       containerName,
       task.image,
@@ -365,6 +392,17 @@ async function runOneTask(task, index, systemPrompt) {
       "-c",
       `sleep ${task.agent_timeout_sec + 900}`,
     ]);
+
+    if (PINNED_PROVIDER) {
+      // pi cannot add the gateway's providerOptions itself, but it can take a
+      // baseUrl -- so point its gateway provider at the sidecar, which injects
+      // the pin and forwards.
+      const cfg = buildPinnedModelsConfig({ proxyPort: GATEWAY_PROXY_PORT, model: RUNNER_MODEL });
+      const cfgFile = path.join(os.tmpdir(), `models-${RUN_ID}-${index}.json`);
+      writeFileSync(cfgFile, cfg);
+      tempDirs.push(cfgFile);
+      sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:/root/.pi/models.json`]);
+    }
 
     if (PI_INSTALL_MODE === "agentkit") {
       sh(DOCKER_CMD, ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
@@ -577,6 +615,10 @@ async function runOneTask(task, index, systemPrompt) {
 async function main() {
   const startedAt = Date.now();
   try {
+    // Must be listening before any task container starts, since pi's models.json
+    // points at it. Started here rather than per-task so all 16 tasks in a run
+    // share one pinned upstream.
+    gatewayProxy = await startGatewayProxy();
     const dockerReady = await ensureDockerReady();
     if (!dockerReady) {
       queueEvent("run.failed", {
@@ -651,13 +693,16 @@ async function main() {
 
     await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
 
+    gatewayProxy?.close();
     const delivered = await finalizeTerminalStatus({
       status: "completed",
       totals: { ...totals, over_budget: overBudget },
       task_results: taskResults,
+      provider_pinned: PINNED_PROVIDER || undefined,
     });
     process.exit(delivered ? 0 : 1);
   } catch (err) {
+    gatewayProxy?.close();
     log(`uncaught error: ${err?.stack ?? err}`);
     queueEvent("run.failed", { error: String(err?.message ?? err), stage: "run" });
     try {

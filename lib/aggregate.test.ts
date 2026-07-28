@@ -414,3 +414,44 @@ describe("run-to-run spread", () => {
   });
 });
 });
+
+// Runs recorded before provider pinning sampled an unknown mix of upstreams,
+// so they are not strictly comparable with pinned runs. The board has to say
+// so rather than silently ranking them together.
+describe("pre-pinning runs", () => {
+  it("flags a standing whose runs predate provider pinning", () => {
+    const flags = Array(16).fill(false);
+    const [standing] = aggregatePrompts(
+      [run("r1", "s1", flags)],
+      [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")],
+      16,
+    );
+
+    expect(standing.prePinningRuns).toBe(1);
+  });
+
+  it("does not flag a standing whose runs were pinned", () => {
+    const flags = Array(16).fill(false);
+    const pinned = { ...run("r1", "s1", flags), provider_pinned: "zai" };
+    const [standing] = aggregatePrompts(
+      [pinned],
+      [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")],
+      16,
+    );
+
+    expect(standing.prePinningRuns).toBe(0);
+  });
+
+  it("counts a mixed standing, because averaging across the cutover is the thing to warn about", () => {
+    const flags = Array(16).fill(false);
+    const runs = [run("r1", "s1", flags), { ...run("r2", "s1", flags), provider_pinned: "zai" }];
+    const [standing] = aggregatePrompts(
+      runs,
+      [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")],
+      16,
+    );
+
+    expect(standing.prePinningRuns).toBe(1);
+    expect(standing.runs).toBe(2);
+  });
+});

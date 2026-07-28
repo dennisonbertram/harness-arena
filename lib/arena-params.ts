@@ -17,3 +17,25 @@ export const ARENA_BENCHMARK_URL = "https://github.com/laude-institute/terminal-
 // prompts; it is NOT an authorization boundary. Gating the endpoint itself
 // would be a server change.
 export const RERUN_OPERATOR_LOGIN = process.env.RERUN_OPERATOR_LOGIN ?? "dennisonbertram";
+// The gateway providers each model is pinned to. A model absent here is not
+// pinned, and its runs stay comparable only to other unpinned runs.
+//
+// Chosen as the model's own first-party provider where one exists, so the
+// benchmark measures the model as its authors serve it rather than whichever
+// reseller the gateway happened to pick. Verified against the gateway's own
+// provider list on 2026-07-28.
+export const PINNED_PROVIDERS: Record<string, string> = {
+  "zai/glm-5.2": "zai",
+  "anthropic/claude-sonnet-5": "anthropic",
+  "anthropic/claude-opus-5": "anthropic",
+  "anthropic/claude-opus-4-8": "anthropic",
+};
+
+/**
+ * A run recorded before provider pinning shipped. Its model calls were served
+ * by an unknown mix of upstreams, so it is not strictly comparable with a
+ * pinned run -- including for the baseline it may be ranked against.
+ */
+export function isPrePinningRun(run: { provider_pinned?: string }): boolean {
+  return run.provider_pinned === undefined;
+}
