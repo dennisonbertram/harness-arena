@@ -1,5 +1,7 @@
+import { ARENA_HARNESS } from "./arena-params";
+import { COMPETITION_MODEL } from "./competition-config";
 import type { Storage } from "./storage";
-import type { Run, Submission } from "./types";
+import type { Competition, Run, Submission } from "./types";
 import { UNKNOWN_GITHUB_LOGIN } from "./github";
 
 export interface CompetitionRow {
@@ -33,10 +35,57 @@ interface JoinedEntry {
   run: Run | undefined;
 }
 
-function joinCompetitionEntries(runs: Run[], submissions: Submission[]): JoinedEntry[] {
+// The Competition entity backing the (arena=harness-arena, harness=pi,
+// model=COMPETITION_MODEL) seeded row -- id is DERIVED from that triple, the
+// same way scripts/seed-competition.mjs's competitionId() computes it, so
+// this always agrees with what the backfill script created. Duplicated here
+// (rather than importing the .mjs script) because that script imports
+// @vercel/blob at module scope, which has no business loading into the
+// leaderboard's read path.
+const LEGACY_ARENA = "harness-arena";
+export function defaultCompetitionId(): string {
+  return ["comp", LEGACY_ARENA, ARENA_HARNESS, COMPETITION_MODEL]
+    .join("__")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Resolves "the live default" competition for callers (the homepage) that
+ * don't yet let a user pick one (that's #78's switcher). Prefers the seeded
+ * Harness Arena / Pi / COMPETITION_MODEL row by its deterministic id; falls
+ * back to the most-recently-created live competition if that id isn't found
+ * (e.g. COMPETITION_MODEL reconfigured after seeding) so a misconfiguration
+ * shows *a* live board rather than none.
+ */
+export async function resolveDefaultCompetition(storage: Storage): Promise<Competition | undefined> {
+  const byDefaultId = await storage.getCompetition(defaultCompetitionId());
+  if (byDefaultId) return byDefaultId;
+  const all = await storage.listCompetitions();
+  return all.find((c) => c.status === "live");
+}
+
+/**
+ * A submission belongs to `competitionId` if it's explicitly stamped
+ * (competition_id matches), OR it's a legacy row -- `competition: true` with
+ * no competition_id, predating the Competition entity -- and `competitionId`
+ * is the seeded default those legacy rows implicitly belong to. The backfill
+ * script (issue #75) should have stamped every such row, but this read path
+ * must stay correct even if one was missed or a new one lands before the
+ * write path (#77) is in.
+ */
+function belongsToCompetition(submission: Submission, competitionId: string, defaultId: string): boolean {
+  if (submission.competition !== true) return false;
+  if (submission.competition_id) return submission.competition_id === competitionId;
+  return competitionId === defaultId;
+}
+
+function joinCompetitionEntries(runs: Run[], submissions: Submission[], competitionId: string): JoinedEntry[] {
   const runById = new Map(runs.map((r) => [r.id, r]));
+  const defaultId = defaultCompetitionId();
   return submissions
-    .filter((s) => s.competition === true)
+    .filter((s) => belongsToCompetition(s, competitionId, defaultId))
     .map((submission) => ({
       submission,
       run: submission.run_id ? runById.get(submission.run_id) : undefined,
@@ -87,13 +136,15 @@ export function rankCompetition(rows: CompetitionRow[]): CompetitionRow[] {
 }
 
 /**
- * The full /competition board: the baseline (in one of four states — see
- * BaselineState) split out from the ranked competitor table, plus a pending
- * count for competitor runs still queued/running.
+ * The full /competition board for ONE competition: the baseline (in one of
+ * four states — see BaselineState) split out from the ranked competitor
+ * table, plus a pending count for competitor runs still queued/running.
+ * Scoped to `competitionId` -- see belongsToCompetition for the legacy
+ * (un-backfilled) row fallback.
  */
-export async function getCompetitionBoard(storage: Storage): Promise<CompetitionBoard> {
+export async function getCompetitionBoard(storage: Storage, competitionId: string): Promise<CompetitionBoard> {
   const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
-  const entries = joinCompetitionEntries(runs, submissions);
+  const entries = joinCompetitionEntries(runs, submissions, competitionId);
 
   const baselineEntry = entries.find((e) => e.submission.competition_baseline === true);
   let baseline: CompetitionRow | null = null;
