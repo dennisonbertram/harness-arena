@@ -2,6 +2,15 @@ import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
+// Creation schedules the baseline with next/server's `after`, which throws
+// outside a request scope. These tests invoke the handler directly, so run the
+// callback inline; ensureBaseline itself is covered in
+// lib/competition-baseline.test.ts.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, after: (fn: () => unknown) => { void fn(); } };
+});
+
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
   return { ...actual, getStorage: () => storageRef.current };

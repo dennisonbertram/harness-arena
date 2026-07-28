@@ -1,16 +1,13 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
-import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
-import { belongsToCompetition, resolveDefaultCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
+import { ensureBaseline } from "@/lib/competition-baseline";
+import { resolveDefaultCompetition } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
-import type { Run, Submission } from "@/lib/types";
-import { getBaselinePrompt } from "@/lib/baseline-prompt";
 
-const BASELINE_AGENT_NAME = "pi-vanilla-baseline";
 const CompetitionTargetSchema = z.object({
   competition_id: z.string().min(1).optional(),
 });
@@ -29,19 +26,6 @@ function isValidToken(token: string | null, expected: string): boolean {
   // secret, so a plain false there is fine (still not a timing leak of the
   // token's actual bytes).
   return a.length === b.length && timingSafeEqual(a, b);
-}
-
-/**
- * Whether an existing competition_baseline submission should block a new
- * baseline attempt (per R2/KTD5): blocks only while it's still "live" — the
- * submission wasn't judge-rejected AND its run is queued/running/completed.
- * A rejected submission, or one whose only run infra-failed (failed/reaped),
- * must not permanently prevent the competition from ever having a baseline.
- */
-function blocksNewBaseline(submission: Submission, run: Run | undefined): boolean {
-  if (submission.status === "rejected") return false;
-  if (!run) return false;
-  return !isInfraFailedRun(run);
 }
 
 export async function POST(request: NextRequest) {
@@ -86,47 +70,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "competition is closed" }, { status: 409 });
   }
 
-  const submissions = await storage.listSubmissions();
-  // Reuses the read path's ownership rule rather than restating it: an
-  // unstamped legacy baseline belongs to whichever competition the resolver
-  // actually picks, which is NOT defaultCompetitionId() once the seeded
-  // default is closed or absent. Getting that wrong lets the admin create a
-  // second active baseline for a board that already has one.
-  const ownerId = await resolveLegacyOwnerId(storage);
-  const existingBaselines = submissions.filter(
-    (s) => s.competition_baseline === true && belongsToCompetition(s, competition.id, ownerId),
-  );
-  // ponytail: same list-then-point-fetch TOCTOU gap as the submissions
-  // route's dedup check (not concurrency-safe against Blob's eventual
-  // consistency) — two near-simultaneous admin triggers could both pass this
-  // and create two baseline submissions. Low-likelihood (single admin,
-  // deliberate rare action) and low-impact (getCompetitionBoard only ever
-  // surfaces the first baseline it finds; a second would just sit unused).
-  const baselineRuns = await Promise.all(
-    existingBaselines.map((s) => (s.run_id ? storage.getRun(s.run_id) : Promise.resolve(undefined))),
-  );
-  const blockingIndex = existingBaselines.findIndex((s, i) => blocksNewBaseline(s, baselineRuns[i]));
-  if (blockingIndex !== -1) {
+  // Delegates to the same helper the create route and the board render use,
+  // so "does this competition already have a healthy baseline?" has exactly
+  // one implementation rather than one per caller.
+  const result = await ensureBaseline(storage, competition);
+
+  if (result.kind === "already_present") {
     return NextResponse.json(
-      { error: "a competition baseline already exists", submission_id: existingBaselines[blockingIndex].id },
+      { error: "a competition baseline already exists", submission_id: result.submissionId },
       { status: 409 },
     );
   }
-
-  const submission: Submission = {
-    id: randomUUID(),
-    agent_name: BASELINE_AGENT_NAME,
-    prompt: getBaselinePrompt(),
-    status: "pending_review",
-    model: competition.model,
-    competition: true,
-    competition_id: competition.id,
-    competition_baseline: true,
-    created_at: new Date().toISOString(),
-  };
-  await storage.putSubmission(submission);
-
-  const result = await judgeAndDispatch(storage, submission, "competition.admin");
   if (result.kind === "judge_unavailable") {
     return NextResponse.json(
       {
@@ -136,17 +90,12 @@ export async function POST(request: NextRequest) {
     );
   }
   if (result.kind === "rejected") {
-    return NextResponse.json({
-      submission_id: result.submission.id,
-      status: result.submission.status,
-      judge_reason: result.verdict.reason,
-    });
+    return NextResponse.json({ submission_id: result.submissionId, status: "rejected", judge_reason: result.reason });
   }
   return NextResponse.json({
-    submission_id: result.submission.id,
-    run_id: result.run.id,
-    run_ids: result.submission.run_ids,
-    status: result.submission.status,
-    judge_reason: result.verdict.reason,
+    submission_id: result.submissionId,
+    run_id: result.runId,
+    run_ids: result.runIds,
+    status: "queued",
   });
 }
