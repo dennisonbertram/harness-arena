@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { after } from "next/server";
+import { ensureBaselines } from "@/lib/competition-baseline";
 import Link from "next/link";
 import { auth } from "@/auth";
 import { GithubSignInButton } from "./github-sign-in-button";
@@ -41,6 +43,13 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
     competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
   ]);
   const githubLogin = session?.user?.githubLogin;
+
+  // Primary path for giving a competition its baseline. Hobby-plan crons run
+  // once a DAY, so a cron-only design would leave real visitors looking at
+  // "Baseline not triggered yet" for hours. after() runs post-response, so
+  // this never delays the render, and ensureBaselines is idempotent and never
+  // throws -- same shape as the lazy reap wired into GET /api/runs.
+  after(() => ensureBaselines(storage));
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
