@@ -12,6 +12,9 @@ const CallbackBodySchema = z
     events: z.array(NewRunEventSchema),
     status: z.enum(["running", "completed", "failed"]).optional(),
     task_results: z.array(TaskResultSchema).optional(),
+    // Which gateway upstream this run was pinned to. Absent means unpinned,
+    // which is exactly how a pre-pinning run is identified.
+    provider_pinned: z.string().optional(),
     totals: z
       .object({
         tasks_passed: z.number(),
@@ -76,6 +79,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
   }
   if (parsed.data.task_results) run.task_results = parsed.data.task_results;
+  if (parsed.data.provider_pinned) run.provider_pinned = parsed.data.provider_pinned;
   if (parsed.data.totals) {
     run.tasks_passed = parsed.data.totals.tasks_passed;
     run.total_cost_usd = parsed.data.totals.total_cost_usd;

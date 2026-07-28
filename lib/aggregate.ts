@@ -2,6 +2,7 @@ import { modelLabel, runModel } from "./models";
 import type { Run, Submission } from "./types";
 import { UNKNOWN_GITHUB_LOGIN } from "./github";
 import { isBaselinePrompt } from "./prompt";
+import { isPrePinningRun } from "./arena-params";
 
 // v1 benchmarks PASS RATE, not cost. With glm-5.2's run-to-run variance
 // (the same vanilla prompt scored 7,7,5,4 of 16 across identical runs) a
@@ -45,6 +46,13 @@ export interface PromptStanding {
    * (docs/measurement-and-variance.md).
    */
   tasksPassedSem: number | null;
+  /**
+   * How many of this standing's runs predate provider pinning. Those sampled
+   * an unknown mix of gateway upstreams, so they are not strictly comparable
+   * with pinned runs -- a standing mixing both is averaging across a change in
+   * what was being measured. See docs/provider-pinning.md.
+   */
+  prePinningRuns: number;
   totalTaskCount: number;
   passRate: number; // meanTasksPassed / totalTaskCount — PRIMARY, higher wins
   perTask: TaskRate[]; // sorted by rate desc, then taskId
@@ -172,6 +180,7 @@ export function aggregatePrompts(
       })
       .sort((a, b) => b.passed / b.of - a.passed / a.of || a.taskId.localeCompare(b.taskId));
 
+    const prePinningRuns = g.runs.filter((r) => isPrePinningRun(r)).length;
     const passedPerRun = g.runs.map((r) => r.tasks_passed ?? 0);
     const tasksPassedSem =
       passedPerRun.length < 2
@@ -192,6 +201,7 @@ export function aggregatePrompts(
       runs: runsCount,
       meanTasksPassed,
       tasksPassedSem,
+      prePinningRuns,
       totalTaskCount,
       passRate,
       perTask,

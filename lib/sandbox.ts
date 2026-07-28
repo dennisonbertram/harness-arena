@@ -1,5 +1,6 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
+import { PINNED_PROVIDERS } from "./arena-params";
 import { log } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
@@ -162,6 +163,11 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     // different runs can use different models (glm-5.2, Claude Sonnet 5, …);
     // all resolve through the gateway, so the provider stays the default.
     if (process.env.RUNNER_PROVIDER) runnerEnv.RUNNER_PROVIDER = process.env.RUNNER_PROVIDER;
+    // Pin the gateway to one upstream for this model, so repeated runs measure
+    // the same machine. Unpinned models fall through unchanged and their runs
+    // are recorded without provider_pinned (see docs/provider-pinning.md).
+    const pinned = PINNED_PROVIDERS[run.model ?? process.env.RUNNER_MODEL ?? ""];
+    if (pinned) runnerEnv.PINNED_PROVIDER = pinned;
     const runnerModel = run.model ?? process.env.RUNNER_MODEL;
     if (runnerModel) runnerEnv.RUNNER_MODEL = runnerModel;
     if (process.env.OPENROUTER_API_KEY) runnerEnv.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;

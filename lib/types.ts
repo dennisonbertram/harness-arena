@@ -149,6 +149,14 @@ export const RunSchema = z.object({
   // dispatch is less likely to double-start it. Absent = not yet dispatched.
   dispatched_at: z.iso.datetime().optional(),
   // The model this run executed on (gateway id). Absent = default glm-5.2.
+  // Which upstream provider the AI Gateway was pinned to for this run.
+  //
+  // The gateway fans one model id across many upstreams -- zai/glm-5.2 reports
+  // fifteen -- which differ in quantisation and serving stack. Runs recorded
+  // BEFORE pinning shipped have no value here, and are therefore not strictly
+  // comparable with pinned ones: each sampled an unknown mix. Absence is the
+  // deprecation marker; see isPrePinningRun and docs/provider-pinning.md.
+  provider_pinned: z.string().optional(),
   model: z.string().optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),

@@ -196,6 +196,18 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={cellStyle} className="tabular-nums">
                       {s.meanTasksPassed.toFixed(1)}/{s.totalTaskCount}
+                      {s.prePinningRuns > 0 && (
+                        // Pre-pinning runs sampled an unknown mix of gateway
+                        // upstreams, so they are not strictly comparable with
+                        // pinned ones. Say so on the row rather than ranking
+                        // them silently alongside.
+                        <span
+                          style={{ color: "var(--gray-700)", marginLeft: 6, fontSize: 12 }}
+                          title={`${s.prePinningRuns} of ${s.runs} runs predate provider pinning — served by an unknown mix of gateway upstreams, so not strictly comparable. To be deprecated.`}
+                        >
+                          ⚠ {s.prePinningRuns}/{s.runs} unpinned
+                        </span>
+                      )}
                       {s.tasksPassedSem !== null && (
                         // How precise the mean is, not how spread the runs are.
                         // Production sd is ~0.78 tasks, so neighbouring rows are
