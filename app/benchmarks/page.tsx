@@ -176,7 +176,12 @@ export default async function LeaderboardPage() {
                         </span>
                       )}
                     </td>
-                    <td style={cellStyle}>{modelLabel(s.model)}</td>
+                    <td style={cellStyle}>
+                      <span style={{ display: "inline-flex", alignItems: "center" }}>
+                        <ModelLogo model={s.model} size={20} />
+                        {modelLabel(s.model)}
+                      </span>
+                    </td>
                     <td style={cellStyle} className="tabular-nums">
                       {(s.passRate * 100).toFixed(0)}%
                       {s.completesTest && (
