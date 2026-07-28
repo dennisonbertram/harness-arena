@@ -117,8 +117,35 @@ describe("CompetitionPage", () => {
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain("$12.5000");
+    expect(html).toContain("$12.50");
     expect(html).toContain("weekly");
+  });
+
+  // The model is a property of the competition record (#77), not the
+  // COMPETITION_MODEL env constant. Showing the constant would display the
+  // wrong model for any competition that isn't the seeded default.
+  it("shows the competition's own model, not the env default", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ model: "anthropic/claude-opus-5" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("Claude Opus 5");
+    expect(html).not.toContain("glm-5.2");
+  });
+
+  // formatUsd renders 4 decimals because it exists for fractions-of-a-cent
+  // run costs. A prize pot is money a human is owed -- $100.00, not $100.0000.
+  it("formats the prize as currency, not as a 4-decimal run cost", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: 100, prize_cadence: "weekly" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("$100.00");
+    expect(html).not.toContain("$100.0000");
   });
 
   it("renders a closed competition as closed", async () => {
@@ -128,7 +155,7 @@ describe("CompetitionPage", () => {
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain("This competition is closed.");
+    expect(html).toContain("closed");
     expect(html).not.toContain("This competition is live.");
   });
 

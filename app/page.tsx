@@ -1,11 +1,11 @@
 import Link from "next/link";
 import { auth } from "@/auth";
 import { GithubSignInButton } from "./github-sign-in-button";
-import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { getCompetitionBoard, resolveDefaultCompetition, type CompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
 import { modelLabel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
+import type { Competition } from "@/lib/types";
 import { CompetitionLeaderboardTable } from "./competition/CompetitionLeaderboardTable";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
 
@@ -30,17 +30,21 @@ export default async function CompetitionPage() {
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
       <section style={{ marginBottom: 40 }}>
-        <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Competition</h1>
+        <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Harness maxing</h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>
-          A daily $100 contest: submit a system prompt, it runs <strong>once</strong> against the fixed benchmark on
-          one fixed model. Ranked by <strong>tasks solved</strong>, then by <strong>cost</strong>{" "}
-          as a tiebreak — different from the main arena&apos;s mean-pass-rate ranking, since here every entry gets
-          exactly one run instead of a 5-run sample. Whoever is on top when the admin checks wins that day&apos;s
-          $100 (paid manually).
+          Help us get the best results out of this harness + model combination. The work is finding the system prompt
+          that does it.
         </p>
-        <p style={{ fontSize: 14, color: "var(--gray-700)" }}>
-          Model: <span className="mono">{modelLabel(COMPETITION_MODEL)}</span> (fixed for this competition)
+        <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660, marginBottom: 8 }}>
+          Harness Arena is harness-maxing. Other kinds of arenas will exist. This is a market of jobs, not a
+          sweepstakes: the forward-looking bet is that agents themselves eventually do this work. The cash incentive
+          is deliberately small.
         </p>
+        <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660 }}>
+          Each entry gets exactly <strong>one run</strong> and is ranked by <strong>tasks solved</strong>, then by{" "}
+          <strong>cost</strong>. That differs from the main arena&apos;s 5-run mean-pass-rate ranking.
+        </p>
+        <CompetitionMeta competition={competition} />
       </section>
 
       <BaselineSection board={board} />
@@ -120,5 +124,53 @@ function BaselineSection({ board }: { board: Awaited<ReturnType<typeof getCompet
         </p>
       )}
     </section>
+  );
+}
+
+// A prize is money someone is owed, so it renders as plain currency. formatUsd
+// deliberately shows 4 decimals because it exists for fractions-of-a-cent run
+// costs -- "$100.0000" reads as a metric, not a pot.
+function formatPrize(amountUsd: number): string {
+  return amountUsd.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+// One meta row rather than a stack of sentences. Prize and cadence are omitted
+// entirely when unset (epic #74: the values are genuinely TBD, and a "$0" or
+// "TBD" placeholder would read as a commitment).
+function CompetitionMeta({ competition }: { competition: Competition | undefined }) {
+  if (!competition) return null;
+  const items: Array<[string, string]> = [
+    ["Harness", competition.harness],
+    ["Model", modelLabel(competition.model)],
+    ["Status", competition.status],
+  ];
+  if (competition.prize_amount_usd != null) items.push(["Prize", formatPrize(competition.prize_amount_usd)]);
+  if (competition.prize_cadence != null) items.push(["Cadence", competition.prize_cadence]);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "12px 32px",
+        padding: "16px 20px",
+        border: "1px solid var(--gray-alpha-400)",
+        borderRadius: 10,
+        width: "fit-content",
+        maxWidth: "100%",
+        marginTop: 20,
+      }}
+    >
+      {items.map(([label, value]) => (
+        <div key={label}>
+          <div className="label" style={{ marginBottom: 2 }}>
+            {label}
+          </div>
+          <div className="mono" style={{ fontSize: 14 }}>
+            {value}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
