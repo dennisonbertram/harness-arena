@@ -376,4 +376,41 @@ describe("aggregateAllRunsByTask", () => {
     const perTask = aggregateAllRunsByTask(runs, compSubs, ["t0"]);
     expect(perTask[0]).toMatchObject({ passed: 1, of: 1 });
   });
+
+// A standing's mean is an estimate from 3-5 noisy runs. Production data shows a
+// within-prompt sd of ~0.78 tasks, so adjacent standings are frequently not
+// distinguishable -- see docs/measurement-and-variance.md. The board should say
+// how precise the number is rather than implying exactness.
+describe("run-to-run spread", () => {
+  it("reports the standard error of the mean across a standing's runs", () => {
+    const submissions = [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")];
+    const runs = [
+      run("r1", "s1", [true, true, true, true, true, true, false, false, false, false, false, false, false, false, false, false]),
+      run("r2", "s1", [true, true, true, true, true, true, true, true, false, false, false, false, false, false, false, false]),
+      run("r3", "s1", [true, true, true, true, true, true, true, true, true, true, false, false, false, false, false, false]),
+    ];
+
+    const [standing] = aggregatePrompts(runs, submissions, 16);
+
+    // tasks 6, 8, 10 -> mean 8, sd 2, sem 2/sqrt(3)
+    expect(standing.meanTasksPassed).toBe(8);
+    expect(standing.tasksPassedSem).toBeCloseTo(2 / Math.sqrt(3), 5);
+  });
+
+  it("reports no spread for a single run, rather than a fake zero", () => {
+    const [standing] = aggregatePrompts([run("r1", "s1", [true, true, true, true, true, true, true, false, false, false, false, false, false, false, false, false])], [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")], 16);
+
+    // One sample has no measurable spread. Reporting 0 would claim certainty
+    // the single run cannot support.
+    expect(standing.tasksPassedSem).toBeNull();
+  });
+
+  it("reports zero spread only when repeated runs genuinely agree", () => {
+    const runs = [run("r1", "s1", [true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, false]), run("r2", "s1", [true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, false]), run("r3", "s1", [true, true, true, true, true, true, true, true, true, false, false, false, false, false, false, false])];
+
+    const [standing] = aggregatePrompts(runs, [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")], 16);
+
+    expect(standing.tasksPassedSem).toBe(0);
+  });
+});
 });

@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 import type { Run, Submission } from "@/lib/types";
 
+vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
+
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
   return { ...actual, getStorage: () => storageRef.current };
@@ -13,6 +15,14 @@ vi.mock("../RerunButton", () => ({
 }));
 
 import * as LeaderboardPage from "./page";
+
+import { auth as mockedAuth } from "@/auth";
+
+// Default to the operator so assertions about standings still see the Rerun
+// control; the gate tests below override this explicitly.
+beforeEach(() => {
+  vi.mocked(mockedAuth).mockResolvedValue({ user: { githubLogin: "dennisonbertram" } } as never);
+});
 
 describe("leaderboard page revalidation", () => {
   it("exports a 15-second ISR revalidate window so the leaderboard isn't cached forever at build time", () => {
@@ -121,6 +131,56 @@ describe("benchmarks board", () => {
 
     // Anthropic's mark, from ModelLogo's PROVIDER_LOGOS.
     expect(html).toContain("M17.3041 3.541h-3.6718l6.696 16.918H24Z");
+  });
+
+  // Adjacent standings are frequently not distinguishable at the measured
+  // sd (~0.78 tasks), so the board shows the interval rather than implying
+  // the mean is exact. See docs/measurement-and-variance.md.
+  it("shows the ± on the mean when a standing has repeated runs", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun(run("r1", { submission_id: "s1", tasks_passed: 6 }));
+    await storage.putRun(run("r2", { submission_id: "s1", tasks_passed: 10 }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).toContain("±");
+  });
+
+  // Rerun spends money re-running someone else's prompt. Hiding it from
+  // visitors is a UI affordance, not an authorization boundary — the endpoint
+  // it posts to is the same public submit endpoint (see RERUN_OPERATOR_LOGIN).
+  it("hides Rerun from a signed-out visitor", async () => {
+    vi.mocked(mockedAuth).mockResolvedValue(null as never);
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun(run("r1", { submission_id: "s1" }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).not.toContain("Rerun");
+  });
+
+  it("hides Rerun from a signed-in user who is not the operator", async () => {
+    vi.mocked(mockedAuth).mockResolvedValue({ user: { githubLogin: "someone-else" } } as never);
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun(run("r1", { submission_id: "s1" }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).not.toContain("Rerun");
+  });
+
+  it("shows Rerun to the operator", async () => {
+    vi.mocked(mockedAuth).mockResolvedValue({ user: { githubLogin: "dennisonbertram" } } as never);
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1" }));
+    await storage.putRun(run("r1", { submission_id: "s1" }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).toContain("Rerun");
   });
 });
 
