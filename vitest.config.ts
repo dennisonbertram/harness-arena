@@ -33,6 +33,8 @@ export default defineConfig({
         "**/*.config.{ts,js,mjs}",
         ".next/**",
         "coverage/**",
+        // Generated build output of the standalone MCP package.
+        "**/dist/**",
         "node_modules/**",
       ],
     },

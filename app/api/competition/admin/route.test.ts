@@ -8,6 +8,7 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 });
 
 import { POST } from "./route";
+import { mintAgentToken } from "@/lib/agent-token";
 
 const ADMIN_TOKEN = "test-admin-token";
 const BODY = { arena: "harness-arena", harness: "pi", model: "zai/glm-5.2" };
@@ -47,6 +48,18 @@ describe("POST /api/competition/admin", () => {
 
     expect(missing.status).toBe(401);
     expect(wrong.status).toBe(401);
+    expect(await storageRef.current.listCompetitions()).toEqual([]);
+  });
+
+  it("rejects an arena agent bearer token without an admin token", async () => {
+    vi.stubEnv("AUTH_SECRET", "admin-isolation-test-secret");
+    const token = await mintAgentToken({ githubId: 999, githubLogin: "agent-user" });
+    const response = await POST(new NextRequest("http://localhost/api/competition/admin", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "x-forwarded-for": "2.2.2.8" },
+      body: JSON.stringify(BODY),
+    }));
+    expect(response.status).toBe(401);
     expect(await storageRef.current.listCompetitions()).toEqual([]);
   });
 

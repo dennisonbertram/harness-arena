@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { auth } from "@/auth";
+import { resolveIdentity } from "@/lib/identity";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { belongsToCompetition, resolveDefaultCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
@@ -47,12 +47,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
 
-  const session = await auth();
-  const githubId = session?.user?.githubId;
-  const githubLogin = session?.user?.githubLogin;
-  if (githubId === undefined || githubLogin === undefined) {
+  const identity = await resolveIdentity(request);
+  if (!identity) {
     return NextResponse.json({ error: "sign in with GitHub to submit" }, { status: 401 });
   }
+  const { githubId, githubLogin } = identity;
 
   if (isGithubIdRateLimited(String(githubId))) {
     log("warn", "competition.submission.rate_limited", { ip, github_id: githubId });
