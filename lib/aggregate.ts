@@ -36,6 +36,15 @@ export interface PromptStanding {
   runIds: string[];
   runs: number; // completed runs aggregated
   meanTasksPassed: number;
+  /**
+   * Standard error of meanTasksPassed across this standing's runs — how
+   * precise the estimate is, not how spread the runs are. null for a single
+   * run, where there is no measurable spread: reporting 0 would claim a
+   * certainty one sample cannot support. Production sd is ~0.78 tasks, so
+   * adjacent standings are often not distinguishable
+   * (docs/measurement-and-variance.md).
+   */
+  tasksPassedSem: number | null;
   totalTaskCount: number;
   passRate: number; // meanTasksPassed / totalTaskCount — PRIMARY, higher wins
   perTask: TaskRate[]; // sorted by rate desc, then taskId
@@ -163,6 +172,14 @@ export function aggregatePrompts(
       })
       .sort((a, b) => b.passed / b.of - a.passed / a.of || a.taskId.localeCompare(b.taskId));
 
+    const passedPerRun = g.runs.map((r) => r.tasks_passed ?? 0);
+    const tasksPassedSem =
+      passedPerRun.length < 2
+        ? null
+        : Math.sqrt(
+            passedPerRun.reduce((sum, v) => sum + (v - meanTasksPassed) ** 2, 0) / (passedPerRun.length - 1),
+          ) / Math.sqrt(passedPerRun.length);
+
     const costs = g.runs.map((r) => r.total_cost_usd).filter((c): c is number => typeof c === "number");
     const passRate = totalTaskCount > 0 ? meanTasksPassed / totalTaskCount : 0;
 
@@ -174,6 +191,7 @@ export function aggregatePrompts(
       runIds: g.runs.map((r) => r.id),
       runs: runsCount,
       meanTasksPassed,
+      tasksPassedSem,
       totalTaskCount,
       passRate,
       perTask,

@@ -9,3 +9,11 @@ export const ARENA_HARNESS = "pi";
 export const ARENA_ENDPOINT = "Vercel AI Gateway";
 export const ARENA_BENCHMARK = "Terminal-Bench 2.0";
 export const ARENA_BENCHMARK_URL = "https://github.com/laude-institute/terminal-bench-2";
+
+// Who sees the Rerun control on /benchmarks. This is a UI affordance only:
+// Rerun posts to POST /api/submissions, the same public endpoint the Submit
+// page uses, which accepts any signed-in GitHub user by design. Hiding the
+// button stops it inviting visitors to spend money re-running other people's
+// prompts; it is NOT an authorization boundary. Gating the endpoint itself
+// would be a server change.
+export const RERUN_OPERATOR_LOGIN = process.env.RERUN_OPERATOR_LOGIN ?? "dennisonbertram";

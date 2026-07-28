@@ -3,7 +3,8 @@ import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import { formatUsd, scaleScatterPoints } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, baselineDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
-import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK } from "@/lib/arena-params";
+import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK, RERUN_OPERATOR_LOGIN } from "@/lib/arena-params";
+import { auth } from "@/auth";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
 import { isBaselinePrompt } from "@/lib/prompt";
@@ -22,7 +23,12 @@ export const revalidate = 15;
 
 export default async function LeaderboardPage() {
   const storage = getStorage();
-  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
+  const [runs, submissions, session] = await Promise.all([
+    storage.listRuns(),
+    storage.listSubmissions(),
+    auth(),
+  ]);
+  const canRerun = session?.user?.githubLogin === RERUN_OPERATOR_LOGIN;
   const tasks = getTasks();
   const totalTasks = tasks.length;
   const standings = aggregatePrompts(runs, submissions, totalTasks);
@@ -190,6 +196,18 @@ export default async function LeaderboardPage() {
                     </td>
                     <td style={cellStyle} className="tabular-nums">
                       {s.meanTasksPassed.toFixed(1)}/{s.totalTaskCount}
+                      {s.tasksPassedSem !== null && (
+                        // How precise the mean is, not how spread the runs are.
+                        // Production sd is ~0.78 tasks, so neighbouring rows are
+                        // often not distinguishable -- showing the interval keeps
+                        // the board from reading as more exact than it is.
+                        <span
+                          style={{ color: "var(--gray-700)", marginLeft: 4 }}
+                          title={`Standard error of the mean across ${s.runs} runs — the ± on this estimate`}
+                        >
+                          ±{s.tasksPassedSem.toFixed(1)}
+                        </span>
+                      )}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
                       {s.runs}
@@ -198,7 +216,7 @@ export default async function LeaderboardPage() {
                       {s.medianCostUsd === null ? "—" : formatUsd(s.medianCostUsd)}
                     </td>
                     <td style={numCellStyle}>
-                      <RerunButton agentName={s.agentName} prompt={s.promptKey} model={s.model} />
+                      {canRerun && <RerunButton agentName={s.agentName} prompt={s.promptKey} model={s.model} />}
                     </td>
                   </tr>
                 ))}
