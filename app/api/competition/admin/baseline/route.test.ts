@@ -172,14 +172,14 @@ describe("POST /api/competition/admin/baseline", () => {
     expect(await storageRef.current.listSubmissions()).toHaveLength(1);
   });
 
-  // The board assigns unstamped legacy rows to whatever competition
-  // resolveDefaultCompetition actually picks. Recognising a legacy baseline
-  // only when the target equals the DERIVED default misses it whenever the
-  // seeded default is closed or absent -- and the admin then creates a second
-  // active baseline for a board that already has one.
-  it("sees a legacy unstamped baseline on the resolved fallback competition", async () => {
+  // Legacy-row ownership is a stable historical fact: unstamped rows belong to
+  // the SEEDED competition, even after it is closed. Following the live-default
+  // resolver instead would migrate them onto an unrelated competition's board
+  // (see legacyOwnerId in lib/competition-leaderboard.ts), so a legacy baseline
+  // must keep blocking a new baseline on the seeded competition and must NOT
+  // block one on a different competition.
+  it("keeps a legacy unstamped baseline with the seeded competition after it closes", async () => {
     resetStorage();
-    // Seeded default is closed, so the resolver falls back to another live one.
     await storageRef.current.putCompetition({
       id: defaultCompetitionId(),
       arena: "harness-arena",
@@ -209,10 +209,12 @@ describe("POST /api/competition/admin/baseline", () => {
       created_at: "2026-07-25T00:00:00.000Z",
     });
 
+    // The legacy baseline belongs to the closed seeded competition, so the
+    // separate live one is free to get its own baseline.
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fair" });
     const response = await POST(adminRequest({}, "4.4.4.9"));
 
-    expect(response.status).toBe(409);
-    expect(await storageRef.current.listSubmissions()).toHaveLength(1);
+    expect(response.status).toBe(200);
   });
 
   it("allows a fresh baseline attempt when the prior one's run ended failed/reaped", async () => {

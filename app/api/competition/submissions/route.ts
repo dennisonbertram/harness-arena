@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
-import { belongsToCompetition, resolveDefaultCompetition } from "@/lib/competition-leaderboard";
+import { belongsToCompetition, resolveDefaultCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
   // model) triple is its own job (epic #74), so a prompt tuned for one model
   // is a legitimate separate entry against another -- a global check would
   // silently burn the prompt for every other contest the moment it's used once.
-  const defaultId = (await resolveDefaultCompetition(storage))?.id ?? competition.id;
+  const defaultId = await resolveLegacyOwnerId(storage);
   const competitionSubmissions = (await storage.listSubmissions()).filter((s) =>
     belongsToCompetition(s, competition.id, defaultId),
   );

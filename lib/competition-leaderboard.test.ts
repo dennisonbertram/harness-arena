@@ -288,6 +288,30 @@ describe("resolveDefaultCompetition", () => {
 // diverges the moment that env var changes after seeding, and every legacy
 // row silently drops off the board -- which matters while the write path
 // (#77) still creates submissions without competition_id.
+describe("legacy-row ownership is stable across the competition lifecycle", () => {
+  // Legacy rows belong to the competition that was default WHEN THEY WERE
+  // WRITTEN. Deriving that from resolveDefaultCompetition made ownership
+  // follow whatever happens to be live now: closing the seeded competition
+  // moved every unstamped row onto an unrelated live board, ranked against a
+  // different model. Closing is the designed lifecycle action here, so this
+  // is reachable by intent, not by accident.
+  it("keeps unstamped rows on the seeded competition after it is closed", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID, { status: "closed" }));
+    await storage.putCompetition(
+      competition("comp-new-season", { status: "live", model: "anthropic/claude-opus-5", created_at: "2026-07-28T00:00:00.000Z" }),
+    );
+    await storage.putSubmission(sub("legacy", { run_id: "r-legacy" }));
+    await storage.putRun(run("r-legacy", { submission_id: "legacy", tasks_passed: 5, total_cost_usd: 0.4 }));
+
+    const seeded = await getCompetitionBoard(storage, DEFAULT_ID);
+    const newSeason = await getCompetitionBoard(storage, "comp-new-season");
+
+    expect(seeded.ranked.map((r) => r.submissionId)).toContain("legacy");
+    expect(newSeason.ranked.map((r) => r.submissionId)).not.toContain("legacy");
+  });
+});
+
 describe("getCompetitionBoard legacy-row ownership", () => {
   it("keeps unstamped rows on the resolved board even when the derived default id isn't seeded", async () => {
     const storage = new MemoryStorage();

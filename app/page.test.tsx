@@ -219,6 +219,21 @@ describe("CompetitionPage", () => {
     expect(html.match(/aria-current="page"/g) ?? []).toHaveLength(3);
   });
 
+  // A closed competition rejects submissions with 409, and the form maps every
+  // 409 to "Prompt already submitted" -- so an entrant would be told their
+  // prompt was a duplicate when it was never stored. Don't offer the flow at
+  // all once the contest is closed.
+  it("does not offer submission for a closed competition", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ status: "closed" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toContain("Submit a prompt");
+    expect(html).toContain("closed");
+  });
+
   it("renders no prize amount or cadence when both are unset (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();

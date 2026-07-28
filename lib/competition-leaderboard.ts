@@ -150,17 +150,42 @@ export function rankCompetition(rows: CompetitionRow[]): CompetitionRow[] {
  * Scoped to `competitionId` -- see belongsToCompetition for the legacy
  * (un-backfilled) row fallback.
  */
+
+/**
+ * Which competition owns unstamped legacy rows (`competition: true`, no
+ * competition_id). This must be a STABLE historical fact, not a function of
+ * what is live right now: those rows were written when the seeded competition
+ * was the only one, and that is where they belong for good.
+ *
+ * Deriving it from resolveDefaultCompetition made ownership follow whatever
+ * happened to be live -- closing the seeded competition moved every legacy row
+ * onto an unrelated live board, ranked against a different model. Deriving it
+ * from COMPETITION_MODEL alone has the opposite failure: change that env var
+ * and the derived id names nothing, orphaning the same rows.
+ *
+ * So: the seeded id when that competition exists at all (closed or not),
+ * else the oldest competition on record.
+ */
+export function legacyOwnerId(competitions: Competition[]): string {
+  const seededId = defaultCompetitionId();
+  if (competitions.some((c) => c.id === seededId)) return seededId;
+  const oldest = [...competitions].sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+  return oldest?.id ?? seededId;
+}
+
+/** Storage-reading convenience wrapper around legacyOwnerId, for call sites
+ * that only have a Storage. Keeps every path on ONE ownership rule. */
+export async function resolveLegacyOwnerId(storage: Storage): Promise<string> {
+  return legacyOwnerId(await storage.listCompetitions());
+}
+
 export async function getCompetitionBoard(storage: Storage, competitionId: string): Promise<CompetitionBoard> {
-  const [runs, submissions, legacyOwner] = await Promise.all([
+  const [runs, submissions, competitions] = await Promise.all([
     storage.listRuns(),
     storage.listSubmissions(),
-    // Which competition owns unstamped legacy rows must be the SAME one the
-    // homepage resolves. Re-deriving the id from COMPETITION_MODEL here would
-    // disagree with resolveDefaultCompetition the moment that env var changes
-    // after seeding -- and every legacy row would silently drop off the board.
-    resolveDefaultCompetition(storage),
+    storage.listCompetitions(),
   ]);
-  const entries = joinCompetitionEntries(runs, submissions, competitionId, legacyOwner?.id ?? defaultCompetitionId());
+  const entries = joinCompetitionEntries(runs, submissions, competitionId, legacyOwnerId(competitions));
 
   const baselineEntry = entries.find((e) => e.submission.competition_baseline === true);
   let baseline: CompetitionRow | null = null;
