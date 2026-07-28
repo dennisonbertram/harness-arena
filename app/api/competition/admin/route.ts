@@ -73,6 +73,10 @@ export async function POST(request: NextRequest) {
     prize_amount_usd: input.prize_amount_usd ?? null,
     prize_cadence: input.prize_cadence ?? null,
     status: "live",
+    // Persisted, not just honoured here: the board render and the cron sweep
+    // reconcile independently and would otherwise recreate the run the admin
+    // declined to pay for.
+    auto_baseline: input.skip_baseline ? false : undefined,
     created_at: new Date().toISOString(),
   };
   const storage = getStorage();

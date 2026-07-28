@@ -173,6 +173,66 @@ describe("ensureBaseline", () => {
   });
 });
 
+describe("automatic reconciliation is bounded", () => {
+  // skip_baseline suppressed only the create route's own callback; the flag
+  // was never stored, so the board render and cron recreated the baseline the
+  // admin explicitly declined to pay for.
+  it("honours a competition that opted out of an automatic baseline", async () => {
+    approve();
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition("comp-opted-out", { auto_baseline: false }));
+
+    const results = await ensureBaselines(storage);
+
+    expect(results).toHaveLength(0);
+    expect(await baselinesFor(storage, "comp-opted-out")).toHaveLength(0);
+  });
+
+  // A rejected baseline means the fixed vanilla prompt failed the fairness
+  // judge -- a systemic problem needing a human, not something to retry. The
+  // predicate treated rejected as absent, so every board render stored another
+  // rejected submission AND burned another judge call, forever.
+  it("does not automatically retry a judge-rejected baseline", async () => {
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+    vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "rejected", reason: "nope" });
+
+    await ensureBaseline(storage, comp);
+    await ensureBaseline(storage, comp);
+    await ensureBaseline(storage, comp);
+
+    expect(await baselinesFor(storage, "comp-1")).toHaveLength(1);
+    expect(vi.mocked(judgeSubmission)).toHaveBeenCalledTimes(1);
+  });
+
+  // The admin route is a human deliberately retrying, so it may override.
+  it("lets an explicit caller retry past a rejection", async () => {
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "rejected", reason: "nope" });
+    await ensureBaseline(storage, comp);
+
+    approve();
+    const result = await ensureBaseline(storage, comp, { retryAfterRejection: true });
+
+    expect(result.kind).toBe("created");
+  });
+
+  // after() fires on every render, so two can overlap on one instance.
+  it("does not double-create when two ensure calls overlap", async () => {
+    approve();
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+
+    await Promise.all([ensureBaseline(storage, comp), ensureBaseline(storage, comp)]);
+
+    expect(await baselinesFor(storage, "comp-1")).toHaveLength(1);
+  });
+});
+
 describe("ensureBaselines", () => {
   it("covers every live competition in one sweep", async () => {
     approve();

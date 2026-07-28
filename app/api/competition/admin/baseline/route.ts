@@ -73,7 +73,9 @@ export async function POST(request: NextRequest) {
   // Delegates to the same helper the create route and the board render use,
   // so "does this competition already have a healthy baseline?" has exactly
   // one implementation rather than one per caller.
-  const result = await ensureBaseline(storage, competition);
+  // A human deliberately retrying may push past a previous rejection; the
+  // automatic reconcilers may not.
+  const result = await ensureBaseline(storage, competition, { retryAfterRejection: true });
 
   if (result.kind === "already_present") {
     return NextResponse.json(

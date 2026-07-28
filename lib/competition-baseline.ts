@@ -28,8 +28,18 @@ export const PENDING_BASELINE_TTL_MS = 15 * 60 * 1000;
  * stale, so a judge outage can't permanently deny the competition a baseline
  * either. Same shape as the run reaper's staleness rule.
  */
-export function blocksNewBaseline(submission: Submission, run: Run | undefined, now: number = Date.now()): boolean {
-  if (submission.status === "rejected") return false;
+export function blocksNewBaseline(
+  submission: Submission,
+  run: Run | undefined,
+  now: number = Date.now(),
+  retryAfterRejection = false,
+): boolean {
+  // A rejected baseline means the FIXED vanilla prompt failed the fairness
+  // judge -- systemic, and a human's problem, not something to retry. Left
+  // non-blocking, every board render stored another rejected submission and
+  // burned another judge call, forever. An explicit caller (the admin route)
+  // can still override.
+  if (submission.status === "rejected") return !retryAfterRejection;
   if (run) return !isInfraFailedRun(run);
   return now - Date.parse(submission.created_at) < PENDING_BASELINE_TTL_MS;
 }
@@ -50,7 +60,34 @@ export type EnsureBaselineResult =
  * best-effort and this function, called again from the board read and the
  * daily cron, is what actually guarantees the baseline exists.
  */
-export async function ensureBaseline(storage: Storage, competition: Competition): Promise<EnsureBaselineResult> {
+// after() fires on every board render, so two sweeps can overlap inside one
+// instance. Blob offers no compare-and-swap, so this is an in-process guard,
+// not a distributed lock: it removes the common same-instance race. A
+// cross-instance race remains possible and stays low-impact -- the board only
+// ever surfaces the first baseline it finds, so a duplicate sits unused.
+const inFlight = new Map<string, Promise<EnsureBaselineResult>>();
+
+export async function ensureBaseline(
+  storage: Storage,
+  competition: Competition,
+  options: { retryAfterRejection?: boolean } = {},
+): Promise<EnsureBaselineResult> {
+  const existingCall = inFlight.get(competition.id);
+  if (existingCall) return existingCall;
+  const call = ensureBaselineUncoordinated(storage, competition, options);
+  inFlight.set(competition.id, call);
+  try {
+    return await call;
+  } finally {
+    inFlight.delete(competition.id);
+  }
+}
+
+async function ensureBaselineUncoordinated(
+  storage: Storage,
+  competition: Competition,
+  options: { retryAfterRejection?: boolean } = {},
+): Promise<EnsureBaselineResult> {
   const [submissions, legacyOwnerId] = await Promise.all([
     storage.listSubmissions(),
     resolveLegacyOwnerId(storage),
@@ -61,7 +98,7 @@ export async function ensureBaseline(storage: Storage, competition: Competition)
   const runs = await Promise.all(
     existing.map((s) => (s.run_id ? storage.getRun(s.run_id) : Promise.resolve(undefined))),
   );
-  const blocking = existing.find((s, i) => blocksNewBaseline(s, runs[i]));
+  const blocking = existing.find((s, i) => blocksNewBaseline(s, runs[i], Date.now(), options.retryAfterRejection));
   if (blocking) return { kind: "already_present", submissionId: blocking.id };
 
   const submission: Submission = {
@@ -110,7 +147,7 @@ export async function ensureBaselines(storage: Storage): Promise<EnsureBaselineR
   }
 
   const results: EnsureBaselineResult[] = [];
-  for (const competition of competitions.filter((c) => c.status === "live")) {
+  for (const competition of competitions.filter((c) => c.status === "live" && c.auto_baseline !== false)) {
     try {
       const result = await ensureBaseline(storage, competition);
       if (result.kind !== "already_present") {
