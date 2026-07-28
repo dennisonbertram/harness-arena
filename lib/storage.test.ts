@@ -154,6 +154,16 @@ describe("MemoryStorage", () => {
     expect(result).toEqual(competition);
   });
 
+  it("stores trace strings and buffers as bytes and returns null for absent traces", async () => {
+    const storage = new MemoryStorage();
+    await storage.putTraceBlob("run-1", "task-1", "stdout.log", "hello");
+    await storage.putTraceBlob("run-1", "task-1", "stderr.log", Buffer.from("problem"));
+
+    await expect(storage.getTraceBytes("run-1", "task-1", "stdout.log")).resolves.toEqual(Buffer.from("hello"));
+    await expect(storage.getTraceBytes("run-1", "task-1", "stderr.log")).resolves.toEqual(Buffer.from("problem"));
+    await expect(storage.getTraceBytes("run-1", "task-1", "missing.log")).resolves.toBeNull();
+  });
+
   it("getCompetition returns undefined for an id that was never stored", async () => {
     const storage = new MemoryStorage();
     expect(await storage.getCompetition("nope")).toBeUndefined();
@@ -318,6 +328,21 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     );
   });
 
+  it("advances the sequence after a write collision instead of dropping the event batch", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(put)
+      .mockRejectedValueOnce(new Error("already exists"))
+      .mockResolvedValueOnce({ url: "https://blob.example/events/run-1/0000000002.json" } as never);
+
+    const appended = await storage.appendRunEvents("run-1", [
+      { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+    ]);
+
+    expect(appended.map((event) => event.seq)).toEqual([2]);
+    expect(put).toHaveBeenNthCalledWith(2, "events/run-1/0000000002.json", expect.any(String), expect.any(Object));
+  });
+
   it("listRunEvents lists per-seq blobs, fetches each, and returns events ordered by seq", async () => {
     const storage = new BlobStorage();
 
@@ -398,6 +423,13 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     expect(ts).toBe("2026-07-21T00:05:00.000Z");
     expect(fetchSpy).not.toHaveBeenCalled(); // reaper must not fetch event contents
     vi.unstubAllGlobals();
+  });
+
+  it("returns no latest timestamp when an event listing is empty", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+
+    await expect(storage.latestEventTimestamp("run-1")).resolves.toBeUndefined();
   });
 
   describe("regression: event log never falls back to a single rewritten blob", () => {
@@ -511,6 +543,44 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       allowOverwrite: true,
       contentType: "application/json",
     });
+  });
+
+  it("reads entity JSON through get(), including a missing blob", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    vi.mocked(get)
+      .mockResolvedValueOnce({ stream: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(run))); controller.close(); } }) } as never)
+      .mockResolvedValueOnce(null as never);
+
+    expect(await storage.getRun("run-1")).toEqual(run);
+    expect(await storage.getSubmission("missing")).toBeUndefined();
+    expect(get).toHaveBeenNthCalledWith(1, "runs/run-1.json", { access: "public" });
+  });
+
+  it("stores trace data and returns raw trace bytes, or null when the trace is absent", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/traces/run-1/task-1/output.log" } as never);
+    vi.mocked(get)
+      .mockResolvedValueOnce({ stream: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("trace output")); controller.close(); } }) } as never)
+      .mockResolvedValueOnce(null as never);
+
+    await expect(storage.putTraceBlob("run-1", "task-1", "output.log", "trace output")).resolves.toBe(
+      "https://blob.example/traces/run-1/task-1/output.log",
+    );
+    await expect(storage.getTraceBytes("run-1", "task-1", "output.log")).resolves.toEqual(Buffer.from("trace output"));
+    await expect(storage.getTraceBytes("run-1", "task-1", "missing.log")).resolves.toBeNull();
+    expect(put).toHaveBeenCalledWith("traces/run-1/task-1/output.log", "trace output", {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    });
+  });
+
+  it("returns null when trace reads keep failing after retries", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(get).mockRejectedValue(new Error("temporary blob failure"));
+
+    await expect(storage.getTraceBytes("run-1", "task-1", "output.log")).resolves.toBeNull();
   });
 
   it("listCompetitions follows list() pagination across multiple pages", async () => {
@@ -632,6 +702,7 @@ describe("incremental event reads (?since= cursor)", () => {
       expect(seqFromEventPathname("events/run-1/weird-name.json")).toBeNull();
       expect(seqFromEventPathname("runs/run-1.json")).toBeNull();
       expect(seqFromEventPathname(undefined)).toBeNull();
+      expect(seqFromEventPathname("events/run-1/9007199254740992.json")).toBeNull();
     });
   });
 
