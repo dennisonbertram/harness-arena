@@ -412,15 +412,19 @@ export class BlobStorage implements Storage {
   }
 }
 
-// Held for the life of the process. A fresh instance per call would make
-// STORAGE=memory useless for anything multi-request -- a POST writes into one
-// instance and the next GET reads an empty one.
-let memoryStorage: MemoryStorage | undefined;
+// Pinned on globalThis, not a module-level `let`. Next.js gives server
+// components and route handlers separate module graphs, so a module-scoped
+// singleton is per-graph: a competition created through a route handler is
+// invisible to the page that renders it. This is what makes STORAGE=memory
+// usable for a real request flow instead of only within one graph.
+const MEMORY_STORAGE_KEY = Symbol.for("harness-arena.memory-storage");
+type MemoryStorageGlobal = typeof globalThis & { [MEMORY_STORAGE_KEY]?: MemoryStorage };
 
 export function getStorage(): Storage {
   if (process.env.STORAGE === "memory") {
-    memoryStorage ??= new MemoryStorage();
-    return memoryStorage;
+    const g = globalThis as MemoryStorageGlobal;
+    g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();
+    return g[MEMORY_STORAGE_KEY];
   }
   if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
