@@ -98,4 +98,86 @@ describe("CompetitionPage", () => {
     expect(html).toContain("default-entrant");
     expect(html).not.toContain("other-entrant");
   });
+
+  it("renders no prize amount or cadence when both are unset", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: null, prize_cadence: null }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toMatch(/\$\d/);
+    expect(html).not.toMatch(/\b(?:daily|weekly|monthly|one-time)\b/i);
+  });
+
+  it("renders the prize amount and cadence supplied by the competition", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: 12.5, prize_cadence: "weekly" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("$12.50");
+    expect(html).toContain("weekly");
+  });
+
+  // The model is a property of the competition record (#77), not the
+  // COMPETITION_MODEL env constant. Showing the constant would display the
+  // wrong model for any competition that isn't the seeded default.
+  it("shows the competition's own model, not the env default", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ model: "anthropic/claude-opus-5" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("Claude Opus 5");
+    expect(html).not.toContain("glm-5.2");
+  });
+
+  // formatUsd renders 4 decimals because it exists for fractions-of-a-cent
+  // run costs. A prize pot is money a human is owed -- $100.00, not $100.0000.
+  it("formats the prize as currency, not as a 4-decimal run cost", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: 100, prize_cadence: "weekly" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("$100.00");
+    expect(html).not.toContain("$100.0000");
+  });
+
+  it("renders a closed competition as closed", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ status: "closed" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("closed");
+    expect(html).not.toContain("This competition is live.");
+  });
+
+  it("removes the old payout-mechanics copy", async () => {
+    mockAuth.mockResolvedValue(null);
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toContain("$100");
+    expect(html).not.toContain("paid manually");
+  });
 });
+
+function defaultCompetition(overrides: Partial<Competition> = {}): Competition {
+  return {
+    id: defaultCompetitionId(),
+    arena: "harness-arena",
+    harness: "pi",
+    model: "zai/glm-5.2",
+    prize_amount_usd: null,
+    prize_cadence: null,
+    status: "live",
+    created_at: "2026-07-25T00:00:00.000Z",
+    ...overrides,
+  };
+}
