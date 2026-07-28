@@ -22,4 +22,21 @@ describe("ModelLogo", () => {
     expect(html).not.toContain("<svg");
     expect(html).toContain(">?<");
   });
+
+  // "I want to see the colour" -- but three of the six brands publish
+  // near-black marks that vanish on this dark site, so the rule is: brand
+  // colour where it clears contrast, theme-aware neutral where the brand is
+  // genuinely monochrome.
+  it("paints a model's mark in its provider brand colour", () => {
+    expect(renderToStaticMarkup(<ModelLogo model="anthropic/claude-opus-5" />)).toContain("#D97757");
+    expect(renderToStaticMarkup(<ModelLogo model="google/gemini-3-flash" />)).toContain("#4285F4");
+    expect(renderToStaticMarkup(<ModelLogo model="nvidia/nemotron-3-super-120b-a12b" />)).toContain("#76B900");
+  });
+
+  it("keeps a monochrome brand on the theme-aware fill so it stays visible on dark", () => {
+    // Z.ai's mark is #2D2D2D — 1.44 contrast against this background.
+    const html = renderToStaticMarkup(<ModelLogo model="zai/glm-5.2" />);
+    expect(html).toContain("var(--gray-1000)");
+    expect(html).not.toContain("#2D2D2D");
+  });
 });
