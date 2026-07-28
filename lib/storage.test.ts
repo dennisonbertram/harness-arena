@@ -216,6 +216,21 @@ describe("MemoryStorage", () => {
       // anything multi-request: a POST writes into one instance and the next
       // GET reads an empty one. Local dev and API smoke tests both need it to
       // persist for the life of the process.
+      // Next.js gives server components and route handlers separate module
+      // graphs, so a module-level singleton is per-graph: a competition created
+      // through a route handler is invisible to the page rendering it. Pinning
+      // the instance on globalThis under a cross-realm Symbol.for key is what
+      // makes STORAGE=memory usable for a real request flow.
+      it("pins the MemoryStorage instance on globalThis so it spans module graphs", () => {
+        process.env.STORAGE = "memory";
+        const key = Symbol.for("harness-arena.memory-storage");
+        delete (globalThis as Record<symbol, unknown>)[key];
+
+        const instance = getStorage();
+
+        expect((globalThis as Record<symbol, unknown>)[key]).toBe(instance);
+      });
+
       it("returns the SAME MemoryStorage instance across calls", () => {
         process.env.STORAGE = "memory";
         expect(getStorage()).toBe(getStorage());
