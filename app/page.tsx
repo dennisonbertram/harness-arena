@@ -18,13 +18,26 @@ export const revalidate = 15;
 // scripts/seed-competition.mjs -- but keeps the page from crashing).
 const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], pending: 0 };
 
-export default async function CompetitionPage() {
+type CompetitionSearchParams = Promise<{ competition?: string | string[] | undefined }>;
+
+export default async function CompetitionPage({ searchParams }: { searchParams?: CompetitionSearchParams } = {}) {
   const storage = getStorage();
-  // No switcher yet (#78) -- always show the live default competition.
-  const competition = await resolveDefaultCompetition(storage);
-  const [board, session] = await Promise.all([
-    competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
+  const [params, defaultCompetition, competitions, session] = await Promise.all([
+    searchParams ?? Promise.resolve<{ competition?: string | string[] | undefined }>({}),
+    resolveDefaultCompetition(storage),
+    storage.listCompetitions(),
     auth(),
+  ]);
+  const requestedCompetitionId = params.competition;
+  // URL input is only accepted when it names an existing competition. This
+  // keeps a bad shared link harmless and preserves the live-default route at
+  // `/`.
+  const competition =
+    typeof requestedCompetitionId === "string"
+      ? competitions.find((candidate) => candidate.id === requestedCompetitionId) ?? defaultCompetition
+      : defaultCompetition;
+  const [board] = await Promise.all([
+    competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
   ]);
   const githubLogin = session?.user?.githubLogin;
 
@@ -62,6 +75,8 @@ export default async function CompetitionPage() {
         </div>
       </section>
 
+      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} />
+
       <BaselineSection board={board} />
 
       <section style={{ marginTop: 40, overflowX: "auto" }}>
@@ -89,6 +104,103 @@ export default async function CompetitionPage() {
           </p>
         )}
       </section>
+    </div>
+  );
+}
+
+function competitionHref(id: string): string {
+  return `/?competition=${encodeURIComponent(id)}`;
+}
+
+function titleCase(value: string): string {
+  return value.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function CompetitionSwitcher({
+  competitions,
+  selectedCompetition,
+}: {
+  competitions: Competition[];
+  selectedCompetition: Competition | undefined;
+}) {
+  if (!selectedCompetition) return null;
+
+  const competitionForArena = new Map<string, Competition>();
+  for (const competition of competitions) {
+    if (!competitionForArena.has(competition.arena)) competitionForArena.set(competition.arena, competition);
+  }
+  const arenas = [...competitionForArena.values()];
+  const withinArena = competitions.filter((competition) => competition.arena === selectedCompetition.arena);
+  const competitionForHarness = new Map<string, Competition>();
+  for (const competition of withinArena) {
+    if (!competitionForHarness.has(competition.harness)) competitionForHarness.set(competition.harness, competition);
+  }
+  const harnesses = [...competitionForHarness.values()];
+  const withinHarness = withinArena.filter((competition) => competition.harness === selectedCompetition.harness);
+
+  return (
+    <nav aria-label="Competition switcher" style={{ marginBottom: 24 }}>
+      <div className="label" style={{ marginBottom: 8 }}>
+        Competition
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "12px 28px",
+          padding: "16px 20px",
+          border: "1px solid var(--gray-alpha-400)",
+          borderRadius: 10,
+        }}
+      >
+        <SwitcherLevel label="Arena" options={arenas} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.arena)} />
+        <SwitcherLevel label="Harness" options={harnesses} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.harness)} />
+        <SwitcherLevel label="Model" options={withinHarness} selectedId={selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
+      </div>
+    </nav>
+  );
+}
+
+function SwitcherLevel({
+  label,
+  options,
+  selectedId,
+  value,
+}: {
+  label: string;
+  options: Competition[];
+  selectedId: string;
+  value: (competition: Competition) => string;
+}) {
+  return (
+    <div>
+      <div className="label" style={{ marginBottom: 5 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {options.map((competition) => {
+          const selected = competition.id === selectedId;
+          return (
+            <Link
+              key={competition.id}
+              href={competitionHref(competition.id)}
+              aria-current={selected ? "page" : undefined}
+              className="mono"
+              style={{
+                fontSize: 14,
+                color: selected ? "var(--background-100)" : "var(--blue-700)",
+                background: selected ? "var(--gray-1000)" : "transparent",
+                border: "1px solid var(--gray-alpha-400)",
+                borderRadius: 6,
+                padding: "5px 8px",
+                textDecoration: "none",
+              }}
+            >
+              {value(competition)}
+            </Link>
+          );
+        })}
+      </div>
     </div>
   );
 }

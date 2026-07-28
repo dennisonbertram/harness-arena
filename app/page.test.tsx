@@ -105,12 +105,74 @@ describe("CompetitionPage", () => {
     expect(html).not.toContain("other-entrant");
   });
 
-  it("renders no prize amount or cadence when both are unset", async () => {
+  it("renders the selected competition's board instead of the default's (issue #78)", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    const defaultId = defaultCompetitionId();
+    const selectedId = "comp-second";
+    await storage.putCompetition(defaultCompetition());
+    await storage.putCompetition(
+      defaultCompetition({
+        id: selectedId,
+        arena: "bounty-arena",
+        harness: "codex",
+        model: "anthropic/claude-opus-5",
+      }),
+    );
+    await storage.putSubmission(submission("default-entry", { run_id: "run-default", competition_id: defaultId, github_login: "default-entrant" }));
+    await storage.putRun(run("run-default", { submission_id: "default-entry" }));
+    await storage.putSubmission(submission("selected-entry", { run_id: "run-selected", competition_id: selectedId, github_login: "selected-entrant" }));
+    await storage.putRun(run("run-selected", { submission_id: "selected-entry" }));
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: selectedId }) }),
+    );
+
+    expect(html).toContain("selected-entrant");
+    expect(html).not.toContain("default-entrant");
+    expect(html).toContain("Bounty Arena");
+    expect(html).toContain("Codex");
+    expect(html).toContain("Claude Opus 5");
+  });
+
+  it("renders a deliberate three-level switcher when there is one competition (issue #78)", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("Competition");
+    expect(html).toContain("Arena");
+    expect(html).toContain("Harness");
+    expect(html).toContain("Model");
+    expect(html).toContain("Harness Arena");
+    expect(html).toContain("Pi");
+    expect(html).toContain("glm-5.2");
+  });
+
+  it("falls back to the default competition when the URL competition id is unknown (issue #78)", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putSubmission(submission("default-entry", { run_id: "run-default", github_login: "default-entrant" }));
+    await storage.putRun(run("run-default", { submission_id: "default-entry" }));
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "not-a-competition" }) }),
+    );
+
+    expect(html).toContain("default-entrant");
+  });
+
+  it("renders no prize amount or cadence when both are unset (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition({ prize_amount_usd: null, prize_cadence: null }));
 
-    const html = renderToStaticMarkup(await CompetitionPage.default());
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: defaultCompetitionId() }) }),
+    );
 
     expect(html).not.toMatch(/\$\d/);
     expect(html).not.toMatch(/\b(?:daily|weekly|monthly|one-time)\b/i);
@@ -154,12 +216,14 @@ describe("CompetitionPage", () => {
     expect(html).not.toContain("$100.0000");
   });
 
-  it("renders a closed competition as closed", async () => {
+  it("renders a selected closed competition as closed (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition({ status: "closed" }));
 
-    const html = renderToStaticMarkup(await CompetitionPage.default());
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: defaultCompetitionId() }) }),
+    );
 
     expect(html).toContain("closed");
     expect(html).not.toContain("This competition is live.");
@@ -183,6 +247,31 @@ function defaultCompetition(overrides: Partial<Competition> = {}): Competition {
     prize_amount_usd: null,
     prize_cadence: null,
     status: "live",
+    created_at: "2026-07-25T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function submission(id: string, overrides: Partial<Submission> = {}): Submission {
+  return {
+    id,
+    agent_name: "entrant",
+    prompt: `prompt-${id}`,
+    status: "scored",
+    competition: true,
+    created_at: "2026-07-25T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function run(id: string, overrides: Partial<Run> = {}): Run {
+  return {
+    id,
+    submission_id: overrides.submission_id ?? "unset",
+    status: "completed",
+    tasks_passed: 10,
+    total_cost_usd: 1,
+    task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }),
     created_at: "2026-07-25T00:00:00.000Z",
     ...overrides,
   };
