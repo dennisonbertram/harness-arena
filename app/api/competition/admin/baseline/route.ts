@@ -1,7 +1,9 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { COMPETITION_MODEL, competitionAdminToken } from "@/lib/competition-config";
+import { z } from "zod";
+import { competitionAdminToken } from "@/lib/competition-config";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
+import { defaultCompetitionId, resolveDefaultCompetition } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -9,6 +11,9 @@ import type { Run, Submission } from "@/lib/types";
 import { getBaselinePrompt } from "@/lib/baseline-prompt";
 
 const BASELINE_AGENT_NAME = "pi-vanilla-baseline";
+const CompetitionTargetSchema = z.object({
+  competition_id: z.string().min(1).optional(),
+});
 
 // Same POC-level limiter shape as the main submission endpoints — throttles
 // repeated admin-token-guessing attempts, not just legitimate use. Must run
@@ -56,9 +61,37 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "invalid or missing admin token" }, { status: 401 });
   }
 
+  const rawBody = await request.text();
+  let parsedBody: unknown = {};
+  if (rawBody) {
+    try {
+      parsedBody = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json({ error: "invalid competition target" }, { status: 400 });
+    }
+  }
+  const target = CompetitionTargetSchema.safeParse(parsedBody);
+  if (!target.success) {
+    return NextResponse.json({ error: "invalid competition target", details: target.error.issues }, { status: 400 });
+  }
+
   const storage = getStorage();
+  const competition = target.data.competition_id
+    ? await storage.getCompetition(target.data.competition_id)
+    : await resolveDefaultCompetition(storage);
+  if (!competition) {
+    return NextResponse.json({ error: "competition not found" }, { status: 404 });
+  }
+  if (competition.status !== "live") {
+    return NextResponse.json({ error: "competition is closed" }, { status: 409 });
+  }
+
   const submissions = await storage.listSubmissions();
-  const existingBaselines = submissions.filter((s) => s.competition_baseline === true);
+  const existingBaselines = submissions.filter(
+    (s) =>
+      s.competition_baseline === true &&
+      (s.competition_id === competition.id || (!s.competition_id && competition.id === defaultCompetitionId())),
+  );
   // ponytail: same list-then-point-fetch TOCTOU gap as the submissions
   // route's dedup check (not concurrency-safe against Blob's eventual
   // consistency) — two near-simultaneous admin triggers could both pass this
@@ -81,8 +114,9 @@ export async function POST(request: NextRequest) {
     agent_name: BASELINE_AGENT_NAME,
     prompt: getBaselinePrompt(),
     status: "pending_review",
-    model: COMPETITION_MODEL,
+    model: competition.model,
     competition: true,
+    competition_id: competition.id,
     competition_baseline: true,
     created_at: new Date().toISOString(),
   };

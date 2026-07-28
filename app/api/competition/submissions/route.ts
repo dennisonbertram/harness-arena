@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
-import { COMPETITION_MODEL } from "@/lib/competition-config";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
+import { belongsToCompetition, resolveDefaultCompetition } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -16,6 +16,7 @@ const MAX_BODY_BYTES = 262144;
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
   prompt: z.string().min(1).max(MAX_PROMPT_CHARS),
+  competition_id: z.string().min(1).optional(),
 });
 
 const isIpRateLimited = createRateLimiter(5);
@@ -66,10 +67,27 @@ export async function POST(request: NextRequest) {
       { status: 400 },
     );
   }
-  const { agent_name: agentName, prompt } = parsedInput.data;
+  const { agent_name: agentName, prompt, competition_id: competitionId } = parsedInput.data;
 
   const storage = getStorage();
-  const competitionSubmissions = (await storage.listSubmissions()).filter((s) => s.competition === true);
+  const competition = competitionId
+    ? await storage.getCompetition(competitionId)
+    : await resolveDefaultCompetition(storage);
+  if (!competition) {
+    return NextResponse.json({ error: "competition not found" }, { status: 404 });
+  }
+  if (competition.status !== "live") {
+    return NextResponse.json({ error: "competition is closed" }, { status: 409 });
+  }
+
+  // Duplicate detection is scoped to THIS competition. Each (arena, harness,
+  // model) triple is its own job (epic #74), so a prompt tuned for one model
+  // is a legitimate separate entry against another -- a global check would
+  // silently burn the prompt for every other contest the moment it's used once.
+  const defaultId = (await resolveDefaultCompetition(storage))?.id ?? competition.id;
+  const competitionSubmissions = (await storage.listSubmissions()).filter((s) =>
+    belongsToCompetition(s, competition.id, defaultId),
+  );
   const candidates = competitionSubmissions.filter((s) => s.prompt === prompt);
   const candidateRuns = await Promise.all(
     candidates.map((s) => (s.run_id ? storage.getRun(s.run_id) : Promise.resolve(undefined))),
@@ -94,8 +112,9 @@ export async function POST(request: NextRequest) {
     agent_name: agentName,
     prompt,
     status: "pending_review",
-    model: COMPETITION_MODEL,
+    model: competition.model,
     competition: true,
+    competition_id: competition.id,
     github_id: githubId,
     github_login: githubLogin,
     created_at: new Date().toISOString(),

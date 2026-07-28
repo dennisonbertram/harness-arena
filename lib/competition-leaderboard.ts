@@ -79,7 +79,7 @@ export async function resolveDefaultCompetition(storage: Storage): Promise<Compe
  * must stay correct even if one was missed or a new one lands before the
  * write path (#77) is in.
  */
-function belongsToCompetition(submission: Submission, competitionId: string, defaultId: string): boolean {
+export function belongsToCompetition(submission: Submission, competitionId: string, defaultId: string): boolean {
   if (submission.competition !== true) return false;
   if (submission.competition_id) return submission.competition_id === competitionId;
   return competitionId === defaultId;
