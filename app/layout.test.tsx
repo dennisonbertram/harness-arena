@@ -34,4 +34,17 @@ describe("RootLayout header sign-in block", () => {
     expect(html).toContain("Sign out");
     expect(html).not.toContain("Sign in with GitHub");
   });
+
+  it("keeps the primary navigation, supplied page content, and operational footer in the document shell", async () => {
+    mockAuth.mockResolvedValue(null);
+    const html = renderToStaticMarkup(await RootLayout({ children: <p>page content</p> }));
+
+    expect(html).toContain('href="/benchmarks"');
+    expect(html).toContain('href="/how-it-works"');
+    expect(html).toContain('href="/submit"');
+    expect(html).toContain('href="/voice"');
+    expect(html).toContain('href="/status"');
+    expect(html).toContain("page content");
+    expect(html).toContain("runs on Vercel Sandbox");
+  });
 });
