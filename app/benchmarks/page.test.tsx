@@ -108,6 +108,20 @@ describe("benchmarks board", () => {
     expect(html).not.toContain("competition-account-must-not-render");
     expect(html).not.toContain("This must stay off the board");
   });
+
+  // Every model on the allowlist has a provider logomark (ModelLogo); the
+  // Model column showed only the text label, so the board was harder to scan
+  // by provider than the rows already were by entrant.
+  it("shows a provider logomark beside each model name", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s1", { run_id: "r1", model: "anthropic/claude-opus-5" }));
+    await storage.putRun(run("r1", { submission_id: "s1", model: "anthropic/claude-opus-5" }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    // Anthropic's mark, from ModelLogo's PROVIDER_LOGOS.
+    expect(html).toContain("M17.3041 3.541h-3.6718l6.696 16.918H24Z");
+  });
 });
 
 function submission(id: string, overrides: Partial<Submission> = {}): Submission {
