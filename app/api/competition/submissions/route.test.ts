@@ -22,6 +22,7 @@ import { judgeSubmission } from "@/lib/judge";
 import { startRun } from "@/lib/run-trigger";
 import { auth } from "@/auth";
 import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
+import { defaultCompetitionId } from "@/lib/competition-leaderboard";
 import { GET, POST } from "./route";
 
 const mockAuth = asMockAuth(auth);
@@ -38,6 +39,19 @@ function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
   mockAuth.mockResolvedValue(githubSession(githubId, githubLogin));
 }
 
+async function putCompetition(id: string, model: string, status: "live" | "closed" = "live") {
+  await storageRef.current.putCompetition({
+    id,
+    arena: "harness-arena",
+    harness: "pi",
+    model,
+    prize_amount_usd: null,
+    prize_cadence: null,
+    status,
+    created_at: "2026-07-27T00:00:00.000Z",
+  });
+}
+
 describe("POST /api/competition/submissions", () => {
   // Same rationale as the main arena's test file: one strictly-increasing
   // counter backs every github_id used anywhere in this file so unrelated
@@ -48,8 +62,9 @@ describe("POST /api/competition/submissions", () => {
     return githubIdCounter;
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetStorage();
+    await putCompetition(defaultCompetitionId(), "zai/glm-5.2");
     vi.mocked(judgeSubmission).mockReset();
     vi.mocked(startRun).mockClear();
     mockAuth.mockReset();
@@ -113,7 +128,7 @@ describe("POST /api/competition/submissions", () => {
     expect(noPrompt.status).toBe(400);
   });
 
-  it("creates a submission tagged competition:true with the fixed model and dispatches exactly 1 run", async () => {
+  it("creates a submission tagged competition:true with the default competition's model and dispatches exactly 1 run", async () => {
     vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fair" });
 
     const response = await POST(postRequest({ agent_name: "alice", prompt: "Plan carefully." }, "3.3.3.1"));
@@ -124,6 +139,7 @@ describe("POST /api/competition/submissions", () => {
     expect(body.run_ids).toEqual([body.run_id]);
     const submission = await storageRef.current.getSubmission(body.submission_id);
     expect(submission?.competition).toBe(true);
+    expect(submission?.competition_id).toBe(defaultCompetitionId());
     expect(submission?.model).toBe("zai/glm-5.2");
     expect(submission?.competition_baseline).toBeUndefined();
     expect(typeof submission?.github_id).toBe("number");
@@ -134,11 +150,93 @@ describe("POST /api/competition/submissions", () => {
     expect(startRun).toHaveBeenCalledTimes(1);
   });
 
+  it("stamps a named live competition and uses that competition's model", async () => {
+    await putCompetition("comp-alt-model", "anthropic/claude-sonnet-5");
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fair" });
+
+    const response = await POST(
+      postRequest({ agent_name: "alice", prompt: "Target the alternate competition.", competition_id: "comp-alt-model" }, "3.3.3.2"),
+    );
+    const body = await response.json();
+    const submission = await storageRef.current.getSubmission(body.submission_id);
+
+    expect(response.status).toBe(200);
+    expect(submission?.competition_id).toBe("comp-alt-model");
+    expect(submission?.model).toBe("anthropic/claude-sonnet-5");
+  });
+
+  it("rejects a closed competition", async () => {
+    await putCompetition("comp-closed", "anthropic/claude-sonnet-5", "closed");
+
+    const response = await POST(
+      postRequest({ agent_name: "alice", prompt: "Try closed.", competition_id: "comp-closed" }, "3.3.3.3"),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "competition is closed" });
+    expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+  });
+
+  it("rejects an unknown competition", async () => {
+    const response = await POST(
+      postRequest({ agent_name: "alice", prompt: "Try unknown.", competition_id: "comp-missing" }, "3.3.3.4"),
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ error: "competition not found" });
+    expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+  });
+
+  it("uses the resolved default competition when competition_id is omitted", async () => {
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fair" });
+
+    const response = await POST(postRequest({ agent_name: "alice", prompt: "Use the default." }, "3.3.3.5"));
+    const body = await response.json();
+    const submission = await storageRef.current.getSubmission(body.submission_id);
+
+    expect(response.status).toBe(200);
+    expect(submission?.competition_id).toBe(defaultCompetitionId());
+  });
+
   it("rejects a prompt byte-identical to an already-approved competition submission with 409", async () => {
     vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fair" });
     await POST(postRequest({ agent_name: "alice", prompt: "SAME PROMPT" }, "4.4.4.1"));
 
     const second = await POST(postRequest({ agent_name: "bob", prompt: "SAME PROMPT" }, "4.4.4.2"));
+    expect(second.status).toBe(409);
+  });
+
+  // Each (arena, harness, model) triple is its own job (epic #74): a prompt
+  // tuned for glm-5.2 is a legitimate, separate entry against claude-sonnet-5.
+  // The duplicate guard is therefore per-competition, not global -- otherwise
+  // entering one contest silently burns the prompt for every other contest.
+  it("allows a prompt already used in another competition", async () => {
+    vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fair" });
+    await putCompetition("comp-second", "anthropic/claude-sonnet-5");
+    const prompt = "Solve the task carefully and cheaply.";
+
+    const first = await POST(postRequest({ agent_name: "alice", prompt }, "9.9.9.1"));
+    expect(first.status).toBe(200);
+
+    mockSession(freshGithubId());
+    const second = await POST(
+      postRequest({ agent_name: "alice", prompt, competition_id: "comp-second" }, "9.9.9.2"),
+    );
+
+    expect(second.status).toBe(200);
+    const body = await second.json();
+    const submission = await storageRef.current.getSubmission(body.submission_id);
+    expect(submission?.competition_id).toBe("comp-second");
+  });
+
+  it("still rejects a duplicate prompt within the same competition", async () => {
+    vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fair" });
+    const prompt = "A repeated prompt within one contest.";
+    await POST(postRequest({ agent_name: "alice", prompt }, "9.9.9.3"));
+
+    mockSession(freshGithubId());
+    const second = await POST(postRequest({ agent_name: "bob", prompt }, "9.9.9.4"));
+
     expect(second.status).toBe(409);
   });
 
@@ -316,3 +414,4 @@ describe("GET /api/competition/submissions", () => {
     expect(body[0].github_login).toBe("unknown");
   });
 });
+

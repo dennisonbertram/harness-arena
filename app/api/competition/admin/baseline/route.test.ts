@@ -18,20 +18,41 @@ vi.mock("@/lib/run-trigger", () => ({
 
 import { judgeSubmission } from "@/lib/judge";
 import { startRun } from "@/lib/run-trigger";
+import { defaultCompetitionId } from "@/lib/competition-leaderboard";
 import { POST } from "./route";
 
 const ADMIN_TOKEN = "test-admin-token";
 
-function adminRequest(headers: Record<string, string> = {}, ip = "1.1.1.1"): NextRequest {
+function adminRequest(headers: Record<string, string> = {}, ip = "1.1.1.1", body?: unknown): NextRequest {
   return new NextRequest("http://localhost/api/competition/admin/baseline", {
     method: "POST",
-    headers: { "x-competition-admin-token": ADMIN_TOKEN, "x-forwarded-for": ip, ...headers },
+    headers: {
+      "x-competition-admin-token": ADMIN_TOKEN,
+      "x-forwarded-for": ip,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...headers,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+async function putCompetition(id: string, model: string) {
+  await storageRef.current.putCompetition({
+    id,
+    arena: "harness-arena",
+    harness: "pi",
+    model,
+    prize_amount_usd: null,
+    prize_cadence: null,
+    status: "live",
+    created_at: "2026-07-27T00:00:00.000Z",
   });
 }
 
 describe("POST /api/competition/admin/baseline", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetStorage();
+    await putCompetition(defaultCompetitionId(), "zai/glm-5.2");
     vi.mocked(judgeSubmission).mockReset();
     vi.mocked(startRun).mockClear();
     vi.stubEnv("COMPETITION_ADMIN_TOKEN", ADMIN_TOKEN);
@@ -74,11 +95,56 @@ describe("POST /api/competition/admin/baseline", () => {
     const submission = await storageRef.current.getSubmission(body.submission_id);
     expect(submission?.competition).toBe(true);
     expect(submission?.competition_baseline).toBe(true);
+    expect(submission?.competition_id).toBe(defaultCompetitionId());
     expect(submission?.model).toBe("zai/glm-5.2");
 
     const runs = await storageRef.current.listRuns();
     expect(runs).toHaveLength(1);
     expect(startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a baseline for the named competition with that competition's model", async () => {
+    await putCompetition("comp-alt-model", "anthropic/claude-sonnet-5");
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+    const response = await POST(adminRequest({}, "3.3.3.2", { competition_id: "comp-alt-model" }));
+    const body = await response.json();
+    const submission = await storageRef.current.getSubmission(body.submission_id);
+
+    expect(response.status).toBe(200);
+    expect(submission?.competition_id).toBe("comp-alt-model");
+    expect(submission?.model).toBe("anthropic/claude-sonnet-5");
+  });
+
+  it("allows a baseline in competition B when competition A already has one", async () => {
+    await putCompetition("comp-a", "anthropic/claude-sonnet-5");
+    await putCompetition("comp-b", "openai/gpt-5.2");
+    await storageRef.current.putSubmission({
+      id: "base-a",
+      agent_name: "pi-vanilla-baseline",
+      prompt: "vanilla",
+      status: "queued",
+      competition: true,
+      competition_id: "comp-a",
+      competition_baseline: true,
+      run_id: "run-a",
+      created_at: "2026-07-27T00:00:00.000Z",
+    });
+    await storageRef.current.putRun({
+      id: "run-a",
+      submission_id: "base-a",
+      status: "queued",
+      task_results: [],
+      created_at: "2026-07-27T00:00:00.000Z",
+    });
+    vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+    const response = await POST(adminRequest({}, "3.3.3.3", { competition_id: "comp-b" }));
+    const body = await response.json();
+    const submission = await storageRef.current.getSubmission(body.submission_id);
+
+    expect(response.status).toBe(200);
+    expect(submission?.competition_id).toBe("comp-b");
   });
 
   it("returns 409 and creates nothing when a live baseline already exists (run queued)", async () => {
@@ -103,6 +169,49 @@ describe("POST /api/competition/admin/baseline", () => {
     const response = await POST(adminRequest({}, "4.4.4.1"));
     expect(response.status).toBe(409);
     expect(judgeSubmission).not.toHaveBeenCalled();
+    expect(await storageRef.current.listSubmissions()).toHaveLength(1);
+  });
+
+  // The board assigns unstamped legacy rows to whatever competition
+  // resolveDefaultCompetition actually picks. Recognising a legacy baseline
+  // only when the target equals the DERIVED default misses it whenever the
+  // seeded default is closed or absent -- and the admin then creates a second
+  // active baseline for a board that already has one.
+  it("sees a legacy unstamped baseline on the resolved fallback competition", async () => {
+    resetStorage();
+    // Seeded default is closed, so the resolver falls back to another live one.
+    await storageRef.current.putCompetition({
+      id: defaultCompetitionId(),
+      arena: "harness-arena",
+      harness: "pi",
+      model: "zai/glm-5.2",
+      prize_amount_usd: null,
+      prize_cadence: null,
+      status: "closed",
+      created_at: "2026-07-27T00:00:00.000Z",
+    });
+    await putCompetition("comp-fallback", "zai/glm-5.2");
+    await storageRef.current.putSubmission({
+      id: "legacy-base",
+      agent_name: "pi-vanilla-baseline",
+      prompt: "vanilla",
+      status: "queued",
+      competition: true,
+      competition_baseline: true,
+      run_id: "run-legacy",
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+    await storageRef.current.putRun({
+      id: "run-legacy",
+      submission_id: "legacy-base",
+      status: "queued",
+      task_results: [],
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+
+    const response = await POST(adminRequest({}, "4.4.4.9"));
+
+    expect(response.status).toBe(409);
     expect(await storageRef.current.listSubmissions()).toHaveLength(1);
   });
 
