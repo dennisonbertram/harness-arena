@@ -2,7 +2,7 @@ import Link from "next/link";
 import { auth } from "@/auth";
 import { GithubSignInButton } from "./github-sign-in-button";
 import { COMPETITION_MODEL } from "@/lib/competition-config";
-import { getCompetitionBoard } from "@/lib/competition-leaderboard";
+import { getCompetitionBoard, resolveDefaultCompetition, type CompetitionBoard } from "@/lib/competition-leaderboard";
 import { formatUsd } from "@/lib/format";
 import { modelLabel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
@@ -13,9 +13,18 @@ import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
 // build-time-cached page would never show new submissions.
 export const revalidate = 15;
 
+// No competition seeded yet (shouldn't happen in prod -- see
+// scripts/seed-competition.mjs -- but keeps the page from crashing).
+const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], pending: 0 };
+
 export default async function CompetitionPage() {
   const storage = getStorage();
-  const [board, session] = await Promise.all([getCompetitionBoard(storage), auth()]);
+  // No switcher yet (#78) -- always show the live default competition.
+  const competition = await resolveDefaultCompetition(storage);
+  const [board, session] = await Promise.all([
+    competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
+    auth(),
+  ]);
   const githubLogin = session?.user?.githubLogin;
 
   return (

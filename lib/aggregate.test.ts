@@ -194,6 +194,23 @@ describe("aggregatePrompts", () => {
     expect(standings[0].agentName).toBe("arena-entrant");
   });
 
+  it("excludes competition submissions from BOTH competitions, not just one (issue #76)", () => {
+    const submissions = [
+      sub("s1", "arena-entrant", "ARENA PROMPT", "2026-07-20T00:00:00Z"),
+      { ...sub("s2", "comp-a-entrant", "ARENA PROMPT", "2026-07-21T00:00:00Z"), competition: true, competition_id: "comp-a" },
+      { ...sub("s3", "comp-b-entrant", "ARENA PROMPT", "2026-07-22T00:00:00Z"), competition: true, competition_id: "comp-b" },
+    ];
+    const runs = [
+      run("r1", "s1", [true, true, false, false]),
+      run("r2", "s2", [true, true, true, true]),
+      run("r3", "s3", [true, true, true, true]),
+    ];
+    const standings = aggregatePrompts(runs, submissions, TOTAL);
+    expect(standings).toHaveLength(1);
+    expect(standings[0].runs).toBe(1);
+    expect(standings[0].agentName).toBe("arena-entrant");
+  });
+
   it("carries the most recent submission's github_login, falling back to 'unknown' when none has ever been set", () => {
     const withLogin = { ...sub("s1", "alice", "SAME", "2026-07-20T00:00:00Z"), github_login: "octocat" };
     const withoutLogin = sub("s2", "bob", "SAME", "2026-07-21T00:00:00Z"); // newer, no login (pre-login submission)
@@ -341,6 +358,21 @@ describe("aggregateAllRunsByTask", () => {
       { ...sub("s2", "comp-entrant", "P2", "2026-07-21T00:00:00Z"), competition: true },
     ];
     const runs = [run("r1", "s1", [true, false, false, false]), run("r2", "s2", [true, true, true, true])];
+    const perTask = aggregateAllRunsByTask(runs, compSubs, ["t0"]);
+    expect(perTask[0]).toMatchObject({ passed: 1, of: 1 });
+  });
+
+  it("excludes entries from BOTH competitions, not just one (issue #76)", () => {
+    const compSubs = [
+      sub("s1", "arena-entrant", "P1", "2026-07-20T00:00:00Z"),
+      { ...sub("s2", "comp-a-entrant", "P2", "2026-07-21T00:00:00Z"), competition: true, competition_id: "comp-a" },
+      { ...sub("s3", "comp-b-entrant", "P3", "2026-07-22T00:00:00Z"), competition: true, competition_id: "comp-b" },
+    ];
+    const runs = [
+      run("r1", "s1", [true, false, false, false]),
+      run("r2", "s2", [true, true, true, true]),
+      run("r3", "s3", [true, true, true, true]),
+    ];
     const perTask = aggregateAllRunsByTask(runs, compSubs, ["t0"]);
     expect(perTask[0]).toMatchObject({ passed: 1, of: 1 });
   });
