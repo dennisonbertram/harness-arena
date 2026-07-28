@@ -212,6 +212,15 @@ describe("MemoryStorage", () => {
         expect(getStorage()).toBeInstanceOf(MemoryStorage);
       });
 
+      // A fresh MemoryStorage per call makes STORAGE=memory useless for
+      // anything multi-request: a POST writes into one instance and the next
+      // GET reads an empty one. Local dev and API smoke tests both need it to
+      // persist for the life of the process.
+      it("returns the SAME MemoryStorage instance across calls", () => {
+        process.env.STORAGE = "memory";
+        expect(getStorage()).toBe(getStorage());
+      });
+
       it("returns BlobStorage when BLOB_READ_WRITE_TOKEN is set and STORAGE is not memory", () => {
         delete process.env.STORAGE;
         process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";

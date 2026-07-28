@@ -412,8 +412,16 @@ export class BlobStorage implements Storage {
   }
 }
 
+// Held for the life of the process. A fresh instance per call would make
+// STORAGE=memory useless for anything multi-request -- a POST writes into one
+// instance and the next GET reads an empty one.
+let memoryStorage: MemoryStorage | undefined;
+
 export function getStorage(): Storage {
-  if (process.env.STORAGE === "memory") return new MemoryStorage();
+  if (process.env.STORAGE === "memory") {
+    memoryStorage ??= new MemoryStorage();
+    return memoryStorage;
+  }
   if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }
