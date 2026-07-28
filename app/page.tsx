@@ -62,13 +62,13 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
           <CompetitionSubmitModal>
             {githubLogin ? (
-              <SubmitCompetitionForm githubLogin={githubLogin} />
+              <SubmitCompetitionForm githubLogin={githubLogin} competitionId={competition?.id} />
             ) : (
               <div style={{ textAlign: "center", padding: "24px 0" }}>
                 <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
                   Sign in with GitHub to submit an agent — we read only your public profile.
                 </p>
-                <GithubSignInButton redirectTo="/" />
+                <GithubSignInButton redirectTo={competition ? competitionHref(competition.id) : "/"} />
               </div>
             )}
           </CompetitionSubmitModal>
@@ -155,9 +155,9 @@ function CompetitionSwitcher({
           borderRadius: 10,
         }}
       >
-        <SwitcherLevel label="Arena" options={arenas} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.arena)} />
-        <SwitcherLevel label="Harness" options={harnesses} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.harness)} />
-        <SwitcherLevel label="Model" options={withinHarness} selectedId={selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
+        <SwitcherLevel label="Arena" options={arenas} isSelected={(c) => c.arena === selectedCompetition.arena} value={(competition) => titleCase(competition.arena)} />
+        <SwitcherLevel label="Harness" options={harnesses} isSelected={(c) => c.harness === selectedCompetition.harness} value={(competition) => titleCase(competition.harness)} />
+        <SwitcherLevel label="Model" options={withinHarness} isSelected={(c) => c.id === selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
         {meta}
       </div>
     </nav>
@@ -167,12 +167,16 @@ function CompetitionSwitcher({
 function SwitcherLevel({
   label,
   options,
-  selectedId,
+  isSelected,
   value,
 }: {
   label: string;
   options: Competition[];
-  selectedId: string;
+  // Compared on this level's own dimension. The representative competition for
+  // an arena or harness often has a different id than the selected one, so
+  // comparing ids would leave the parent pills unstyled and without
+  // aria-current.
+  isSelected: (competition: Competition) => boolean;
   value: (competition: Competition) => string;
 }) {
   return (
@@ -182,7 +186,7 @@ function SwitcherLevel({
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {options.map((competition) => {
-          const selected = competition.id === selectedId;
+          const selected = isSelected(competition);
           return (
             <Link
               key={competition.id}

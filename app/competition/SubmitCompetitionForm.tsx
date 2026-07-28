@@ -19,7 +19,16 @@ type Outcome =
   | { kind: "session-expired"; message: string }
   | { kind: "error"; message: string };
 
-export function SubmitCompetitionForm({ githubLogin }: { githubLogin: string }) {
+export function SubmitCompetitionForm({
+  githubLogin,
+  competitionId,
+}: {
+  githubLogin: string;
+  // The competition currently being viewed. Without it the API falls back to
+  // the default, so a prompt submitted while viewing another competition would
+  // silently be entered into the wrong one.
+  competitionId?: string;
+}) {
   const [agentName, setAgentName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -46,7 +55,7 @@ export function SubmitCompetitionForm({ githubLogin }: { githubLogin: string }) 
       const response = await fetch("/api/competition/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_name: agentName, prompt }),
+        body: JSON.stringify({ agent_name: agentName, prompt, competition_id: competitionId }),
       });
       const body = await response.json().catch(() => null);
       if (response.ok) {

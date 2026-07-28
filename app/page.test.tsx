@@ -182,6 +182,43 @@ describe("CompetitionPage", () => {
     expect(html.match(/>glm-5\.2</g) ?? []).toHaveLength(1);
   });
 
+  // Selecting a competition must change where a submission GOES, not just what
+  // the page shows. The prop wiring itself (competitionId on the form,
+  // redirectTo on the sign-in button) is invisible in rendered HTML and is
+  // covered by types plus the API's own competition_id tests; what IS
+  // assertable here is that every switcher link carries the competition id, so
+  // a shared link and a sign-in round-trip both land on the same board.
+  it("addresses every competition by id in the switcher links", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putCompetition(defaultCompetition({ id: "comp-other", model: "anthropic/claude-opus-5" }));
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
+    );
+
+    expect(html).toContain(`/?competition=${encodeURIComponent("comp-other")}`);
+    expect(html).toContain(`/?competition=${encodeURIComponent(defaultCompetitionId())}`);
+  });
+
+  // The representative competition for an arena/harness usually has a
+  // different id than the selected one, so comparing ids left the parent pills
+  // unstyled and without aria-current.
+  it("marks the arena and harness pills current, not just the model pill", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putCompetition(defaultCompetition({ id: "comp-other", model: "anthropic/claude-opus-5" }));
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
+    );
+
+    // Arena, harness and model pills are all on the selected dimension.
+    expect(html.match(/aria-current="page"/g) ?? []).toHaveLength(3);
+  });
+
   it("renders no prize amount or cadence when both are unset (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
