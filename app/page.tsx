@@ -60,6 +60,15 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
           <strong>cost</strong>. That differs from the main arena&apos;s 5-run mean-pass-rate ranking.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
+          {competition?.status === "closed" ? (
+            // A closed competition rejects submissions with 409, and the form
+            // maps every 409 to "Prompt already submitted" -- an entrant would
+            // be told their prompt was a duplicate when it was never stored.
+            // Don't offer the flow once the contest is over.
+            <p style={{ fontSize: 14, color: "var(--gray-700)" }}>
+              This competition is closed — submissions are no longer accepted.
+            </p>
+          ) : (
           <CompetitionSubmitModal>
             {githubLogin ? (
               <SubmitCompetitionForm githubLogin={githubLogin} competitionId={competition?.id} />
@@ -72,6 +81,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
               </div>
             )}
           </CompetitionSubmitModal>
+          )}
         </div>
       </section>
 

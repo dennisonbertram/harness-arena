@@ -34,11 +34,54 @@ function adminRequest(method: string, path: string, body?: unknown, ip = "3.3.3.
   });
 }
 
+function unauthedRequest(method: string, path: string, token?: string, body?: unknown, ip = "3.3.3.9"): NextRequest {
+  const headers: Record<string, string> = { "content-type": "application/json", "x-forwarded-for": ip };
+  if (token !== undefined) headers["x-competition-admin-token"] = token;
+  return new NextRequest(`http://localhost${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 describe("competition admin close and prize endpoints", () => {
   beforeEach(async () => {
     resetStorage();
     vi.stubEnv("COMPETITION_ADMIN_TOKEN", ADMIN_TOKEN);
     await storageRef.current.putCompetition(competition);
+  });
+
+  // Without these, the token guard could be deleted from either endpoint and
+  // the suite would stay green -- both existing tests send a VALID token, so
+  // neither exercises rejection. These are the only tests standing between a
+  // refactor and an unauthenticated close/reprice.
+  it.each([
+    ["missing token", undefined],
+    ["wrong token", "not-the-token"],
+  ])("rejects close with a %s", async (_label, token) => {
+    const response = await closeCompetition(
+      unauthedRequest("POST", "/api/competition/admin/competition-1/close", token),
+      { params: Promise.resolve({ id: "competition-1" }) },
+    );
+
+    expect(response.status).toBe(401);
+    expect((await storageRef.current.getCompetition("competition-1"))?.status).toBe("live");
+  });
+
+  it.each([
+    ["missing token", undefined],
+    ["wrong token", "not-the-token"],
+  ])("rejects a prize update with a %s", async (_label, token) => {
+    const response = await updatePrize(
+      unauthedRequest("PATCH", "/api/competition/admin/competition-1/prize", token, {
+        prize_amount_usd: 999,
+        prize_cadence: "weekly",
+      }),
+      { params: Promise.resolve({ id: "competition-1" }) },
+    );
+
+    expect(response.status).toBe(401);
+    expect((await storageRef.current.getCompetition("competition-1"))?.prize_amount_usd).toBeNull();
   });
 
   it("closes a live competition and stamps closed_at", async () => {
