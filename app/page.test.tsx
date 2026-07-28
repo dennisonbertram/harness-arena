@@ -98,4 +98,59 @@ describe("CompetitionPage", () => {
     expect(html).toContain("default-entrant");
     expect(html).not.toContain("other-entrant");
   });
+
+  it("renders no prize amount or cadence when both are unset", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: null, prize_cadence: null }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toMatch(/\$\d/);
+    expect(html).not.toMatch(/\b(?:daily|weekly|monthly|one-time)\b/i);
+  });
+
+  it("renders the prize amount and cadence supplied by the competition", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ prize_amount_usd: 12.5, prize_cadence: "weekly" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("$12.5000");
+    expect(html).toContain("weekly");
+  });
+
+  it("renders a closed competition as closed", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ status: "closed" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("This competition is closed.");
+    expect(html).not.toContain("This competition is live.");
+  });
+
+  it("removes the old payout-mechanics copy", async () => {
+    mockAuth.mockResolvedValue(null);
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toContain("$100");
+    expect(html).not.toContain("paid manually");
+  });
 });
+
+function defaultCompetition(overrides: Partial<Competition> = {}): Competition {
+  return {
+    id: defaultCompetitionId(),
+    arena: "harness-arena",
+    harness: "pi",
+    model: "zai/glm-5.2",
+    prize_amount_usd: null,
+    prize_cadence: null,
+    status: "live",
+    created_at: "2026-07-25T00:00:00.000Z",
+    ...overrides,
+  };
+}
