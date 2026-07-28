@@ -9,6 +9,15 @@ vi.mock("@/lib/storage", async (importOriginal) => {
   return { ...actual, getStorage: () => storageRef.current };
 });
 
+// The page schedules its baseline sweep with next/server's `after`, which
+// throws outside a request scope. These tests render the component directly,
+// so there is no request — run the callback inline instead. ensureBaselines is
+// separately covered in lib/competition-baseline.test.ts.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, after: (fn: () => unknown) => { void fn(); } };
+});
+
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
 
 import { auth } from "@/auth";

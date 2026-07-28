@@ -123,6 +123,12 @@ export const CompetitionSchema = z.object({
   prize_cadence: z.enum(PRIZE_CADENCES).nullable().optional(),
   // Closing is manual (epic #74) -- no scheduled rollover computes this.
   status: z.enum(["live", "closed"]),
+  // Whether the reconciler may create a baseline for this competition.
+  // Absent means yes: a competition without a baseline has no reference point.
+  // Stored rather than inferred, because the board render and the cron sweep
+  // reconcile independently of whoever created it and would otherwise
+  // recreate the run an admin explicitly declined to pay for.
+  auto_baseline: z.boolean().optional(),
   created_at: z.iso.datetime(),
   closed_at: z.iso.datetime().optional(),
 });

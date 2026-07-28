@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { ensureBaseline } from "@/lib/competition-baseline";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
 import { log } from "@/lib/log";
@@ -15,6 +16,10 @@ const CreateCompetitionSchema = z
     model: z.string().min(1),
     prize_amount_usd: z.number().nonnegative().optional(),
     prize_cadence: z.enum(PRIZE_CADENCES).optional(),
+    // Creating a competition normally starts a baseline run, which costs
+    // money. Opt OUT rather than in: a competition with no baseline has no
+    // reference point, so the board is meaningless until one exists.
+    skip_baseline: z.boolean().optional(),
   })
   .refine(
     ({ prize_amount_usd, prize_cadence }) =>
@@ -68,9 +73,31 @@ export async function POST(request: NextRequest) {
     prize_amount_usd: input.prize_amount_usd ?? null,
     prize_cadence: input.prize_cadence ?? null,
     status: "live",
+    // Persisted, not just honoured here: the board render and the cron sweep
+    // reconcile independently and would otherwise recreate the run the admin
+    // declined to pay for.
+    auto_baseline: input.skip_baseline ? false : undefined,
     created_at: new Date().toISOString(),
   };
-  await getStorage().putCompetition(competition);
+  const storage = getStorage();
+  await storage.putCompetition(competition);
+
+  // Kicked, not awaited. Judging calls an external LLM and dispatching costs
+  // minutes; creating a competition is a cheap write that must succeed. A
+  // judge outage must not fail creation or leave a permanent hole -- the board
+  // render and the daily cron call ensureBaseline again, and it is idempotent.
+  if (!input.skip_baseline) {
+    after(async () => {
+      const result = await ensureBaseline(storage, competition).catch((error: unknown) => {
+        log("warn", "competition.create.baseline_failed", {
+          competition_id: competition.id,
+          error: (error as Error).message,
+        });
+        return null;
+      });
+      if (result) log("info", "competition.create.baseline", { competition_id: competition.id, outcome: result.kind });
+    });
+  }
 
   return NextResponse.json(competition, { status: 201 });
 }
