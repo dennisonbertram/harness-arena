@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
-import { defaultCompetitionId, resolveDefaultCompetition } from "@/lib/competition-leaderboard";
+import { belongsToCompetition, resolveDefaultCompetition } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -87,10 +87,14 @@ export async function POST(request: NextRequest) {
   }
 
   const submissions = await storage.listSubmissions();
+  // Reuses the read path's ownership rule rather than restating it: an
+  // unstamped legacy baseline belongs to whichever competition the resolver
+  // actually picks, which is NOT defaultCompetitionId() once the seeded
+  // default is closed or absent. Getting that wrong lets the admin create a
+  // second active baseline for a board that already has one.
+  const legacyOwnerId = (await resolveDefaultCompetition(storage))?.id ?? competition.id;
   const existingBaselines = submissions.filter(
-    (s) =>
-      s.competition_baseline === true &&
-      (s.competition_id === competition.id || (!s.competition_id && competition.id === defaultCompetitionId())),
+    (s) => s.competition_baseline === true && belongsToCompetition(s, competition.id, legacyOwnerId),
   );
   // ponytail: same list-then-point-fetch TOCTOU gap as the submissions
   // route's dedup check (not concurrency-safe against Blob's eventual

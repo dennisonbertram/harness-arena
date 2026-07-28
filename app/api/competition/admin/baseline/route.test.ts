@@ -172,6 +172,49 @@ describe("POST /api/competition/admin/baseline", () => {
     expect(await storageRef.current.listSubmissions()).toHaveLength(1);
   });
 
+  // The board assigns unstamped legacy rows to whatever competition
+  // resolveDefaultCompetition actually picks. Recognising a legacy baseline
+  // only when the target equals the DERIVED default misses it whenever the
+  // seeded default is closed or absent -- and the admin then creates a second
+  // active baseline for a board that already has one.
+  it("sees a legacy unstamped baseline on the resolved fallback competition", async () => {
+    resetStorage();
+    // Seeded default is closed, so the resolver falls back to another live one.
+    await storageRef.current.putCompetition({
+      id: defaultCompetitionId(),
+      arena: "harness-arena",
+      harness: "pi",
+      model: "zai/glm-5.2",
+      prize_amount_usd: null,
+      prize_cadence: null,
+      status: "closed",
+      created_at: "2026-07-27T00:00:00.000Z",
+    });
+    await putCompetition("comp-fallback", "zai/glm-5.2");
+    await storageRef.current.putSubmission({
+      id: "legacy-base",
+      agent_name: "pi-vanilla-baseline",
+      prompt: "vanilla",
+      status: "queued",
+      competition: true,
+      competition_baseline: true,
+      run_id: "run-legacy",
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+    await storageRef.current.putRun({
+      id: "run-legacy",
+      submission_id: "legacy-base",
+      status: "queued",
+      task_results: [],
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+
+    const response = await POST(adminRequest({}, "4.4.4.9"));
+
+    expect(response.status).toBe(409);
+    expect(await storageRef.current.listSubmissions()).toHaveLength(1);
+  });
+
   it("allows a fresh baseline attempt when the prior one's run ended failed/reaped", async () => {
     await storageRef.current.putSubmission({
       id: "base-1",
