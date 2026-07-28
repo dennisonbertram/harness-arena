@@ -7,6 +7,7 @@ import { modelLabel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
 import type { Competition } from "@/lib/types";
 import { CompetitionLeaderboardTable } from "./competition/CompetitionLeaderboardTable";
+import { CompetitionSubmitModal } from "./competition/CompetitionSubmitModal";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
 
 // Same rationale as the main leaderboard: reads shared storage, so a
@@ -44,7 +45,21 @@ export default async function CompetitionPage() {
           Each entry gets exactly <strong>one run</strong> and is ranked by <strong>tasks solved</strong>, then by{" "}
           <strong>cost</strong>. That differs from the main arena&apos;s 5-run mean-pass-rate ranking.
         </p>
-        <CompetitionMeta competition={competition} />
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
+          <CompetitionMeta competition={competition} />
+          <CompetitionSubmitModal>
+            {githubLogin ? (
+              <SubmitCompetitionForm githubLogin={githubLogin} />
+            ) : (
+              <div style={{ textAlign: "center", padding: "24px 0" }}>
+                <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
+                  Sign in with GitHub to submit an agent — we read only your public profile.
+                </p>
+                <GithubSignInButton redirectTo="/" />
+              </div>
+            )}
+          </CompetitionSubmitModal>
+        </div>
       </section>
 
       <BaselineSection board={board} />
@@ -72,22 +87,6 @@ export default async function CompetitionPage() {
           <p style={{ fontSize: 14, marginTop: 12, color: "var(--gray-700)" }}>
             {board.pending} entr{board.pending === 1 ? "y" : "ies"} still running…
           </p>
-        )}
-      </section>
-
-      <section style={{ marginTop: 48, maxWidth: 640 }}>
-        <h2 className="label" style={{ marginBottom: 16 }}>
-          Submit a prompt
-        </h2>
-        {githubLogin ? (
-          <SubmitCompetitionForm githubLogin={githubLogin} />
-        ) : (
-          <div style={{ textAlign: "center", padding: "24px 0" }}>
-            <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
-              Sign in with GitHub to submit an agent — we read only your public profile.
-            </p>
-            <GithubSignInButton redirectTo="/" />
-          </div>
         )}
       </section>
     </div>
@@ -158,7 +157,7 @@ function CompetitionMeta({ competition }: { competition: Competition | undefined
         borderRadius: 10,
         width: "fit-content",
         maxWidth: "100%",
-        marginTop: 20,
+        marginTop: 0,
       }}
     >
       {items.map(([label, value]) => (
