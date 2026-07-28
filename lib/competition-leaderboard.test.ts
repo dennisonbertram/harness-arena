@@ -261,4 +261,44 @@ describe("resolveDefaultCompetition", () => {
     const resolved = await resolveDefaultCompetition(storage);
     expect(resolved).toBeUndefined();
   });
+
+  // Closing is MANUAL (#74), so a closed default is an expected state. Taking
+  // it anyway would render a finished contest as the active one -- submission
+  // form included -- while a genuinely live competition sits unshown.
+  it("skips the seeded default once it's closed and picks a live competition instead", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID, { status: "closed" }));
+    await storage.putCompetition(competition("comp-next-season", { status: "live" }));
+
+    const resolved = await resolveDefaultCompetition(storage);
+    expect(resolved?.id).toBe("comp-next-season");
+  });
+
+  it("still returns the closed default when it is the only competition, rather than nothing", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID, { status: "closed" }));
+
+    const resolved = await resolveDefaultCompetition(storage);
+    expect(resolved?.id).toBe(DEFAULT_ID);
+  });
+});
+
+// The board's notion of "which competition owns unstamped legacy rows" must
+// agree with resolveDefaultCompetition. Re-deriving it from COMPETITION_MODEL
+// diverges the moment that env var changes after seeding, and every legacy
+// row silently drops off the board -- which matters while the write path
+// (#77) still creates submissions without competition_id.
+describe("getCompetitionBoard legacy-row ownership", () => {
+  it("keeps unstamped rows on the resolved board even when the derived default id isn't seeded", async () => {
+    const storage = new MemoryStorage();
+    // Simulates COMPETITION_MODEL changed after seeding: the deterministic id
+    // resolves to nothing, so the live board carries a different id.
+    await storage.putCompetition(competition("comp-seeded-under-old-model", { status: "live" }));
+    await storage.putSubmission(sub("legacy", { run_id: "r-legacy" })); // competition:true, no competition_id
+    await storage.putRun(run("r-legacy", { submission_id: "legacy", tasks_passed: 5, total_cost_usd: 0.4 }));
+
+    const board = await getCompetitionBoard(storage, "comp-seeded-under-old-model");
+
+    expect(board.ranked.map((r) => r.submissionId)).toContain("legacy");
+  });
 });
