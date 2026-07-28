@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { auth } from "@/auth";
 import { GithubSignInButton } from "./github-sign-in-button";
@@ -18,13 +19,26 @@ export const revalidate = 15;
 // scripts/seed-competition.mjs -- but keeps the page from crashing).
 const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], pending: 0 };
 
-export default async function CompetitionPage() {
+type CompetitionSearchParams = Promise<{ competition?: string | string[] | undefined }>;
+
+export default async function CompetitionPage({ searchParams }: { searchParams?: CompetitionSearchParams } = {}) {
   const storage = getStorage();
-  // No switcher yet (#78) -- always show the live default competition.
-  const competition = await resolveDefaultCompetition(storage);
-  const [board, session] = await Promise.all([
-    competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
+  const [params, defaultCompetition, competitions, session] = await Promise.all([
+    searchParams ?? Promise.resolve<{ competition?: string | string[] | undefined }>({}),
+    resolveDefaultCompetition(storage),
+    storage.listCompetitions(),
     auth(),
+  ]);
+  const requestedCompetitionId = params.competition;
+  // URL input is only accepted when it names an existing competition. This
+  // keeps a bad shared link harmless and preserves the live-default route at
+  // `/`.
+  const competition =
+    typeof requestedCompetitionId === "string"
+      ? competitions.find((candidate) => candidate.id === requestedCompetitionId) ?? defaultCompetition
+      : defaultCompetition;
+  const [board] = await Promise.all([
+    competition ? getCompetitionBoard(storage, competition.id) : Promise.resolve(EMPTY_BOARD),
   ]);
   const githubLogin = session?.user?.githubLogin;
 
@@ -46,21 +60,22 @@ export default async function CompetitionPage() {
           <strong>cost</strong>. That differs from the main arena&apos;s 5-run mean-pass-rate ranking.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
-          <CompetitionMeta competition={competition} />
           <CompetitionSubmitModal>
             {githubLogin ? (
-              <SubmitCompetitionForm githubLogin={githubLogin} />
+              <SubmitCompetitionForm githubLogin={githubLogin} competitionId={competition?.id} />
             ) : (
               <div style={{ textAlign: "center", padding: "24px 0" }}>
                 <p style={{ fontSize: 14, color: "var(--gray-700)", marginBottom: 16 }}>
                   Sign in with GitHub to submit an agent — we read only your public profile.
                 </p>
-                <GithubSignInButton redirectTo="/" />
+                <GithubSignInButton redirectTo={competition ? competitionHref(competition.id) : "/"} />
               </div>
             )}
           </CompetitionSubmitModal>
         </div>
       </section>
+
+      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} meta={<CompetitionMeta competition={competition} />} />
 
       <BaselineSection board={board} />
 
@@ -89,6 +104,110 @@ export default async function CompetitionPage() {
           </p>
         )}
       </section>
+    </div>
+  );
+}
+
+function competitionHref(id: string): string {
+  return `/?competition=${encodeURIComponent(id)}`;
+}
+
+function titleCase(value: string): string {
+  return value.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function CompetitionSwitcher({
+  competitions,
+  selectedCompetition,
+  meta,
+}: {
+  competitions: Competition[];
+  selectedCompetition: Competition | undefined;
+  meta?: ReactNode;
+}) {
+  if (!selectedCompetition) return null;
+
+  const competitionForArena = new Map<string, Competition>();
+  for (const competition of competitions) {
+    if (!competitionForArena.has(competition.arena)) competitionForArena.set(competition.arena, competition);
+  }
+  const arenas = [...competitionForArena.values()];
+  const withinArena = competitions.filter((competition) => competition.arena === selectedCompetition.arena);
+  const competitionForHarness = new Map<string, Competition>();
+  for (const competition of withinArena) {
+    if (!competitionForHarness.has(competition.harness)) competitionForHarness.set(competition.harness, competition);
+  }
+  const harnesses = [...competitionForHarness.values()];
+  const withinHarness = withinArena.filter((competition) => competition.harness === selectedCompetition.harness);
+
+  return (
+    <nav aria-label="Competition switcher" style={{ marginBottom: 24 }}>
+      <div className="label" style={{ marginBottom: 8 }}>
+        Competition
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "12px 28px",
+          padding: "16px 20px",
+          border: "1px solid var(--gray-alpha-400)",
+          borderRadius: 10,
+        }}
+      >
+        <SwitcherLevel label="Arena" options={arenas} isSelected={(c) => c.arena === selectedCompetition.arena} value={(competition) => titleCase(competition.arena)} />
+        <SwitcherLevel label="Harness" options={harnesses} isSelected={(c) => c.harness === selectedCompetition.harness} value={(competition) => titleCase(competition.harness)} />
+        <SwitcherLevel label="Model" options={withinHarness} isSelected={(c) => c.id === selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
+        {meta}
+      </div>
+    </nav>
+  );
+}
+
+function SwitcherLevel({
+  label,
+  options,
+  isSelected,
+  value,
+}: {
+  label: string;
+  options: Competition[];
+  // Compared on this level's own dimension. The representative competition for
+  // an arena or harness often has a different id than the selected one, so
+  // comparing ids would leave the parent pills unstyled and without
+  // aria-current.
+  isSelected: (competition: Competition) => boolean;
+  value: (competition: Competition) => string;
+}) {
+  return (
+    <div>
+      <div className="label" style={{ marginBottom: 5 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {options.map((competition) => {
+          const selected = isSelected(competition);
+          return (
+            <Link
+              key={competition.id}
+              href={competitionHref(competition.id)}
+              aria-current={selected ? "page" : undefined}
+              className="mono"
+              style={{
+                fontSize: 14,
+                color: selected ? "var(--background-100)" : "var(--blue-700)",
+                background: selected ? "var(--gray-1000)" : "transparent",
+                border: "1px solid var(--gray-alpha-400)",
+                borderRadius: 6,
+                padding: "5px 8px",
+                textDecoration: "none",
+              }}
+            >
+              {value(competition)}
+            </Link>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -138,28 +257,17 @@ function formatPrize(amountUsd: number): string {
 // "TBD" placeholder would read as a commitment).
 function CompetitionMeta({ competition }: { competition: Competition | undefined }) {
   if (!competition) return null;
-  const items: Array<[string, string]> = [
-    ["Harness", competition.harness],
-    ["Model", modelLabel(competition.model)],
-    ["Status", competition.status],
-  ];
+  // Harness and model deliberately omitted: the Arena/Harness/Model switcher
+  // below already states both, and repeating them here puts the same two
+  // facts on screen twice.
+  const items: Array<[string, string]> = [["Status", competition.status]];
   if (competition.prize_amount_usd != null) items.push(["Prize", formatPrize(competition.prize_amount_usd)]);
   if (competition.prize_cadence != null) items.push(["Cadence", competition.prize_cadence]);
 
+  // Rendered inside the switcher panel, so no wrapper box of its own -- a
+  // bordered box nested in a bordered box reads as a mistake.
   return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: "12px 32px",
-        padding: "16px 20px",
-        border: "1px solid var(--gray-alpha-400)",
-        borderRadius: 10,
-        width: "fit-content",
-        maxWidth: "100%",
-        marginTop: 0,
-      }}
-    >
+    <>
       {items.map(([label, value]) => (
         <div key={label}>
           <div className="label" style={{ marginBottom: 2 }}>
@@ -170,6 +278,6 @@ function CompetitionMeta({ competition }: { competition: Competition | undefined
           </div>
         </div>
       ))}
-    </div>
+    </>
   );
 }
