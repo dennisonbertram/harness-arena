@@ -23,6 +23,7 @@ import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { auth } from "@/auth";
 import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import { GET, POST } from "./route";
+import { mintAgentToken } from "@/lib/agent-token";
 
 const mockAuth = asMockAuth(auth);
 
@@ -107,6 +108,21 @@ describe("POST /api/submissions", () => {
       const submission = await storageRef.current.getSubmission(body.submission_id);
       expect(submission?.github_id).toBe(555);
       expect(submission?.github_login).toBe("real-login");
+    });
+
+    it("accepts a valid arena bearer token when no cookie session exists", async () => {
+      vi.stubEnv("AUTH_SECRET", "main-bearer-test-secret");
+      mockAuth.mockResolvedValueOnce(null);
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+      const token = await mintAgentToken({ githubId: 901, githubLogin: "agent-user" });
+      const response = await POST(new NextRequest("http://localhost/api/submissions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "x-forwarded-for": "10.0.0.31" },
+        body: JSON.stringify({ agent_name: "agent-x", prompt: "hi" }),
+      }));
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      await expect(storageRef.current.getSubmission(body.submission_id)).resolves.toMatchObject({ github_id: 901, github_login: "agent-user" });
     });
   });
 

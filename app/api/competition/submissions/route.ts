@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { auth } from "@/auth";
+import { resolveIdentity } from "@/lib/identity";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { belongsToCompetition, resolveDefaultCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
 import { log } from "@/lib/log";
@@ -47,12 +47,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
 
-  const session = await auth();
-  const githubId = session?.user?.githubId;
-  const githubLogin = session?.user?.githubLogin;
-  if (githubId === undefined || githubLogin === undefined) {
+  const identity = await resolveIdentity(request);
+  if (!identity) {
     return NextResponse.json({ error: "sign in with GitHub to submit" }, { status: 401 });
   }
+  const { githubId, githubLogin } = identity;
 
   if (isGithubIdRateLimited(String(githubId))) {
     log("warn", "competition.submission.rate_limited", { ip, github_id: githubId });
@@ -151,11 +150,26 @@ export async function POST(request: NextRequest) {
 // submissions (a fraud-judge rejection may quote flagged jailbreak/injection
 // text) and never returns raw prompt text, matching the main arena's
 // /api/leaderboard precedent of not exposing prompt content.
-export async function GET() {
+export async function GET(request: NextRequest) {
   const storage = getStorage();
+  // ?mine=true is the caller's own history -- it requires identity and, unlike
+  // the public listing, INCLUDES rejected entries. A competitor most needs to
+  // see their own rejections; hiding those from them while the public view
+  // hides them from everyone would leave a rejection invisible to its author.
+  const mineOnly = new URL(request.url).searchParams.get("mine") === "true";
+  let identity = null;
+  if (mineOnly) {
+    identity = await resolveIdentity(request);
+    if (!identity) {
+      return NextResponse.json({ error: "sign in with GitHub to list your submissions" }, { status: 401 });
+    }
+  }
   const submissions = await storage.listSubmissions();
   const entries = submissions
-    .filter((s) => s.competition === true && s.status !== "rejected")
+    .filter((s) =>
+      s.competition === true &&
+      (identity ? s.github_id === identity.githubId : s.status !== "rejected"),
+    )
     .map((s) => ({
       submission_id: s.id,
       status: s.status,

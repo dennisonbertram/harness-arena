@@ -30,5 +30,13 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "coverage",
+    // mcp/ is a standalone publishable package with its own tsconfig and its
+    // own dependencies (the MCP SDK is not a dependency of the web app). The
+    // Next build typechecks the whole project, so without this it fails on an
+    // import it was never meant to resolve.
+    "mcp"
+  ]
 }

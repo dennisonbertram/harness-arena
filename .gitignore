@@ -12,3 +12,7 @@ public/runner-bundle.tgz
 !.env.example
 .vercel
 .env*
+
+# MCP package build output and deps
+mcp/dist/
+mcp/node_modules/
