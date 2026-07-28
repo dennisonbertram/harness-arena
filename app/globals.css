@@ -170,3 +170,10 @@ a {
     font-size: 13px;
   }
 }
+
+/* Native <dialog> renders its backdrop transparent by default, so without
+   this the page behind a modal stays fully lit and the modal reads as a
+   floating panel rather than a layer above the page. */
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}

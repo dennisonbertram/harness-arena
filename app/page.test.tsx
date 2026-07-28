@@ -29,20 +29,26 @@ describe("CompetitionPage", () => {
     mockAuth.mockReset();
   });
 
-  it("renders a sign-in prompt in place of the submit form when signed out", async () => {
+  it("moves submission into an accessible modal triggered before the leaderboard when signed out (issue #81)", async () => {
     mockAuth.mockResolvedValue(null);
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain("Sign in with GitHub to submit an agent");
+    expect(html).toContain("Submit a prompt");
+    expect(html.indexOf("Submit a prompt")).toBeLessThan(html.indexOf("Leaderboard"));
+    expect(html).not.toContain("margin-top:48px;max-width:640px");
+    expect(html).toMatch(
+      /<dialog[^>]*id="competition-submit-modal"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby="competition-submit-modal-heading"/,
+    );
+    expect(html).toContain('<h2 id="competition-submit-modal-heading"');
+    expect(html).toMatch(/<dialog[^>]*>[\s\S]*Sign in with GitHub to submit an agent[\s\S]*Sign in with GitHub[\s\S]*<\/dialog>/);
     expect(html).not.toContain("Signed in as");
   });
 
-  it("renders the submit form and the signed-in login when signed in", async () => {
+  it("renders the signed-in submission form inside the modal (issue #81)", async () => {
     mockAuth.mockResolvedValue(githubSession(1, "octocat"));
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain("Signed in as");
-    expect(html).toContain("octocat");
+    expect(html).toMatch(/<dialog[^>]*>[\s\S]*Signed in as[\s\S]*octocat[\s\S]*Agent name[\s\S]*<\/dialog>/);
   });
 
   it("renders the empty-leaderboard message, not the table, when there are no ranked entries", async () => {
