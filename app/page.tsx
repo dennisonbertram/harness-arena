@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { auth } from "@/auth";
 import { GithubSignInButton } from "./github-sign-in-button";
@@ -59,7 +60,6 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
           <strong>cost</strong>. That differs from the main arena&apos;s 5-run mean-pass-rate ranking.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
-          <CompetitionMeta competition={competition} />
           <CompetitionSubmitModal>
             {githubLogin ? (
               <SubmitCompetitionForm githubLogin={githubLogin} />
@@ -75,7 +75,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
         </div>
       </section>
 
-      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} />
+      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} meta={<CompetitionMeta competition={competition} />} />
 
       <BaselineSection board={board} />
 
@@ -119,9 +119,11 @@ function titleCase(value: string): string {
 function CompetitionSwitcher({
   competitions,
   selectedCompetition,
+  meta,
 }: {
   competitions: Competition[];
   selectedCompetition: Competition | undefined;
+  meta?: ReactNode;
 }) {
   if (!selectedCompetition) return null;
 
@@ -156,6 +158,7 @@ function CompetitionSwitcher({
         <SwitcherLevel label="Arena" options={arenas} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.arena)} />
         <SwitcherLevel label="Harness" options={harnesses} selectedId={selectedCompetition.id} value={(competition) => titleCase(competition.harness)} />
         <SwitcherLevel label="Model" options={withinHarness} selectedId={selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
+        {meta}
       </div>
     </nav>
   );
@@ -250,28 +253,17 @@ function formatPrize(amountUsd: number): string {
 // "TBD" placeholder would read as a commitment).
 function CompetitionMeta({ competition }: { competition: Competition | undefined }) {
   if (!competition) return null;
-  const items: Array<[string, string]> = [
-    ["Harness", competition.harness],
-    ["Model", modelLabel(competition.model)],
-    ["Status", competition.status],
-  ];
+  // Harness and model deliberately omitted: the Arena/Harness/Model switcher
+  // below already states both, and repeating them here puts the same two
+  // facts on screen twice.
+  const items: Array<[string, string]> = [["Status", competition.status]];
   if (competition.prize_amount_usd != null) items.push(["Prize", formatPrize(competition.prize_amount_usd)]);
   if (competition.prize_cadence != null) items.push(["Cadence", competition.prize_cadence]);
 
+  // Rendered inside the switcher panel, so no wrapper box of its own -- a
+  // bordered box nested in a bordered box reads as a mistake.
   return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: "12px 32px",
-        padding: "16px 20px",
-        border: "1px solid var(--gray-alpha-400)",
-        borderRadius: 10,
-        width: "fit-content",
-        maxWidth: "100%",
-        marginTop: 0,
-      }}
-    >
+    <>
       {items.map(([label, value]) => (
         <div key={label}>
           <div className="label" style={{ marginBottom: 2 }}>
@@ -282,6 +274,6 @@ function CompetitionMeta({ competition }: { competition: Competition | undefined
           </div>
         </div>
       ))}
-    </div>
+    </>
   );
 }

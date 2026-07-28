@@ -165,6 +165,23 @@ describe("CompetitionPage", () => {
     expect(html).toContain("default-entrant");
   });
 
+  // The switcher shows Arena/Harness/Model, so repeating harness and model in
+  // the meta box states the same facts twice on one screen. The meta box keeps
+  // only what the switcher does not carry.
+  it("does not repeat the harness and model values now the switcher shows them", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ harness: "pi", model: "zai/glm-5.2" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    // The switcher renders the harness as "Pi" and the model as "glm-5.2";
+    // each must appear exactly once on the page, not once here and once in
+    // the meta box.
+    expect(html.match(/>Pi</gi) ?? []).toHaveLength(1);
+    expect(html.match(/>glm-5\.2</g) ?? []).toHaveLength(1);
+  });
+
   it("renders no prize amount or cadence when both are unset (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
