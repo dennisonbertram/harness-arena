@@ -5,6 +5,7 @@ import Link from "next/link";
 import { formatUsd } from "@/lib/format";
 import type { CompetitionRow } from "@/lib/competition-leaderboard";
 import { GithubAvatar } from "../GithubAvatar";
+import { ModelLogo } from "../ModelLogo";
 import { cellStyle, numCellStyle } from "../tableStyles";
 
 // Fixed locale/UTC so server and client render identical text — a
@@ -36,9 +37,18 @@ function RankLabel({ rank, tied, prefix = "#" }: { rank: number; tied: boolean; 
 export function CompetitionLeaderboardTable({
   ranked,
   currentGithubLogin,
+  baselineRow = null,
+  rankless = false,
+  baselineModel = "",
 }: {
   ranked: CompetitionRow[];
   currentGithubLogin: string | undefined;
+  /** Rendered as the final row: the bar every ranked entry above it cleared. */
+  baselineRow?: CompetitionRow | null;
+  /** Below-baseline entries are ordered but not ranked, so the column is dropped. */
+  rankless?: boolean;
+  /** Drives the provider logomark on the baseline row. */
+  baselineModel?: string;
 }) {
   const [openRow, setOpenRow] = useState<CompetitionRow | null>(null);
   const triggerRef = useRef<HTMLTableRowElement | null>(null);
@@ -69,7 +79,7 @@ export function CompetitionLeaderboardTable({
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
-            <th className="label" style={cellStyle}>Rank</th>
+            {!rankless && <th className="label" style={cellStyle}>Rank</th>}
             <th className="label" style={cellStyle}>Entrant</th>
             <th className="label" style={cellStyle}>Tasks solved</th>
             <th className="label" style={numCellStyle}>Submitted</th>
@@ -95,9 +105,11 @@ export function CompetitionLeaderboardTable({
                   background: isCurrentUser ? "var(--blue-100)" : undefined,
                 }}
               >
-                <td style={cellStyle} className="tabular-nums">
-                  <RankLabel rank={row.rank} tied={row.tied} />
-                </td>
+                {!rankless && (
+                  <td style={cellStyle} className="tabular-nums">
+                    <RankLabel rank={row.rank} tied={row.tied} />
+                  </td>
+                )}
                 <td style={cellStyle}>
                   <span style={{ display: "inline-flex", alignItems: "center" }}>
                     <GithubAvatar githubLogin={row.githubLogin} />
@@ -118,6 +130,37 @@ export function CompetitionLeaderboardTable({
               </tr>
             );
           })}
+          {baselineRow && (
+            // The bar, shown in the same table as the entries that cleared it,
+            // so the cutoff is visible rather than implied. It has no
+            // submitting user, hence the label instead of a login and avatar.
+            <tr
+              style={{
+                borderTop: "2px solid var(--gray-alpha-400)",
+                borderBottom: "1px solid var(--gray-alpha-400)",
+                color: "var(--gray-700)",
+              }}
+            >
+              {!rankless && <td style={cellStyle} className="tabular-nums">—</td>}
+              <td style={cellStyle}>
+                <span style={{ display: "inline-flex", alignItems: "center" }}>
+                  <ModelLogo model={baselineModel} size={24} />
+                  <span className="mono">Baseline</span>
+                </span>
+              </td>
+              <td style={cellStyle}>
+                <div className="tabular-nums" style={{ fontWeight: 600 }}>
+                  {baselineRow.tasksPassed}/{baselineRow.totalTasks}
+                </div>
+                <div className="tabular-nums" style={{ fontSize: 12 }}>
+                  {formatUsd(baselineRow.totalCostUsd)}
+                </div>
+              </td>
+              <td style={numCellStyle} className="tabular-nums">
+                {dateFormatter.format(new Date(baselineRow.submittedAt))}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
 

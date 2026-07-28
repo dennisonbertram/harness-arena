@@ -243,6 +243,52 @@ describe("CompetitionPage", () => {
     expect(html).toContain("closed");
   });
 
+  // The baseline is the bar. Entries that clear it are ranked; entries that do
+  // not are shown separately and unranked, so nobody appears to be "winning"
+  // while scoring worse than the unaided harness.
+  it("splits the board at the baseline and labels the baseline row", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putSubmission(submission("base", { run_id: "r-base", competition_baseline: true }));
+    await storage.putRun(run("r-base", { submission_id: "base", tasks_passed: 7, total_cost_usd: 1 }));
+    await storage.putSubmission(submission("winner", { run_id: "r-win", github_login: "beat-it" }));
+    await storage.putRun(run("r-win", { submission_id: "winner", tasks_passed: 11, total_cost_usd: 1 }));
+    await storage.putSubmission(submission("loser", { run_id: "r-lose", github_login: "missed-it" }));
+    await storage.putRun(run("r-lose", { submission_id: "loser", tasks_passed: 3, total_cost_usd: 1 }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    // The baseline row carries a label, not a login — it has no submitter.
+    expect(html).toContain(">Baseline<");
+    expect(html).toContain("Below the baseline");
+
+    // Split on the heading and check membership per section. React emits a
+    // <link rel="preload"> avatar tag for BOTH entrants at the top of the
+    // document, so those have to come off first or every entrant looks like
+    // it appears in the ranked half.
+    const body = html.replace(/<link rel="preload"[^>]*>/g, "");
+    const [rankedSection, belowSection] = body.split("Below the baseline");
+    expect(rankedSection).toContain("beat-it");
+    expect(rankedSection).not.toContain("missed-it");
+    expect(belowSection).toContain("missed-it");
+    expect(belowSection).not.toContain("beat-it");
+  });
+
+  it("shows no below-baseline table when every entry cleared the bar", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putSubmission(submission("base", { run_id: "r-base", competition_baseline: true }));
+    await storage.putRun(run("r-base", { submission_id: "base", tasks_passed: 7, total_cost_usd: 1 }));
+    await storage.putSubmission(submission("winner", { run_id: "r-win", github_login: "beat-it" }));
+    await storage.putRun(run("r-win", { submission_id: "winner", tasks_passed: 11, total_cost_usd: 1 }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toContain("Below the baseline");
+  });
+
   it("renders no prize amount or cadence when both are unset (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();

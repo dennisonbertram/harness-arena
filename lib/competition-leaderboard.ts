@@ -26,7 +26,15 @@ export interface CompetitionBoard {
   baseline: CompetitionRow | null;
   baselineState: BaselineState;
   baselineRejectionReason?: string;
+  /** Entries that beat the baseline, ranked. */
   ranked: CompetitionRow[];
+  /**
+   * Entries that did NOT beat the baseline. Shown but deliberately unranked:
+   * the baseline is what the vanilla harness scores unaided, so an entry that
+   * fails to clear it has not demonstrated an improvement and should not
+   * appear alongside those that did. Empty until a baseline is ready.
+   */
+  belowBaseline: CompetitionRow[];
   pending: number;
 }
 
@@ -125,6 +133,17 @@ function toRow(entry: JoinedEntry): CompetitionRow | null {
  * them into consecutive ranks. Real-world prize splitting for ties is a
  * manual, out-of-band admin decision; this module only marks the tie.
  */
+/**
+ * Whether an entry cleared the bar. Same comparator as the ranking itself:
+ * more tasks solved, or the same number more cheaply. Matching the baseline
+ * exactly is NOT beating it -- equalling the unaided harness demonstrates no
+ * improvement.
+ */
+export function beatsBaseline(row: CompetitionRow, baseline: CompetitionRow): boolean {
+  if (row.tasksPassed !== baseline.tasksPassed) return row.tasksPassed > baseline.tasksPassed;
+  return row.totalCostUsd < baseline.totalCostUsd;
+}
+
 export function rankCompetition(rows: CompetitionRow[]): CompetitionRow[] {
   const sorted = [...rows].sort((a, b) => b.tasksPassed - a.tasksPassed || a.totalCostUsd - b.totalCostUsd);
 
@@ -208,11 +227,20 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
 
   const competitorEntries = entries.filter((e) => e.submission.competition_baseline !== true);
   const rows = competitorEntries.map(toRow).filter((r): r is CompetitionRow => r !== null);
-  const ranked = rankCompetition(rows);
+  // With no baseline there is no bar to clear, so everyone stays ranked --
+  // filtering against a reference that does not exist yet would silently hide
+  // every entry until the baseline finishes.
+  const [beat, missed] = baseline
+    ? [rows.filter((r) => beatsBaseline(r, baseline)), rows.filter((r) => !beatsBaseline(r, baseline))]
+    : [rows, []];
+  const ranked = rankCompetition(beat);
+  // Ranked too, then stripped of rank: ordering best-first lets a submitter
+  // see how close they got, without implying a standing they did not earn.
+  const belowBaseline = rankCompetition(missed).map((r) => ({ ...r, rank: 0, tied: false }));
 
   const pending = competitorEntries.filter(
     (e) => e.run !== undefined && (e.run.status === "queued" || e.run.status === "running"),
   ).length;
 
-  return { baseline, baselineState, baselineRejectionReason, ranked, pending };
+  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending };
 }

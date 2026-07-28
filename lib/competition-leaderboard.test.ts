@@ -95,6 +95,93 @@ function run(id: string, overrides: Partial<Run> = {}): Run {
   };
 }
 
+// The baseline is the bar: it is what the vanilla harness scores unaided, so
+// an entry that does not beat it has not demonstrated anything. Those entries
+// are still shown -- the runs are public and the submitter should see their
+// result -- but they are NOT ranked against people who cleared the bar.
+describe("baseline as the ranking cutoff", () => {
+  async function boardWith(entries: Array<{ id: string; tasks: number; cost: number }>, baseline: { tasks: number; cost: number }) {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putSubmission(sub("base", { run_id: "r-base", competition_baseline: true }));
+    await storage.putRun(run("r-base", { submission_id: "base", tasks_passed: baseline.tasks, total_cost_usd: baseline.cost }));
+    for (const e of entries) {
+      await storage.putSubmission(sub(e.id, { run_id: `r-${e.id}`, github_login: e.id }));
+      await storage.putRun(run(`r-${e.id}`, { submission_id: e.id, tasks_passed: e.tasks, total_cost_usd: e.cost }));
+    }
+    return getCompetitionBoard(storage, DEFAULT_ID);
+  }
+
+  it("ranks only entries that beat the baseline", async () => {
+    const board = await boardWith(
+      [
+        { id: "above", tasks: 9, cost: 1 },
+        { id: "below", tasks: 5, cost: 1 },
+      ],
+      { tasks: 7, cost: 1 },
+    );
+
+    expect(board.ranked.map((r) => r.submissionId)).toEqual(["above"]);
+    expect(board.belowBaseline.map((r) => r.submissionId)).toEqual(["below"]);
+  });
+
+  it("treats equal tasks at a lower cost as beating the baseline", async () => {
+    const board = await boardWith([{ id: "cheaper", tasks: 7, cost: 0.5 }], { tasks: 7, cost: 1 });
+
+    expect(board.ranked.map((r) => r.submissionId)).toEqual(["cheaper"]);
+  });
+
+  it("does not count matching the baseline exactly as beating it", async () => {
+    const board = await boardWith([{ id: "tie", tasks: 7, cost: 1 }], { tasks: 7, cost: 1 });
+
+    expect(board.ranked).toHaveLength(0);
+    expect(board.belowBaseline.map((r) => r.submissionId)).toEqual(["tie"]);
+  });
+
+  it("orders the below-baseline table best-first too, so a submitter can see how close they got", async () => {
+    const board = await boardWith(
+      [
+        { id: "far", tasks: 1, cost: 1 },
+        { id: "close", tasks: 6, cost: 1 },
+      ],
+      { tasks: 7, cost: 1 },
+    );
+
+    expect(board.belowBaseline.map((r) => r.submissionId)).toEqual(["close", "far"]);
+  });
+
+  // Without a reference point there is no bar to clear, so filtering would
+  // silently hide every entry until the baseline finishes.
+  it("ranks everyone normally while the baseline is not yet ready", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putSubmission(sub("solo", { run_id: "r-solo", github_login: "solo" }));
+    await storage.putRun(run("r-solo", { submission_id: "solo", tasks_passed: 2, total_cost_usd: 1 }));
+
+    const board = await getCompetitionBoard(storage, DEFAULT_ID);
+
+    expect(board.baselineState).toBe("none");
+    expect(board.ranked.map((r) => r.submissionId)).toEqual(["solo"]);
+    expect(board.belowBaseline).toHaveLength(0);
+  });
+
+  it("numbers ranks from 1 among those who cleared the bar", async () => {
+    const board = await boardWith(
+      [
+        { id: "first", tasks: 12, cost: 1 },
+        { id: "second", tasks: 10, cost: 1 },
+        { id: "under", tasks: 3, cost: 1 },
+      ],
+      { tasks: 7, cost: 1 },
+    );
+
+    expect(board.ranked.map((r) => [r.submissionId, r.rank])).toEqual([
+      ["first", 1],
+      ["second", 2],
+    ]);
+  });
+});
+
 describe("getCompetitionBoard", () => {
   it("ranks completed competition runs and reports a pending count for queued/running ones", async () => {
     const storage = new MemoryStorage();

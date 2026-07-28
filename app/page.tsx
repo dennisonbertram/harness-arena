@@ -19,7 +19,7 @@ export const revalidate = 15;
 
 // No competition seeded yet (shouldn't happen in prod -- see
 // scripts/seed-competition.mjs -- but keeps the page from crashing).
-const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], pending: 0 };
+const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], belowBaseline: [], pending: 0 };
 
 type CompetitionSearchParams = Promise<{ competition?: string | string[] | undefined }>;
 
@@ -102,7 +102,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
         <h2 className="label" style={{ marginBottom: 16 }}>
           Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by tasks solved, then cost</span>
         </h2>
-        {board.ranked.length === 0 ? (
+        {board.ranked.length === 0 && board.belowBaseline.length === 0 ? (
           <div
             style={{
               border: "1px solid var(--gray-alpha-400)",
@@ -115,7 +115,12 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
             No entries yet — beat the baseline.
           </div>
         ) : (
-          <CompetitionLeaderboardTable ranked={board.ranked} currentGithubLogin={githubLogin} />
+          <CompetitionLeaderboardTable
+            ranked={board.ranked}
+            currentGithubLogin={githubLogin}
+            baselineRow={board.baseline}
+            baselineModel={competition?.model ?? ""}
+          />
         )}
         {board.pending > 0 && (
           <p style={{ fontSize: 14, marginTop: 12, color: "var(--gray-700)" }}>
@@ -123,6 +128,22 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
           </p>
         )}
       </section>
+
+      {board.belowBaseline.length > 0 && (
+        <section style={{ marginTop: 40, overflowX: "auto" }}>
+          <h2 className="label" style={{ marginBottom: 8 }}>
+            Below the baseline <span style={{ color: "var(--gray-700)" }}>· not ranked</span>
+          </h2>
+          <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660, marginBottom: 16 }}>
+            These entries did not beat the vanilla harness, so they are shown but not ranked. Ordered best-first.
+          </p>
+          <CompetitionLeaderboardTable
+            ranked={board.belowBaseline}
+            currentGithubLogin={githubLogin}
+            rankless
+          />
+        </section>
+      )}
     </div>
   );
 }
