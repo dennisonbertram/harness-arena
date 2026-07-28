@@ -146,7 +146,9 @@ export class HarnessArenaClient {
 
   async listMySubmissions(): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/competition/submissions", { token });
+    // ?mine=true is what makes this "my" submissions: the unfiltered listing
+    // returns every entrant's, and hides the caller's own rejected entries.
+    return this.requestJson("/api/competition/submissions?mine=true", { token });
   }
 
   private async requireCredentials(): Promise<Credentials> {

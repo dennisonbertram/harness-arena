@@ -150,11 +150,26 @@ export async function POST(request: NextRequest) {
 // submissions (a fraud-judge rejection may quote flagged jailbreak/injection
 // text) and never returns raw prompt text, matching the main arena's
 // /api/leaderboard precedent of not exposing prompt content.
-export async function GET() {
+export async function GET(request: NextRequest) {
   const storage = getStorage();
+  // ?mine=true is the caller's own history -- it requires identity and, unlike
+  // the public listing, INCLUDES rejected entries. A competitor most needs to
+  // see their own rejections; hiding those from them while the public view
+  // hides them from everyone would leave a rejection invisible to its author.
+  const mineOnly = new URL(request.url).searchParams.get("mine") === "true";
+  let identity = null;
+  if (mineOnly) {
+    identity = await resolveIdentity(request);
+    if (!identity) {
+      return NextResponse.json({ error: "sign in with GitHub to list your submissions" }, { status: 401 });
+    }
+  }
   const submissions = await storage.listSubmissions();
   const entries = submissions
-    .filter((s) => s.competition === true && s.status !== "rejected")
+    .filter((s) =>
+      s.competition === true &&
+      (identity ? s.github_id === identity.githubId : s.status !== "rejected"),
+    )
     .map((s) => ({
       submission_id: s.id,
       status: s.status,

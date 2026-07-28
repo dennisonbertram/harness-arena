@@ -3,7 +3,12 @@ import { z } from "zod";
 import { AGENT_TOKEN_EXPIRY_SECONDS, mintAgentToken } from "@/lib/agent-token";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 
-const isRateLimited = createRateLimiter(30);
+// A device code is valid for ~15 minutes and GitHub's advertised poll interval
+// is 5s, so a patient human legitimately generates ~180 polls for ONE login.
+// A 30/hour bucket closed after ~150 seconds and stranded anyone slower than
+// that, with no way to finish -- the client cannot distinguish this local 429
+// from GitHub's own slow_down, so it just kept polling a dead bucket.
+const isRateLimited = createRateLimiter(240);
 const PollInputSchema = z.object({ device_code: z.string().min(1) });
 
 function errorResponse(error: string, interval: unknown) {

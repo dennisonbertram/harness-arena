@@ -98,7 +98,7 @@ describe("HarnessArenaClient", () => {
 
     await expect(client.whoami()).resolves.toEqual({ github_login: "octo", expires_at: "2099-01-01T00:00:00Z", base_url: "https://harness-arena-psi.vercel.app" });
     await expect(client.listMySubmissions()).resolves.toEqual([{ submission_id: "submission" }]);
-    expect(fetcher).toHaveBeenCalledWith(new URL("/api/competition/submissions", client.baseUrl), expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }));
+    expect(fetcher).toHaveBeenCalledWith(new URL("/api/competition/submissions?mine=true", client.baseUrl), expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }));
   });
 
   it.each([

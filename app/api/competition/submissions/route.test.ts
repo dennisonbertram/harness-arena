@@ -372,6 +372,43 @@ describe("POST /api/competition/submissions", () => {
 });
 
 describe("GET /api/competition/submissions", () => {
+
+  // list_my_submissions promises the CALLER's history. Without identity
+  // filtering it returned every entrant's submissions and, because the public
+  // listing hides rejected ones, omitted the caller's own rejections -- the
+  // exact rows they most need to see.
+  it("returns only the caller's own submissions, including rejected ones, with ?mine=true", async () => {
+    // beforeEach installs a signed-in session; clear it so identity must come
+    // from the bearer token this test is actually exercising.
+    mockAuth.mockResolvedValue(null);
+    const token = await mintAgentToken({ githubId: 4242, githubLogin: "mine-user" });
+    await storageRef.current.putSubmission({
+      id: "mine-ok", agent_name: "a", prompt: "p1", status: "scored", competition: true,
+      github_id: 4242, github_login: "mine-user", created_at: "2026-07-28T00:00:00.000Z",
+    });
+    await storageRef.current.putSubmission({
+      id: "mine-rejected", agent_name: "a", prompt: "p2", status: "rejected", competition: true,
+      github_id: 4242, github_login: "mine-user", created_at: "2026-07-28T00:00:01.000Z",
+    });
+    await storageRef.current.putSubmission({
+      id: "someone-else", agent_name: "b", prompt: "p3", status: "scored", competition: true,
+      github_id: 9999, github_login: "other-user", created_at: "2026-07-28T00:00:02.000Z",
+    });
+
+    const response = await GET(new NextRequest("http://localhost/api/competition/submissions?mine=true", {
+      headers: { authorization: `Bearer ${token}` },
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.map((e: { submission_id: string }) => e.submission_id).sort()).toEqual(["mine-ok", "mine-rejected"]);
+  });
+
+  it("rejects ?mine=true without authentication", async () => {
+    mockAuth.mockResolvedValue(null);
+    const response = await GET(new NextRequest("http://localhost/api/competition/submissions?mine=true"));
+    expect(response.status).toBe(401);
+  });
   beforeEach(() => {
     resetStorage();
   });
@@ -403,7 +440,7 @@ describe("GET /api/competition/submissions", () => {
       created_at: "2026-07-25T00:00:00.000Z",
     });
 
-    const response = await GET();
+    const response = await GET(new NextRequest("http://localhost/api/competition/submissions"));
     const body = await response.json();
 
     expect(body.map((e: { submission_id: string }) => e.submission_id)).toEqual(["s-ok"]);
@@ -423,7 +460,7 @@ describe("GET /api/competition/submissions", () => {
       created_at: "2026-07-25T00:00:00.000Z",
     });
 
-    const response = await GET();
+    const response = await GET(new NextRequest("http://localhost/api/competition/submissions"));
     const body = await response.json();
 
     expect(body).toHaveLength(1);
