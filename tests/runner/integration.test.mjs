@@ -1,6 +1,6 @@
-// Full runner pipeline against real local Docker + the real regex-log task
+// Full runner pipeline against real local Docker + the real fix-git task
 // image, with PI_INVOKE_OVERRIDE pointing at a deterministic fake-pi
-// fixture that writes a WRONG regex.txt answer. This proves the pipeline
+// fixture that writes an intentionally WRONG answer. This proves the pipeline
 // (docker lifecycle, agent kit injection, cost parsing, verification,
 // reward.txt parsing, trace upload, event sequence, final totals)
 // completes correctly end to end -- pipeline correctness is asserted via
@@ -9,9 +9,10 @@
 // Guarded: only runs with RUNNER_IT=1 (see PR description). Set
 // RUNNER_IT_VERBOSE=1 to also print the runner's stdout/stderr.
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildContainerName } from "../../scripts/runner/lib.mjs";
@@ -22,14 +23,15 @@ const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
-// Unique per test file (not just "regex-log") so this suite's container
+// Unique per test file (not just "fix-git") so this suite's container
 // name never collides with other tests/runner/*.test.mjs files that also
-// exercise the regex-log image concurrently under vitest's file parallelism.
-const TASK_ID = "regex-log-it";
+// exercise the fix-git image concurrently under vitest's file parallelism.
+const TASK_ID = "fix-git-it";
 const RUN_ID = "it-run-1";
 // Container name now includes RUN_ID + index (issue #19 finding 6) so
 // concurrent runs can never force-remove each other's containers.
 const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+const cleanupDirs = new Set();
 
 function cleanupContainer() {
   try {
@@ -41,17 +43,20 @@ function cleanupContainer() {
 
 afterEach(() => {
   cleanupContainer();
+  for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+  cleanupDirs.clear();
 });
 
 describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)", () => {
   it(
-    "drives the real regex-log task through fake-pi with a WRONG answer end to end",
+    "drives the real fix-git task through fake-pi with a WRONG answer end to end",
     async () => {
       cleanupContainer();
 
       // Build a fixture agentkit tarball containing fake-pi.sh extracted to
       // /usr/local/bin/fake-pi.sh, mirroring the real agentkit.tgz -> /usr/local layout.
       const tgzRoot = mkdtempSync(path.join(tmpdir(), "agentkit-fixture-"));
+      cleanupDirs.add(tgzRoot);
       mkdirSync(path.join(tgzRoot, "bin"), { recursive: true });
       const fakePiSrc = readFileSync(path.join(__dirname, "fixtures", "fake-pi.sh"));
       const fakePiDest = path.join(tgzRoot, "bin", "fake-pi.sh");
@@ -60,17 +65,23 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       const agentkitTgz = path.join(tgzRoot, "agentkit.tgz");
       execFileSync("tar", ["-czf", agentkitTgz, "-C", tgzRoot, "bin"]);
 
-      const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret" });
-      const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+      const gradingSource = buildTaskBundleDir(REPO_ROOT, TASK_ID, "fix-git");
+      cleanupDirs.add(gradingSource.root);
+      const fetchedTasksRoot = mkdtempSync(path.join(tmpdir(), "runner-fetched-tests-"));
+      cleanupDirs.add(fetchedTasksRoot);
+      const { state, baseUrl, stop } = await startCallbackServer({
+        secret: "test-secret",
+        tasksRoot: gradingSource.root,
+      });
 
       const instruction = readFileSync(
-        path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
+        path.join(REPO_ROOT, "tasks", "fix-git", "instruction.md"),
         "utf8",
       );
       const tasks = [
         {
           id: TASK_ID,
-          image: "alexgshaw/regex-log:20251031",
+          image: "alexgshaw/fix-git:20251031",
           instruction,
           agent_timeout_sec: 60,
           verifier_timeout_sec: 300,
@@ -83,12 +94,13 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
         CALLBACK_BASE: baseUrl,
         RUNNER_CALLBACK_SECRET: "test-secret",
         AI_GATEWAY_API_KEY: "test-gateway-key",
+        GATEWAY_UPSTREAM: baseUrl,
         SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString(
           "base64",
         ),
         BUDGET_CAP_USD: "2",
         TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
-        RUNNER_TASKS_DIR: bundle.root,
+        RUNNER_TASKS_DIR: fetchedTasksRoot,
         AGENTKIT_TGZ: agentkitTgz,
         PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
       };
@@ -111,9 +123,15 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       });
 
       await stop();
-      rmSync(tgzRoot, { recursive: true, force: true });
 
       expect(exitCode).toBe(0);
+      const fetchedTestScript = path.join(fetchedTasksRoot, TASK_ID, "tests", "test.sh");
+      expect(
+        existsSync(fetchedTestScript),
+        `runner did not fetch grading tests; events=${JSON.stringify(state.events)}`,
+      ).toBe(true);
+      expect(readFileSync(fetchedTestScript, "utf8").trim().length).toBeGreaterThan(0);
+      expect(state.testFetches).toBe(1);
 
       // First status transition must be "running", posted right after
       // run.sandbox_ready and before any task work starts (issue #23
@@ -156,7 +174,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       expect(traceNames).toContain("runner-log.txt");
 
       const sessionTrace = state.traces.find((t) => t.name === "session.jsonl");
-      expect(sessionTrace.body.toString("utf8")).toContain('"total":0.001');
+      expect(gunzipSync(sessionTrace.body).toString("utf8")).toContain('"total":0.001');
 
       const finalStatus = state.statusUpdates.at(-1);
       expect(finalStatus.status).toBe("completed");
@@ -181,7 +199,6 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
       }
       expect(containerStillExists).toBe(false);
 
-      bundle.cleanup();
     },
     600000,
   );
