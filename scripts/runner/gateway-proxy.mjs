@@ -55,14 +55,21 @@ export function pinProviders(body, only) {
  * ~/.nvm/... paths. The request body is ground truth and cannot drift.
  */
 export function systemPromptOf(body) {
-  const message = body?.messages?.find?.((m) => m?.role === "system");
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  // Some clients send content as an array of typed parts rather than a string.
-  if (Array.isArray(content)) {
-    const text = content.map((part) => part?.text ?? "").join("");
-    return text || undefined;
-  }
+  // pi speaks the ANTHROPIC MESSAGES api, not OpenAI chat completions --
+  // verified from pi's own output ("api":"anthropic-messages") and the path it
+  // opens against this sidecar (/v1/messages). That api puts the system prompt
+  // in a top-level `system` field, so it is checked first. The messages[] form
+  // is kept as a fallback in case a model is ever routed over an
+  // OpenAI-compatible api instead.
+  const fromTopLevel = textOf(body?.system);
+  if (fromTopLevel) return fromTopLevel;
+  return textOf(body?.messages?.find?.((m) => m?.role === "system")?.content);
+}
+
+function textOf(value) {
+  if (typeof value === "string") return value || undefined;
+  // Both apis allow content as an array of typed blocks rather than a string.
+  if (Array.isArray(value)) return value.map((part) => part?.text ?? "").join("") || undefined;
   return undefined;
 }
 
