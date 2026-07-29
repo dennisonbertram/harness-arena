@@ -24,6 +24,7 @@ import {
   buildPiCommand,
   buildPinnedModelsConfig,
   PI_MODELS_CONFIG_PATH,
+  preflightProxy,
   resolvePinnedProvider,
   computeTotals,
   deliverTerminalStatus,
@@ -640,6 +641,26 @@ async function main() {
     // points at it. Started here rather than per-task so all 16 tasks in a run
     // share one pinned upstream.
     gatewayProxy = await startGatewayProxy();
+
+    // Prove the path pi will use actually answers, before spending 16 tasks
+    // finding out. When this broke, every task ran its full timeout and the run
+    // reported 0 passes at 0 cost -- indistinguishable from a hopeless model.
+    const preflight = await preflightProxy({
+      port: GATEWAY_PROXY_PORT,
+      model: RUNNER_MODEL,
+      apiKey: process.env.AI_GATEWAY_API_KEY ?? "",
+    });
+    if (!preflight.ok) {
+      log(`gateway preflight FAILED: ${preflight.detail}`);
+      queueEvent("run.failed", {
+        error: `gateway sidecar preflight failed (pinned=${PINNED_PROVIDER || "none"}): ${preflight.detail}`,
+        stage: "gateway_preflight",
+      });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
+    }
+    log(`gateway preflight ok (pinned to ${PINNED_PROVIDER || "nothing"})`);
+
     const dockerReady = await ensureDockerReady();
     if (!dockerReady) {
       queueEvent("run.failed", {

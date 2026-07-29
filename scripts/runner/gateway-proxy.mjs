@@ -90,13 +90,20 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
     }
     const forwarded = body === null ? raw : JSON.stringify(pinProviders(body, pinned));
 
+    // Pass every header through. An earlier version forwarded only
+    // authorization + content-type, which silently dropped things the api
+    // depends on (anthropic-version among them). host/content-length are
+    // rebuilt because we are talking to a different host and may have made the
+    // body longer by injecting the pin.
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers["content-length"];
+    delete headers["accept-encoding"];
+    headers["content-length"] = String(Buffer.byteLength(forwarded));
+
     let upstreamRes;
     try {
-      upstreamRes = await fetch(upstream + req.url, {
-        method: req.method,
-        headers: { authorization: req.headers.authorization ?? "", "content-type": "application/json" },
-        body: forwarded,
-      });
+      upstreamRes = await fetch(upstream + req.url, { method: req.method, headers, body: forwarded });
     } catch (error) {
       // The agent must see a real failure, not a hang: a dead proxy that
       // silently swallows calls would look like a model that stopped
@@ -106,24 +113,37 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       return;
     }
 
-    const text = await upstreamRes.text();
     if (onForward) {
-      let generationId;
-      try {
-        generationId = JSON.parse(text)?.generationId;
-      } catch {
-        /* non-JSON response: nothing to attribute */
-      }
       onForward({
         status: upstreamRes.status,
         model: body?.model,
         only: pinned,
-        generationId,
         systemPrompt: systemPromptOf(body),
       });
     }
-    res.writeHead(upstreamRes.status, { "content-type": "application/json" });
-    res.end(text);
+
+    // Stream the response straight through, preserving status and headers.
+    // Buffering it and relabelling it application/json left a streaming client
+    // waiting for events it could never parse -- a hang rather than an error,
+    // which is the worst failure shape for a benchmark.
+    const outHeaders = {};
+    upstreamRes.headers.forEach((value, key) => {
+      if (key !== "content-encoding" && key !== "content-length" && key !== "transfer-encoding") {
+        outHeaders[key] = value;
+      }
+    });
+    res.writeHead(upstreamRes.status, outHeaders);
+
+    if (!upstreamRes.body) {
+      res.end();
+      return;
+    }
+    try {
+      for await (const chunk of upstreamRes.body) res.write(chunk);
+    } catch {
+      /* client hung up mid-stream */
+    }
+    res.end();
   });
 }
 

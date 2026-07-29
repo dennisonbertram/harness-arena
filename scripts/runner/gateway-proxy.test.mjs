@@ -25,15 +25,15 @@ async function fakeUpstream(handler) {
     } catch {
       /* a real gateway would 400 rather than crash; mirror that */
     }
-    received.push({ url: req.url, auth: req.headers.authorization, body: parsed, raw });
+    received.push({ url: req.url, auth: req.headers.authorization, headers: req.headers, body: parsed, raw });
     if (parsed === null) {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "malformed body" } }));
       return;
     }
-    const { status = 200, payload = { generationId: "gen_test" } } = handler?.() ?? {};
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(payload));
+    const { status = 200, payload = { generationId: "gen_test" }, headers, body } = handler?.() ?? {};
+    res.writeHead(status, headers ?? { "content-type": "application/json" });
+    res.end(body ?? JSON.stringify(payload));
   });
   const port = await listen(server);
   return { received, url: `http://127.0.0.1:${port}` };
@@ -76,20 +76,26 @@ describe("gateway proxy", () => {
     expect(upstream.received[0].auth).toBe("Bearer k");
   });
 
-  it("reports the generation id so a run can be attributed later", async () => {
+  // generationId used to be read here, which required buffering the whole
+  // upstream response. That buffering is what broke streaming, and the id was
+  // never wired up to anything (see docs/provider-pinning.md). Reporting now
+  // derives entirely from the REQUEST, so the response can stream untouched.
+  it("reports what it pinned without reading the response body", async () => {
     const upstream = await fakeUpstream(() => ({ payload: { generationId: "gen_abc" } }));
     const seen = [];
     const port = await listen(
       createGatewayProxy({ only: ["zai"], upstream: upstream.url, onForward: (e) => seen.push(e) }),
     );
 
-    await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "zai/glm-5.2" }),
+      body: JSON.stringify({ model: "zai/glm-5.2", system: "sys prompt" }),
     });
 
-    expect(seen).toEqual([{ status: 200, model: "zai/glm-5.2", only: ["zai"], generationId: "gen_abc" }]);
+    expect(seen).toEqual([
+      { status: 200, model: "zai/glm-5.2", only: ["zai"], systemPrompt: "sys prompt" },
+    ]);
   });
 
   it("passes an upstream error through rather than masking it", async () => {
@@ -273,5 +279,114 @@ describe("resolvePinnedProvider", () => {
   it("stays unpinned when nothing was configured, however the run went", () => {
     expect(resolvePinnedProvider({ configured: "", applied: true })).toBeUndefined();
     expect(resolvePinnedProvider({ configured: "", applied: false })).toBeUndefined();
+  });
+});
+
+// The sidecar sat between pi and the gateway while forwarding only two headers
+// and re-encoding every response as buffered application/json. Both are wrong
+// for a proxy and both are invisible in a happy-path check: a run still starts,
+// it just never gets a usable answer. These pin the pass-through contract.
+describe("the sidecar is a transparent proxy", () => {
+  it("forwards the headers pi sends, not just authorization", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["zai"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer k",
+        "content-type": "application/json",
+        // Anthropic Messages requires this; dropping it changes the request.
+        "anthropic-version": "2023-06-01",
+        "x-custom-pi-header": "keep-me",
+      },
+      body: JSON.stringify({ model: "m", messages: [] }),
+    });
+
+    const got = upstream.received[0].headers;
+    expect(got["anthropic-version"]).toBe("2023-06-01");
+    expect(got["x-custom-pi-header"]).toBe("keep-me");
+  });
+
+  it("preserves the upstream content-type instead of relabelling a stream as json", async () => {
+    const upstream = await fakeUpstream(() => ({
+      headers: { "content-type": "text/event-stream" },
+      body: "data: {\"x\":1}\n\ndata: [DONE]\n\n",
+    }));
+    const port = await listen(createGatewayProxy({ only: [], upstream: upstream.url }));
+
+    const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", stream: true }),
+    });
+
+    // Relabelling text/event-stream as application/json leaves an SSE client
+    // waiting for events it will never parse -- which is a hang, not an error.
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(await res.text()).toContain("data:");
+  });
+
+  it("does not send a stale content-length after rewriting the body", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["zai"], upstream: upstream.url }));
+
+    // Injecting the pin makes the body longer than the client's content-length.
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", messages: [] }),
+    });
+
+    const got = upstream.received[0];
+    const declared = got.headers["content-length"];
+    if (declared !== undefined) expect(Number(declared)).toBe(Buffer.byteLength(got.raw));
+    expect(JSON.parse(got.raw).providerOptions.gateway.only).toEqual(["zai"]);
+  });
+});
+
+import { preflightProxy } from "./lib.mjs";
+
+// The pinning path failed silently: pi could not get a usable answer, so all 16
+// tasks burned their full agent timeout and the run finished with 0 cost and 0
+// passes -- which reads like a terrible model rather than broken plumbing. One
+// real call before any task turns that into an immediate, named failure.
+describe("preflightProxy", () => {
+  it("passes when a real call through the sidecar comes back 200", async () => {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, text: async () => '{"content":[]}' };
+    };
+    const result = await preflightProxy({ port: 4599, model: "zai/glm-5.2", apiKey: "k", fetchImpl });
+
+    expect(result.ok).toBe(true);
+    // Must exercise the sidecar, not the gateway -- otherwise it proves nothing.
+    expect(calls[0].url).toContain("127.0.0.1:4599");
+  });
+
+  it("fails with the upstream status and body when the call is rejected", async () => {
+    const fetchImpl = async () => ({ ok: false, status: 401, text: async () => '{"error":"bad key"}' });
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("401");
+    expect(result.detail).toContain("bad key");
+  });
+
+  it("fails loudly when the sidecar cannot be reached at all", async () => {
+    const fetchImpl = async () => { throw new Error("ECONNREFUSED"); };
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("ECONNREFUSED");
+  });
+
+  it("times out rather than hanging, since hanging is the failure being guarded", async () => {
+    const fetchImpl = (_url, init) =>
+      new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl, timeoutMs: 50 });
+
+    expect(result.ok).toBe(false);
   });
 });
