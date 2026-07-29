@@ -260,8 +260,8 @@ describe("aggregatePrompts", () => {
 
 describe("baselineDisplayName", () => {
   it("labels a baseline standing '<model label> Baseline'", () => {
-    expect(baselineDisplayName({ model: "anthropic/claude-sonnet-5" })).toBe("Claude Sonnet 5 Baseline");
-    expect(baselineDisplayName({ model: "zai/glm-5.2" })).toBe("glm-5.2 Baseline");
+    expect(baselineDisplayName({ model: "anthropic/claude-sonnet-5", pinnedProvider: undefined })).toBe("Claude Sonnet 5 Baseline");
+    expect(baselineDisplayName({ model: "zai/glm-5.2", pinnedProvider: undefined })).toBe("glm-5.2 Baseline");
   });
 });
 
@@ -442,16 +442,67 @@ describe("pre-pinning runs", () => {
     expect(standing.prePinningRuns).toBe(0);
   });
 
-  it("counts a mixed standing, because averaging across the cutover is the thing to warn about", () => {
+  // Superseded by the grouping split: a standing can no longer contain both
+  // pinned and unpinned runs, which is stronger than warning about the mix.
+  // Kept as a guard that the split actually holds.
+  it("cannot produce a standing that mixes pinned and unpinned runs", () => {
     const flags = Array(16).fill(false);
     const runs = [run("r1", "s1", flags), { ...run("r2", "s1", flags), provider_pinned: "zai" }];
-    const [standing] = aggregatePrompts(
-      runs,
-      [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")],
+    const standings = aggregatePrompts(runs, [sub("s1", "agent", "p", "2026-07-21T00:00:00.000Z")], 16);
+
+    for (const standing of standings) {
+      expect([0, standing.runs]).toContain(standing.prePinningRuns);
+    }
+  });
+
+// A pinned run and an unpinned run of the SAME prompt on the SAME model are
+// not the same measurement -- the unpinned one drew from an unknown mix of
+// gateway upstreams. Averaging them into one standing would hide exactly the
+// comparison we pinned in order to make.
+describe("pinned and unpinned runs are separate standings", () => {
+  const flags = Array(16).fill(false);
+  const submission = sub("s1", "agent", "", "2026-07-21T00:00:00.000Z");
+
+  it("does not merge a pinned run into the unpinned standing", () => {
+    const unpinned = run("r1", "s1", flags);
+    const pinned = { ...run("r2", "s1", flags), provider_pinned: "zai" };
+
+    const standings = aggregatePrompts([unpinned, pinned], [submission], 16);
+
+    expect(standings).toHaveLength(2);
+    expect(standings.map((s) => s.pinnedProvider).sort()).toEqual(["zai", undefined]);
+  });
+
+  it("keeps each standing's runs internally consistent", () => {
+    const standings = aggregatePrompts(
+      [run("r1", "s1", flags), { ...run("r2", "s1", flags), provider_pinned: "zai" }],
+      [submission],
       16,
     );
 
-    expect(standing.prePinningRuns).toBe(1);
-    expect(standing.runs).toBe(2);
+    const pinnedStanding = standings.find((s) => s.pinnedProvider === "zai");
+    const unpinnedStanding = standings.find((s) => s.pinnedProvider === undefined);
+    expect(pinnedStanding?.prePinningRuns).toBe(0);
+    expect(unpinnedStanding?.prePinningRuns).toBe(1);
   });
+
+  it("still groups two runs pinned to the same provider together", () => {
+    const a = { ...run("r1", "s1", flags), provider_pinned: "zai" };
+    const b = { ...run("r2", "s1", flags), provider_pinned: "zai" };
+
+    expect(aggregatePrompts([a, b], [submission], 16)).toHaveLength(1);
+  });
+
+  it("labels a pinned baseline distinctly from the unpinned one", () => {
+    const pinned = aggregatePrompts(
+      [{ ...run("r1", "s1", flags), provider_pinned: "zai" }],
+      [submission],
+      16,
+    )[0];
+    const unpinned = aggregatePrompts([run("r2", "s1", flags)], [submission], 16)[0];
+
+    expect(baselineDisplayName(pinned)).not.toBe(baselineDisplayName(unpinned));
+    expect(baselineDisplayName(pinned)).toContain("pinned");
+  });
+});
 });

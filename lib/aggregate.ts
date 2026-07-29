@@ -53,6 +53,14 @@ export interface PromptStanding {
    * what was being measured. See docs/provider-pinning.md.
    */
   prePinningRuns: number;
+  /**
+   * The gateway upstream every run in this standing was pinned to, or
+   * undefined when they were unpinned. Part of the grouping key: a pinned and
+   * an unpinned run of the same prompt on the same model are not the same
+   * measurement, so averaging them would hide the very comparison pinning
+   * exists to make. See docs/provider-pinning.md.
+   */
+  pinnedProvider: string | undefined;
   totalTaskCount: number;
   passRate: number; // meanTasksPassed / totalTaskCount — PRIMARY, higher wins
   perTask: TaskRate[]; // sorted by rate desc, then taskId
@@ -65,8 +73,11 @@ export interface PromptStanding {
 // system prompt") standings display as "<model> Baseline" -- a stray "p2" or
 // "restore-check" name from a manual baseline run is not meaningful to show,
 // and the submitter has no attached GitHub identity to show instead.
-export function baselineDisplayName(standing: Pick<PromptStanding, "model">): string {
-  return `${modelLabel(standing.model)} Baseline`;
+export function baselineDisplayName(standing: Pick<PromptStanding, "model" | "pinnedProvider">): string {
+  const base = `${modelLabel(standing.model)} Baseline`;
+  // Distinct label so a pinned baseline sits beside the unpinned one on the
+  // board and can be compared, rather than silently replacing it.
+  return standing.pinnedProvider ? `${base} (pinned: ${standing.pinnedProvider})` : base;
 }
 
 function median(nums: number[]): number | null {
@@ -95,7 +106,15 @@ export function aggregatePrompts(
   // Claude is a different benchmark and must not be averaged together.
   const groups = new Map<
     string,
-    { promptKey: string; model: string; runs: Run[]; agentName: string; githubLogin: string; lastAt: string }
+    {
+      promptKey: string;
+      model: string;
+      pinnedProvider: string | undefined;
+      runs: Run[];
+      agentName: string;
+      githubLogin: string;
+      lastAt: string;
+    }
   >();
   for (const run of runs) {
     if (run.status !== "completed" || run.tasks_passed === undefined) continue;
@@ -114,7 +133,9 @@ export function aggregatePrompts(
           ? ""
           : submission.prompt;
     const model = runModel(run.model ?? submission?.model);
-    const key = `${model}\0${promptKey}`;
+    // Pinning is part of the identity of a measurement, not a property of it.
+    const pinnedProvider = run.provider_pinned;
+    const key = `${model}\0${promptKey}\0${pinnedProvider ?? ""}`;
     const at = submission?.created_at ?? run.created_at;
     const g = groups.get(key);
     if (g) {
@@ -128,6 +149,7 @@ export function aggregatePrompts(
       groups.set(key, {
         promptKey,
         model,
+        pinnedProvider,
         runs: [run],
         agentName: submission?.agent_name ?? "unknown",
         githubLogin: submission?.github_login ?? UNKNOWN_GITHUB_LOGIN,
@@ -202,6 +224,7 @@ export function aggregatePrompts(
       meanTasksPassed,
       tasksPassedSem,
       prePinningRuns,
+      pinnedProvider: g.pinnedProvider,
       totalTaskCount,
       passRate,
       perTask,
