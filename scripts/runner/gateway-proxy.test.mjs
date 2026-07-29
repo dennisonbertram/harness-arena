@@ -157,3 +157,59 @@ describe("buildPinnedModelsConfig", () => {
     expect(Object.keys(cfg.providers["vercel-ai-gateway"].modelOverrides)).toEqual(["anthropic/claude-opus-5"]);
   });
 });
+
+import { systemPromptOf } from "./gateway-proxy.mjs";
+
+describe("systemPromptOf", () => {
+  // Why capture it here rather than rebuild it: pi's default system prompt is
+  // assembled at runtime from the container's own doc paths, tool set, cwd,
+  // project context and skills (see buildSystemPrompt in pi's
+  // dist/core/system-prompt.js). Any copy we generate ourselves is an
+  // approximation that silently drifts on a pi upgrade -- exactly what the
+  // stale docs/pi-vanilla-system-prompt.txt snapshot already did, laptop paths
+  // and all. The request body is the ground truth: it is the prompt pi
+  // actually sent.
+  it("reads the prompt pi actually sent", () => {
+    expect(
+      systemPromptOf({ messages: [{ role: "system", content: "You are an expert coding assistant" }] }),
+    ).toBe("You are an expert coding assistant");
+  });
+
+  it("handles content sent as parts rather than a bare string", () => {
+    expect(
+      systemPromptOf({ messages: [{ role: "system", content: [{ type: "text", text: "part one" }] }] }),
+    ).toBe("part one");
+  });
+
+  it("returns undefined when the request carries no system message", () => {
+    expect(systemPromptOf({ messages: [{ role: "user", content: "hi" }] })).toBeUndefined();
+    expect(systemPromptOf({})).toBeUndefined();
+    expect(systemPromptOf(null)).toBeUndefined();
+  });
+});
+
+describe("capturing the resolved prompt through the proxy", () => {
+  it("reports the system prompt pi sent, even with nothing pinned", async () => {
+    // The unpinned case is the one that matters for capture: a baseline runs
+    // vanilla, so this is the only way to learn what pi's default resolved to.
+    const upstream = await fakeUpstream();
+    const seen = [];
+    const port = await listen(createGatewayProxy({ only: [], upstream: upstream.url, onForward: (e) => seen.push(e) }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "zai/glm-5.2",
+        messages: [
+          { role: "system", content: "You are an expert coding assistant operating inside pi" },
+          { role: "user", content: "do the task" },
+        ],
+      }),
+    });
+
+    expect(seen[0].systemPrompt).toBe("You are an expert coding assistant operating inside pi");
+    // Capture must not disturb the request: nothing pinned means nothing added.
+    expect(upstream.received[0].body.providerOptions).toBeUndefined();
+  });
+});

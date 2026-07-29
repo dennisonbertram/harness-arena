@@ -24,11 +24,17 @@ const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 // submitted text. This reconstructs the exact complete system prompt the model
 // receives, identical for every task in a run.
 const PI_CWD = "/app";
-export function completeSystemPrompt(submittedPrompt: string): string {
+export function completeSystemPrompt(submittedPrompt: string, capturedPrompt?: string): string {
+  // What the gateway sidecar read off the wire is the prompt the model actually
+  // received -- no reconstruction, so nothing to drift. Everything below is the
+  // fallback for runs that predate the capture.
+  if (capturedPrompt) return capturedPrompt;
+
   // A baseline submission passes NO --system-prompt at all, so the model
   // never received "" + the cwd line -- it received pi's own built-in
-  // default (captured in docs/pi-vanilla-system-prompt.txt, which already
-  // ends in the same "Current working directory: <cwd>" line).
+  // default. docs/pi-vanilla-system-prompt.txt approximates that, but it is a
+  // hand-edited snapshot and still carries the paths of the machine it was
+  // taken on; it is shown only when nothing better was recorded.
   if (isBaselinePrompt(submittedPrompt)) {
     return getBaselinePrompt().replace("<cwd>", PI_CWD);
   }
@@ -229,11 +235,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
 
       <section style={{ marginBottom: 40 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
-          <h2 className="label">Submitted system prompt</h2>
+          <h2 className="label">{submission && isBaselinePrompt(submission.prompt) ? "System prompt pi ran" : "Submitted system prompt"}</h2>
           {submission ? (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <CompletePromptModal
-                prompt={completeSystemPrompt(submission.prompt)}
+                prompt={completeSystemPrompt(submission.prompt, run.resolved_system_prompt)}
                 isBaseline={isBaselinePrompt(submission.prompt)}
               />
               <CopyPromptButton text={submission.prompt} />
@@ -252,7 +258,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
             background: "var(--background-200)",
           }}
         >
-          {submission?.prompt ?? "Prompt unavailable."}
+          {/* A baseline submits no prompt by design, so its own text is empty --
+              show what pi actually ran instead of a blank box. */}
+          {submission && isBaselinePrompt(submission.prompt)
+            ? (run.resolved_system_prompt ?? "No custom prompt — pi ran with its own default system prompt.")
+            : (submission?.prompt ?? "Prompt unavailable.")}
         </pre>
       </section>
 

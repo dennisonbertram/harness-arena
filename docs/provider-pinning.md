@@ -133,5 +133,37 @@ itself is what matters for comparability.
 - Unpin: remove it. Its runs then record no `provider_pinned` and are marked
   unpinned, which is accurate.
 - Override the port: `GATEWAY_PROXY_PORT` (default 4599).
-- The sidecar only starts when a pin applies, so unpinned runs gain no new
-  failure mode.
+- The sidecar now starts for **every** run, pinned or not. Two reasons: it is
+  what captures the resolved system prompt (see below), and routing only *some*
+  runs through a proxy would itself be a difference between them beyond the pin
+  under test. Unpinned runs pass through it untouched -- `pinProviders` returns
+  the body unchanged when nothing is pinned.
+
+## Capturing the system prompt pi actually ran
+
+A baseline submits an empty prompt by design -- that is what makes the runner
+pass no `--system-prompt`, so pi builds its own default. Recording that as `""`
+made the baseline look like it ran nothing.
+
+It cannot be rebuilt from our side. pi's `buildSystemPrompt` assembles the
+default at runtime from the container's own doc paths, tool set, cwd, project
+context and skills, and pi does not persist the result: the session JSONL header
+carries only `id`, `timestamp` and `cwd`. `docs/pi-vanilla-system-prompt.txt` is
+what rebuilding it looks like -- a hand-edited snapshot that still points at
+`/Users/dennison/.nvm/.../pi-coding-agent/README.md` and ends in a literal
+`<cwd>` placeholder.
+
+So the sidecar reads it off the wire instead. `systemPromptOf()` takes the
+`system` message out of the request body -- the exact bytes pi sent -- and the
+run records it as `resolved_system_prompt`. There is no reconstruction, so
+there is nothing to drift on a pi upgrade.
+
+The run page prefers that captured value and falls back to the snapshot only for
+runs recorded before this shipped.
+
+**Note on the two `buildSystemPrompt` branches.** Passing a custom prompt takes
+a different branch from the default, but both append project context, skills and
+the cwd line identically -- the only difference is the base text. So passing a
+correctly-generated default would be equivalent *while it stayed correct*, and
+would silently stop being the default the moment it drifted. Capturing avoids
+that class of bug entirely, which is why the baseline still runs vanilla.
