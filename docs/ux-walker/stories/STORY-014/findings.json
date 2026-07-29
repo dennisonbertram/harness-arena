@@ -1,0 +1,30 @@
+[
+  {
+    "id": "F-014-1",
+    "story_id": "STORY-014",
+    "severity": "medium",
+    "category": "flow",
+    "criterion": "Dead ends / discoverability (rubric 11, Flow Economy)",
+    "score": "warn",
+    "description": "The header nav (Harness Arena | Leaderboard | How it works | Submit | Voice) has no entry for /voice/results. The only in-app path to results is the 'View results →' link shown on the done-state screen after finishing or skipping through a whole session. A researcher who lands on /voice but doesn't want to sit through 5-40 comparisons has no discoverable UI path to the results table — they would need to already know the /voice/results URL.",
+    "expected": "A discoverable path to results that doesn't require completing (or skipping through) an entire evaluation session — e.g. a 'Results' nav entry or a persistent link from the /voice page itself.",
+    "actual": "Results is reachable only via the post-session done-state link or direct URL knowledge; verified by inspecting the header nav on both /voice and /voice/results — both show the identical 5-item list with no results/analytics entry.",
+    "screenshot": "docs/ux-walker/stories/STORY-014/screenshots/step-2-voice-nav.png",
+    "suggested_fix": "Add a 'Results' link to the header nav (or a secondary link near the Voice Arena intro copy on /voice) pointing to /voice/results.",
+    "files_likely_involved": []
+  },
+  {
+    "id": "F-014-2",
+    "story_id": "STORY-014",
+    "severity": "low",
+    "category": "flow",
+    "criterion": "One way per task / dead ends (rubric 11)",
+    "score": "warn",
+    "description": "/voice/results has no link back to /voice — the only route back is the ambient header 'Voice' nav link, not a dedicated in-content link. This matches the story's documented edge case ('one-directional: /voice/results has no link back to /voice').",
+    "expected": "A direct link/button on the results page back to the arena, in addition to the header nav.",
+    "actual": "No such link exists on the results page; navigation back relies entirely on the persistent header nav, which does work correctly (verified: clicking 'Voice' from /voice/results navigates to /voice).",
+    "screenshot": "docs/ux-walker/stories/STORY-014/screenshots/step-1-results-nav.png",
+    "suggested_fix": "Low priority since the header nav link works reliably; would only matter if the header nav were ever removed or hidden on this page.",
+    "files_likely_involved": []
+  }
+]
