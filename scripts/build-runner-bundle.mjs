@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Packages the in-sandbox runner (scripts/runner/{runner.mjs,lib.mjs}) plus
+// Packages the in-sandbox runner (scripts/runner/{runner.mjs,lib.mjs,gateway-proxy.mjs}) plus
 // every task's tests/ dir into public/runner-bundle.tgz. The bundle is
 // curled and extracted inside the sandbox to /opt/runner (see
 // lib/sandbox.ts), so this must produce exactly the layout runner.mjs
@@ -32,6 +32,7 @@ export function buildBundle({ outFile = DEFAULT_OUT_FILE } = {}) {
   mkdirSync(path.join(stageDir, "scripts", "runner"), { recursive: true });
   cpSync(path.join(RUNNER_DIR, "runner.mjs"), path.join(stageDir, "scripts", "runner", "runner.mjs"));
   cpSync(path.join(RUNNER_DIR, "lib.mjs"), path.join(stageDir, "scripts", "runner", "lib.mjs"));
+  cpSync(path.join(RUNNER_DIR, "gateway-proxy.mjs"), path.join(stageDir, "scripts", "runner", "gateway-proxy.mjs"));
 
   for (const id of taskIds()) {
     const testsDst = path.join(stageDir, "tasks", id, "tests");

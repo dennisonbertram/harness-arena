@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,6 +57,34 @@ describe("build-runner-bundle", () => {
 
     for (const id of realTaskIds()) {
       expect(entries).toContain(`tasks/${id}/tests/test.sh`);
+    }
+  }, BUNDLE_TEST_TIMEOUT_MS);
+});
+
+// A run failed in production with "Cannot find module
+// '/opt/runner/scripts/runner/gateway-proxy.mjs'": the bundle copied a
+// hand-maintained list of files, and a new module the runner imports was not
+// on it. A literal list cannot catch that -- it has to be DERIVED from what
+// the runner actually imports, so adding a module can never silently break
+// dispatch again.
+describe("regression: every module the runner imports is bundled", () => {
+  function localImportsOf(file: string): string[] {
+    const src = readFileSync(path.join(process.cwd(), "scripts", "runner", file), "utf8");
+    // Both static `from "./x.mjs"` and dynamic `import("./x.mjs")`.
+    return [...src.matchAll(/(?:from|import)\s*\(?\s*["'](\.\/[^"']+\.mjs)["']/g)].map((m) => m[1].slice(2));
+  }
+
+  it("bundles every local .mjs that runner.mjs or lib.mjs imports", () => {
+    workDir = mkdtempSync(path.join(tmpdir(), "runner-bundle-test-"));
+    const outFile = path.join(workDir, "runner-bundle.tgz");
+
+    buildBundle({ outFile });
+    const entries = listEntries(outFile);
+
+    const required = new Set([...localImportsOf("runner.mjs"), ...localImportsOf("lib.mjs")]);
+    expect(required.size).toBeGreaterThan(0);
+    for (const dep of required) {
+      expect(entries, `runner imports ${dep} but the bundle omits it`).toContain(`scripts/runner/${dep}`);
     }
   }, BUNDLE_TEST_TIMEOUT_MS);
 });
