@@ -18,8 +18,7 @@ export const dynamic = "force-dynamic";
 // Files whose raw bytes trip GitHub secret-scanning push protection are stored
 // base64-encoded as `<name>.b64` (e.g. sanitize-git-repo's fake leaked
 // tokens). Decode them back to their real name so the runtime file the
-// verifier sees is byte-identical to upstream -- same rule as the bundle
-// builder (scripts/build-runner-bundle.mjs).
+// verifier sees is byte-identical to upstream before transport.
 function realNameAndBytes(filePath: string): { name: string; bytes: Buffer } {
   const raw = readFileSync(filePath);
   if (filePath.endsWith(".b64")) {
