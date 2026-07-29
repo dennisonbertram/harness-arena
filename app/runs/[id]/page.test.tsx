@@ -150,6 +150,38 @@ describe("RunDetailPage", () => {
     expect(html).toContain("View complete system prompt");
   });
 
+  // The point of the capture: a baseline's own prompt is empty, so before this
+  // the page rendered an empty box that read as "this run had no prompt".
+  it("shows the captured prompt for a baseline instead of an empty box", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-cap", { agent_name: "Baseline Bot", prompt: "" }));
+    await storage.putRun(
+      run("r-cap", {
+        submission_id: "s-cap",
+        status: "completed",
+        resolved_system_prompt: "You are an expert coding assistant operating inside pi\nCurrent working directory: /app",
+      }),
+    );
+
+    const html = renderToStaticMarkup(await RunPage.default({ params: Promise.resolve({ id: "r-cap" }) }));
+
+    expect(html).toContain("You are an expert coding assistant operating inside pi");
+    expect(html).toContain("System prompt pi ran");
+    // The stale snapshot's laptop paths must never reach the page when a real
+    // capture exists.
+    expect(html).not.toContain("/Users/dennison");
+  });
+
+  it("falls back to a plain explanation for a baseline run with nothing captured", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-old", { agent_name: "Baseline Bot", prompt: "" }));
+    await storage.putRun(run("r-old", { submission_id: "s-old", status: "completed" }));
+
+    const html = renderToStaticMarkup(await RunPage.default({ params: Promise.resolve({ id: "r-old" }) }));
+
+    expect(html).toContain("pi ran with its own default system prompt");
+  });
+
   it("shows 'Unknown agent' / 'Prompt unavailable' and the no-custom-prompt diff message when the submission is missing", async () => {
     const storage = resetStorage();
     await storage.putRun(run("r2", { submission_id: "gone", status: "failed", task_results: [] }));
