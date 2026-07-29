@@ -303,6 +303,42 @@ export function buildModelsConfig(maxOutputTokens) {
 export const PI_MODELS_CONFIG_PATH = "/root/.pi/agent/models.json";
 
 /**
+ * One real model call through the sidecar, before any task starts.
+ *
+ * The pinning path failed silently in production: pi could not get a usable
+ * answer, so every one of the 16 tasks burned its full agent timeout and the
+ * run finished with 0 cost and 0 passes. That reads like a catastrophically bad
+ * model rather than broken plumbing, and it cost a full run to discover. This
+ * turns the same failure into an immediate, named error.
+ *
+ * Deliberately exercises the sidecar (127.0.0.1:port), not the gateway --
+ * calling the gateway directly would prove nothing about the path pi uses.
+ */
+export async function preflightProxy({ port, model, apiKey, fetchImpl = fetch, timeoutMs = 60_000 }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+      signal: controller.signal,
+    });
+    if (response.ok) return { ok: true };
+    const detail = (await response.text().catch(() => "")).slice(0, 300);
+    return { ok: false, detail: `HTTP ${response.status} ${detail}` };
+  } catch (error) {
+    return { ok: false, detail: String(error?.message ?? error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * What to record as provider_pinned.
  *
  * Absence of this field is how the board marks a run as not comparable, so it

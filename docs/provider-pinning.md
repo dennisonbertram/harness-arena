@@ -200,3 +200,45 @@ the cwd line identically -- the only difference is the base text. So passing a
 correctly-generated default would be equivalent *while it stayed correct*, and
 would silently stop being the default the moment it drifted. Capturing avoids
 that class of bug entirely, which is why the baseline still runs vanilla.
+
+## The sidecar must be a transparent proxy (2026-07-29)
+
+Once pi actually routed through the sidecar for the first time, every task hung
+and each run finished **0 passes at 0 cost** -- which reads like a hopeless
+model rather than broken plumbing. Two defects, both invisible on a happy-path
+check:
+
+1. **It forwarded two headers.** Only `authorization` and `content-type` were
+   passed on, silently dropping everything else pi sends (`anthropic-version`
+   among them).
+2. **It buffered the response and relabelled it `application/json`.** Measured
+   against the live gateway from inside a container, same harness, one variable:
+
+   | sidecar | `content-type` returned for a `stream: true` request |
+   |---|---|
+   | buffering | `application/json` |
+   | pass-through | `text/event-stream` |
+
+   A streaming client that dispatches on content-type never parses the
+   mislabelled body. It waits -- so the failure is a hang, not an error, which
+   is the worst shape for a benchmark. (That pi specifically rejects it is
+   strongly supported but not directly confirmed; pi could not be driven
+   reliably outside the sandbox.)
+
+The sidecar now forwards all headers (rebuilding `content-length`, since
+injecting the pin lengthens the body) and streams the upstream response through
+with its own status and headers intact.
+
+`generationId` capture was removed with the buffering that enabled it. It was
+never wired to anything, and reporting now derives entirely from the request.
+
+## Preflight
+
+The run makes **one real model call through the sidecar before any task starts**
+(`preflightProxy`). If it does not come back 200 the run fails immediately with
+the upstream status and body, naming the pinned provider.
+
+This exists because the failure above cost a full run of 16 tasks to notice, and
+looked like a model result rather than an outage. Verified end to end in a
+sandbox carrying the production network allowlist: preflight ok, and a real
+container -> sidecar -> gateway call returning 200.
