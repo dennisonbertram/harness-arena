@@ -77,6 +77,10 @@ Runs record `provider_pinned`, and only when a pin was actually applied.
 **Absence of `provider_pinned` is the deprecation marker.** No backfill, no
 timestamp to drift: a run either recorded which upstream it used, or it did not.
 
+**Caveat for runs before 2026-07-29:** the marker was unreliable in the other
+direction -- runs carry `provider_pinned` without having been pinned. See the
+correction above. Presence of the field is only trustworthy from 2026-07-29 on.
+
 `isPrePinningRun()` in `lib/arena-params.ts` is the single definition.
 `PromptStanding.prePinningRuns` counts them per standing, and `/benchmarks`
 renders `⚠ n/m unpinned` on any affected row.
@@ -101,7 +105,36 @@ renders `⚠ n/m unpinned` on any affected row.
 
 ## What is proven, and what is not
 
-**Proven, against the live gateway:**
+### Correction (2026-07-29): pinning did not work until this date
+
+Everything below in this section was true of the sidecar in isolation and false
+of the system as a whole. pi never read the config that pointed it at the
+sidecar, so **every run recorded before 2026-07-29 that carries
+`provider_pinned` is mislabelled** -- it was served by whichever upstream the
+gateway chose, exactly like an unpinned run.
+
+Two defects, found by A/B against pi 0.82.1 with one variable changed:
+
+| config at | what pi did |
+|---|---|
+| `~/.pi/models.json` (what the runner wrote) | ignored it, called the real gateway -- 401 from Vercel, **zero traffic to the sidecar** |
+| `~/.pi/agent/models.json` (what pi documents) | routed through the sidecar, pin applied |
+
+1. **Wrong path.** pi reads `~/.pi/agent/models.json` (its `docs/models.md`).
+   The runner wrote `~/.pi/models.json`. This fails *silently*: the run still
+   completes, just unpinned. That is why a manual end-to-end check passed --
+   the check exercised the sidecar directly, never pi's own config loading.
+2. **The label asserted intent, not fact.** `provider_pinned` was
+   `PINNED_PROVIDER || undefined` -- the env var echoed back. It was therefore
+   stamped on runs that were never pinned. It is now derived from the sidecar
+   having actually pinned a request (`resolvePinnedProvider`).
+
+A third, unrelated to pinning: the system-prompt capture read `messages[]` for a
+`role: "system"` entry, but pi speaks the **Anthropic Messages** api
+(`"api":"anthropic-messages"`, path `/v1/messages`), which carries the prompt in
+a top-level `system` field. It captured nothing.
+
+**Proven, against the live gateway (sidecar in isolation):**
 
 - `providerOptions.gateway.only` is enforced (a bogus value 400s and enumerates
   the real providers).

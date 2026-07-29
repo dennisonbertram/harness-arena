@@ -23,6 +23,8 @@ import {
   buildContainerName,
   buildPiCommand,
   buildPinnedModelsConfig,
+  PI_MODELS_CONFIG_PATH,
+  resolvePinnedProvider,
   computeTotals,
   deliverTerminalStatus,
   fetchWithTimeout,
@@ -363,6 +365,9 @@ let gatewayProxy = null;
 // baseline runs vanilla, so this is the only faithful record of what pi's
 // default resolved to inside this container -- see systemPromptOf().
 let resolvedSystemPrompt;
+// Set only when the sidecar actually pinned a request -- see
+// resolvePinnedProvider(). Configuration alone must never mark a run pinned.
+let pinWasApplied = false;
 
 async function startGatewayProxy() {
   const { createGatewayProxy } = await import("./gateway-proxy.mjs");
@@ -370,6 +375,7 @@ async function startGatewayProxy() {
     only: PINNED_PROVIDER ? [PINNED_PROVIDER] : [],
     onForward: (event) => {
       if (!resolvedSystemPrompt && event.systemPrompt) resolvedSystemPrompt = event.systemPrompt;
+      if (event.only?.length) pinWasApplied = true;
     },
   });
   await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
@@ -413,7 +419,10 @@ async function runOneTask(task, index, systemPrompt) {
       const cfgFile = path.join(os.tmpdir(), `models-${RUN_ID}-${index}.json`);
       writeFileSync(cfgFile, cfg);
       tempDirs.push(cfgFile);
-      sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:/root/.pi/models.json`]);
+      // pi only reads this path (see PI_MODELS_CONFIG_PATH); mkdir -p because
+      // the agent/ directory does not exist in a bare container.
+      sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", path.posix.dirname(PI_MODELS_CONFIG_PATH)]);
+      sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:${PI_MODELS_CONFIG_PATH}`]);
     }
 
     if (PI_INSTALL_MODE === "agentkit") {
@@ -710,7 +719,7 @@ async function main() {
       status: "completed",
       totals: { ...totals, over_budget: overBudget },
       task_results: taskResults,
-      provider_pinned: PINNED_PROVIDER || undefined,
+      provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
       resolved_system_prompt: resolvedSystemPrompt,
     });
     process.exit(delivered ? 0 : 1);

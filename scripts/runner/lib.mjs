@@ -293,6 +293,29 @@ export function buildModelsConfig(maxOutputTokens) {
 }
 
 /**
+ * Where pi reads custom provider config from, per its own docs/models.md:
+ * `~/.pi/agent/models.json` -- NOT `~/.pi/models.json`. Verified by A/B against
+ * pi 0.82.1: at the wrong path pi ignored the file and called the real gateway
+ * (401 from Vercel, zero traffic to the sidecar); at this path it routed
+ * through the sidecar. The wrong path fails silently -- the run still
+ * completes, just unpinned -- so nothing surfaced it.
+ */
+export const PI_MODELS_CONFIG_PATH = "/root/.pi/agent/models.json";
+
+/**
+ * What to record as provider_pinned.
+ *
+ * Absence of this field is how the board marks a run as not comparable, so it
+ * must reflect what HAPPENED, not what was configured. Echoing the env var
+ * meant that while the models.json path was wrong -- pi silently ignoring the
+ * config and calling the real gateway -- every run was still stamped as pinned.
+ * `applied` comes from the sidecar having actually pinned a request.
+ */
+export function resolvePinnedProvider({ configured, applied }) {
+  return configured && applied ? configured : undefined;
+}
+
+/**
  * pi models.json that routes the gateway provider through the pinning sidecar.
  *
  * pi cannot add arbitrary body fields, so it cannot send the gateway's

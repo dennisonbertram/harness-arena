@@ -213,3 +213,65 @@ describe("capturing the resolved prompt through the proxy", () => {
     expect(upstream.received[0].body.providerOptions).toBeUndefined();
   });
 });
+
+// pi talks to the gateway over the ANTHROPIC MESSAGES api, not OpenAI chat
+// completions -- verified from pi's own JSON output ("api":"anthropic-messages")
+// and from the request path it opens against the sidecar (/v1/messages). That
+// api carries the system prompt in a top-level `system` field, so looking for a
+// role:"system" entry in `messages` finds nothing, every time.
+describe("systemPromptOf on the api pi actually uses", () => {
+  it("reads the top-level system field of an Anthropic Messages request", () => {
+    expect(systemPromptOf({ system: "You are an expert coding assistant", messages: [] })).toBe(
+      "You are an expert coding assistant",
+    );
+  });
+
+  it("reads a system field sent as content blocks", () => {
+    expect(
+      systemPromptOf({ system: [{ type: "text", text: "block one" }, { type: "text", text: " two" }] }),
+    ).toBe("block one two");
+  });
+
+  it("still reads the OpenAI-style system message, so either api works", () => {
+    expect(systemPromptOf({ messages: [{ role: "system", content: "openai style" }] })).toBe("openai style");
+  });
+});
+
+import { PI_MODELS_CONFIG_PATH } from "./lib.mjs";
+
+// Verified by A/B against pi 0.82.1, one variable changed: with the config at
+// ~/.pi/models.json pi ignored it and went straight to the real gateway (401
+// from Vercel, zero traffic to the sidecar); with it at ~/.pi/agent/models.json
+// pi routed through the sidecar. pi's own docs/models.md states the path. The
+// wrong path fails SILENTLY -- the run completes, just unpinned -- which is why
+// it survived a manual end-to-end check.
+describe("PI_MODELS_CONFIG_PATH", () => {
+  it("is the path pi actually reads, not ~/.pi/models.json", () => {
+    expect(PI_MODELS_CONFIG_PATH).toBe("/root/.pi/agent/models.json");
+    expect(PI_MODELS_CONFIG_PATH).not.toBe("/root/.pi/models.json");
+  });
+});
+
+import { resolvePinnedProvider } from "./lib.mjs";
+
+// provider_pinned used to be `PINNED_PROVIDER || undefined` -- the env var
+// echoed straight back. That is a statement of INTENT, not of what happened, so
+// while the models.json path was wrong every run was stamped "pinned: zai"
+// while actually being served by whichever upstream the gateway chose. Absence
+// of the field is the deprecation marker the board relies on, so a false
+// positive here silently contaminates the comparison. Derive it from the
+// sidecar actually having pinned a request instead.
+describe("resolvePinnedProvider", () => {
+  it("does not claim a pin when no request went through the sidecar", () => {
+    expect(resolvePinnedProvider({ configured: "zai", applied: false })).toBeUndefined();
+  });
+
+  it("reports the pin only once the sidecar actually applied it", () => {
+    expect(resolvePinnedProvider({ configured: "zai", applied: true })).toBe("zai");
+  });
+
+  it("stays unpinned when nothing was configured, however the run went", () => {
+    expect(resolvePinnedProvider({ configured: "", applied: true })).toBeUndefined();
+    expect(resolvePinnedProvider({ configured: "", applied: false })).toBeUndefined();
+  });
+});
