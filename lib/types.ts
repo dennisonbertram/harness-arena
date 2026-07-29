@@ -157,6 +157,10 @@ export const RunSchema = z.object({
   // comparable with pinned ones: each sampled an unknown mix. Absence is the
   // deprecation marker; see isPrePinningRun and docs/provider-pinning.md.
   provider_pinned: z.string().optional(),
+  // What pi's system prompt actually resolved to inside the container, read
+  // off the request body by the gateway sidecar. Absent on runs that predate
+  // the capture, and on any run whose model never reached the sidecar.
+  resolved_system_prompt: z.string().optional(),
   model: z.string().optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),

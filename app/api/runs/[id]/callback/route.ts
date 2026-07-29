@@ -15,6 +15,10 @@ const CallbackBodySchema = z
     // Which gateway upstream this run was pinned to. Absent means unpinned,
     // which is exactly how a pre-pinning run is identified.
     provider_pinned: z.string().optional(),
+    // The system prompt pi actually sent, captured off the wire by the gateway
+    // sidecar. A baseline's submitted prompt is empty by design ("run vanilla
+    // pi"), so this is the only faithful record of what it really ran.
+    resolved_system_prompt: z.string().optional(),
     totals: z
       .object({
         tasks_passed: z.number(),
@@ -80,6 +84,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   if (parsed.data.task_results) run.task_results = parsed.data.task_results;
   if (parsed.data.provider_pinned) run.provider_pinned = parsed.data.provider_pinned;
+  if (parsed.data.resolved_system_prompt) run.resolved_system_prompt = parsed.data.resolved_system_prompt;
   if (parsed.data.totals) {
     run.tasks_passed = parsed.data.totals.tasks_passed;
     run.total_cost_usd = parsed.data.totals.total_cost_usd;
