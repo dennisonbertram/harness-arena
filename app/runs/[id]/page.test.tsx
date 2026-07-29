@@ -38,6 +38,27 @@ describe("completeSystemPrompt", () => {
   it("treats a whitespace-only prompt as baseline too", () => {
     expect(completeSystemPrompt("   ")).toBe(getBaselinePrompt().replace("<cwd>", "/app"));
   });
+
+  // The reconstruction above is an approximation: docs/pi-vanilla-system-prompt.txt
+  // is a hand-edited snapshot that still carries the paths of the laptop it was
+  // taken on. When the run captured what pi actually sent, that is the truth and
+  // the snapshot must not be shown instead of it.
+  it("prefers the prompt the run actually captured over the reconstruction", () => {
+    const captured = "You are an expert coding assistant operating inside pi\nCurrent working directory: /app";
+    expect(completeSystemPrompt("", captured)).toBe(captured);
+    expect(completeSystemPrompt("", captured)).not.toContain("/Users/");
+  });
+
+  it("still falls back to the reconstruction for runs captured before this shipped", () => {
+    expect(completeSystemPrompt("", undefined)).toBe(getBaselinePrompt().replace("<cwd>", "/app"));
+  });
+
+  // A captured prompt is the whole prompt, cwd line included -- appending our
+  // own would duplicate it.
+  it("does not append a second cwd line to a captured prompt", () => {
+    const captured = "Be terse.\nCurrent working directory: /app";
+    expect(completeSystemPrompt("Be terse.", captured)).toBe(captured);
+  });
 });
 
 function submission(id: string, overrides: Partial<Submission> = {}): Submission {

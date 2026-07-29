@@ -441,4 +441,33 @@ describe("POST /api/runs/[id]/callback", () => {
     expect(response.status).toBe(200);
     expect((await storageRef.current.getRun("run-pinned"))?.provider_pinned).toBe("zai");
   });
+
+  // A baseline runs vanilla, so its submitted prompt is empty by design. The
+  // prompt pi actually used is its own default, built inside the container --
+  // captured off the wire rather than reconstructed, so it must round-trip.
+  it("records the system prompt pi actually resolved to", async () => {
+    await storageRef.current.putRun({
+      id: "run-prompt",
+      submission_id: "sub-1",
+      status: "running",
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      callbackRequest("run-prompt", {
+        events: [],
+        status: "completed",
+        totals: { tasks_passed: 3, total_cost_usd: 1, over_budget: false },
+        task_results: [],
+        resolved_system_prompt: "You are an expert coding assistant operating inside pi",
+      }),
+      { params: Promise.resolve({ id: "run-prompt" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect((await storageRef.current.getRun("run-prompt"))?.resolved_system_prompt).toBe(
+      "You are an expert coding assistant operating inside pi",
+    );
+  });
 });

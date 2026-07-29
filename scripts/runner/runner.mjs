@@ -359,12 +359,21 @@ let gatewayProxy = null;
  * Only started when a provider is actually pinned, so an unpinned run behaves
  * exactly as before rather than gaining a new failure mode.
  */
+// The prompt pi actually sent, captured off the wire by the sidecar. A
+// baseline runs vanilla, so this is the only faithful record of what pi's
+// default resolved to inside this container -- see systemPromptOf().
+let resolvedSystemPrompt;
+
 async function startGatewayProxy() {
-  if (!PINNED_PROVIDER) return null;
   const { createGatewayProxy } = await import("./gateway-proxy.mjs");
-  const server = createGatewayProxy({ only: [PINNED_PROVIDER] });
+  const server = createGatewayProxy({
+    only: PINNED_PROVIDER ? [PINNED_PROVIDER] : [],
+    onForward: (event) => {
+      if (!resolvedSystemPrompt && event.systemPrompt) resolvedSystemPrompt = event.systemPrompt;
+    },
+  });
   await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
-  log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER}`);
+  log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER || "(nothing)"}`);
   return server;
 }
 
@@ -393,10 +402,13 @@ async function runOneTask(task, index, systemPrompt) {
       `sleep ${task.agent_timeout_sec + 900}`,
     ]);
 
-    if (PINNED_PROVIDER) {
+    {
       // pi cannot add the gateway's providerOptions itself, but it can take a
       // baseUrl -- so point its gateway provider at the sidecar, which injects
-      // the pin and forwards.
+      // the pin (when there is one) and forwards. Unpinned runs go through it
+      // too: it is what captures the resolved system prompt, and routing only
+      // some runs through a proxy would itself be a difference between them
+      // beyond the pin under test.
       const cfg = buildPinnedModelsConfig({ proxyPort: GATEWAY_PROXY_PORT, model: RUNNER_MODEL });
       const cfgFile = path.join(os.tmpdir(), `models-${RUN_ID}-${index}.json`);
       writeFileSync(cfgFile, cfg);
@@ -699,6 +711,7 @@ async function main() {
       totals: { ...totals, over_budget: overBudget },
       task_results: taskResults,
       provider_pinned: PINNED_PROVIDER || undefined,
+      resolved_system_prompt: resolvedSystemPrompt,
     });
     process.exit(delivered ? 0 : 1);
   } catch (err) {

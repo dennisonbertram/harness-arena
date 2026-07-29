@@ -43,6 +43,29 @@ export function pinProviders(body, only) {
   };
 }
 
+/**
+ * The system prompt pi actually sent, read straight off the wire.
+ *
+ * A baseline runs vanilla -- no `--system-prompt` -- so pi builds its own
+ * default inside the container from that container's doc paths, tool set, cwd,
+ * project context and skills. There is no file to read it from: pi does not
+ * persist the resolved prompt to its session JSONL (the header carries only
+ * id/timestamp/cwd). Rebuilding our own copy is what produced the stale
+ * docs/pi-vanilla-system-prompt.txt, which still points at a laptop's
+ * ~/.nvm/... paths. The request body is ground truth and cannot drift.
+ */
+export function systemPromptOf(body) {
+  const message = body?.messages?.find?.((m) => m?.role === "system");
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  // Some clients send content as an array of typed parts rather than a string.
+  if (Array.isArray(content)) {
+    const text = content.map((part) => part?.text ?? "").join("");
+    return text || undefined;
+  }
+  return undefined;
+}
+
 export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}) {
   const pinned = (only ?? []).filter(Boolean);
   return http.createServer(async (req, res) => {
@@ -84,7 +107,13 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       } catch {
         /* non-JSON response: nothing to attribute */
       }
-      onForward({ status: upstreamRes.status, model: body?.model, only: pinned, generationId });
+      onForward({
+        status: upstreamRes.status,
+        model: body?.model,
+        only: pinned,
+        generationId,
+        systemPrompt: systemPromptOf(body),
+      });
     }
     res.writeHead(upstreamRes.status, { "content-type": "application/json" });
     res.end(text);
