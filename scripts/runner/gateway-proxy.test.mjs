@@ -352,6 +352,17 @@ describe("systemPromptOf on the api pi actually uses", () => {
   it("still reads the OpenAI-style system message, so either api works", () => {
     expect(systemPromptOf({ messages: [{ role: "system", content: "openai style" }] })).toBe("openai style");
   });
+
+  it("reads Pi's developer-role system prompt for reasoning-capable OpenAI models", () => {
+    expect(
+      systemPromptOf({
+        messages: [
+          { role: "developer", content: "the resolved Pi system prompt" },
+          { role: "user", content: "do the task" },
+        ],
+      }),
+    ).toBe("the resolved Pi system prompt");
+  });
 });
 
 import { PI_MODELS_CONFIG_PATH } from "./lib.mjs";

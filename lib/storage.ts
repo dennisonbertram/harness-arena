@@ -189,9 +189,9 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(await res.text()) as T;
 }
 
-async function getJson<T>(pathname: string): Promise<T> {
-  const result = await get(pathname, { access: "public" });
-  // The caller got this pathname from list(), so a null/304 here is a
+async function getJson<T>(identifier: string): Promise<T> {
+  const result = await get(identifier, { access: "public" });
+  // The caller derived this identifier from list(), so a null/304 here is a
   // transiently unreadable object rather than a legitimate missing entity.
   // Throw so withRetry can make another authenticated attempt.
   if (!result || result.statusCode !== 200 || !result.stream) {
@@ -248,7 +248,13 @@ export class BlobStorage implements Storage {
         // receiving persistent 403s from public URLs while get(pathname)
         // stayed healthy; trying the failing public edge first added ~300 ms
         // per blob and pushed /status static generation past 60 seconds.
-        return await withRetry(() => getJson<T>(blob.pathname), 2);
+        //
+        // Authenticate the uploadedAt-versioned URL, not the bare pathname.
+        // Production proved the bare get can return a pre-overwrite "running"
+        // document for minutes after list() already reports the completed
+        // upload. The version keeps authenticated reads on the current object
+        // while retaining the reliable SDK data plane.
+        return await withRetry(() => getJson<T>(versionedBlobUrl(blob)), 2);
       } catch {
         // Keep the uploadedAt-versioned public URL as a fallback: a prior Blob
         // incident had the inverse failure shape (SDK get 403, public URL
@@ -277,6 +283,7 @@ export class BlobStorage implements Storage {
         access: "public",
         addRandomSuffix: false,
         allowOverwrite: true,
+        cacheControlMaxAge: 60,
         contentType: "application/json",
       }),
     );
