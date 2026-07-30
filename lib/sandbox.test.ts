@@ -222,6 +222,16 @@ describe("createRunSandbox", () => {
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {
+    it("pins legacy GLM runs to Morph when the competition does not request a provider", async () => {
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun({ model: "zai/glm-5.2" }), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.PINNED_PROVIDER).toBe("morph");
+    });
+
     it("uses the run's requested provider instead of the model's legacy default pin", async () => {
       const sandbox = makeSandbox();
       mockCreate.mockResolvedValue(sandbox);
