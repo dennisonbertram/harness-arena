@@ -13,6 +13,7 @@ import {
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
+  parseSessionAgentError,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -78,6 +79,45 @@ describe("parseSessionCost", () => {
     expect(result.negativeCostCount).toBe(1);
     // Only the two nonnegative assistant cost.total values count as "valid".
     expect(result.validCostCount).toBe(2);
+  });
+});
+
+describe("parseSessionAgentError", () => {
+  it("recognizes Pi's zero-token timeout message as a provider timeout", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "user", content: "do the task" } }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "Request timed out.",
+          usage: { input: 0, output: 0, cost: { total: 0 } },
+        },
+      }),
+    ].join("\n");
+
+    expect(parseSessionAgentError(jsonl)).toEqual({
+      stage: "provider_timeout",
+      error: "Request timed out.",
+    });
+  });
+
+  it("surfaces other terminal provider errors without misclassifying normal assistant turns", () => {
+    expect(
+      parseSessionAgentError(
+        JSON.stringify({
+          type: "message",
+          message: { role: "assistant", stopReason: "error", errorMessage: "upstream overloaded" },
+        }),
+      ),
+    ).toEqual({ stage: "provider_error", error: "upstream overloaded" });
+    expect(
+      parseSessionAgentError(
+        JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop" } }),
+      ),
+    ).toBeUndefined();
   });
 });
 
