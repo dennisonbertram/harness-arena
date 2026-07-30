@@ -179,6 +179,18 @@ describe("buildPinnedModelsConfig", () => {
     // that repeatedly produced zero Pi turns in production.
     const provider = cfg.providers["vercel-ai-gateway"];
     expect(provider.api).toBe("openai-completions");
+    // Pi only applies a provider-level `api` while materializing entries from
+    // `models`. Built-in models otherwise retain their original transport
+    // (`anthropic-messages` for GLM), even though the configured baseUrl does
+    // apply. That combination generated /v1/v1/messages and 0/16 in
+    // production, so assert the effective model definition, not just the
+    // provider-shaped input Pi silently ignores.
+    expect(provider.models).toContainEqual(
+      expect.objectContaining({
+        id: "zai/glm-5.2",
+        api: "openai-completions",
+      }),
+    );
     const piRequestUrl = `${provider.baseUrl}/chat/completions`;
     expect(piRequestUrl).toBe("http://host.docker.internal:4599/v1/chat/completions");
   });
@@ -192,7 +204,9 @@ describe("buildPinnedModelsConfig", () => {
   it("marks Z.AI models so Pi sends an explicit disabled-thinking payload", () => {
     const model = "zai/glm-5.2-fast";
     const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
-    const override = cfg.providers["vercel-ai-gateway"].modelOverrides[model];
+    const provider = cfg.providers["vercel-ai-gateway"];
+    const override = provider.modelOverrides[model];
+    const definition = provider.models.find((candidate) => candidate.id === model);
 
     // Pi only emits `thinking: { type: "disabled" }` when both of these
     // fields are present. Without them, `--thinking off` is silently omitted
@@ -200,6 +214,12 @@ describe("buildPinnedModelsConfig", () => {
     // reasoning until the task timeout.
     expect(override.reasoning).toBe(true);
     expect(override.compat?.thinkingFormat).toBe("zai");
+    expect(definition).toMatchObject({
+      api: "openai-completions",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+      cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+    });
   });
 });
 
