@@ -165,6 +165,7 @@ describe("RunDetailPage", () => {
             attempted: true,
             passed: false,
             cost_usd: 0.03,
+            duration_s: 303,
             failure_stage: "agent_timeout",
             error: "Agent timed out after 300s waiting for model output",
           },
@@ -176,6 +177,9 @@ describe("RunDetailPage", () => {
       await RunPage.default({ params: Promise.resolve({ id: "r-task-timeout" }) }),
     );
 
+    expect(html).toContain("Task timeouts detected (1)");
+    expect(html).toContain("cancel-async-tasks");
+    expect(html).toContain("5m 3s");
     expect(html).toContain("agent_timeout");
     expect(html).toContain("Agent timed out after 300s waiting for model output");
   });

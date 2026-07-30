@@ -56,6 +56,7 @@ describe("reconstructRunProgress", () => {
         task_id: "t0",
         stage: "agent_timeout",
         error: "Agent timed out waiting for model output",
+        duration_s: 304,
       }),
     ];
 
@@ -65,6 +66,7 @@ describe("reconstructRunProgress", () => {
     expect(p.tasks[0]).toMatchObject({
       failureStage: "agent_timeout",
       error: "Agent timed out waiting for model output",
+      durationS: 304,
     });
     expect(p.verified).toBe(1);
     expect(p.current).toBeNull();

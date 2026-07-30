@@ -68,6 +68,23 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
     run.task_results.length === 0 && (run.status === "running" || run.status === "queued");
   const progress = isLive ? reconstructRunProgress(events) : null;
   const liveDurationSec = progress ? progress.tasks.reduce((s, t) => s + (t.durationS ?? 0), 0) : 0;
+  const taskTimeouts = progress
+    ? progress.tasks
+        .filter((task) => task.failureStage?.endsWith("_timeout"))
+        .map((task) => ({
+          taskId: task.taskId,
+          stage: task.failureStage!,
+          error: task.error,
+          durationS: task.durationS,
+        }))
+    : run.task_results
+        .filter((task) => task.failure_stage?.endsWith("_timeout"))
+        .map((task) => ({
+          taskId: task.task_id,
+          stage: task.failure_stage!,
+          error: task.error,
+          durationS: task.duration_s,
+        }));
   const failureEvent = [...events]
     .reverse()
     .find((event) => event.type === "run.failed" || event.type === "run.reaped");
@@ -133,6 +150,41 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         </section>
       ) : null}
 
+      {taskTimeouts.length > 0 ? (
+        <section
+          role="alert"
+          style={{
+            marginBottom: 32,
+            padding: 16,
+            border: "1px solid var(--red-700)",
+            borderRadius: 8,
+            background: "var(--red-100)",
+          }}
+        >
+          <p style={{ fontWeight: 600, marginBottom: 4 }}>
+            Task timeouts detected ({taskTimeouts.length})
+          </p>
+          <p style={{ fontSize: 13, marginBottom: 8 }}>
+            These are execution-limit failures, not verifier test failures. Each measured duration is retained for
+            follow-up.
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13 }}>
+            {taskTimeouts.map((task) => (
+              <li key={task.taskId}>
+                <Link href={`/runs/${run.id}/${task.taskId}`} className="mono">
+                  {task.taskId}
+                </Link>
+                {" · "}
+                <span className="mono">{task.stage}</span>
+                {" · "}
+                {task.durationS !== undefined ? formatDuration(task.durationS) : "duration unavailable"}
+                {task.error ? ` · ${task.error}` : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <section
         style={{
           display: "flex",
@@ -167,6 +219,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
             <span style={{ color: "var(--gray-700)" }}> · now running {progress.current}</span>
           )}
         </h2>
+        <p style={{ fontSize: 12, color: "var(--gray-700)", marginBottom: 12 }}>
+          Every task is timed. Live rows show measured agent execution time; completed rows include the full task
+          attempt through verification and trace capture.
+        </p>
         {progress ? (
           progress.tasks.length === 0 ? (
             <p style={{ fontSize: 14, color: "var(--gray-900)" }}>Starting… no task has begun yet.</p>

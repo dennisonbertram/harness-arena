@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
+import { reapThresholdMs } from "@/lib/reaper";
 
 const dispatchQueuedRuns = vi.hoisted(() => vi.fn().mockResolvedValue([]));
 
@@ -52,17 +53,17 @@ describe("GET /api/runs/[id]", () => {
 
     it("marks a stale dispatched-queued run reaped and returns the reaped status, persisting the change", async () => {
       vi.useFakeTimers();
-      // Reap threshold raised to 20 minutes (issue #23 finding F5).
-      vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
+      const createdAt = "2026-07-21T00:00:00.000Z";
+      vi.setSystemTime(new Date(new Date(createdAt).getTime() + reapThresholdMs() + 1000));
       // Dispatched (claimed) but its sandbox stalled -> a genuinely stuck run.
       // (An undispatched queued run is just waiting for a slot and is never reaped.)
       await storageRef.current.putRun({
         id: "run-stale",
         submission_id: "sub-1",
         status: "queued",
-        dispatched_at: "2026-07-21T00:00:00.000Z",
+        dispatched_at: createdAt,
         task_results: [],
-        created_at: "2026-07-21T00:00:00.000Z",
+        created_at: createdAt,
       });
 
       const response = await GET(new NextRequest("http://localhost/api/runs/run-stale"), {

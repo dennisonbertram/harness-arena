@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { reapIfStale } from "@/lib/reaper";
+import { reapIfStale, reapThresholdMs } from "@/lib/reaper";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -342,7 +342,7 @@ describe("POST /api/runs/[id]/callback", () => {
       const reaped = await reapIfStale(
         storageRef.current,
         (await storageRef.current.getRun("run-raced"))!,
-        new Date("2026-07-21T00:21:00.000Z").getTime(),
+        new Date("2026-07-21T00:00:00.000Z").getTime() + reapThresholdMs() + 1000,
       );
       expect(reaped.status).toBe("reaped");
 

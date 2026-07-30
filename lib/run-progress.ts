@@ -75,6 +75,7 @@ export function reconstructRunProgress(events: RunEvent[]): RunProgress {
         t.state = "failed";
         t.failureStage = payloadStr(p, "stage");
         t.error = payloadStr(p, "error");
+        t.durationS = payloadNum(p, "duration_s") ?? t.durationS;
         break;
       case "task.trace_uploaded":
         t.hasTrace = true;
