@@ -314,28 +314,57 @@ export const PI_MODELS_CONFIG_PATH = "/root/.pi/agent/models.json";
  * Deliberately exercises the sidecar (127.0.0.1:port), not the gateway --
  * calling the gateway directly would prove nothing about the path pi uses.
  */
-export async function preflightProxy({ port, model, apiKey, fetchImpl = fetch, timeoutMs = 60_000 }) {
+async function waitForRetry(ms, signal) {
+  if (ms <= 0 || signal.aborted) return;
+  await new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+export async function preflightProxy({
+  port,
+  model,
+  apiKey,
+  fetchImpl = fetch,
+  timeoutMs = 60_000,
+  maxAttempts = 3,
+  retryDelayMs = 1_000,
+}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/v1/messages`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
-      signal: controller.signal,
-    });
-    // `fetch()` resolves once response headers arrive. The gateway can return
-    // HTTP 200 and then never produce a model token; treating headers alone as
-    // success lets every real task burn through Pi's retry timeouts. Consume
-    // the complete one-token response while the same abort deadline is active
-    // so preflight proves generation, not just admission.
-    const detail = (await response.text()).slice(0, 300);
-    if (response.ok) return { ok: true };
-    return { ok: false, detail: `HTTP ${response.status} ${detail}` };
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const response = await fetchImpl(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+        signal: controller.signal,
+      });
+      // `fetch()` resolves once response headers arrive. The gateway can
+      // return HTTP 200 and then never produce a model token; treating headers
+      // alone as success lets every real task burn through Pi's retry
+      // timeouts. Consume the complete one-token response while the same abort
+      // deadline is active so preflight proves generation, not just admission.
+      const detail = (await response.text()).slice(0, 300);
+      if (response.ok) return { ok: true };
+
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable || attempt === maxAttempts || controller.signal.aborted) {
+        return { ok: false, detail: `HTTP ${response.status} ${detail}` };
+      }
+      await waitForRetry(retryDelayMs, controller.signal);
+    }
+    return { ok: false, detail: "preflight exhausted without a response" };
   } catch (error) {
     return { ok: false, detail: String(error?.message ?? error) };
   } finally {
