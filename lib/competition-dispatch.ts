@@ -60,6 +60,7 @@ export async function judgeAndDispatch(
     submission_id: submission.id,
     status: "queued",
     model: submission.model,
+    provider_requested: submission.gateway_provider,
     task_results: [],
     created_at: new Date().toISOString(),
   };

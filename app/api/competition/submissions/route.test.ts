@@ -40,12 +40,18 @@ function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
   mockAuth.mockResolvedValue(githubSession(githubId, githubLogin));
 }
 
-async function putCompetition(id: string, model: string, status: "live" | "closed" = "live") {
+async function putCompetition(
+  id: string,
+  model: string,
+  status: "live" | "closed" = "live",
+  gatewayProvider?: string,
+) {
   await storageRef.current.putCompetition({
     id,
     arena: "harness-arena",
     harness: "pi",
     model,
+    gateway_provider: gatewayProvider,
     prize_amount_usd: null,
     prize_cadence: null,
     status,
@@ -167,7 +173,7 @@ describe("POST /api/competition/submissions", () => {
   });
 
   it("stamps a named live competition and uses that competition's model", async () => {
-    await putCompetition("comp-alt-model", "anthropic/claude-sonnet-5");
+    await putCompetition("comp-alt-model", "anthropic/claude-sonnet-5", "live", "morph");
     vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fair" });
 
     const response = await POST(
@@ -179,6 +185,8 @@ describe("POST /api/competition/submissions", () => {
     expect(response.status).toBe(200);
     expect(submission?.competition_id).toBe("comp-alt-model");
     expect(submission?.model).toBe("anthropic/claude-sonnet-5");
+    expect(submission?.gateway_provider).toBe("morph");
+    expect((await storageRef.current.getRun(body.run_id))?.provider_requested).toBe("morph");
   });
 
   it("rejects a closed competition", async () => {
@@ -222,10 +230,11 @@ describe("POST /api/competition/submissions", () => {
     expect(second.status).toBe(409);
   });
 
-  // Each (arena, harness, model) triple is its own job (epic #74): a prompt
-  // tuned for glm-5.2 is a legitimate, separate entry against claude-sonnet-5.
-  // The duplicate guard is therefore per-competition, not global -- otherwise
-  // entering one contest silently burns the prompt for every other contest.
+  // Each provider-versioned competition is its own job (epic #74): a prompt
+  // tuned for glm-5.2 is a legitimate, separate entry against claude-sonnet-5,
+  // and a Morph target stays separate from z.ai. The duplicate guard is
+  // therefore per-competition, not global -- otherwise entering one contest
+  // silently burns the prompt for every other contest.
   it("allows a prompt already used in another competition", async () => {
     vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fair" });
     await putCompetition("comp-second", "anthropic/claude-sonnet-5");

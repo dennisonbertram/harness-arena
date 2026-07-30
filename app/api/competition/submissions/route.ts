@@ -112,6 +112,7 @@ export async function POST(request: NextRequest) {
     prompt,
     status: "pending_review",
     model: competition.model,
+    gateway_provider: competition.gateway_provider,
     competition: true,
     competition_id: competition.id,
     github_id: githubId,

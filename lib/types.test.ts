@@ -42,6 +42,21 @@ describe("RUN_EVENT_TYPES: task.cost_tamper_signal (runner-emitted, issue #24)",
 });
 
 describe("CompetitionSchema (issue #75)", () => {
+  it("preserves the gateway provider that versions otherwise-identical competitions", () => {
+    const result = CompetitionSchema.safeParse({
+      id: "comp-morph",
+      arena: "harness-arena",
+      harness: "pi",
+      model: "zai/glm-5.2",
+      gateway_provider: "morph",
+      status: "live",
+      created_at: "2026-07-30T00:00:00.000Z",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.gateway_provider).toBe("morph");
+  });
+
   it("round-trips a seeded competition with prize fields unset (null, not a placeholder)", () => {
     const competition = {
       id: "comp-1",

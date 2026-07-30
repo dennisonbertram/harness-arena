@@ -68,6 +68,9 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
     run.task_results.length === 0 && (run.status === "running" || run.status === "queued");
   const progress = isLive ? reconstructRunProgress(events) : null;
   const liveDurationSec = progress ? progress.tasks.reduce((s, t) => s + (t.durationS ?? 0), 0) : 0;
+  const failureEvent = [...events].reverse().find((event) => event.type === "run.failed");
+  const failureMessage =
+    typeof failureEvent?.payload.error === "string" ? failureEvent.payload.error : "The run stopped unexpectedly.";
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -107,6 +110,22 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <span className="mono">{modelLabel(run.model)}</span> via AI Gateway
         </p>
       </section>
+
+      {failureEvent || run.status === "failed" ? (
+        <section
+          role="alert"
+          style={{
+            marginBottom: 32,
+            padding: 16,
+            border: "1px solid var(--red-700)",
+            borderRadius: 8,
+            background: "var(--red-100)",
+          }}
+        >
+          <p style={{ fontWeight: 600, marginBottom: 4 }}>Run failed</p>
+          <p style={{ fontSize: 14 }}>{failureMessage}</p>
+        </section>
+      ) : null}
 
       <section
         style={{
@@ -357,4 +376,3 @@ function TaskStateBadge({ state }: { state: TaskState }) {
   const s = TASK_STATE_STYLES[state];
   return <span style={{ color: s.color, fontWeight: 600 }}>{s.label}</span>;
 }
-

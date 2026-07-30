@@ -197,6 +197,45 @@ describe("RunDetailPage", () => {
     expect(html).toContain("still failed");
   });
 
+  it("surfaces a run failure as a prominent error instead of leaving it buried in the event payload", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-failed"));
+    await storage.putRun(run("r-failed", { submission_id: "s-failed", status: "failed", task_results: [] }));
+    await storage.appendRunEvents("r-failed", [
+      runEvent(0, "run.failed", {
+        stage: "agent_timeout",
+        task_id: "cancel-async-tasks",
+        error: "Provider morph timed out before producing a response.",
+      }),
+    ]);
+
+    const html = renderToStaticMarkup(await RunPage.default({ params: Promise.resolve({ id: "r-failed" }) }));
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Run failed");
+    expect(html).toContain("Provider morph timed out before producing a response.");
+  });
+
+  it("surfaces a generic error for failed runs whose legacy callback never recorded a run.failed event", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-legacy-failed"));
+    await storage.putRun(
+      run("r-legacy-failed", {
+        submission_id: "s-legacy-failed",
+        status: "failed",
+        task_results: [],
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await RunPage.default({ params: Promise.resolve({ id: "r-legacy-failed" }) }),
+    );
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Run failed");
+    expect(html).toContain("The run stopped unexpectedly.");
+  });
+
   it("reconstructs live progress mid-run: pass/fail states, trace links, measured-cost-so-far, and hides the terminal-run stats", async () => {
     const storage = resetStorage();
     await storage.putSubmission(

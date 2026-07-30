@@ -70,7 +70,18 @@ Providers are pinned to the model's own first-party upstream where one exists,
 so the benchmark measures a model as its authors serve it rather than whichever
 reseller the gateway happened to pick.
 
-Runs record `provider_pinned`, and only when a pin was actually applied.
+Runs record two distinct fields:
+
+- `provider_requested` is the competition's intended target and is set before
+  sandbox creation.
+- `provider_pinned` is evidence from the runner that the sidecar actually
+  applied a pin.
+
+For legacy competitions, `PINNED_PROVIDERS` remains the fallback. New
+competitions can set `gateway_provider`, which is copied to each submission and
+run as an immutable snapshot. This allows a new Morph competition for
+`zai/glm-5.2` without silently mixing its results with the historical z.ai
+leaderboard.
 
 ## Deprecating old runs
 
@@ -162,7 +173,11 @@ itself is what matters for comparability.
 
 ## Operating it
 
-- Pin a model: add it to `PINNED_PROVIDERS`.
+- Pin every legacy competition for a model: add it to `PINNED_PROVIDERS`.
+- Target a provider for a new competition: set `gateway_provider` when creating
+  it. Do not change an existing competition in place; create a provider-versioned
+  competition with a fresh baseline so unlike serving stacks never share a
+  leaderboard.
 - Unpin: remove it. Its runs then record no `provider_pinned` and are marked
   unpinned, which is accurate.
 - Override the port: `GATEWAY_PROXY_PORT` (default 4599).

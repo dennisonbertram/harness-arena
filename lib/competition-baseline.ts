@@ -107,6 +107,7 @@ async function ensureBaselineUncoordinated(
     prompt: getBaselinePrompt(),
     status: "pending_review",
     model: competition.model,
+    gateway_provider: competition.gateway_provider,
     competition: true,
     competition_id: competition.id,
     competition_baseline: true,

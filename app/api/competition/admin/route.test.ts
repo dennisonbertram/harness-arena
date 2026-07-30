@@ -20,7 +20,7 @@ import { POST } from "./route";
 import { mintAgentToken } from "@/lib/agent-token";
 
 const ADMIN_TOKEN = "test-admin-token";
-const BODY = { arena: "harness-arena", harness: "pi", model: "zai/glm-5.2" };
+const BODY = { arena: "harness-arena", harness: "pi", model: "zai/glm-5.2", gateway_provider: "morph" };
 
 function adminRequest(
   body: unknown = BODY,
@@ -96,6 +96,7 @@ describe("POST /api/competition/admin", () => {
     expect(response.status).toBe(201);
     expect(competition).toMatchObject({ ...BODY, prize_amount_usd: null, prize_cadence: null, status: "live" });
     expect(await storageRef.current.getCompetition(competition.id)).toMatchObject({
+      gateway_provider: "morph",
       prize_amount_usd: null,
       prize_cadence: null,
     });

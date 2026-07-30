@@ -14,6 +14,7 @@ const CreateCompetitionSchema = z
     arena: z.string().min(1),
     harness: z.string().min(1),
     model: z.string().min(1),
+    gateway_provider: z.string().regex(/^[a-z0-9-]+$/).optional(),
     prize_amount_usd: z.number().nonnegative().optional(),
     prize_cadence: z.enum(PRIZE_CADENCES).optional(),
     // Creating a competition normally starts a baseline run, which costs
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest) {
     arena: input.arena,
     harness: input.harness,
     model: input.model,
+    gateway_provider: input.gateway_provider,
     prize_amount_usd: input.prize_amount_usd ?? null,
     prize_cadence: input.prize_cadence ?? null,
     status: "live",

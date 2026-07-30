@@ -222,6 +222,16 @@ describe("createRunSandbox", () => {
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {
+    it("uses the run's requested provider instead of the model's legacy default pin", async () => {
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun({ model: "zai/glm-5.2", provider_requested: "morph" }), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.PINNED_PROVIDER).toBe("morph");
+    });
+
     it("launches runner.mjs via a structured runCommand call with detached:true and secrets ONLY in the env map", async () => {
       const sandbox = makeSandbox();
       mockCreate.mockResolvedValue(sandbox);

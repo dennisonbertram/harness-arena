@@ -73,6 +73,10 @@ export const SubmissionSchema = z.object({
   competition_id: z.string().optional(),
   // Marks the one competition submission that is the reference baseline.
   competition_baseline: z.boolean().optional(),
+  // Snapshot of the competition's requested AI Gateway provider. Keeping it
+  // on the submission makes the routing target auditable even if the
+  // Competition record is edited after this entry was queued.
+  gateway_provider: z.string().optional(),
   // The submitter's GitHub identity, stamped server-side from the session —
   // never from the request body. Optional at the schema level because the
   // admin-triggered competition baseline has no submitting user; both
@@ -102,10 +106,10 @@ export type TaskResult = z.infer<typeof TaskResultSchema>;
 
 export const PRIZE_CADENCES = ["daily", "weekly", "monthly", "one-time"] as const;
 
-// A (arena, harness, model) triple -- one leaderboard, one prize pot (epic
-// #74). "Harness Arena" is the one arena type that exists today, but arena is
-// deliberately an open string rather than a closed enum: a future arena type
-// (e.g. a bounty) is not a schema change, just a new value.
+// A (arena, harness, model, gateway provider) target -- one leaderboard, one
+// prize pot (epic #74). "Harness Arena" is the one arena type that exists
+// today, but arena is deliberately an open string rather than a closed enum: a
+// future arena type (e.g. a bounty) is not a schema change, just a new value.
 export const CompetitionSchema = z.object({
   id: z.string(),
   // Slug for the competition TYPE, e.g. "harness-arena". Open string on
@@ -114,6 +118,10 @@ export const CompetitionSchema = z.object({
   harness: z.string(),
   // Gateway id, e.g. "zai/glm-5.2" -- must pass isAllowedModel (lib/models.ts).
   model: z.string(),
+  // Provider slug supplied to AI Gateway's providerOptions.gateway.only.
+  // Optional for legacy competitions, which continue to use the historical
+  // model-level default in PINNED_PROVIDERS.
+  gateway_provider: z.string().optional(),
   // Prize amount/cadence are data, not a constant, but deliberately UNSET at
   // seed time (epic #74: "TBD, do not invent a figure"). Nullable because a
   // seeded row explicitly carries "no value yet" rather than omitting the
@@ -157,6 +165,10 @@ export const RunSchema = z.object({
   // comparable with pinned ones: each sampled an unknown mix. Absence is the
   // deprecation marker; see isPrePinningRun and docs/provider-pinning.md.
   provider_pinned: z.string().optional(),
+  // Provider this run was ASKED to pin. This is distinct from
+  // provider_pinned, which is written only after the sidecar actually applies
+  // the pin and therefore remains trustworthy as execution evidence.
+  provider_requested: z.string().optional(),
   // What pi's system prompt actually resolved to inside the container, read
   // off the request body by the gateway sidecar. Absent on runs that predate
   // the capture, and on any run whose model never reached the sidecar.

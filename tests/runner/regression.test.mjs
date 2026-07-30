@@ -67,6 +67,9 @@ const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
+const TEST_GATEWAY_PROXY_PORT = "14599";
+const LEGACY_REGEX_INSTRUCTION =
+  "Write a deterministic regex result to /app/regex.txt for the synthetic runner fixture.";
 
 describe("buildPiCommand regression: shell-injection safety", () => {
   it("does not execute a semicolon/command-substitution injection attempt embedded in the instruction", () => {
@@ -240,10 +243,7 @@ describe.skipIf(!RUNNER_IT)(
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-2" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID_1);
 
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID_1,
@@ -268,6 +268,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID: BUDGET_RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-2",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString(
@@ -368,10 +370,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-force-error" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -386,6 +385,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-force-error",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -457,10 +458,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-nosession" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -475,6 +473,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-nosession",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -539,10 +539,7 @@ describe.skipIf(!RUNNER_IT)(
           secret: "test-secret-default-floor",
         });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -557,6 +554,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-default-floor",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -610,10 +609,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-timeout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-timeout" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -630,6 +626,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-timeout",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -660,7 +658,15 @@ describe.skipIf(!RUNNER_IT)(
         expect(agentFinished.payload.cost_usd).toBeCloseTo(0.015, 10);
 
         const finalStatus = state.statusUpdates.at(-1);
-        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.015, 10);
+        expect(finalStatus.status).toBe("failed");
+        expect(
+          state.events.some(
+            (event) =>
+              event.type === "run.failed" &&
+              event.payload.stage === "agent_timeout" &&
+              event.payload.task_id === TASK_ID,
+          ),
+        ).toBe(true);
       },
       600000,
     );
@@ -688,10 +694,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-bigstdout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-bigstdout" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -706,6 +709,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-bigstdout",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -769,10 +774,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-leaky.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-leaky" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -787,6 +789,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-leaky",
           AI_GATEWAY_API_KEY: SECRET,
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -815,8 +819,8 @@ describe.skipIf(!RUNNER_IT)(
         expect(sessionTrace).toBeDefined();
         expect(stdoutTrace).toBeDefined();
 
-        const sessionBody = sessionTrace.body.toString("utf8");
-        const stdoutBody = stdoutTrace.body.toString("utf8");
+        const sessionBody = gunzipSync(sessionTrace.body).toString("utf8");
+        const stdoutBody = gunzipSync(stdoutTrace.body).toString("utf8");
 
         expect(sessionBody).not.toContain(SECRET);
         expect(sessionBody).not.toContain("vck_leakedtoken999");
