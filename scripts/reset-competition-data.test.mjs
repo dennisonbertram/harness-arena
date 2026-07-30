@@ -177,4 +177,35 @@ describe("resetCompetitionData", () => {
     expect(JSON.stringify(del.mock.calls)).not.toContain("submission-other");
     expect(JSON.stringify(del.mock.calls)).not.toContain("run-other");
   });
+
+  it("can archive and delete the obsolete competition after deleting all of its children", async () => {
+    const { resetCompetitionData } = await import("./reset-competition-data.mjs");
+    const order = [];
+    vi.mocked(copy).mockImplementation(async (from, to) => {
+      order.push(`copy:${from}->${to}`);
+      return { url: `https://store.example/${to}`, pathname: to };
+    });
+    vi.mocked(del).mockImplementation(async (paths) => {
+      order.push(`del:${Array.isArray(paths) ? paths.join(",") : paths}`);
+    });
+
+    const result = await resetCompetitionData({
+      competitionId,
+      gatewayProvider: "wafer",
+      archivePrefix: "archives/reset-delete",
+      deleteCompetition: true,
+      confirm: true,
+    });
+
+    expect(result.deleteCompetition).toBe(true);
+    expect(del.mock.calls.flatMap(([paths]) => Array.isArray(paths) ? paths : [paths])).toEqual([
+      "events/run-target/0000000001.json",
+      "traces/run-target/task/result.json",
+      "runs/run-target.json",
+      "submissions/submission-target.json",
+      `competitions/${competitionId}.json`,
+    ]);
+    expect(put).not.toHaveBeenCalled();
+    expect(order.at(-1)).toBe(`del:competitions/${competitionId}.json`);
+  });
 });

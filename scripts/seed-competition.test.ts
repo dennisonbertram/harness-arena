@@ -36,7 +36,7 @@ function legacySubmission(id: string, overrides: Partial<Submission> = {}): Subm
 }
 
 describe("backfillCompetition", () => {
-  it("creates the Harness Arena / Pi / GLM 5.2 competition with prize fields unset", async () => {
+  it("creates the Harness Arena / Pi / GLM 5.2 Fast competition pinned to Wafer", async () => {
     const storage = new MemoryStorage();
 
     const result = await backfillCompetition(storage);
@@ -46,12 +46,13 @@ describe("backfillCompetition", () => {
     expect(competition).toMatchObject({
       arena: "harness-arena",
       harness: "pi",
-      model: "zai/glm-5.2",
+      model: "zai/glm-5.2-fast",
+      gateway_provider: "wafer",
       status: "live",
       prize_amount_usd: null,
       prize_cadence: null,
     });
-    expect(competition.id).toBe(competitionId("harness-arena", "pi", "zai/glm-5.2"));
+    expect(competition.id).toBe(competitionId("harness-arena", "pi", "zai/glm-5.2-fast"));
     expect(competition.created_at).toBeTruthy();
   });
 
@@ -124,7 +125,7 @@ describe("seed-competition CLI Blob adapter", () => {
     await expect(runCli([])).rejects.toBe(exitSignal);
 
     expect(log).toHaveBeenCalledWith("Dry run (pass --yes to actually write). Would seed/backfill against the configured Blob store.");
-    expect(log).toHaveBeenCalledWith(`  competition id: ${competitionId("harness-arena", "pi", "zai/glm-5.2")}`);
+    expect(log).toHaveBeenCalledWith(`  competition id: ${competitionId("harness-arena", "pi", "zai/glm-5.2-fast")}`);
     expect(exit).toHaveBeenCalledWith(0);
     expect(get).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
@@ -151,7 +152,7 @@ describe("seed-competition CLI Blob adapter", () => {
 
     await runCli(["--yes"]);
 
-    const id = competitionId("harness-arena", "pi", "zai/glm-5.2");
+    const id = competitionId("harness-arena", "pi", "zai/glm-5.2-fast");
     expect(get).toHaveBeenCalledWith(`competitions/${id}.json`, { access: "public" });
     expect(list).toHaveBeenNthCalledWith(1, { prefix: "submissions/", cursor: undefined });
     expect(list).toHaveBeenNthCalledWith(2, { prefix: "submissions/", cursor: "page-2" });
@@ -173,12 +174,13 @@ describe("seed-competition CLI Blob adapter", () => {
   });
 
   it("parses an existing Blob competition instead of creating a duplicate", async () => {
-    const id = competitionId("harness-arena", "pi", "zai/glm-5.2");
+    const id = competitionId("harness-arena", "pi", "zai/glm-5.2-fast");
     const existing = {
       id,
       arena: "harness-arena",
       harness: "pi",
-      model: "zai/glm-5.2",
+      model: "zai/glm-5.2-fast",
+      gateway_provider: "wafer",
     };
     vi.mocked(get).mockResolvedValue({ stream: new Response(JSON.stringify(existing)).body } as never);
     vi.mocked(list).mockResolvedValue({ blobs: [], hasMore: false, cursor: undefined } as never);

@@ -25,6 +25,9 @@ export const RERUN_OPERATOR_LOGIN = process.env.RERUN_OPERATOR_LOGIN ?? "denniso
 // first-party z.ai route and Morph proved too slow for this benchmark.
 export const PINNED_PROVIDERS: Record<string, string> = {
   "zai/glm-5.2": "togetherai",
+  // Vercel exposes the fast tier as a separate model slug. Its provider table
+  // reports Wafer at 245 tokens/s versus Fireworks at 171 tokens/s.
+  "zai/glm-5.2-fast": "wafer",
   "anthropic/claude-sonnet-5": "anthropic",
   "anthropic/claude-opus-5": "anthropic",
   "anthropic/claude-opus-4-8": "anthropic",

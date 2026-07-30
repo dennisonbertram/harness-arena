@@ -9,6 +9,7 @@
 //   node --env-file=.env.local scripts/reset-competition-data.mjs \
 //     --competition comp-harness-arena-pi-zai-glm-5-2 \
 //     --gateway-provider togetherai \
+//     --delete-competition \
 //     --yes
 
 import { copy, del, get, list, put } from "@vercel/blob";
@@ -48,6 +49,7 @@ export async function resetCompetitionData({
   competitionId,
   gatewayProvider,
   archivePrefix,
+  deleteCompetition = false,
   confirm = false,
 } = {}) {
   const token = process.env.BLOB_READ_WRITE_TOKEN;
@@ -115,6 +117,7 @@ export async function resetCompetitionData({
   const result = {
     competitionId,
     gatewayProvider,
+    deleteCompetition,
     archivePrefix: resolvedArchivePrefix,
     submissionIds,
     runIds,
@@ -150,17 +153,23 @@ export async function resetCompetitionData({
     }
   }
 
-  await put(
-    competitionPath,
-    JSON.stringify({ ...competition, gateway_provider: gatewayProvider }),
-    {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/json",
-      token,
-    },
-  );
+  if (deleteCompetition) {
+    // The retained definition was archived with the children above, so the
+    // obsolete board can now be removed without losing recoverability.
+    await del(competitionPath, { token });
+  } else {
+    await put(
+      competitionPath,
+      JSON.stringify({ ...competition, gateway_provider: gatewayProvider }),
+      {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: true,
+        contentType: "application/json",
+        token,
+      },
+    );
+  }
 
   return result;
 }
@@ -179,6 +188,7 @@ if (isMain()) {
     competitionId: option("--competition"),
     gatewayProvider: option("--gateway-provider"),
     archivePrefix: option("--archive-prefix"),
+    deleteCompetition: process.argv.includes("--delete-competition"),
     confirm: process.argv.includes("--yes"),
   });
 
