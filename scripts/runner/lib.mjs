@@ -376,6 +376,12 @@ const OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions";
  * therefore looks like an agent timeout and consumes five minutes. Apply the
  * shorter fail-fast window only to the Fast route for which production
  * demonstrated this failure; leave other models on Pi's native defaults.
+ *
+ * Keep one retry inside that bounded window. Wafer production runs repeatedly
+ * returned an immediate, zero-token `terminated` error on a follow-up turn;
+ * with retries disabled each transient upstream failure became a guaranteed
+ * failed benchmark task. One retry can recover that turn while adding at most
+ * one bounded 60-second wait if a provider becomes silent again.
  */
 export function buildPiSettings({ model } = {}) {
   if (model !== "zai/glm-5.2-fast") return undefined;
@@ -383,8 +389,8 @@ export function buildPiSettings({ model } = {}) {
     httpIdleTimeoutMs: 60_000,
     retry: {
       enabled: true,
-      maxRetries: 0,
-      provider: { maxRetries: 0 },
+      maxRetries: 1,
+      provider: { maxRetries: 1 },
     },
   });
 }
