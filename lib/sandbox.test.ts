@@ -49,6 +49,7 @@ const ENV_KEYS = [
   "RUNNER_SANDBOX_TIMEOUT_MIN",
   "RUNNER_AGENT_TIMEOUT_CAP",
   "RUNNER_VERIFY_TIMEOUT_CAP",
+  "VERCEL_GIT_COMMIT_SHA",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -99,6 +100,7 @@ describe("createRunSandbox", () => {
     delete process.env.RUNNER_SANDBOX_TIMEOUT_MIN;
     delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
     delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
+    delete process.env.VERCEL_GIT_COMMIT_SHA;
   });
 
   afterEach(() => {
@@ -208,6 +210,19 @@ describe("createRunSandbox", () => {
     expect(bootstrapScript).toContain("mkdir -p /opt/runner");
     expect(bootstrapScript).toContain("https://cb.example.test/runner-bundle.tgz");
     expect(bootstrapScript).toContain("tar -xzf /tmp/rb.tgz -C /opt/runner");
+  });
+
+  it("versions the runner bundle URL by deployment SHA so a new deploy cannot launch a cached old runner", async () => {
+    process.env.VERCEL_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    const sandbox = makeSandbox();
+    mockCreate.mockResolvedValue(sandbox);
+
+    await createRunSandbox(makeRun(), { prompt: "be careful" });
+
+    const bootstrap = sandbox.runCommand.mock.calls[0][0] as { args: string[] };
+    expect(bootstrap.args[1]).toContain(
+      "https://cb.example.test/runner-bundle.tgz?v=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    );
   });
 
   it("falls back to the production callback base URL when CALLBACK_BASE is unset", async () => {
