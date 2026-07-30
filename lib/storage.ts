@@ -1,4 +1,4 @@
-import { get, list, put } from "@vercel/blob";
+import { list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
@@ -189,21 +189,26 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(await res.text()) as T;
 }
 
+function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
+  const url = new URL(blob.url);
+  const uploadedAt = new Date(blob.uploadedAt).getTime();
+  url.searchParams.set("v", Number.isFinite(uploadedAt) ? String(uploadedAt) : String(blob.uploadedAt));
+  return url.toString();
+}
+
 export class BlobStorage implements Storage {
   private async readJson<T>(pathname: string): Promise<T | undefined> {
     return withRetry(async () => {
-      // A pathname-only get() infers the Blob store from the deployment's
-      // token. Production has returned persistent 403s from that inference
-      // even while list() and the public blob URL remain healthy. Resolve the
-      // exact blob first, then pass its full URL so get() derives the store
-      // from the URL itself (the documented alternative to token inference).
+      // Both pathname and full-URL SDK get() calls have returned persistent
+      // 403s in production while list() and direct public-URL fetches remain
+      // healthy. Resolve the exact blob, then fetch its public URL directly.
+      // The uploadedAt cache-buster is required because entity blobs are
+      // overwritten in place and an unversioned public URL can serve the
+      // previous run/submission state from an edge cache.
       const blobs = await this.listAllBlobs(pathname);
       const blob = blobs.find((candidate) => candidate.pathname === pathname);
       if (!blob) return undefined;
-      const result = await get(blob.url, { access: "public" });
-      if (!result) return undefined;
-      const text = await new Response(result.stream).text();
-      return JSON.parse(text) as T;
+      return fetchJson<T>(versionedBlobUrl(blob));
     });
   }
 
@@ -410,9 +415,13 @@ export class BlobStorage implements Storage {
   async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
     try {
       return await withRetry(async () => {
-        const result = await get(`traces/${runId}/${taskId}/${name}`, { access: "public" });
-        if (!result) return null;
-        return Buffer.from(await new Response(result.stream).arrayBuffer());
+        const pathname = `traces/${runId}/${taskId}/${name}`;
+        const blobs = await this.listAllBlobs(pathname);
+        const blob = blobs.find((candidate) => candidate.pathname === pathname);
+        if (!blob) return null;
+        const response = await fetch(versionedBlobUrl(blob), { cache: "no-store" });
+        if (!response.ok) throw new Error(`blob fetch ${response.status}`);
+        return Buffer.from(await response.arrayBuffer());
       });
     } catch {
       return null;
