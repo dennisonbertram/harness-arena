@@ -258,14 +258,14 @@ describe("buildPinnedModelsConfig", () => {
 });
 
 describe("Pi provider timeout settings", () => {
-  it("fails a silent provider stream in one minute instead of consuming the whole task timeout", () => {
+  it("retries one transient GLM Fast provider failure within the bounded idle window", () => {
     expect(PI_SETTINGS_CONFIG_PATH).toBe("/root/.pi/agent/settings.json");
     expect(JSON.parse(buildPiSettings({ model: "zai/glm-5.2-fast" }))).toMatchObject({
       httpIdleTimeoutMs: 60_000,
       retry: {
         enabled: true,
-        maxRetries: 0,
-        provider: { maxRetries: 0 },
+        maxRetries: 1,
+        provider: { maxRetries: 1 },
       },
     });
   });
