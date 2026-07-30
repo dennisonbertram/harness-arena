@@ -56,6 +56,12 @@ const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
 const PINNED_PROVIDER = process.env.PINNED_PROVIDER || "";
 const GATEWAY_PROXY_PORT = Number(process.env.GATEWAY_PROXY_PORT || 4599);
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
+// Pi defaults reasoning models to medium. The dedicated fast-tier GLM route is
+// for low-latency competition runs, so do not spend the whole task window on
+// hidden reasoning before the first tool call. An explicit env value still
+// wins for controlled experiments.
+const RUNNER_THINKING =
+  process.env.RUNNER_THINKING || (RUNNER_MODEL === "zai/glm-5.2-fast" ? "off" : undefined);
 // Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
 // solution can complete the whole test instead of being killed mid-run, which
 // would deflate its pass rate. Sandbox.ts passes the real value; this default
@@ -465,6 +471,7 @@ async function runOneTask(task, index, systemPrompt) {
       hasSystemPrompt,
       provider: RUNNER_PROVIDER,
       model: RUNNER_MODEL,
+      thinking: RUNNER_THINKING,
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value

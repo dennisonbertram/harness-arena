@@ -356,6 +356,21 @@ describe("buildPiCommand", () => {
     expect(cmd).toContain(shQuote("Recover the lost commits."));
   });
 
+  it("can disable Pi's default medium reasoning for the dedicated fast-tier model", () => {
+    const cmd = buildPiCommand({
+      agentTimeoutSec: 300,
+      sessionDir: "/logs/agent/sessions",
+      promptFile: "/tmp/system-prompt.txt",
+      instruction: "Solve it.",
+      hasSystemPrompt: true,
+      model: "zai/glm-5.2-fast",
+      thinking: "off",
+    });
+
+    expect(cmd).toContain("--model " + shQuote("zai/glm-5.2-fast"));
+    expect(cmd).toContain("--thinking " + shQuote("off"));
+  });
+
   it("uses the override command instead of the default pi invocation when given", () => {
     const cmd = buildPiCommand({
       agentTimeoutSec: 60,
