@@ -597,6 +597,29 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     });
   });
 
+  it("listRuns fetches each overwritten entity through its uploadedAt version, not a stale edge-cached URL", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
+
+    vi.mocked(list).mockResolvedValue({
+      blobs: [{ url, pathname: "runs/run-1.json", uploadedAt: "2026-07-30T16:31:36.833Z" }],
+      hasMore: false,
+    } as never);
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(run),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(storage.listRuns()).resolves.toEqual([run]);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      `${url}?v=${new Date("2026-07-30T16:31:36.833Z").getTime()}`,
+      { cache: "no-store" },
+    );
+  });
+
   it("stores trace data and returns raw trace bytes, or null when the trace is absent", async () => {
     const storage = new BlobStorage();
     const url = "https://blob.example/traces/run-1/task-1/output.log";
