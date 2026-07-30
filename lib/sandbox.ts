@@ -4,6 +4,7 @@ import { PINNED_PROVIDERS } from "./arena-params";
 import { log } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
+import type { RunnerTask } from "./tasks-for-runner";
 import type { Run } from "./types";
 
 // FINAL golden snapshot per architect spike (issue #7 comments): docker +
@@ -13,15 +14,30 @@ import type { Run } from "./types";
 const DEFAULT_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
 const DEFAULT_CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
 
-// Raised from 45 to 120 minutes (issue #23 finding E) -- the Vercel account
-// is confirmed Pro (5h sandboxes supported), and the per-task timeout caps
-// in lib/tasks-for-runner.ts bound worst-case run duration to well under
-// 120 minutes regardless. Override via RUNNER_SANDBOX_TIMEOUT_MIN.
+// Requested lifetime before applying the task-derived safety floor below.
+// Vercel Pro currently permits much longer runs, but keeping the requested
+// default small avoids paying for an idle VM after a runner crash.
 const DEFAULT_SANDBOX_TIMEOUT_MIN = 120;
+const SANDBOX_SHUTDOWN_MARGIN_MIN = 30;
+const MINUTES_PER_HOUR = 60;
+const MS_PER_MINUTE = 60 * 1000;
 
-function sandboxTimeoutMs(): number {
-  const minutes = Number(process.env.RUNNER_SANDBOX_TIMEOUT_MIN ?? DEFAULT_SANDBOX_TIMEOUT_MIN);
-  return minutes * 60 * 1000;
+/**
+ * A configured timeout is only safe when every task could consume both of its
+ * enforced stage timeouts and the runner would still have time to upload traces
+ * and post its terminal callback. Round that floor up to a whole hour so small
+ * task-list changes do not repeatedly churn the Sandbox configuration.
+ */
+function sandboxTimeoutMs(tasks: RunnerTask[]): number {
+  const configured = Number(process.env.RUNNER_SANDBOX_TIMEOUT_MIN ?? DEFAULT_SANDBOX_TIMEOUT_MIN);
+  const configuredMinutes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_SANDBOX_TIMEOUT_MIN;
+  const taskBudgetMinutes = tasks.reduce(
+    (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) / 60,
+    0,
+  );
+  const safeFloorMinutes =
+    Math.ceil((taskBudgetMinutes + SANDBOX_SHUTDOWN_MARGIN_MIN) / MINUTES_PER_HOUR) * MINUTES_PER_HOUR;
+  return Math.max(configuredMinutes, safeFloorMinutes) * MS_PER_MINUTE;
 }
 
 // Egress allowlist for the sandbox's default network policy (issue #23
@@ -101,6 +117,11 @@ async function markFailed(run: Run, err: unknown): Promise<void> {
   await storage.appendRunEvents(run.id, [
     { ts: new Date().toISOString(), type: "run.failed", payload: { error: message, stage: "sandbox_create" } },
   ]);
+  const submission = await storage.getSubmission(run.submission_id);
+  if (submission && (submission.status === "queued" || submission.status === "running")) {
+    submission.status = "failed";
+    await storage.putSubmission(submission);
+  }
 }
 
 export async function createRunSandbox(run: Run, opts: { prompt: string }): Promise<{ sandbox_id: string }> {
@@ -112,11 +133,12 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     // Claude; glm-5.2 runs cost ~$1 and never approach it.
     const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "15";
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
-    const tasksJsonB64 = Buffer.from(JSON.stringify(buildRunnerTasks()), "utf8").toString("base64");
+    const runnerTasks = buildRunnerTasks();
+    const tasksJsonB64 = Buffer.from(JSON.stringify(runnerTasks), "utf8").toString("base64");
 
     const sandbox = await Sandbox.create({
       source: { type: "snapshot", snapshotId: process.env.RUNNER_SNAPSHOT_ID ?? DEFAULT_SNAPSHOT_ID },
-      timeout: sandboxTimeoutMs(),
+      timeout: sandboxTimeoutMs(runnerTasks),
       networkPolicy: networkPolicy(),
       ...vercelCredentials(),
     });

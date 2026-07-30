@@ -9,6 +9,7 @@ import { formatUsd } from "@/lib/format";
 import { modelLabel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
 import type { Competition } from "@/lib/types";
+import { CompetitionAutoRefresh } from "./CompetitionAutoRefresh";
 import { CompetitionLeaderboardTable } from "./competition/CompetitionLeaderboardTable";
 import { CompetitionSubmitModal } from "./competition/CompetitionSubmitModal";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
@@ -19,7 +20,14 @@ export const revalidate = 15;
 
 // No competition seeded yet (shouldn't happen in prod -- see
 // scripts/seed-competition.mjs -- but keeps the page from crashing).
-const EMPTY_BOARD: CompetitionBoard = { baseline: null, baselineState: "none", ranked: [], belowBaseline: [], pending: 0 };
+const EMPTY_BOARD: CompetitionBoard = {
+  baseline: null,
+  baselineState: "none",
+  ranked: [],
+  belowBaseline: [],
+  pending: 0,
+  pendingRunIds: [],
+};
 
 type CompetitionSearchParams = Promise<{ competition?: string | string[] | undefined }>;
 
@@ -53,6 +61,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
+      <CompetitionAutoRefresh runIds={board.pendingRunIds} />
       <section style={{ marginBottom: 40 }}>
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Harness maxing</h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>

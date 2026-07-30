@@ -389,4 +389,20 @@ describe("preflightProxy", () => {
 
     expect(result.ok).toBe(false);
   });
+
+  it("fails when the upstream returns 200 headers but never completes a model response", async () => {
+    const fetchImpl = async (_url, init) => ({
+      ok: true,
+      status: 200,
+      text: () =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(new Error("response body timed out")));
+        }),
+    });
+
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl, timeoutMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("response body timed out");
+  });
 });

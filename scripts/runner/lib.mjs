@@ -328,8 +328,13 @@ export async function preflightProxy({ port, model, apiKey, fetchImpl = fetch, t
       body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
       signal: controller.signal,
     });
+    // `fetch()` resolves once response headers arrive. The gateway can return
+    // HTTP 200 and then never produce a model token; treating headers alone as
+    // success lets every real task burn through Pi's retry timeouts. Consume
+    // the complete one-token response while the same abort deadline is active
+    // so preflight proves generation, not just admission.
+    const detail = (await response.text()).slice(0, 300);
     if (response.ok) return { ok: true };
-    const detail = (await response.text().catch(() => "")).slice(0, 300);
     return { ok: false, detail: `HTTP ${response.status} ${detail}` };
   } catch (error) {
     return { ok: false, detail: String(error?.message ?? error) };

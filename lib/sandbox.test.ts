@@ -47,6 +47,8 @@ const ENV_KEYS = [
   "VERCEL_PROJECT_ID",
   "RUNNER_NETWORK_MODE",
   "RUNNER_SANDBOX_TIMEOUT_MIN",
+  "RUNNER_AGENT_TIMEOUT_CAP",
+  "RUNNER_VERIFY_TIMEOUT_CAP",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -95,6 +97,8 @@ describe("createRunSandbox", () => {
     delete process.env.VERCEL_PROJECT_ID;
     delete process.env.RUNNER_NETWORK_MODE;
     delete process.env.RUNNER_SANDBOX_TIMEOUT_MIN;
+    delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
+    delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
   });
 
   afterEach(() => {
@@ -104,26 +108,54 @@ describe("createRunSandbox", () => {
     }
   });
 
-  it("creates the sandbox from the golden snapshot id with a 120-minute timeout by default", async () => {
+  it("creates the sandbox from the golden snapshot id with a task-derived safe timeout by default", async () => {
     mockCreate.mockResolvedValue(makeSandbox());
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
+    const tasks = buildRunnerTasks();
+    const fullTaskBudgetMinutes = tasks.reduce(
+      (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) / 60,
+      0,
+    );
+    const expectedMinutes = Math.ceil((fullTaskBudgetMinutes + 30) / 60) * 60;
     expect(mockCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         source: { type: "snapshot", snapshotId: GOLDEN_SNAPSHOT_ID },
-        timeout: 120 * 60 * 1000,
+        timeout: expectedMinutes * 60 * 1000,
       }),
     );
   });
 
-  it("uses RUNNER_SANDBOX_TIMEOUT_MIN to override the default 120-minute timeout", async () => {
-    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "45";
+  it("uses RUNNER_SANDBOX_TIMEOUT_MIN when it is longer than the task-derived floor", async () => {
+    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "240";
     mockCreate.mockResolvedValue(makeSandbox());
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 45 * 60 * 1000 }));
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 240 * 60 * 1000 }));
+  });
+
+  it("never accepts a sandbox timeout shorter than the full task timeout budget", async () => {
+    // Production allowed each of the 16 agents to run for 15 minutes while
+    // keeping the sandbox at four hours. The first 15 consumed nearly the
+    // whole lifetime and the VM died during task 16 without a terminal
+    // callback. Derive this assertion from the runner payload so adding tasks
+    // or changing either cap cannot recreate that class of failure.
+    process.env.RUNNER_AGENT_TIMEOUT_CAP = "900";
+    process.env.RUNNER_VERIFY_TIMEOUT_CAP = "240";
+    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "240";
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await createRunSandbox(makeRun(), { prompt: "be careful" });
+
+    const tasks = buildRunnerTasks();
+    const fullTaskBudgetMs = tasks.reduce(
+      (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) * 1000,
+      0,
+    );
+    const createOptions = mockCreate.mock.calls[0][0] as { timeout: number };
+    expect(createOptions.timeout).toBeGreaterThan(fullTaskBudgetMs);
   });
 
   it("uses RUNNER_SNAPSHOT_ID to override the default snapshot id when set", async () => {
@@ -290,11 +322,20 @@ describe("createRunSandbox", () => {
     mockCreate.mockRejectedValue(new Error("sandbox quota exceeded"));
     const run = makeRun();
     await storageRef.current.putRun(run);
+    await storageRef.current.putSubmission({
+      id: run.submission_id,
+      agent_name: "agent",
+      prompt: "hi",
+      status: "queued",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
 
     await expect(createRunSandbox(run, { prompt: "hi" })).rejects.toThrow("sandbox quota exceeded");
 
     const stored = await storageRef.current.getRun(run.id);
     expect(stored?.status).toBe("failed");
+    expect((await storageRef.current.getSubmission(run.submission_id))?.status).toBe("failed");
 
     const events = await storageRef.current.listRunEvents(run.id);
     expect(events.some((e) => e.type === "run.failed")).toBe(true);

@@ -19,6 +19,11 @@ vi.mock("next/server", async (importOriginal) => {
 });
 
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
+vi.mock("./CompetitionAutoRefresh", () => ({
+  CompetitionAutoRefresh: ({ runIds = [] }: { runIds?: string[] }) => (
+    <i data-competition-auto-refresh={runIds.join(",")} />
+  ),
+}));
 
 import { auth } from "@/auth";
 import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
@@ -65,6 +70,27 @@ describe("CompetitionPage", () => {
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
     expect(html).toContain("No entries yet — beat the baseline.");
+  });
+
+  it("activates homepage refresh while a competition entry is still running", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putSubmission(submission("pending", { status: "running", run_id: "run-pending" }));
+    await storage.putRun(
+      run("run-pending", {
+        submission_id: "pending",
+        status: "running",
+        tasks_passed: undefined,
+        total_cost_usd: undefined,
+        task_results: [],
+      }),
+    );
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("1 entry still running");
+    expect(html).toContain('data-competition-auto-refresh="run-pending"');
   });
 
   it("shows only the live default competition's entries, not another competition's (issue #76)", async () => {
