@@ -352,34 +352,36 @@ function buildAgentkitTgz(fixtureName) {
 describe.skipIf(!RUNNER_IT)(
   "runner regression (RUNNER_IT=1, real local docker): container cleanup on mid-task error",
   () => {
-    const TASK_ID = "regex-log-force-error";
+    const TASK_IDS = ["regex-log-before-force-error", "regex-log-force-error"];
     const RUN_ID = "it-run-force-error";
-    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+    const CONTAINER_NAMES = TASK_IDS.map((taskId, index) =>
+      buildContainerName(RUN_ID, index, taskId),
+    );
 
     afterEach(() => {
-      try {
-        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
-      } catch {
-        // fine
+      for (const containerName of CONTAINER_NAMES) {
+        try {
+          execFileSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        } catch {
+          // fine
+        }
       }
     });
 
     it(
-      "removes the container in the finally block even when the task throws mid-run (issue #19 finding 5)",
+      "preserves completed task results and removes the container when a later task throws",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-force-error" });
-        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_IDS[0]);
         const instruction = LEGACY_REGEX_INSTRUCTION;
-        const tasks = [
-          {
-            id: TASK_ID,
-            image: "alexgshaw/regex-log:20251031",
-            instruction,
-            agent_timeout_sec: 60,
-            verifier_timeout_sec: 300,
-          },
-        ];
+        const tasks = TASK_IDS.map((id) => ({
+          id,
+          image: "alexgshaw/regex-log:20251031",
+          instruction,
+          agent_timeout_sec: 60,
+          verifier_timeout_sec: 300,
+        }));
 
         const env = {
           ...process.env,
@@ -397,7 +399,7 @@ describe.skipIf(!RUNNER_IT)(
           PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
           // Test-only hook: forces runOneTask to throw right after the
           // container is created, before pi ever runs.
-          RUNNER_FORCE_TASK_ERROR: TASK_ID,
+          RUNNER_FORCE_TASK_ERROR: TASK_IDS[1],
         };
         delete env.PI_INSTALL_MODE;
 
@@ -423,14 +425,26 @@ describe.skipIf(!RUNNER_IT)(
 
         const finalStatus = state.statusUpdates.at(-1);
         expect(finalStatus.status).toBe("failed");
+        expect(finalStatus.task_results).toHaveLength(1);
+        expect(finalStatus.task_results[0]).toMatchObject({
+          task_id: TASK_IDS[0],
+          attempted: true,
+          passed: false,
+        });
+        expect(finalStatus.totals).toMatchObject({
+          tasks_passed: 0,
+          over_budget: false,
+        });
 
-        let containerStillExists = true;
-        try {
-          execFileSync("docker", ["inspect", CONTAINER_NAME], { stdio: "ignore" });
-        } catch {
-          containerStillExists = false;
+        for (const containerName of CONTAINER_NAMES) {
+          let containerStillExists = true;
+          try {
+            execFileSync("docker", ["inspect", containerName], { stdio: "ignore" });
+          } catch {
+            containerStillExists = false;
+          }
+          expect(containerStillExists).toBe(false);
         }
-        expect(containerStillExists).toBe(false);
       },
       600000,
     );
@@ -591,36 +605,38 @@ describe.skipIf(!RUNNER_IT)(
 describe.skipIf(!RUNNER_IT)(
   "runner regression (RUNNER_IT=1, real local docker): cost recovery from stdout on agent-timeout SIGTERM",
   () => {
-    const TASK_ID = "regex-log-timeout";
+    const TASK_IDS = ["regex-log-timeout-1", "regex-log-timeout-2"];
     const RUN_ID = "it-run-timeout";
-    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+    const CONTAINER_NAMES = TASK_IDS.map((taskId, index) =>
+      buildContainerName(RUN_ID, index, taskId),
+    );
 
     afterEach(() => {
-      try {
-        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
-      } catch {
-        // fine
+      for (const containerName of CONTAINER_NAMES) {
+        try {
+          execFileSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        } catch {
+          // fine
+        }
       }
     });
 
     it(
-      "uses the real cost recovered from pi's captured stdout, not the missing-cost floor, when the agent-timeout SIGTERM kills pi before it flushes session.jsonl (live-run evidence: run 9f4a1b3e)",
+      "records an agent timeout as a failed task, preserves its real stdout cost, and continues the benchmark",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-timeout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-timeout" });
-        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_IDS[0]);
         const instruction = LEGACY_REGEX_INSTRUCTION;
-        const tasks = [
-          {
-            id: TASK_ID,
-            image: "alexgshaw/regex-log:20251031",
-            instruction,
-            // Short enough that `timeout` SIGTERMs fake-pi-timeout.sh's
-            // `sleep 120` well before it ever writes a session.jsonl.
-            agent_timeout_sec: 3,
-            verifier_timeout_sec: 300,
-          },
-        ];
+        const tasks = TASK_IDS.map((id) => ({
+          id,
+          image: "alexgshaw/regex-log:20251031",
+          instruction,
+          // Short enough that `timeout` SIGTERMs fake-pi-timeout.sh's
+          // `sleep 120` well before it ever writes a session.jsonl.
+          agent_timeout_sec: 3,
+          verifier_timeout_sec: 300,
+        }));
 
         const env = {
           ...process.env,
@@ -651,22 +667,38 @@ describe.skipIf(!RUNNER_IT)(
 
         expect(exitCode).toBe(0);
 
-        const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("stdout");
+        const agentFinished = state.events.filter((e) => e.type === "task.agent_finished");
+        expect(agentFinished).toHaveLength(2);
+        expect(agentFinished[0].payload.cost_source).toBe("stdout");
         // 0.006 + 0.009 from the two message_end events — a real recovered
         // cost, never a fabricated value.
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.015, 10);
+        expect(agentFinished[0].payload.cost_usd).toBeCloseTo(0.015, 10);
 
         const finalStatus = state.statusUpdates.at(-1);
-        expect(finalStatus.status).toBe("failed");
-        expect(
-          state.events.some(
-            (event) =>
-              event.type === "run.failed" &&
-              event.payload.stage === "agent_timeout" &&
-              event.payload.task_id === TASK_ID,
+        expect(finalStatus.status).toBe("completed");
+        expect(finalStatus.totals).toMatchObject({
+          tasks_passed: 0,
+          total_cost_usd: 0.03,
+          over_budget: false,
+        });
+        expect(finalStatus.task_results).toHaveLength(2);
+        expect(finalStatus.task_results).toEqual(
+          TASK_IDS.map((taskId) =>
+            expect.objectContaining({
+              task_id: taskId,
+              attempted: true,
+              passed: false,
+              failure_stage: "agent_timeout",
+              cost_usd: 0.015,
+            }),
           ),
-        ).toBe(true);
+        );
+        expect(
+          state.events
+            .filter((event) => event.type === "task.failed")
+            .map((event) => event.payload.task_id),
+        ).toEqual(TASK_IDS);
+        expect(state.events.some((event) => event.type === "run.failed")).toBe(false);
       },
       600000,
     );

@@ -189,6 +189,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                     </td>
                     <td style={cellStyle}>
                       <TaskStateBadge state={t.state} />
+                      {t.error ? <TaskFailure stage={t.failureStage} error={t.error} /> : null}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
                       {t.costUsd !== undefined ? formatUsd(t.costUsd) : "—"}
@@ -228,7 +229,12 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                     <Link href={`/runs/${run.id}/${task.task_id}`}>{task.task_id}</Link>
                   </td>
                   <td style={cellStyle}><BoolMark ok={task.attempted} yes="attempted" no="not attempted" /></td>
-                  <td style={cellStyle}><BoolMark ok={task.passed} yes="passed" no="failed" /></td>
+                  <td style={cellStyle}>
+                    <BoolMark ok={task.passed} yes="passed" no="failed" />
+                    {!task.passed && task.error ? (
+                      <TaskFailure stage={task.failure_stage} error={task.error} />
+                    ) : null}
+                  </td>
                   <td style={cellStyle} className="tabular-nums">
                     {task.cost_usd !== undefined ? formatUsd(task.cost_usd) : "—"}
                   </td>
@@ -381,4 +387,22 @@ const TASK_STATE_STYLES: Record<TaskState, { label: string; color: string }> = {
 function TaskStateBadge({ state }: { state: TaskState }) {
   const s = TASK_STATE_STYLES[state];
   return <span style={{ color: s.color, fontWeight: 600 }}>{s.label}</span>;
+}
+
+function TaskFailure({ stage, error }: { stage?: string; error: string }) {
+  return (
+    <div
+      style={{
+        color: "var(--red-700)",
+        fontSize: 12,
+        lineHeight: 1.4,
+        marginTop: 4,
+        minWidth: 220,
+        whiteSpace: "normal",
+      }}
+    >
+      {stage ? <span className="mono">{stage}: </span> : null}
+      {error}
+    </div>
+  );
 }

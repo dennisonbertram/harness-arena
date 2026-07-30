@@ -150,6 +150,36 @@ describe("RunDetailPage", () => {
     expect(html).toContain("View complete system prompt");
   });
 
+  it("surfaces a task-level timeout on a completed benchmark run", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-task-timeout"));
+    await storage.putRun(
+      run("r-task-timeout", {
+        submission_id: "s-task-timeout",
+        status: "completed",
+        tasks_passed: 0,
+        total_cost_usd: 0.03,
+        task_results: [
+          {
+            task_id: "cancel-async-tasks",
+            attempted: true,
+            passed: false,
+            cost_usd: 0.03,
+            failure_stage: "agent_timeout",
+            error: "Agent timed out after 300s waiting for model output",
+          },
+        ],
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await RunPage.default({ params: Promise.resolve({ id: "r-task-timeout" }) }),
+    );
+
+    expect(html).toContain("agent_timeout");
+    expect(html).toContain("Agent timed out after 300s waiting for model output");
+  });
+
   // The point of the capture: a baseline's own prompt is empty, so before this
   // the page rendered an empty box that read as "this run had no prompt".
   it("shows the captured prompt for a baseline instead of an empty box", async () => {

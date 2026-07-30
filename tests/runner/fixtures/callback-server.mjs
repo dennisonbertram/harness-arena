@@ -62,7 +62,10 @@ export function startCallbackServer({ secret, tasksRoot = null }) {
       // integration test replaces pi itself, so only a successful response is
       // needed to prove the sidecar path is alive without spending a real API
       // call or depending on external credentials.
-      if (req.method === "POST" && url.pathname === "/v1/messages") {
+      if (
+        req.method === "POST" &&
+        (url.pathname === "/v1/messages" || url.pathname === "/v1/chat/completions")
+      ) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ content: [] }));
         return;

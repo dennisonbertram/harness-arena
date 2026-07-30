@@ -47,6 +47,29 @@ describe("reconstructRunProgress", () => {
     expect(p.current).toBe("t0");
   });
 
+  it("marks a task failed when the agent times out before verification", () => {
+    seq = 0;
+    const events = [
+      ev("task.started", { task_id: "t0", index: 0 }),
+      ev("task.agent_finished", { task_id: "t0", turns: 2, cost_usd: 0.03 }),
+      ev("task.failed", {
+        task_id: "t0",
+        stage: "agent_timeout",
+        error: "Agent timed out waiting for model output",
+      }),
+    ];
+
+    const p = reconstructRunProgress(events);
+
+    expect(p.tasks[0].state).toBe("failed");
+    expect(p.tasks[0]).toMatchObject({
+      failureStage: "agent_timeout",
+      error: "Agent timed out waiting for model output",
+    });
+    expect(p.verified).toBe(1);
+    expect(p.current).toBeNull();
+  });
+
   it("reports null costSoFar when no task carried a measured cost (unmeasured / 0-turn)", () => {
     seq = 0;
     const events = [
