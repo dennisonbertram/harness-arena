@@ -217,9 +217,22 @@ describe("buildPinnedModelsConfig", () => {
     expect(definition).toMatchObject({
       api: "openai-completions",
       contextWindow: 1_000_000,
-      maxTokens: 128_000,
+      maxTokens: 8_192,
       cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
     });
+  });
+
+  it("bounds GLM Fast completions so hidden reasoning cannot consume the whole task timeout", () => {
+    const model = "zai/glm-5.2-fast";
+    const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
+    const definition = cfg.providers["vercel-ai-gateway"].models.find((candidate) => candidate.id === model);
+
+    // Fireworks currently spends hidden reasoning tokens even when the
+    // Gateway receives reasoning.enabled=false. At the model's advertised
+    // 120-250 TPS, 8K tokens is roughly one minute at the slow end; leaving
+    // Pi's 128K metadata ceiling in place allowed one turn to run until the
+    // runner's five-minute task timeout.
+    expect(definition.maxTokens).toBe(8_192);
   });
 });
 

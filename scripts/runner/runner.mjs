@@ -466,15 +466,13 @@ async function runOneTask(task, index, systemPrompt) {
       sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
     }
 
-    // NOTE: an earlier version wrote a pi models.json here capping maxTokens
-    // (anti-runaway). It backfired badly: glm-5.2 does very heavy hidden
-    // thinking, and an 8192-token output cap starved its real work, so the
-    // agent quit after a few turns and the 16-task baseline scored 2/16
-    // instead of ~10/16 (a with/without-config A/B on fix-git showed 15 turns
-    // vanilla vs a few turns capped). The 16-task ranked set contains no
-    // runaway tasks, so the cap has no upside here. Removed — pi runs with its
-    // own defaults, matching harnessarena.xyz's vanilla baseline. Bound
-    // runaways at the runner level (agent timeout) instead if it recurs.
+    // NOTE: an earlier global 8192-token anti-runaway cap backfired badly for
+    // non-fast glm-5.2: it starved real work and reduced the 16-task baseline
+    // from ~10/16 to 2/16. The provider metadata therefore keeps that model's
+    // native ceiling. GLM-5.2 Fast is different: production showed Fireworks
+    // spending hidden reasoning despite thinking=off until the five-minute
+    // task timeout. Its model definition carries a Fast-only 8192 ceiling,
+    // which applies equally to baseline and competitors.
     // An empty submitted prompt means "run vanilla pi with its own default
     // system prompt" (the baseline), matching harnessarena.xyz. Only write and
     // pass a prompt file when there's actually a submitted prompt.
