@@ -16,6 +16,7 @@ import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
 import { LiveDuration } from "./LiveDuration";
 import { cellStyle } from "../../tableStyles";
+import { ARENA_ENDPOINT } from "@/lib/arena-params";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 
@@ -137,9 +138,16 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <a href={BENCHMARK_REPO} target="_blank" rel="noopener noreferrer">
             Terminal-Bench 2
           </a>{" "}
-          · {benchmarkTaskCount}-task subset · model{" "}
-          <span className="mono">{modelLabel(run.model)}</span> via AI Gateway
+          · {benchmarkTaskCount}-task subset
         </p>
+        <dl style={{ display: "flex", flexWrap: "wrap", gap: "12px 28px", margin: "16px 0 0" }}>
+          <RoutingMeta label="Model" value={modelLabel(run.model)} />
+          <RoutingMeta label="Provider" value={run.provider_pinned ?? "not recorded"} />
+          {run.provider_requested && run.provider_requested !== run.provider_pinned ? (
+            <RoutingMeta label="Requested provider" value={run.provider_requested} />
+          ) : null}
+          <RoutingMeta label="Intermediary" value={ARENA_ENDPOINT} />
+        </dl>
       </section>
 
       {failureEvent || run.status === "failed" || run.status === "reaped" ? (
@@ -423,6 +431,19 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           </p>
         ) : null}
       </section>
+    </div>
+  );
+}
+
+function RoutingMeta({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="label" style={{ marginBottom: 4 }}>
+        {label}
+      </dt>
+      <dd className="mono" style={{ fontSize: 13, margin: 0 }}>
+        {value}
+      </dd>
     </div>
   );
 }

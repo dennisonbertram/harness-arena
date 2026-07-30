@@ -18,6 +18,11 @@ vi.mock("next/server", async (importOriginal) => {
   return { ...actual, after: (fn: () => unknown) => { void fn(); } };
 });
 
+vi.mock("next/navigation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/navigation")>();
+  return { ...actual, useRouter: () => ({ push: vi.fn() }) };
+});
+
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
 vi.mock("./CompetitionAutoRefresh", () => ({
   CompetitionAutoRefresh: ({ runIds = [] }: { runIds?: string[] }) => (
@@ -170,10 +175,10 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Claude Opus 5");
   });
 
-  it("renders a deliberate three-level switcher when there is one competition (issue #78)", async () => {
+  it("renders the competition selector and complete metadata when there is one competition (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
-    await storage.putCompetition(defaultCompetition());
+    await storage.putCompetition(defaultCompetition({ gateway_provider: "togetherai" }));
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
@@ -209,6 +214,57 @@ describe("CompetitionPage", () => {
     expect(html).toContain("zai");
   });
 
+  it("searches live and closed provider-versioned competitions from one accessible selector", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(
+      defaultCompetition({
+        id: "comp-wafer",
+        model: "zai/glm-5.2-fast",
+        gateway_provider: "wafer",
+        status: "closed",
+        closed_at: "2026-07-30T23:00:00.000Z",
+      }),
+    );
+    await storage.putCompetition(
+      defaultCompetition({
+        id: "comp-fireworks",
+        model: "zai/glm-5.2-fast",
+        gateway_provider: "fireworks",
+        created_at: "2026-07-31T00:00:00.000Z",
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-wafer" }) }),
+    );
+
+    expect(html).toContain('role="search"');
+    expect(html).toContain('<label for="competition-search"');
+    expect(html).toContain('<select id="competition-search" name="competition"');
+    expect(html).toContain('<optgroup label="Live competitions">');
+    expect(html).toContain('<optgroup label="Closed competitions">');
+    expect(html).toMatch(/<option value="comp-fireworks"[^>]*>[^<]*fireworks[^<]*live<\/option>/);
+    expect(html).toMatch(/<option value="comp-wafer" selected=""[^>]*>[^<]*wafer[^<]*closed<\/option>/);
+    expect(html).toContain("View competition");
+  });
+
+  it("shows the selected competition's provider and Vercel intermediary as separate metadata", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(
+      defaultCompetition({
+        model: "zai/glm-5.2-fast",
+        gateway_provider: "fireworks",
+      }),
+    );
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toMatch(/<dt[^>]*>Provider<\/dt><dd[^>]*>fireworks<\/dd>/);
+    expect(html).toMatch(/<dt[^>]*>Intermediary<\/dt><dd[^>]*>Vercel AI Gateway<\/dd>/);
+  });
+
   it("falls back to the default competition when the URL competition id is unknown (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
@@ -240,13 +296,10 @@ describe("CompetitionPage", () => {
     expect(html.match(/>glm-5\.2</g) ?? []).toHaveLength(1);
   });
 
-  // Selecting a competition must change where a submission GOES, not just what
-  // the page shows. The prop wiring itself (competitionId on the form,
-  // redirectTo on the sign-in button) is invisible in rendered HTML and is
-  // covered by types plus the API's own competition_id tests; what IS
-  // assertable here is that every switcher link carries the competition id, so
-  // a shared link and a sign-in round-trip both land on the same board.
-  it("addresses every competition by id in the switcher links", async () => {
+  // The selector submits the selected record id through the canonical
+  // ?competition=<id> URL contract, so same-model provider versions remain
+  // distinct without client-only state.
+  it("addresses every competition by id in the search selector", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition());
@@ -256,14 +309,13 @@ describe("CompetitionPage", () => {
       await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
     );
 
-    expect(html).toContain(`/?competition=${encodeURIComponent("comp-other")}`);
-    expect(html).toContain(`/?competition=${encodeURIComponent(defaultCompetitionId())}`);
+    expect(html).toContain('form role="search"');
+    expect(html).toContain('name="competition"');
+    expect(html).toContain(`value="${encodeURIComponent("comp-other")}"`);
+    expect(html).toContain(`value="${encodeURIComponent(defaultCompetitionId())}"`);
   });
 
-  // The representative competition for an arena/harness usually has a
-  // different id than the selected one, so comparing ids left the parent pills
-  // unstyled and without aria-current.
-  it("marks the arena and harness pills current, not just the model pill", async () => {
+  it("marks the requested competition selected in the native selector", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition());
@@ -273,8 +325,10 @@ describe("CompetitionPage", () => {
       await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
     );
 
-    // Arena, harness and model pills are all on the selected dimension.
-    expect(html.match(/aria-current="page"/g) ?? []).toHaveLength(4);
+    expect(html).toMatch(/<option value="comp-other" selected="">/);
+    expect(html).not.toMatch(
+      new RegExp(`<option value="${defaultCompetitionId()}" selected="">`),
+    );
   });
 
   // A closed competition rejects submissions with 409, and the form maps every

@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { after } from "next/server";
 import { ensureBaselines } from "@/lib/competition-baseline";
 import Link from "next/link";
@@ -13,7 +12,7 @@ import { CompetitionAutoRefresh } from "./CompetitionAutoRefresh";
 import { CompetitionLeaderboardTable } from "./competition/CompetitionLeaderboardTable";
 import { CompetitionSubmitModal } from "./competition/CompetitionSubmitModal";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
-import { PINNED_PROVIDERS } from "@/lib/arena-params";
+import { ARENA_ENDPOINT } from "@/lib/arena-params";
 
 // Same rationale as the main leaderboard: reads shared storage, so a
 // build-time-cached page would never show new submissions.
@@ -104,7 +103,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
         </div>
       </section>
 
-      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} meta={<CompetitionMeta competition={competition} />} />
+      <CompetitionSwitcher competitions={competitions} selectedCompetition={competition} />
 
       <BaselineSection board={board} />
 
@@ -169,105 +168,94 @@ function titleCase(value: string): string {
 function CompetitionSwitcher({
   competitions,
   selectedCompetition,
-  meta,
 }: {
   competitions: Competition[];
   selectedCompetition: Competition | undefined;
-  meta?: ReactNode;
 }) {
   if (!selectedCompetition) return null;
 
-  const competitionForArena = new Map<string, Competition>();
-  for (const competition of competitions) {
-    if (!competitionForArena.has(competition.arena)) competitionForArena.set(competition.arena, competition);
-  }
-  const arenas = [...competitionForArena.values()];
-  const withinArena = competitions.filter((competition) => competition.arena === selectedCompetition.arena);
-  const competitionForHarness = new Map<string, Competition>();
-  for (const competition of withinArena) {
-    if (!competitionForHarness.has(competition.harness)) competitionForHarness.set(competition.harness, competition);
-  }
-  const harnesses = [...competitionForHarness.values()];
-  const withinHarness = withinArena.filter((competition) => competition.harness === selectedCompetition.harness);
-  const competitionForModel = new Map<string, Competition>();
-  for (const competition of withinHarness) {
-    if (!competitionForModel.has(competition.model)) competitionForModel.set(competition.model, competition);
-  }
-  const models = [...competitionForModel.values()];
-  const withinModel = withinHarness.filter((competition) => competition.model === selectedCompetition.model);
-  const providerName = (competition: Competition) =>
-    competition.gateway_provider ?? PINNED_PROVIDERS[competition.model] ?? "automatic";
+  const liveCompetitions = competitions.filter((competition) => competition.status === "live");
+  const closedCompetitions = competitions.filter((competition) => competition.status === "closed");
 
   return (
-    <nav aria-label="Competition switcher" style={{ marginBottom: 24 }}>
-      <div className="label" style={{ marginBottom: 8 }}>
+    <section aria-labelledby="competition-heading" style={{ marginBottom: 24 }}>
+      <div id="competition-heading" className="label" style={{ marginBottom: 8 }}>
         Competition
       </div>
       <div
         style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "12px 28px",
           padding: "16px 20px",
           border: "1px solid var(--gray-alpha-400)",
           borderRadius: 10,
         }}
       >
-        <SwitcherLevel label="Arena" options={arenas} isSelected={(c) => c.arena === selectedCompetition.arena} value={(competition) => titleCase(competition.arena)} />
-        <SwitcherLevel label="Harness" options={harnesses} isSelected={(c) => c.harness === selectedCompetition.harness} value={(competition) => titleCase(competition.harness)} />
-        <SwitcherLevel label="Model" options={models} isSelected={(c) => c.model === selectedCompetition.model} value={(competition) => modelLabel(competition.model)} />
-        <SwitcherLevel label="Provider" options={withinModel} isSelected={(c) => c.id === selectedCompetition.id} value={providerName} />
-        {meta}
+        <form action="/" method="get" role="search" style={{ marginBottom: 20 }}>
+          <label htmlFor="competition-search" className="label" style={{ display: "block", marginBottom: 6 }}>
+            Search
+          </label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <select
+              id="competition-search"
+              name="competition"
+              defaultValue={selectedCompetition.id}
+              style={{
+                minWidth: "min(100%, 520px)",
+                height: 40,
+                padding: "0 36px 0 12px",
+                border: "1px solid var(--gray-alpha-400)",
+                borderRadius: 6,
+                background: "var(--background-100)",
+                color: "var(--gray-1000)",
+                fontFamily: "var(--font-geist-mono)",
+                fontSize: 14,
+              }}
+            >
+              {liveCompetitions.length > 0 ? (
+                <CompetitionOptions label="Live competitions" competitions={liveCompetitions} />
+              ) : null}
+              {closedCompetitions.length > 0 ? (
+                <CompetitionOptions label="Closed competitions" competitions={closedCompetitions} />
+              ) : null}
+            </select>
+            <button
+              type="submit"
+              style={{
+                height: 40,
+                padding: "0 16px",
+                border: "none",
+                borderRadius: 6,
+                background: "var(--gray-1000)",
+                color: "var(--background-100)",
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+            >
+              View competition
+            </button>
+          </div>
+        </form>
+        <CompetitionMeta competition={selectedCompetition} />
       </div>
-    </nav>
+    </section>
   );
 }
 
-function SwitcherLevel({
+function CompetitionOptions({
   label,
-  options,
-  isSelected,
-  value,
+  competitions,
 }: {
   label: string;
-  options: Competition[];
-  // Compared on this level's own dimension. The representative competition for
-  // an arena or harness often has a different id than the selected one, so
-  // comparing ids would leave the parent pills unstyled and without
-  // aria-current.
-  isSelected: (competition: Competition) => boolean;
-  value: (competition: Competition) => string;
+  competitions: Competition[];
 }) {
   return (
-    <div>
-      <div className="label" style={{ marginBottom: 5 }}>
-        {label}
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {options.map((competition) => {
-          const selected = isSelected(competition);
-          return (
-            <Link
-              key={competition.id}
-              href={competitionHref(competition.id)}
-              aria-current={selected ? "page" : undefined}
-              className="mono"
-              style={{
-                fontSize: 14,
-                color: selected ? "var(--background-100)" : "var(--blue-700)",
-                background: selected ? "var(--gray-1000)" : "transparent",
-                border: "1px solid var(--gray-alpha-400)",
-                borderRadius: 6,
-                padding: "5px 8px",
-                textDecoration: "none",
-              }}
-            >
-              {value(competition)}
-            </Link>
-          );
-        })}
-      </div>
-    </div>
+    <optgroup label={label}>
+      {competitions.map((competition) => (
+        <option key={competition.id} value={competition.id}>
+          {titleCase(competition.arena)} · {titleCase(competition.harness)} · {modelLabel(competition.model)} ·{" "}
+          {competition.gateway_provider ?? "provider not recorded"} · {competition.status}
+        </option>
+      ))}
+    </optgroup>
   );
 }
 
@@ -316,27 +304,29 @@ function formatPrize(amountUsd: number): string {
 // "TBD" placeholder would read as a commitment).
 function CompetitionMeta({ competition }: { competition: Competition | undefined }) {
   if (!competition) return null;
-  // Harness and model deliberately omitted: the Arena/Harness/Model switcher
-  // below already states both, and repeating them here puts the same two
-  // facts on screen twice.
-  const items: Array<[string, string]> = [["Status", competition.status]];
+  const items: Array<[string, string]> = [
+    ["Arena", titleCase(competition.arena)],
+    ["Harness", titleCase(competition.harness)],
+    ["Model", modelLabel(competition.model)],
+    ["Provider", competition.gateway_provider ?? "not recorded"],
+    ["Intermediary", ARENA_ENDPOINT],
+    ["Status", competition.status],
+  ];
   if (competition.prize_amount_usd != null) items.push(["Prize", formatPrize(competition.prize_amount_usd)]);
   if (competition.prize_cadence != null) items.push(["Cadence", competition.prize_cadence]);
 
-  // Rendered inside the switcher panel, so no wrapper box of its own -- a
-  // bordered box nested in a bordered box reads as a mistake.
   return (
-    <>
+    <dl style={{ display: "flex", flexWrap: "wrap", gap: "16px 32px", margin: 0 }}>
       {items.map(([label, value]) => (
         <div key={label}>
-          <div className="label" style={{ marginBottom: 2 }}>
+          <dt className="label" style={{ marginBottom: 4 }}>
             {label}
-          </div>
-          <div className="mono" style={{ fontSize: 14 }}>
+          </dt>
+          <dd className="mono" style={{ fontSize: 14, margin: 0 }}>
             {value}
-          </div>
+          </dd>
         </div>
       ))}
-    </>
+    </dl>
   );
 }

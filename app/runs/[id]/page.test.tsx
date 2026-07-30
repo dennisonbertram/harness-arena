@@ -155,6 +155,45 @@ describe("RunDetailPage", () => {
     expect(html).toContain("View complete system prompt");
   });
 
+  it("shows the applied upstream provider separately from the Vercel intermediary", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-routing", { agent_name: "Wafer run" }));
+    await storage.putRun(
+      run("r-routing", {
+        submission_id: "s-routing",
+        model: "zai/glm-5.2-fast",
+        provider_requested: "wafer",
+        provider_pinned: "wafer",
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await RunPage.default({ params: Promise.resolve({ id: "r-routing" }) }),
+    );
+
+    expect(html).toMatch(/<dt[^>]*>Provider<\/dt><dd[^>]*>wafer<\/dd>/);
+    expect(html).toMatch(/<dt[^>]*>Intermediary<\/dt><dd[^>]*>Vercel AI Gateway<\/dd>/);
+  });
+
+  it("does not present a requested provider as applied when pin evidence is absent", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-unconfirmed"));
+    await storage.putRun(
+      run("r-unconfirmed", {
+        submission_id: "s-unconfirmed",
+        model: "zai/glm-5.2-fast",
+        provider_requested: "fireworks",
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await RunPage.default({ params: Promise.resolve({ id: "r-unconfirmed" }) }),
+    );
+
+    expect(html).toMatch(/<dt[^>]*>Provider<\/dt><dd[^>]*>not recorded<\/dd>/);
+    expect(html).toMatch(/<dt[^>]*>Requested provider<\/dt><dd[^>]*>fireworks<\/dd>/);
+  });
+
   it("surfaces a task-level timeout on a completed benchmark run", async () => {
     const storage = resetStorage();
     await storage.putSubmission(submission("s-task-timeout"));
