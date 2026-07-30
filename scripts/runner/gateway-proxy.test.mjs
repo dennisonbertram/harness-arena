@@ -374,6 +374,32 @@ describe("preflightProxy", () => {
     expect(result.detail).toContain("bad key");
   });
 
+  it("retries a transient gateway 503 before failing the whole run", async () => {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () => '{"error":{"message":"Service unavailable","isRetryable":true}}',
+        };
+      }
+      return { ok: true, status: 200, text: async () => '{"content":[]}' };
+    };
+
+    const result = await preflightProxy({
+      port: 4599,
+      model: "m",
+      apiKey: "k",
+      fetchImpl,
+      retryDelayMs: 0,
+    });
+
+    expect(calls).toBe(2);
+    expect(result.ok).toBe(true);
+  });
+
   it("fails loudly when the sidecar cannot be reached at all", async () => {
     const fetchImpl = async () => { throw new Error("ECONNREFUSED"); };
     const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl });
