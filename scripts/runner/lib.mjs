@@ -358,7 +358,13 @@ const OPENAI_COMPATIBLE_ZAI_MODELS = {
     name: "GLM 5.2 Fast",
     cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
     contextWindow: 1_000_000,
-    maxTokens: 128_000,
+    // Production evidence (run e32e1166): Fireworks still generated hidden
+    // reasoning with reasoning.enabled=false, and an unlimited turn consumed
+    // the full five-minute task window. At the route's advertised 120-250
+    // TPS, 8K tokens bounds one completion to roughly a minute at the slow
+    // end. Keep this specific to the Fast route: the same cap materially
+    // reduced the non-fast GLM baseline score in an earlier A/B.
+    maxTokens: 8_192,
   },
 };
 
