@@ -414,6 +414,13 @@ export function resolvePinnedProvider({ configured, applied }) {
  * proxy runs on the sandbox VM outside it.
  */
 export function buildPinnedModelsConfig({ proxyPort, model }) {
+  const modelOverride = model.startsWith("zai/")
+    ? {
+        reasoning: true,
+        compat: { thinkingFormat: "zai" },
+      }
+    : {};
+
   return JSON.stringify({
     providers: {
       "vercel-ai-gateway": {
@@ -422,7 +429,7 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
           host: "host.docker.internal",
           port: proxyPort,
         }),
-        modelOverrides: { [model]: {} },
+        modelOverrides: { [model]: modelOverride },
       },
     },
   });
