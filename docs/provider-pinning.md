@@ -51,7 +51,7 @@ pi (inside the task container)
   │               = http://host.docker.internal:4599/v1
   ▼
 gateway-proxy.mjs (on the sandbox VM)
-  │  injects providerOptions.gateway.only = ["morph"]
+  │  injects providerOptions.gateway.only = ["togetherai"]
   ▼
 https://ai-gateway.vercel.sh
 ```
@@ -67,8 +67,9 @@ https://ai-gateway.vercel.sh
   before.
 
 Providers are pinned to one deliberately selected upstream rather than
-whichever provider the gateway happened to pick. GLM 5.2 is pinned to Morph
-because the first-party z.ai route proved too slow for this benchmark.
+whichever provider the gateway happened to pick. GLM 5.2 is pinned to Together
+AI because the first-party z.ai route was too slow and a production Morph run
+timed out before returning a first task result.
 
 Runs record two distinct fields:
 
