@@ -7,6 +7,7 @@ export const DEFAULT_MODEL = "zai/glm-5.2";
 
 export const MODEL_LABELS: Record<string, string> = {
   "zai/glm-5.2": "glm-5.2",
+  "zai/glm-5.2-fast": "glm-5.2 Fast",
   "anthropic/claude-sonnet-5": "Claude Sonnet 5",
   "anthropic/claude-opus-4-8": "Claude Opus 4.8",
   // Slug verified against the live gateway catalog 2026-07-24 (note: the
@@ -26,6 +27,7 @@ export const MODEL_LABELS: Record<string, string> = {
 // the dark UI and reasonably colorblind-distinguishable.
 export const MODEL_COLORS: Record<string, string> = {
   "zai/glm-5.2": "#4f9bf5", // blue
+  "zai/glm-5.2-fast": "#20b8cd", // cyan
   "anthropic/claude-sonnet-5": "#e8912a", // amber
   "anthropic/claude-opus-4-8": "#a06fe0", // violet
   "anthropic/claude-opus-5": "#e0566f", // rose

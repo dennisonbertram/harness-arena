@@ -10,10 +10,10 @@ describe("competition-config", () => {
     vi.unstubAllEnvs();
   });
 
-  it("defaults COMPETITION_MODEL to zai/glm-5.2 when the env var is unset", async () => {
+  it("defaults COMPETITION_MODEL to the dedicated GLM 5.2 fast tier when the env var is unset", async () => {
     delete process.env.COMPETITION_MODEL;
     const { COMPETITION_MODEL } = await import("./competition-config");
-    expect(COMPETITION_MODEL).toBe("zai/glm-5.2");
+    expect(COMPETITION_MODEL).toBe("zai/glm-5.2-fast");
   });
 
   it("honors a valid COMPETITION_MODEL override from the allowlist", async () => {

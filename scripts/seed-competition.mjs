@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// One-off script: seeds the Harness Arena / Pi / GLM 5.2 Competition entity
+// One-off script: seeds the Harness Arena / Pi / GLM 5.2 Fast Competition entity
 // (issue #75, epic #74) and backfills competition_id onto every existing
 // submission that has the legacy `competition: true` flag but no
 // competition_id yet.
@@ -31,7 +31,8 @@ const HARNESS = "pi";
 // Mirrors lib/competition-config.ts's COMPETITION_MODEL default. Not imported
 // directly -- see file-header comment on why a plain `node` invocation can't
 // import lib/*.ts here.
-const DEFAULT_MODEL = process.env.COMPETITION_MODEL ?? "zai/glm-5.2";
+const DEFAULT_MODEL = process.env.COMPETITION_MODEL ?? "zai/glm-5.2-fast";
+const DEFAULT_GATEWAY_PROVIDER = process.env.COMPETITION_GATEWAY_PROVIDER ?? "wafer";
 
 /** Deterministic id from (arena, harness, model) -- the whole idempotency mechanism. */
 export function competitionId(arena, harness, model) {
@@ -48,7 +49,15 @@ export function competitionId(arena, harness, model) {
  * competition_id yet. `storage` needs only: getCompetition, putCompetition,
  * listCompetitions, listSubmissions, putSubmission.
  */
-export async function backfillCompetition(storage, { arena = ARENA, harness = HARNESS, model = DEFAULT_MODEL } = {}) {
+export async function backfillCompetition(
+  storage,
+  {
+    arena = ARENA,
+    harness = HARNESS,
+    model = DEFAULT_MODEL,
+    gatewayProvider = DEFAULT_GATEWAY_PROVIDER,
+  } = {},
+) {
   const id = competitionId(arena, harness, model);
 
   let created = false;
@@ -59,6 +68,7 @@ export async function backfillCompetition(storage, { arena = ARENA, harness = HA
       arena,
       harness,
       model,
+      gateway_provider: gatewayProvider,
       // TBD -- do not invent a figure (epic #74).
       prize_amount_usd: null,
       prize_cadence: null,
