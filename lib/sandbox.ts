@@ -151,10 +151,18 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     ]);
     log("info", "sandbox.creating", { run_id: run.id, sandbox_id: sandbox.name });
 
+    // Vercel's public static-asset cache can continue serving a previous
+    // deployment's runner-bundle.tgz from this stable pathname. That silently
+    // launched old transport code in production (/v1/v1/messages) even though
+    // the application deployment contained the fix. Tie the download URL to
+    // the deployment commit so every code revision has a distinct cache key.
+    const runnerBundleUrl = new URL(`${callbackBase}/runner-bundle.tgz`);
+    runnerBundleUrl.searchParams.set("v", process.env.VERCEL_GIT_COMMIT_SHA ?? "dev");
+
     // Bootstrap carries no secrets, so a plain shell string is fine here.
     const bootstrapCmd =
       `mkdir -p /opt/runner && ` +
-      `curl -fsSL ${shQuote(`${callbackBase}/runner-bundle.tgz`)} -o /tmp/rb.tgz && ` +
+      `curl -fsSL ${shQuote(runnerBundleUrl.toString())} -o /tmp/rb.tgz && ` +
       `tar -xzf /tmp/rb.tgz -C /opt/runner`;
     // sudo: /opt is root-owned, and the runner (also root) must be able to
     // read what we extract here.
