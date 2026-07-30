@@ -106,7 +106,11 @@ export function systemPromptOf(body) {
   // Anthropic Messages with a top-level `system` field.
   const fromTopLevel = textOf(body?.system);
   if (fromTopLevel) return fromTopLevel;
-  return textOf(body?.messages?.find?.((m) => m?.role === "system")?.content);
+  // Pi's OpenAI adapter uses `developer` instead of `system` whenever the
+  // model is reasoning-capable and the provider supports that role. GLM Fast
+  // takes exactly this path, so ignoring it left completed baselines without
+  // the resolved prompt we intended to publish.
+  return textOf(body?.messages?.find?.((m) => m?.role === "system" || m?.role === "developer")?.content);
 }
 
 function textOf(value) {

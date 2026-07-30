@@ -496,6 +496,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
+      cacheControlMaxAge: 60,
       contentType: "application/json",
     });
   });
@@ -545,11 +546,12 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       access: "public",
       addRandomSuffix: false,
       allowOverwrite: true,
+      cacheControlMaxAge: 60,
       contentType: "application/json",
     });
   });
 
-  it("reads entity JSON through the exact listed pathname, including a missing blob", async () => {
+  it("reads entity JSON through the uploadedAt-versioned listed URL, including a missing blob", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://blob.example/runs/run-1.json";
@@ -586,7 +588,9 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     expect(await storage.getRun("run-1")).toEqual(run);
     expect(await storage.getSubmission("missing")).toBeUndefined();
     expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith(`${url}?v=${new Date("2026-07-21T00:00:00.000Z").getTime()}`, {
+      access: "public",
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -608,7 +612,9 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith(`${url}?v=${new Date("2026-07-21T00:00:00.000Z").getTime()}`, {
+      access: "public",
+    });
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/store-id\.public\.blob\.vercel-storage\.com\/runs\/run-1\.json\?v=\d+$/), {
       cache: "no-store",
     });
@@ -654,8 +660,66 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     } as never);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith(`${url}?v=${new Date("2026-07-30T18:15:02.000Z").getTime()}`, {
+      access: "public",
+    });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("authenticates the uploadedAt-versioned URL so an overwritten run cannot read a stale status", async () => {
+    const storage = new BlobStorage();
+    const staleRun = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    const completedRun: Run = {
+      ...staleRun,
+      status: "completed",
+      tasks_passed: 8,
+      task_results: [
+        {
+          task_id: "task-1",
+          attempted: true,
+          passed: true,
+          reward: 1,
+          cost_usd: 0.1,
+          duration_s: 10,
+          turns: 2,
+        },
+      ],
+    };
+    const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
+    const uploadedAt = "2026-07-30T19:45:54.000Z";
+    const versionedUrl = `${url}?v=${new Date(uploadedAt).getTime()}`;
+
+    vi.mocked(list).mockResolvedValue({
+      blobs: [{ url, pathname: "runs/run-1.json", uploadedAt }],
+      hasMore: false,
+    } as never);
+    vi.mocked(get).mockImplementation(async (identifier) => {
+      const run = String(identifier) === versionedUrl ? completedRun : staleRun;
+      return {
+        statusCode: 200,
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+            controller.close();
+          },
+        }),
+        headers: new Headers(),
+        blob: {
+          url,
+          downloadUrl: `${url}?download=1`,
+          pathname: "runs/run-1.json",
+          contentType: "application/json",
+          contentDisposition: 'inline; filename="run-1.json"',
+          cacheControl: "public, max-age=0",
+          uploadedAt: new Date(uploadedAt),
+          size: 1,
+          etag: "etag-completed",
+        },
+      } as never;
+    });
+
+    await expect(storage.getRun("run-1")).resolves.toEqual(completedRun);
+    expect(get).toHaveBeenCalledWith(versionedUrl, { access: "public" });
   });
 
   it("listRuns fetches each overwritten entity through its uploadedAt version, not a stale edge-cached URL", async () => {
@@ -694,14 +758,15 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       })),
       hasMore: false,
     } as never);
-    vi.mocked(get).mockImplementation(async (pathname) => {
+    vi.mocked(get).mockImplementation(async (identifier) => {
       active += 1;
       peak = Math.max(peak, active);
       await new Promise((resolve) => setTimeout(resolve, 5));
       active -= 1;
-      const id = /runs\/(.+)\.json$/.exec(String(pathname))![1];
+      const parsed = new URL(String(identifier));
+      const id = /runs\/(.+)\.json$/.exec(parsed.pathname)![1];
       const run = makeRun(id, "2026-07-21T00:00:00.000Z");
-      const url = `https://blob.example/${pathname}`;
+      const url = `https://blob.example${parsed.pathname}`;
       return {
         statusCode: 200,
         stream: new ReadableStream({
@@ -714,7 +779,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
         blob: {
           url,
           downloadUrl: `${url}?download=1`,
-          pathname: String(pathname),
+          pathname: parsed.pathname.slice(1),
           contentType: "application/json",
           contentDisposition: "inline",
           cacheControl: "public, max-age=0",
