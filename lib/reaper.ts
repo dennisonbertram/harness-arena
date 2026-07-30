@@ -24,6 +24,14 @@ function isReapCandidate(run: Run): boolean {
   return run.status === "running" || (run.status === "queued" && !!run.dispatched_at);
 }
 
+async function markSubmissionFailed(storage: Storage, run: Run): Promise<void> {
+  const submission = await storage.getSubmission(run.submission_id);
+  if (submission && (submission.status === "queued" || submission.status === "running")) {
+    submission.status = "failed";
+    await storage.putSubmission(submission);
+  }
+}
+
 /**
  * Pure predicate: a reap-candidate run is stale once it's been silent for over
  * the threshold (default 20 min). Dispatch resets the clock — a freshly-claimed
@@ -45,6 +53,14 @@ export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now
  * Idempotent: a run already in a terminal status is returned untouched.
  */
 export async function reapIfStale(storage: Storage, run: Run, now: number = Date.now()): Promise<Run> {
+  // Reconcile historical rows and partial writes where the terminal run write
+  // succeeded but the following parent-submission write did not. Completed
+  // runs are synchronized by their result callback; failure-like terminal
+  // states both map to the same parent status.
+  if (run.status === "reaped" || run.status === "failed") {
+    await markSubmissionFailed(storage, run);
+    return run;
+  }
   if (!isReapCandidate(run)) return run;
 
   // Cheap staleness probe (list metadata only). Using listRunEvents here
@@ -67,6 +83,7 @@ export async function reapIfStale(storage: Storage, run: Run, now: number = Date
       payload: { reason: `no events for over ${reapThresholdMs() / 60000} minutes` },
     },
   ]);
+  await markSubmissionFailed(storage, run);
   return reaped;
 }
 

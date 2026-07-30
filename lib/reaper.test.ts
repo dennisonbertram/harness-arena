@@ -89,6 +89,60 @@ describe("reapIfStale (integration against MemoryStorage)", () => {
     expect(events.some((e) => e.type === "run.reaped")).toBe(true);
   });
 
+  it("marks the parent submission failed when its stale run is reaped", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "running" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "stalled agent",
+      prompt: "p",
+      status: "running",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(storage, run, new Date("2026-07-21T00:21:00.000Z").getTime());
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
+  it("repairs a stale parent status when the run was already reaped", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "reaped", finished_at: "2026-07-21T00:21:00.000Z" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "stalled agent",
+      prompt: "p",
+      status: "running",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(storage, run);
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
+  it("repairs a stale parent status when sandbox creation already marked the run failed", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "failed", finished_at: "2026-07-21T00:01:00.000Z" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "never started",
+      prompt: "p",
+      status: "queued",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(storage, run);
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
   it("uses the timestamp of the most recent event, not created_at, once events exist", async () => {
     const storage = new MemoryStorage();
     const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });

@@ -2,16 +2,20 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
+const dispatchQueuedRuns = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
   return { ...actual, getStorage: () => storageRef.current };
 });
+vi.mock("@/lib/dispatch", () => ({ dispatchQueuedRuns }));
 
 import { GET } from "./route";
 
 describe("GET /api/runs/[id]", () => {
   beforeEach(() => {
     resetStorage();
+    dispatchQueuedRuns.mockClear();
   });
 
   it("returns the run, including incrementally accumulated task_results, when it exists", async () => {
@@ -68,6 +72,7 @@ describe("GET /api/runs/[id]", () => {
 
       expect(body.status).toBe("reaped");
       expect((await storageRef.current.getRun("run-stale"))?.status).toBe("reaped");
+      await vi.waitFor(() => expect(dispatchQueuedRuns).toHaveBeenCalledWith(storageRef.current));
     });
   });
 });

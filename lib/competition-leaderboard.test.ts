@@ -194,6 +194,7 @@ describe("getCompetitionBoard", () => {
     expect(board.ranked).toHaveLength(1);
     expect(board.ranked[0].submissionId).toBe("s1");
     expect(board.pending).toBe(1);
+    expect(board.pendingRunIds).toEqual(["r2"]);
   });
 
   it("carries the entrant's github_login onto the ranked row, falling back to 'unknown' when unset", async () => {

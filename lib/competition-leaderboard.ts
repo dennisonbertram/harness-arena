@@ -36,6 +36,8 @@ export interface CompetitionBoard {
    */
   belowBaseline: CompetitionRow[];
   pending: number;
+  /** Exact runs the open homepage should poll until they become terminal. */
+  pendingRunIds: string[];
 }
 
 interface JoinedEntry {
@@ -238,9 +240,10 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
   // see how close they got, without implying a standing they did not earn.
   const belowBaseline = rankCompetition(missed).map((r) => ({ ...r, rank: 0, tied: false }));
 
-  const pending = competitorEntries.filter(
+  const pendingRunIds = competitorEntries.filter(
     (e) => e.run !== undefined && (e.run.status === "queued" || e.run.status === "running"),
-  ).length;
+  ).map((e) => e.run!.id);
+  const pending = pendingRunIds.length;
 
-  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending };
+  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending, pendingRunIds };
 }
