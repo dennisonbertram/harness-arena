@@ -236,6 +236,29 @@ describe("RunDetailPage", () => {
     expect(html).toContain("The run stopped unexpectedly.");
   });
 
+  it("surfaces the reaper reason when a stale production run is terminated", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-reaped"));
+    await storage.putRun(
+      run("r-reaped", {
+        submission_id: "s-reaped",
+        status: "reaped",
+        task_results: [],
+      }),
+    );
+    await storage.appendRunEvents("r-reaped", [
+      runEvent(0, "run.reaped", { reason: "no events for over 20 minutes" }),
+    ]);
+
+    const html = renderToStaticMarkup(
+      await RunPage.default({ params: Promise.resolve({ id: "r-reaped" }) }),
+    );
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Run failed");
+    expect(html).toContain("no events for over 20 minutes");
+  });
+
   it("reconstructs live progress mid-run: pass/fail states, trace links, measured-cost-so-far, and hides the terminal-run stats", async () => {
     const storage = resetStorage();
     await storage.putSubmission(
