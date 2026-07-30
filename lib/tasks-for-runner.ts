@@ -19,12 +19,19 @@ export interface RunnerTask {
 const DEFAULT_AGENT_TIMEOUT_CAP_SEC = 300;
 const DEFAULT_VERIFY_TIMEOUT_CAP_SEC = 240;
 
+function timeoutCap(envValue: string | undefined, hardCeiling: number): number {
+  if (envValue === undefined) return hardCeiling;
+  const configured = Number(envValue);
+  if (!Number.isFinite(configured) || configured <= 0) return hardCeiling;
+  return Math.min(configured, hardCeiling);
+}
+
 function agentTimeoutCap(): number {
-  return Number(process.env.RUNNER_AGENT_TIMEOUT_CAP ?? DEFAULT_AGENT_TIMEOUT_CAP_SEC);
+  return timeoutCap(process.env.RUNNER_AGENT_TIMEOUT_CAP, DEFAULT_AGENT_TIMEOUT_CAP_SEC);
 }
 
 function verifyTimeoutCap(): number {
-  return Number(process.env.RUNNER_VERIFY_TIMEOUT_CAP ?? DEFAULT_VERIFY_TIMEOUT_CAP_SEC);
+  return timeoutCap(process.env.RUNNER_VERIFY_TIMEOUT_CAP, DEFAULT_VERIFY_TIMEOUT_CAP_SEC);
 }
 
 export function buildRunnerTasks(): RunnerTask[] {

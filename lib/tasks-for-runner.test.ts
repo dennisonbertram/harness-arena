@@ -83,5 +83,15 @@ describe("timeout caps (issue #23 finding E): bound worst-case run duration unde
         expect(runnerTask.verifier_timeout_sec).toBe(90);
       }
     });
+
+    it("does not let an environment override loosen the hard timeout ceilings", () => {
+      process.env.RUNNER_AGENT_TIMEOUT_CAP = "900";
+      process.env.RUNNER_VERIFY_TIMEOUT_CAP = "900";
+
+      for (const runnerTask of buildRunnerTasks()) {
+        expect(runnerTask.agent_timeout_sec).toBe(300);
+        expect(runnerTask.verifier_timeout_sec).toBe(240);
+      }
+    });
   });
 });
