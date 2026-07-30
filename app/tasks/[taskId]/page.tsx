@@ -6,6 +6,7 @@ import { getTasks } from "@/lib/tasks";
 import { formatUsd } from "@/lib/format";
 import { ARENA_BENCHMARK, ARENA_BENCHMARK_URL } from "@/lib/arena-params";
 import { modelLabel, modelColor } from "@/lib/models";
+import { TaskModelPerformanceChart } from "./TaskModelPerformanceChart";
 
 export const revalidate = 15;
 
@@ -65,6 +66,7 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
           <h2 className="label" style={{ margin: "20px 0 10px" }}>
             By model <span style={{ color: "var(--gray-700)" }}>· pass rate per model, never averaged together</span>
           </h2>
+          <TaskModelPerformanceChart models={stats.byModel} />
           <div style={{ overflowX: "auto", marginBottom: 36 }}>
             <table style={{ width: "100%", maxWidth: 640, borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
@@ -72,6 +74,8 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
                   <th className="label" style={cell}>Model</th>
                   <th className="label" style={cell}>Pass rate</th>
                   <th className="label" style={cell}>Mean turns</th>
+                  <th className="label" style={cell}>Mean wall time</th>
+                  <th className="label" style={cell}>Output tok/s</th>
                   <th className="label" style={cell}>Mean cost</th>
                 </tr>
               </thead>
@@ -87,6 +91,12 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
                     </td>
                     <td style={cell} className="tabular-nums">
                       {m.meanTurns.toFixed(1)}
+                    </td>
+                    <td style={cell} className="tabular-nums">
+                      {m.meanDurationS === null ? "unmeasured" : `${m.meanDurationS.toFixed(1)}s`}
+                    </td>
+                    <td style={cell} className="tabular-nums">
+                      {m.outputTokensPerSecond === null ? "unmeasured" : m.outputTokensPerSecond.toFixed(1)}
                     </td>
                     <td style={cell} className="tabular-nums">
                       {m.meanCostUsd === null ? "unmeasured" : `${formatUsd(m.meanCostUsd)}/attempt`}
@@ -153,16 +163,3 @@ export default async function TaskPage({ params }: { params: Promise<{ taskId: s
 }
 
 const cell: React.CSSProperties = { padding: "8px 12px", textAlign: "left" };
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="label" style={{ marginBottom: 2 }}>
-        {label}
-      </div>
-      <div className="tabular-nums" style={{ fontSize: 22, fontWeight: 600 }}>
-        {value}
-      </div>
-    </div>
-  );
-}
