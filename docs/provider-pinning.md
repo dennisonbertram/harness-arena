@@ -4,6 +4,11 @@
 board.** Skip to [Deprecating old runs](#deprecating-old-runs) for what that
 means and what to do about it.
 
+For the later investigation of a task-specific stream failure, see [GLM Fast
+provider stream failure A/B](provider-stream-failure-ab.md). The same request
+returned headers and no body when pinned to Wafer, but streamed to completion
+when pinned to Fireworks.
+
 ---
 
 ## The problem
@@ -168,9 +173,11 @@ response — it returns only `id, object, created, model, choices, usage,
 system_fingerprint, generationId`. `providerMetadata.gateway.routing
 .resolvedProvider` is an AI SDK feature not exposed here.
 
-The proxy does capture `generationId` per call, which gateway observability may
-be able to resolve to a provider after the fact. Not wired up yet; the pin
-itself is what matters for comparability.
+The proxy captures `generationId` per call, and the runner persists a compact
+`task.gateway_correlation` event containing the pinned provider, response ID,
+status, byte/idle timing, stream error, and Pi retry evidence. Gateway
+observability may be able to resolve those IDs further after the fact; the pin
+itself remains the primary routing evidence for comparability.
 
 ## Operating it
 

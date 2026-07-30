@@ -14,6 +14,8 @@ import {
   flushWithPendingStatus,
   isSessionTextUnreadable,
   parseSessionAgentError,
+  summarizeGatewayRequests,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -133,6 +135,78 @@ describe("parseSessionAgentError", () => {
         JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop" } }),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("parsePiCorrelation", () => {
+  it("extracts Pi response ids from session messages and retry events from stdout", () => {
+    const session = [
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_2" } }),
+    ].join("\n");
+    const stdout = [
+      JSON.stringify({ type: "message_end", message: { role: "assistant" } }),
+      JSON.stringify({ type: "auto_retry_start", attempt: 1, error: "terminated" }),
+      JSON.stringify({ type: "turn_end", usage: {} }),
+    ].join("\n");
+
+    expect(parsePiCorrelation(session, stdout)).toEqual({
+      response_ids: ["gen_1", "gen_2"],
+      retry_events: [{ type: "auto_retry_start", attempt: 1, error: "terminated" }],
+    });
+  });
+});
+
+describe("summarizeGatewayRequests", () => {
+  it("retains the compact timing fields needed to distinguish stalls from provider errors", () => {
+    const events = [
+      {
+        type: "gateway_proxy.request",
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+      },
+      {
+        type: "gateway_proxy.response_headers",
+        request_id: "gw-1",
+        status: 200,
+      },
+      {
+        type: "gateway_proxy.response_complete",
+        request_id: "gw-1",
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+      },
+    ];
+
+    expect(summarizeGatewayRequests(events)).toEqual([
+      {
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+        status: 200,
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+        stream_error: undefined,
+      },
+    ]);
   });
 });
 

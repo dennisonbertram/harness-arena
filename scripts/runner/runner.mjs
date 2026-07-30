@@ -34,6 +34,7 @@ import {
   flushWithPendingStatus,
   isSessionTextUnreadable,
   parseSessionAgentError,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -42,6 +43,7 @@ import {
   safeCleanup,
   sh,
   shAsync,
+  summarizeGatewayRequests,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -393,6 +395,8 @@ function readRewardFile(containerName) {
 }
 
 let gatewayProxy = null;
+const gatewayDiagnosticLog = [];
+let currentGatewayTaskId;
 
 /**
  * Starts the pinning sidecar on the sandbox VM. pi runs inside the task
@@ -416,6 +420,14 @@ async function startGatewayProxy() {
       if (!resolvedSystemPrompt && event.systemPrompt) resolvedSystemPrompt = event.systemPrompt;
       if (event.only?.length) pinWasApplied = true;
     },
+    onDiagnostic: (event) => {
+      const correlated = {
+        ...(currentGatewayTaskId ? { task_id: currentGatewayTaskId } : {}),
+        ...event,
+      };
+      gatewayDiagnosticLog.push(correlated);
+      log(`gateway-proxy ${JSON.stringify(correlated)}`);
+    },
   });
   await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
   log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER || "(nothing)"}`);
@@ -426,6 +438,8 @@ async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
   const tempDirs = [];
+  const gatewayDiagnosticStart = gatewayDiagnosticLog.length;
+  currentGatewayTaskId = task.id;
 
   try {
     queueEvent("task.started", { task_id: task.id, index });
@@ -541,6 +555,19 @@ async function runOneTask(task, index, systemPrompt) {
     const agentDurationS = (agentFinishedAt - taskStart) / 1000;
 
     const sessionText = extractNewestSessionJsonl(containerName);
+    const piCorrelation = parsePiCorrelation(sessionText, piStdout.toString("utf8"));
+    const taskGatewayDiagnostics = gatewayDiagnosticLog.slice(gatewayDiagnosticStart);
+    const proxyRequests = summarizeGatewayRequests(taskGatewayDiagnostics);
+    const gatewayCorrelation = {
+      proxy_requests: proxyRequests,
+      pi_response_ids: piCorrelation.response_ids,
+      pi_retry_events: piCorrelation.retry_events,
+    };
+    log(`gateway-proxy correlation ${JSON.stringify({ task_id: task.id, ...gatewayCorrelation })}`);
+    queueEvent("task.gateway_correlation", {
+      task_id: task.id,
+      ...gatewayCorrelation,
+    });
     const sessionUnreadable = isSessionTextUnreadable(sessionText);
     const parsed = parseSessionCost(sessionText);
     const turns = parsed.turns;
@@ -728,6 +755,7 @@ async function runOneTask(task, index, systemPrompt) {
       trace_blob_url: traceBlobUrl,
     };
   } finally {
+    if (currentGatewayTaskId === task.id) currentGatewayTaskId = undefined;
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its
     // container or temp files (issue #19 finding 5). Each cleanup step is

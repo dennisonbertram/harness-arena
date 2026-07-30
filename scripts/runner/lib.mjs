@@ -91,6 +91,92 @@ export function parseSessionAgentError(jsonlText) {
   };
 }
 
+/**
+ * Correlates sidecar request logs with the identifiers Pi writes to its own
+ * session/stdout traces. The sidecar cannot know Pi's final response id while
+ * a request is being opened, so the runner emits this compact join record
+ * after the task finishes.
+ */
+export function parsePiCorrelation(sessionText, stdoutText) {
+  const responseIds = [];
+  const seenResponseIds = new Set();
+  for (const line of String(sessionText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const responseId = obj?.type === "message" && obj?.message?.role === "assistant" ? obj.message.responseId : undefined;
+    if (typeof responseId === "string" && responseId && !seenResponseIds.has(responseId)) {
+      seenResponseIds.add(responseId);
+      responseIds.push(responseId);
+    }
+  }
+
+  const retryEvents = [];
+  for (const line of String(stdoutText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (obj?.type !== "auto_retry_start") continue;
+    retryEvents.push({
+      type: obj.type,
+      ...(obj.attempt !== undefined ? { attempt: obj.attempt } : {}),
+      ...(obj.maxAttempts !== undefined ? { max_attempts: obj.maxAttempts } : {}),
+      ...(obj.delayMs !== undefined ? { delay_ms: obj.delayMs } : {}),
+      ...(typeof obj.error === "string" ? { error: obj.error } : {}),
+      ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
+      ...(typeof obj.timestamp === "string" ? { timestamp: obj.timestamp } : {}),
+    });
+  }
+  return { response_ids: responseIds, retry_events: retryEvents };
+}
+
+/**
+ * Joins each proxy request to its terminal response diagnostic and keeps the
+ * compact timing/error fields needed to distinguish an upstream rejection,
+ * a first-byte stall, and a mid-stream interruption in persisted run events.
+ */
+export function summarizeGatewayRequests(events) {
+  return events
+    .filter((event) => event.type === "gateway_proxy.request")
+    .map((request) => {
+      const response = events.find(
+        (event) => event.type === "gateway_proxy.response_headers" && event.request_id === request.request_id,
+      );
+      const complete = events.find(
+        (event) => event.type === "gateway_proxy.response_complete" && event.request_id === request.request_id,
+      );
+      const streamError = events.find(
+        (event) => event.type === "gateway_proxy.stream_error" && event.request_id === request.request_id,
+      );
+      const terminal = complete ?? streamError;
+      return {
+        request_id: request.request_id,
+        model: request.model,
+        pinned_provider: request.pinned_provider,
+        request_bytes: request.request_bytes,
+        message_count: request.message_count,
+        tool_count: request.tool_count,
+        status: response?.status,
+        response_id: terminal?.response_id,
+        first_byte_at: terminal?.first_byte_at,
+        last_byte_at: terminal?.last_byte_at,
+        total_bytes: terminal?.total_bytes,
+        chunk_count: terminal?.chunk_count,
+        max_idle_ms: terminal?.max_idle_ms,
+        duration_ms: terminal?.duration_ms,
+        stream_error: streamError?.error,
+      };
+    });
+}
+
 // Distinguishes "session unusable for cost accounting" (no assistant
 // record with a finite, nonnegative cost.total -- whether because the
 // file is missing/empty, every line fails to parse, or it parses fine but

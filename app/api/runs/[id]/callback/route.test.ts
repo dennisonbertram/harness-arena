@@ -134,6 +134,50 @@ describe("POST /api/runs/[id]/callback", () => {
     });
   });
 
+  describe("gateway correlation event", () => {
+    it("accepts and persists the runner's provider-routing evidence", async () => {
+      await storageRef.current.putRun({
+        id: "run-gateway-correlation",
+        submission_id: "sub-gateway-correlation",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-31T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        callbackRequest("run-gateway-correlation", {
+          events: [
+            {
+              ts: "2026-07-31T00:01:00.000Z",
+              type: "task.gateway_correlation",
+              payload: {
+                task_id: "t1",
+                proxy_requests: [
+                  {
+                    request_id: "gw-1",
+                    pinned_provider: "fireworks",
+                    status: 200,
+                    response_id: "gen-1",
+                  },
+                ],
+                pi_response_ids: ["gen-1"],
+                pi_retry_events: [],
+              },
+            },
+          ],
+        }),
+        { params: Promise.resolve({ id: "run-gateway-correlation" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const events = await storageRef.current.listRunEvents("run-gateway-correlation");
+      expect(events.find((event) => event.type === "task.gateway_correlation")?.payload).toMatchObject({
+        task_id: "t1",
+        proxy_requests: [{ pinned_provider: "fireworks", status: 200 }],
+      });
+    });
+  });
+
   describe("status transition table", () => {
     it("allows a direct queued->completed transition (belt-and-suspenders if the running post is lost)", async () => {
       await storageRef.current.putRun({

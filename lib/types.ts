@@ -45,6 +45,11 @@ export const RUN_EVENT_TYPES = [
   // batch -- including the run's status -- whenever the runner emitted it
   // (issue #23 finding A).
   "task.cost_tamper_signal",
+  // Compact, non-secret provider-routing evidence captured by the local
+  // Gateway proxy after each task. Persisting this makes provider failures,
+  // response IDs, retry signals, and stream timing inspectable from the run
+  // event history instead of only from ephemeral sandbox logs.
+  "task.gateway_correlation",
 ] as const;
 
 export const SubmissionSchema = z.object({
