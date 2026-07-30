@@ -44,6 +44,32 @@ export function pinProviders(body, only) {
 }
 
 /**
+ * Translate Pi's Z.AI-specific control into Vercel Gateway's documented
+ * OpenAI Chat Completions reasoning shape.
+ *
+ * Pi emits `thinking: { type: "disabled" }` for a Z.AI model. The Gateway
+ * normalizes reasoning across upstreams through `reasoning.enabled`, so the
+ * raw provider field is not a reliable disable signal once Fireworks (or any
+ * other gateway-routed provider) is selected.
+ */
+export function normalizeZaiReasoning(body) {
+  const type = body?.thinking?.type;
+  if (!body?.model?.startsWith?.("zai/") || (type !== "enabled" && type !== "disabled")) {
+    return body;
+  }
+
+  const withoutThinking = { ...body };
+  delete withoutThinking.thinking;
+  return {
+    ...withoutThinking,
+    reasoning: {
+      ...(body.reasoning ?? {}),
+      enabled: type === "enabled",
+    },
+  };
+}
+
+/**
  * The system prompt pi actually sent, read straight off the wire.
  *
  * A baseline runs vanilla -- no `--system-prompt` -- so pi builds its own
@@ -85,7 +111,8 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       // request shape we did not anticipate.
       body = null;
     }
-    const forwarded = body === null ? raw : JSON.stringify(pinProviders(body, pinned));
+    const forwarded =
+      body === null ? raw : JSON.stringify(pinProviders(normalizeZaiReasoning(body), pinned));
 
     // Pass every header through. An earlier version forwarded only
     // authorization + content-type, which silently dropped things the api
