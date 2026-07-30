@@ -342,6 +342,26 @@ export function gatewayProxyBaseUrl({ host, port }) {
   return `http://${host}:${port}/v1`;
 }
 
+// `models.json` cannot change the transport of a built-in Pi model with a
+// provider-level `api` alone. The model must be explicitly upserted through
+// `models`, and Pi's upsert does not inherit the built-in model's accounting
+// metadata. Preserve the exact metadata shipped by the pinned agentkit rather
+// than silently turning usage cost into $0 or shrinking the context window.
+const OPENAI_COMPATIBLE_ZAI_MODELS = {
+  "zai/glm-5.2": {
+    name: "GLM 5.2",
+    cost: { input: 1.1, output: 3.851, cacheRead: 0.275, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  },
+  "zai/glm-5.2-fast": {
+    name: "GLM 5.2 Fast",
+    cost: { input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  },
+};
+
 /**
  * One real model call through the sidecar, before any task starts.
  *
@@ -453,6 +473,21 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
         compat: { thinkingFormat: "zai" },
       }
     : {};
+  const zaiMetadata = OPENAI_COMPATIBLE_ZAI_MODELS[model];
+  if (model.startsWith("zai/") && !zaiMetadata) {
+    throw new Error(`Missing Pi metadata for OpenAI-compatible model ${model}`);
+  }
+  const models = zaiMetadata
+    ? [
+        {
+          id: model,
+          ...zaiMetadata,
+          api: "openai-completions",
+          reasoning: true,
+          input: ["text"],
+        },
+      ]
+    : undefined;
 
   return JSON.stringify({
     providers: {
@@ -462,6 +497,7 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
           host: "host.docker.internal",
           port: proxyPort,
         }),
+        ...(models ? { models } : {}),
         modelOverrides: { [model]: modelOverride },
       },
     },
