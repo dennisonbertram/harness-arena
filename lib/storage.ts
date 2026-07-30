@@ -190,7 +190,16 @@ export async function fetchJson<T>(url: string): Promise<T> {
 }
 
 function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
-  const url = new URL(blob.url);
+  // `uploadedAt` is present on real Blob list results. Keep the helper
+  // tolerant of older/custom storage adapters that only provide a URL rather
+  // than turning a readable entity into a partial-read failure.
+  if (!blob.uploadedAt) return blob.url;
+  let url: URL;
+  try {
+    url = new URL(blob.url);
+  } catch {
+    return blob.url;
+  }
   const uploadedAt = new Date(blob.uploadedAt).getTime();
   url.searchParams.set("v", Number.isFinite(uploadedAt) ? String(uploadedAt) : String(blob.uploadedAt));
   return url.toString();
@@ -248,7 +257,9 @@ export class BlobStorage implements Storage {
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Submission>(blob.url), 3).catch(() => undefined)),
+      blobs.map((blob) =>
+        withRetry(() => fetchJson<Submission>(versionedBlobUrl(blob)), 3).catch(() => undefined),
+      ),
     );
     const found = results.filter((s): s is Submission => s !== undefined);
     // Fail loud on an incomplete read -- see PartialReadError. Each entry
@@ -271,7 +282,9 @@ export class BlobStorage implements Storage {
   async listCompetitions(): Promise<Competition[]> {
     const blobs = await this.listAllBlobs("competitions/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Competition>(blob.url), 3).catch(() => undefined)),
+      blobs.map((blob) =>
+        withRetry(() => fetchJson<Competition>(versionedBlobUrl(blob)), 3).catch(() => undefined),
+      ),
     );
     const found = results.filter((c): c is Competition => c !== undefined);
     // Fail loud on an incomplete read -- same contract as listSubmissions:
@@ -293,7 +306,7 @@ export class BlobStorage implements Storage {
   async listRuns(): Promise<Run[]> {
     const blobs = await this.listAllBlobs("runs/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Run>(blob.url), 3).catch(() => undefined)),
+      blobs.map((blob) => withRetry(() => fetchJson<Run>(versionedBlobUrl(blob)), 3).catch(() => undefined)),
     );
     const found = results.filter((r): r is Run => r !== undefined);
     // Fail loud on an incomplete read -- a missing run silently changes every
