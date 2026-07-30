@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
+import { reapThresholdMs } from "@/lib/reaper";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
@@ -48,14 +49,14 @@ describe("GET /api/runs", () => {
 
     it("marks a stale running run reaped before returning it, and persists the change", async () => {
       vi.useFakeTimers();
-      // Reap threshold raised to 20 minutes (issue #23 finding F5).
-      vi.setSystemTime(new Date("2026-07-21T00:21:00.000Z"));
+      const createdAt = "2026-07-21T00:00:00.000Z";
+      vi.setSystemTime(new Date(new Date(createdAt).getTime() + reapThresholdMs() + 1000));
       await storageRef.current.putRun({
         id: "run-stale",
         submission_id: "sub-1",
         status: "running",
         task_results: [],
-        created_at: "2026-07-21T00:00:00.000Z",
+        created_at: createdAt,
       });
 
       const response = await GET();

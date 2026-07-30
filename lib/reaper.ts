@@ -1,15 +1,29 @@
 import type { Storage } from "./storage";
+import { buildRunnerTasks } from "./tasks-for-runner";
 import type { Run } from "./types";
 
-// Default raised from 10 to 20 minutes (issue #23 finding F5) once the
-// per-task timeout caps in lib/tasks-for-runner.ts bound worst-case
-// per-task quiet time to ~300+240+setup =~ 10 minutes -- 10 minutes left
-// zero margin. Override via REAP_STALE_MINUTES; read per-call (not cached
-// at module load) so tests/ops can override without a process restart.
-const DEFAULT_REAP_STALE_MINUTES = 20;
+const REAP_SAFETY_MARGIN_MINUTES = 10;
+const REAP_WINDOW_ROUNDING_MINUTES = 10;
 
-function reapThresholdMs(): number {
-  const minutes = Number(process.env.REAP_STALE_MINUTES ?? DEFAULT_REAP_STALE_MINUTES);
+// A healthy runner emits no events between task.started and the end of the
+// agent/verifier stages. Derive the stale window from the longest task instead
+// of maintaining a second hand-written timeout that can drift below it.
+function defaultReapStaleMinutes(): number {
+  const maxQuietSeconds = Math.max(
+    0,
+    ...buildRunnerTasks().map((task) => task.agent_timeout_sec + task.verifier_timeout_sec),
+  );
+  const requiredMinutes = maxQuietSeconds / 60 + REAP_SAFETY_MARGIN_MINUTES;
+  return (
+    Math.ceil(requiredMinutes / REAP_WINDOW_ROUNDING_MINUTES) *
+    REAP_WINDOW_ROUNDING_MINUTES
+  );
+}
+
+export function reapThresholdMs(): number {
+  const fallbackMinutes = defaultReapStaleMinutes();
+  const configured = Number(process.env.REAP_STALE_MINUTES ?? fallbackMinutes);
+  const minutes = Number.isFinite(configured) && configured > 0 ? configured : fallbackMinutes;
   return minutes * 60 * 1000;
 }
 
@@ -70,9 +84,10 @@ export async function reapIfStale(storage: Storage, run: Run, now: number = Date
   if (!shouldReap(run, lastEventTs, now)) return run;
   // ponytail: read-then-write is not atomic — a runner callback that lands
   // between the freshness check and putRun could be overwritten. Bounded in
-  // practice: the 20-min threshold far exceeds the max per-task quiet period,
-  // so a run this stale has almost certainly stopped emitting. Move to a CAS/
-  // conditional write if concurrent writers ever become real.
+  // practice: the task-derived threshold exceeds the max per-task quiet period
+  // with an additional safety margin, so a run this stale has almost certainly
+  // stopped emitting. Move to a CAS/conditional write if concurrent writers
+  // ever become real.
 
   const reaped: Run = { ...run, status: "reaped", finished_at: new Date(now).toISOString() };
   await storage.putRun(reaped);

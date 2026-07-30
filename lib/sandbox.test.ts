@@ -130,12 +130,12 @@ describe("createRunSandbox", () => {
   });
 
   it("uses RUNNER_SANDBOX_TIMEOUT_MIN when it is longer than the task-derived floor", async () => {
-    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "240";
+    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "720";
     mockCreate.mockResolvedValue(makeSandbox());
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 240 * 60 * 1000 }));
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 720 * 60 * 1000 }));
   });
 
   it("never accepts a sandbox timeout shorter than the full task timeout budget", async () => {
