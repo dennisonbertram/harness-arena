@@ -36,7 +36,7 @@ function legacySubmission(id: string, overrides: Partial<Submission> = {}): Subm
 }
 
 describe("backfillCompetition", () => {
-  it("creates the Harness Arena / Pi / GLM 5.2 Fast competition pinned to Wafer", async () => {
+  it("creates the Harness Arena / Pi / GLM 5.2 Fast competition pinned to Fireworks", async () => {
     const storage = new MemoryStorage();
 
     const result = await backfillCompetition(storage);
@@ -47,7 +47,7 @@ describe("backfillCompetition", () => {
       arena: "harness-arena",
       harness: "pi",
       model: "zai/glm-5.2-fast",
-      gateway_provider: "wafer",
+      gateway_provider: "fireworks",
       status: "live",
       prize_amount_usd: null,
       prize_cadence: null,
