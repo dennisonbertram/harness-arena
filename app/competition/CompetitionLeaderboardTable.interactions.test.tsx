@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+
+const push = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push }) }));
+
 import { CompetitionLeaderboardTable } from "./CompetitionLeaderboardTable";
 import type { CompetitionRow } from "@/lib/competition-leaderboard";
 
@@ -21,12 +25,16 @@ function row(overrides: Partial<CompetitionRow> = {}): CompetitionRow {
   };
 }
 
+beforeEach(() => {
+  push.mockReset();
+});
+
 afterEach(() => {
   cleanup();
 });
 
 describe("CompetitionLeaderboardTable interactions", () => {
-  it("opens the entry detail dialog for that row when a row is clicked, and moves focus to its close button", async () => {
+  it("navigates straight to an entrant's run when its row is clicked", async () => {
     const user = userEvent.setup();
     render(
       <CompetitionLeaderboardTable
@@ -35,139 +43,45 @@ describe("CompetitionLeaderboardTable interactions", () => {
       />,
     );
 
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
     await user.click(screen.getByRole("row", { name: /octocat/ }));
 
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("octocat");
-    expect(screen.getByRole("link", { name: /View full run/ })).toHaveAttribute("href", "/runs/run-a");
-    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    expect(push).toHaveBeenCalledWith("/runs/run-a");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("opens the dialog for the correct row when multiple rows are present", async () => {
+  it("navigates straight to the baseline run when its row is clicked", async () => {
     const user = userEvent.setup();
     render(
       <CompetitionLeaderboardTable
-        ranked={[
-          row({ submissionId: "a", githubLogin: "octocat" }),
-          row({ submissionId: "b", githubLogin: "hubot" }),
-        ]}
+        ranked={[]}
+        baselineRow={row({ submissionId: "baseline", runId: "baseline-run", githubLogin: "unknown" })}
         currentGithubLogin={undefined}
       />,
     );
 
-    await user.click(screen.getByRole("row", { name: /hubot/ }));
+    await user.click(screen.getByRole("row", { name: /baseline/i }));
 
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("hubot");
-    expect(dialog).not.toHaveTextContent("octocat");
+    expect(push).toHaveBeenCalledWith("/runs/baseline-run");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  // These three use fireEvent.keyDown rather than userEvent.keyboard: this
-  // <tr> is focusable only via an explicit tabIndex (not a native
-  // interactive element), and userEvent's raw dispatch to it doesn't route
-  // through React's synthetic event delegation under this
-  // React 19 + jsdom + user-event combination (confirmed by comparing
-  // against a native-listener probe -- the DOM event fires and bubbles,
-  // but React's handler isn't invoked). fireEvent.keyDown goes through
-  // Testing Library's React act()-wrapped dispatch and does reach it, which
-  // is what the click- and Escape-driven tests above already prove works
-  // for this same handler wiring.
-  it("opens the dialog when Enter is pressed on a focused row", () => {
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
+  it("navigates on Enter or Space and prevents Space from scrolling", () => {
+    render(<CompetitionLeaderboardTable ranked={[row({ runId: "keyboard-run" })]} currentGithubLogin={undefined} />);
+    const entry = screen.getByRole("row", { name: /octocat/ });
 
-    fireEvent.keyDown(screen.getByRole("row", { name: /octocat/ }), { key: "Enter" });
+    fireEvent.keyDown(entry, { key: "Enter" });
+    const notCancelled = fireEvent.keyDown(entry, { key: " " });
 
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-  });
-
-  it("opens the dialog when Space is pressed on a focused row, and prevents the page-scroll default", () => {
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    // fireEvent's keyDown helper returns the raw dispatchEvent() result,
-    // which is false when the handler called preventDefault().
-    const notCancelled = fireEvent.keyDown(screen.getByRole("row", { name: /octocat/ }), { key: " " });
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(push).toHaveBeenNthCalledWith(1, "/runs/keyboard-run");
+    expect(push).toHaveBeenNthCalledWith(2, "/runs/keyboard-run");
     expect(notCancelled).toBe(false);
   });
 
-  it("does not open the dialog for an unrelated key", () => {
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
+  it("does not navigate for an unrelated key", () => {
+    render(<CompetitionLeaderboardTable ranked={[row()]} currentGithubLogin={undefined} />);
 
     fireEvent.keyDown(screen.getByRole("row", { name: /octocat/ }), { key: "a" });
 
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  });
-
-  it("closes on Escape and returns focus to the row that opened it", async () => {
-    const user = userEvent.setup();
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    const triggerRow = screen.getByRole("row", { name: /octocat/ });
-    await user.click(triggerRow);
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
-
-    await user.keyboard("{Escape}");
-
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(triggerRow).toHaveFocus();
-  });
-
-  it("ignores a non-Escape key while the dialog is open", async () => {
-    const user = userEvent.setup();
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    await user.click(screen.getByRole("row", { name: /octocat/ }));
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
-
-    await user.keyboard("x");
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-  });
-
-  it("closes when the backdrop is clicked directly, and returns focus to the triggering row", async () => {
-    const user = userEvent.setup();
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    const triggerRow = screen.getByRole("row", { name: /octocat/ });
-    await user.click(triggerRow);
-    const dialog = await screen.findByRole("dialog");
-
-    // Click the backdrop itself, not the inner card -- this is the element
-    // the closeModal onClick handler lives on.
-    await user.click(dialog);
-
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(triggerRow).toHaveFocus();
-  });
-
-  it("does not close when a click inside the dialog card is stopped from propagating to the backdrop", async () => {
-    const user = userEvent.setup();
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    await user.click(screen.getByRole("row", { name: /octocat/ }));
-    await screen.findByRole("dialog");
-
-    // The heading is inside the inner card, whose onClick calls
-    // stopPropagation so the backdrop's closeModal handler never fires.
-    await user.click(screen.getByRole("heading", { name: "octocat" }));
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-  });
-
-  it("closes via the explicit Close button", async () => {
-    const user = userEvent.setup();
-    render(<CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />);
-
-    const triggerRow = screen.getByRole("row", { name: /octocat/ });
-    await user.click(triggerRow);
-    await screen.findByRole("dialog");
-
-    await user.click(screen.getByRole("button", { name: "Close" }));
-
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(triggerRow).toHaveFocus();
+    expect(push).not.toHaveBeenCalled();
   });
 });

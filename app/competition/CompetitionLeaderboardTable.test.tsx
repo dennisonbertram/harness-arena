@@ -1,5 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 import { CompetitionLeaderboardTable } from "./CompetitionLeaderboardTable";
 import type { CompetitionRow } from "@/lib/competition-leaderboard";
 

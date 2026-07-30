@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { formatUsd } from "@/lib/format";
 import type { CompetitionRow } from "@/lib/competition-leaderboard";
 import { GithubAvatar } from "../GithubAvatar";
@@ -16,15 +15,6 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
 });
-const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "UTC",
-  year: "numeric",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-});
-
 function RankLabel({ rank, tied, prefix = "#" }: { rank: number; tied: boolean; prefix?: string }) {
   return (
     <>
@@ -50,33 +40,14 @@ export function CompetitionLeaderboardTable({
   /** Drives the provider logomark on the baseline row. */
   baselineModel?: string;
 }) {
-  const [openRow, setOpenRow] = useState<CompetitionRow | null>(null);
-  const triggerRef = useRef<HTMLTableRowElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const router = useRouter();
 
-  function openModal(row: CompetitionRow, trigger: HTMLTableRowElement) {
-    triggerRef.current = trigger;
-    setOpenRow(row);
+  function visitRun(runId: string) {
+    router.push(`/runs/${runId}`);
   }
-
-  function closeModal() {
-    setOpenRow(null);
-    triggerRef.current?.focus();
-  }
-
-  useEffect(() => {
-    if (!openRow) return;
-    closeButtonRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeModal();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [openRow]);
 
   return (
-    <>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
             {!rankless && <th className="label" style={cellStyle}>Rank</th>}
@@ -93,11 +64,11 @@ export function CompetitionLeaderboardTable({
                 key={row.submissionId}
                 className="clickable-row"
                 tabIndex={0}
-                onClick={(e) => openModal(row, e.currentTarget)}
+                onClick={() => visitRun(row.runId)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     if (e.key === " ") e.preventDefault();
-                    openModal(row, e.currentTarget);
+                    visitRun(row.runId);
                   }
                 }}
                 style={{
@@ -135,6 +106,15 @@ export function CompetitionLeaderboardTable({
             // so the cutoff is visible rather than implied. It has no
             // submitting user, hence the label instead of a login and avatar.
             <tr
+              className="clickable-row"
+              tabIndex={0}
+              onClick={() => visitRun(baselineRow.runId)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  if (e.key === " ") e.preventDefault();
+                  visitRun(baselineRow.runId);
+                }
+              }}
               style={{
                 borderTop: "2px solid var(--gray-alpha-400)",
                 borderBottom: "1px solid var(--gray-alpha-400)",
@@ -162,78 +142,6 @@ export function CompetitionLeaderboardTable({
             </tr>
           )}
         </tbody>
-      </table>
-
-      {openRow && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="competition-entry-modal-heading"
-          onClick={closeModal}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.6)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 24,
-            zIndex: 50,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "var(--background-100)",
-              border: "1px solid var(--gray-alpha-400)",
-              borderRadius: 12,
-              maxWidth: 420,
-              width: "100%",
-              padding: 20,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <span style={{ display: "inline-flex", alignItems: "center" }}>
-                <GithubAvatar githubLogin={openRow.githubLogin} />
-                <h3 id="competition-entry-modal-heading" className="mono" style={{ fontSize: 16, fontWeight: 600 }}>
-                  {openRow.githubLogin}
-                </h3>
-              </span>
-              <button
-                ref={closeButtonRef}
-                type="button"
-                onClick={closeModal}
-                aria-label="Close"
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  color: "var(--gray-900)",
-                  fontSize: 18,
-                  cursor: "pointer",
-                  lineHeight: 1,
-                }}
-              >
-                ✕
-              </button>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
-              <div>
-                <RankLabel rank={openRow.rank} tied={openRow.tied} prefix="Rank #" />
-              </div>
-              <div className="tabular-nums">
-                {openRow.tasksPassed}/{openRow.totalTasks} tasks solved
-              </div>
-              <div className="tabular-nums">{formatUsd(openRow.totalCostUsd)}</div>
-              <div style={{ color: "var(--gray-700)" }}>
-                Submitted {dateTimeFormatter.format(new Date(openRow.submittedAt))}
-              </div>
-              <Link href={`/runs/${openRow.runId}`} style={{ color: "var(--blue-700)", marginTop: 8 }}>
-                View full run →
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    </table>
   );
 }
