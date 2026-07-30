@@ -347,7 +347,12 @@ export async function preflightProxy({
           "content-type": "application/json",
           "anthropic-version": "2023-06-01",
         },
-        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+        body: JSON.stringify({
+          model,
+          max_tokens: 1,
+          stream: true,
+          messages: [{ role: "user", content: "ping" }],
+        }),
         signal: controller.signal,
       });
       // `fetch()` resolves once response headers arrive. The gateway can

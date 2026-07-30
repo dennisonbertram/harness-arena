@@ -363,6 +363,10 @@ describe("preflightProxy", () => {
     expect(result.ok).toBe(true);
     // Must exercise the sidecar, not the gateway -- otherwise it proves nothing.
     expect(calls[0].url).toContain("127.0.0.1:4599");
+    // pi asks for SSE streaming. A provider can answer a non-streaming ping
+    // while hanging forever on pi's real request shape, so preflight must
+    // exercise the same mode.
+    expect(JSON.parse(calls[0].init.body).stream).toBe(true);
   });
 
   it("fails with the upstream status and body when the call is rejected", async () => {
