@@ -33,6 +33,7 @@ import {
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
+  parseSessionAgentError,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -623,6 +624,37 @@ async function runOneTask(task, index, systemPrompt) {
         turns,
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_timeout",
+        error,
+      };
+    }
+
+    // Pi exits 0 when its provider stream fails and records the real failure
+    // only in the terminal assistant session record. Do not run the verifier
+    // against an untouched workspace and mislabel that as a test failure.
+    const agentError = parseSessionAgentError(sessionText);
+    if (agentError) {
+      const error =
+        `${agentError.error} ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: agentError.stage,
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        trace_blob_url: traceBlobUrl,
+        failure_stage: agentError.stage,
         error,
       };
     }

@@ -48,6 +48,39 @@ export function parseSessionCost(jsonlText) {
   return { totalCost, turns, negativeCostCount, validCostCount };
 }
 
+/**
+ * Returns Pi's terminal assistant/provider error, if the session ended on one.
+ *
+ * Pi exits 0 after a provider stream idle timeout and records the failure only
+ * in session JSONL (`stopReason:"error"`). Without inspecting that record the
+ * runner verifies an untouched workspace and reports "tests failed", hiding
+ * the infrastructure error that actually caused the failure.
+ */
+export function parseSessionAgentError(jsonlText) {
+  let lastAssistant;
+  for (const line of String(jsonlText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (obj?.type === "message" && obj?.message?.role === "assistant") {
+      lastAssistant = obj.message;
+    }
+  }
+  if (lastAssistant?.stopReason !== "error") return undefined;
+  const error =
+    typeof lastAssistant.errorMessage === "string" && lastAssistant.errorMessage.trim()
+      ? lastAssistant.errorMessage.trim()
+      : "Provider request failed.";
+  return {
+    stage: /timed?\s*out|timeout/i.test(error) ? "provider_timeout" : "provider_error",
+    error,
+  };
+}
+
 // Distinguishes "session unusable for cost accounting" (no assistant
 // record with a finite, nonnegative cost.total -- whether because the
 // file is missing/empty, every line fails to parse, or it parses fine but
