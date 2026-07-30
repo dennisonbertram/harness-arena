@@ -55,12 +55,9 @@ export function pinProviders(body, only) {
  * ~/.nvm/... paths. The request body is ground truth and cannot drift.
  */
 export function systemPromptOf(body) {
-  // pi speaks the ANTHROPIC MESSAGES api, not OpenAI chat completions --
-  // verified from pi's own output ("api":"anthropic-messages") and the path it
-  // opens against this sidecar (/v1/messages). That api puts the system prompt
-  // in a top-level `system` field, so it is checked first. The messages[] form
-  // is kept as a fallback in case a model is ever routed over an
-  // OpenAI-compatible api instead.
+  // Keep both shapes: the current GLM route is deliberately forced through
+  // OpenAI chat completions, while other models or historical traces may use
+  // Anthropic Messages with a top-level `system` field.
   const fromTopLevel = textOf(body?.system);
   if (fromTopLevel) return fromTopLevel;
   return textOf(body?.messages?.find?.((m) => m?.role === "system")?.content);

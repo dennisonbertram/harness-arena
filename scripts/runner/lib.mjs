@@ -301,13 +301,12 @@ export function buildModelsConfig(maxOutputTokens) {
  * completes, just unpinned -- so nothing surfaced it.
  */
 export const PI_MODELS_CONFIG_PATH = "/root/.pi/agent/models.json";
-const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
+const OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions";
 
-// Pi's Anthropic client owns the API path and appends /v1/messages to the
-// configured baseUrl. Keep the sidecar value as an origin only: adding /v1
-// here makes pi request /v1/v1/messages.
+// Pi's OpenAI-compatible client appends /chat/completions to a base URL that
+// already includes /v1, matching the gateway's documented endpoint.
 export function gatewayProxyBaseUrl({ host, port }) {
-  return `http://${host}:${port}`;
+  return `http://${host}:${port}/v1`;
 }
 
 /**
@@ -349,13 +348,12 @@ export async function preflightProxy({
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const response = await fetchImpl(
-        `${gatewayProxyBaseUrl({ host: "127.0.0.1", port })}${ANTHROPIC_MESSAGES_PATH}`,
+        `${gatewayProxyBaseUrl({ host: "127.0.0.1", port })}${OPENAI_CHAT_COMPLETIONS_PATH}`,
         {
           method: "POST",
           headers: {
             authorization: `Bearer ${apiKey}`,
             "content-type": "application/json",
-            "anthropic-version": "2023-06-01",
           },
           body: JSON.stringify({
             model,
@@ -406,9 +404,10 @@ export function resolvePinnedProvider({ configured, applied }) {
  *
  * pi cannot add arbitrary body fields, so it cannot send the gateway's
  * `providerOptions.gateway.only` itself. It CAN point a provider at a
- * different baseUrl, so we send it to the local proxy origin, which injects
- * the pin and forwards. Pi appends its own `/v1/messages` path. See
- * scripts/runner/gateway-proxy.mjs for why this matters.
+ * different baseUrl, so we send it to the local proxy's `/v1` endpoint, which
+ * injects the pin and forwards. GLM is forced onto Pi's OpenAI-compatible
+ * transport because the Anthropic Messages stream repeatedly produced zero
+ * agent turns across providers in production. See gateway-proxy.mjs.
  *
  * `host.docker.internal` resolves via the --add-host=host-gateway mapping the
  * runner adds to `docker run`: pi executes inside the task container, and the
@@ -418,6 +417,7 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
   return JSON.stringify({
     providers: {
       "vercel-ai-gateway": {
+        api: "openai-completions",
         baseUrl: gatewayProxyBaseUrl({
           host: "host.docker.internal",
           port: proxyPort,

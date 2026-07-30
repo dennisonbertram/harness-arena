@@ -149,15 +149,17 @@ describe("gateway proxy", () => {
 import { buildPinnedModelsConfig } from "./lib.mjs";
 
 describe("buildPinnedModelsConfig", () => {
-  it("gives pi the sidecar origin without duplicating its /v1/messages path", () => {
+  it("forces GLM through Pi's OpenAI-compatible transport and its chat-completions path", () => {
     const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model: "zai/glm-5.2" }));
 
     // host.docker.internal, not localhost: pi runs inside the task container
-    // while the proxy runs on the sandbox VM outside it. Pi's Anthropic client
-    // appends /v1/messages itself; including /v1 here produced
-    // /v1/v1/messages in production.
-    const piRequestUrl = `${cfg.providers["vercel-ai-gateway"].baseUrl}/v1/messages`;
-    expect(piRequestUrl).toBe("http://host.docker.internal:4599/v1/messages");
+    // while the proxy runs on the sandbox VM outside it. The gateway's GLM
+    // route is OpenAI-compatible; forcing it avoids the Anthropic stream path
+    // that repeatedly produced zero Pi turns in production.
+    const provider = cfg.providers["vercel-ai-gateway"];
+    expect(provider.api).toBe("openai-completions");
+    const piRequestUrl = `${provider.baseUrl}/chat/completions`;
+    expect(piRequestUrl).toBe("http://host.docker.internal:4599/v1/chat/completions");
   });
 
   it("names the run's own model so the override applies to it", () => {
@@ -365,11 +367,12 @@ describe("preflightProxy", () => {
 
     expect(result.ok).toBe(true);
     // Must exercise the sidecar, not the gateway -- otherwise it proves nothing.
-    expect(calls[0].url).toContain("127.0.0.1:4599");
+    expect(calls[0].url).toBe("http://127.0.0.1:4599/v1/chat/completions");
     // pi asks for SSE streaming. A provider can answer a non-streaming ping
     // while hanging forever on pi's real request shape, so preflight must
     // exercise the same mode.
     expect(JSON.parse(calls[0].init.body).stream).toBe(true);
+    expect(calls[0].init.headers["anthropic-version"]).toBeUndefined();
   });
 
   it("fails with the upstream status and body when the call is rejected", async () => {
