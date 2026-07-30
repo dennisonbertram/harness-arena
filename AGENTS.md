@@ -4,6 +4,34 @@
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
 
+# Use Vercel CLI for production evidence
+
+For every task involving Vercel production or preview behavior — deployments,
+runtime failures, missing or stale data, AI Gateway/provider behavior, slow
+requests, or a discrepancy between local and hosted behavior — use the Vercel
+CLI early as a mandatory evidence source. Do not rely only on the dashboard,
+browser symptoms, repository inference, or application APIs.
+
+At minimum:
+
+1. Identify the deployment actually serving the target hostname with
+   `vercel ls` and/or `vercel inspect`.
+2. Query runtime logs with `vercel logs`, using the relevant deployment,
+   environment, time range, status code, level, request ID, or text filters.
+3. After a fix is deployed, repeat the CLI checks against the new production
+   deployment and confirm both the expected requests and the absence of the
+   original errors.
+4. State which facts came from Vercel and which could not. Vercel runtime logs
+   only contain platform metadata and output the application emitted; request
+   bodies, prompt sizes, proxy translations, and provider responses require
+   structured application logging if they are not exposed by a documented
+   Vercel API.
+
+Use the authenticated Vercel REST API or SDK when it provides information the
+CLI cannot query directly. Never print or commit Vercel tokens. If CLI/API
+access is unavailable, report the exact authentication or permission blocker
+instead of silently proceeding without production evidence.
+
 # Regression tests come first
 
 **Before writing any new feature, write the test that would have caught the
