@@ -76,6 +76,27 @@ describe("gateway proxy", () => {
     expect(upstream.received[0].auth).toBe("Bearer k");
   });
 
+  it("translates Pi's Z.AI thinking-off marker into the Gateway reasoning contract", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["fireworks"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "zai/glm-5.2-fast",
+        messages: [],
+        thinking: { type: "disabled" },
+      }),
+    });
+
+    // Vercel's OpenAI-compatible API normalizes provider reasoning through
+    // `reasoning.enabled`. A raw Z.AI `thinking` object is not that contract
+    // and was silently leaving provider-default thinking enabled.
+    expect(upstream.received[0].body.reasoning).toEqual({ enabled: false });
+    expect(upstream.received[0].body).not.toHaveProperty("thinking");
+  });
+
   // generationId used to be read here, which required buffering the whole
   // upstream response. That buffering is what broke streaming, and the id was
   // never wired up to anything (see docs/provider-pinning.md). Reporting now
