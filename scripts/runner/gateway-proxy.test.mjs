@@ -97,6 +97,27 @@ describe("gateway proxy", () => {
     expect(upstream.received[0].body).not.toHaveProperty("thinking");
   });
 
+  it("enforces GLM Fast's completion ceiling on the request that reaches the Gateway", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["fireworks"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "zai/glm-5.2-fast",
+        messages: [],
+        max_tokens: 128_000,
+      }),
+    });
+
+    // The model definition is useful client metadata, but the proxy is the
+    // authoritative last hop. This assertion inspects the exact body sent to
+    // Vercel AI Gateway so a Pi compatibility path cannot silently bypass the
+    // ceiling again.
+    expect(upstream.received[0].body.max_tokens).toBe(8_192);
+  });
+
   // generationId used to be read here, which required buffering the whole
   // upstream response. That buffering is what broke streaming, and the id was
   // never wired up to anything (see docs/provider-pinning.md). Reporting now
@@ -167,7 +188,7 @@ describe("gateway proxy", () => {
   });
 });
 
-import { buildPinnedModelsConfig } from "./lib.mjs";
+import { buildPiSettings, buildPinnedModelsConfig, PI_SETTINGS_CONFIG_PATH } from "./lib.mjs";
 
 describe("buildPinnedModelsConfig", () => {
   it("forces GLM through Pi's OpenAI-compatible transport and its chat-completions path", () => {
@@ -233,6 +254,24 @@ describe("buildPinnedModelsConfig", () => {
     // Pi's 128K metadata ceiling in place allowed one turn to run until the
     // runner's five-minute task timeout.
     expect(definition.maxTokens).toBe(8_192);
+  });
+});
+
+describe("Pi provider timeout settings", () => {
+  it("fails a silent provider stream in one minute instead of consuming the whole task timeout", () => {
+    expect(PI_SETTINGS_CONFIG_PATH).toBe("/root/.pi/agent/settings.json");
+    expect(JSON.parse(buildPiSettings({ model: "zai/glm-5.2-fast" }))).toMatchObject({
+      httpIdleTimeoutMs: 60_000,
+      retry: {
+        enabled: true,
+        maxRetries: 0,
+        provider: { maxRetries: 0 },
+      },
+    });
+  });
+
+  it("leaves models without production stall evidence on Pi's defaults", () => {
+    expect(buildPiSettings({ model: "zai/glm-5.2" })).toBeUndefined();
   });
 });
 

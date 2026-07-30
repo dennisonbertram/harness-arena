@@ -549,7 +549,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     });
   });
 
-  it("reads entity JSON through an exact public blob URL, including a missing blob", async () => {
+  it("reads entity JSON through the exact listed pathname, including a missing blob", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://blob.example/runs/run-1.json";
@@ -559,21 +559,38 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
         hasMore: false,
       } as never)
       .mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
-    const fetchSpy = vi.fn().mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify(run),
+    vi.mocked(get).mockResolvedValueOnce({
+      statusCode: 200,
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+          controller.close();
+        },
+      }),
+      headers: new Headers(),
+      blob: {
+        url,
+        downloadUrl: `${url}?download=1`,
+        pathname: "runs/run-1.json",
+        contentType: "application/json",
+        contentDisposition: 'inline; filename="run-1.json"',
+        cacheControl: "public, max-age=0",
+        uploadedAt: new Date("2026-07-21T00:00:00.000Z"),
+        size: 1,
+        etag: "etag-1",
+      },
     } as never);
+    const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
 
     expect(await storage.getRun("run-1")).toEqual(run);
     expect(await storage.getSubmission("missing")).toBeUndefined();
-    expect(get).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining(`${url}?v=`), { cache: "no-store" });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("fetches an entity's versioned public URL without SDK get(), which can 403 even for full URLs", async () => {
+  it("falls back to the versioned public URL when the authenticated Blob read fails", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
@@ -591,10 +608,54 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/store-id\.public\.blob\.vercel-storage\.com\/runs\/run-1\.json\?v=\d+$/), {
       cache: "no-store",
     });
+  });
+
+  it("uses the authenticated Blob read without first waiting on a rate-limited public URL", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
+
+    vi.mocked(list).mockResolvedValue({
+      blobs: [{ url, pathname: "runs/run-1.json", uploadedAt: "2026-07-30T18:15:02.000Z" }],
+      hasMore: false,
+    } as never);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => "<!DOCTYPE html><html>Forbidden</html>",
+      }),
+    );
+    vi.mocked(get).mockResolvedValue({
+      statusCode: 200,
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+          controller.close();
+        },
+      }),
+      headers: new Headers(),
+      blob: {
+        url,
+        downloadUrl: `${url}?download=1`,
+        pathname: "runs/run-1.json",
+        contentType: "application/json",
+        contentDisposition: 'inline; filename="run-1.json"',
+        cacheControl: "public, max-age=0",
+        uploadedAt: new Date("2026-07-30T18:15:02.000Z"),
+        size: 1,
+        etag: "etag-1",
+      },
+    } as never);
+
+    await expect(storage.getRun("run-1")).resolves.toEqual(run);
+    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("listRuns fetches each overwritten entity through its uploadedAt version, not a stale edge-cached URL", async () => {
@@ -618,6 +679,54 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       `${url}?v=${new Date("2026-07-30T16:31:36.833Z").getTime()}`,
       { cache: "no-store" },
     );
+  });
+
+  it("bounds concurrent entity reads so a list page cannot rate-limit its own Blob store", async () => {
+    const storage = new BlobStorage();
+    const count = 24;
+    let active = 0;
+    let peak = 0;
+    vi.mocked(list).mockResolvedValue({
+      blobs: Array.from({ length: count }, (_, i) => ({
+        url: `https://blob.example/runs/run-${i}.json`,
+        pathname: `runs/run-${i}.json`,
+        uploadedAt: "2026-07-30T18:15:02.000Z",
+      })),
+      hasMore: false,
+    } as never);
+    vi.mocked(get).mockImplementation(async (pathname) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      const id = /runs\/(.+)\.json$/.exec(String(pathname))![1];
+      const run = makeRun(id, "2026-07-21T00:00:00.000Z");
+      const url = `https://blob.example/${pathname}`;
+      return {
+        statusCode: 200,
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+            controller.close();
+          },
+        }),
+        headers: new Headers(),
+        blob: {
+          url,
+          downloadUrl: `${url}?download=1`,
+          pathname: String(pathname),
+          contentType: "application/json",
+          contentDisposition: "inline",
+          cacheControl: "public, max-age=0",
+          uploadedAt: new Date("2026-07-30T18:15:02.000Z"),
+          size: 1,
+          etag: `etag-${id}`,
+        },
+      } as never;
+    });
+
+    await expect(storage.listRuns()).resolves.toHaveLength(count);
+    expect(peak).toBeLessThanOrEqual(8);
   });
 
   it("stores trace data and returns raw trace bytes, or null when the trace is absent", async () => {

@@ -70,6 +70,26 @@ export function normalizeZaiReasoning(body) {
 }
 
 /**
+ * Enforce GLM Fast's per-turn completion ceiling at the last hop before the
+ * Gateway. Pi's model metadata should already emit the same value, but the
+ * proxy body is the request Vercel actually receives and is therefore the
+ * authoritative boundary.
+ */
+export function boundCompletionTokens(body) {
+  if (body?.model !== "zai/glm-5.2-fast") return body;
+  const ceiling = 8_192;
+  const field = Object.hasOwn(body, "max_completion_tokens") ? "max_completion_tokens" : "max_tokens";
+  const requested = body[field];
+  return {
+    ...body,
+    [field]:
+      typeof requested === "number" && Number.isFinite(requested) && requested >= 0
+        ? Math.min(requested, ceiling)
+        : ceiling,
+  };
+}
+
+/**
  * The system prompt pi actually sent, read straight off the wire.
  *
  * A baseline runs vanilla -- no `--system-prompt` -- so pi builds its own
@@ -112,7 +132,9 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       body = null;
     }
     const forwarded =
-      body === null ? raw : JSON.stringify(pinProviders(normalizeZaiReasoning(body), pinned));
+      body === null
+        ? raw
+        : JSON.stringify(pinProviders(boundCompletionTokens(normalizeZaiReasoning(body)), pinned));
 
     // Pass every header through. An earlier version forwarded only
     // authorization + content-type, which silently dropped things the api

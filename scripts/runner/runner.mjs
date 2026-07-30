@@ -20,10 +20,12 @@ import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   budgetExceeded,
+  buildPiSettings,
   buildContainerName,
   buildPiCommand,
   buildPinnedModelsConfig,
   PI_MODELS_CONFIG_PATH,
+  PI_SETTINGS_CONFIG_PATH,
   preflightProxy,
   resolvePinnedProvider,
   computeTotals,
@@ -459,6 +461,14 @@ async function runOneTask(task, index, systemPrompt) {
       // the agent/ directory does not exist in a bare container.
       sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", path.posix.dirname(PI_MODELS_CONFIG_PATH)]);
       sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:${PI_MODELS_CONFIG_PATH}`]);
+
+      const settings = buildPiSettings({ model: RUNNER_MODEL });
+      if (settings) {
+        const settingsFile = path.join(os.tmpdir(), `settings-${RUN_ID}-${index}.json`);
+        writeFileSync(settingsFile, settings);
+        tempDirs.push(settingsFile);
+        sh(DOCKER_CMD, ["cp", settingsFile, `${containerName}:${PI_SETTINGS_CONFIG_PATH}`]);
+      }
     }
 
     if (PI_INSTALL_MODE === "agentkit") {
