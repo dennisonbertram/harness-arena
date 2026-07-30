@@ -334,7 +334,27 @@ export function buildModelsConfig(maxOutputTokens) {
  * completes, just unpinned -- so nothing surfaced it.
  */
 export const PI_MODELS_CONFIG_PATH = "/root/.pi/agent/models.json";
+export const PI_SETTINGS_CONFIG_PATH = "/root/.pi/agent/settings.json";
 const OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions";
+
+/**
+ * Pi's default HTTP idle timeout is 300 seconds: exactly the runner's entire
+ * task deadline. A Fireworks stream that never produces a first token
+ * therefore looks like an agent timeout and consumes five minutes. Apply the
+ * shorter fail-fast window only to the Fast route for which production
+ * demonstrated this failure; leave other models on Pi's native defaults.
+ */
+export function buildPiSettings({ model } = {}) {
+  if (model !== "zai/glm-5.2-fast") return undefined;
+  return JSON.stringify({
+    httpIdleTimeoutMs: 60_000,
+    retry: {
+      enabled: true,
+      maxRetries: 0,
+      provider: { maxRetries: 0 },
+    },
+  });
+}
 
 // Pi's OpenAI-compatible client appends /chat/completions to a base URL that
 // already includes /v1, matching the gateway's documented endpoint.

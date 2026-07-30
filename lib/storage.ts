@@ -1,4 +1,4 @@
-import { list, put } from "@vercel/blob";
+import { get, list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
@@ -189,6 +189,17 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(await res.text()) as T;
 }
 
+async function getJson<T>(pathname: string): Promise<T> {
+  const result = await get(pathname, { access: "public" });
+  // The caller got this pathname from list(), so a null/304 here is a
+  // transiently unreadable object rather than a legitimate missing entity.
+  // Throw so withRetry can make another authenticated attempt.
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`blob get ${result?.statusCode ?? 404}`);
+  }
+  return JSON.parse(await new Response(result.stream).text()) as T;
+}
+
 function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
   // `uploadedAt` is present on real Blob list results. Keep the helper
   // tolerant of older/custom storage adapters that only provide a URL rather
@@ -206,19 +217,55 @@ function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): str
 }
 
 export class BlobStorage implements Storage {
-  private async readJson<T>(pathname: string): Promise<T | undefined> {
-    return withRetry(async () => {
-      // Both pathname and full-URL SDK get() calls have returned persistent
-      // 403s in production while list() and direct public-URL fetches remain
-      // healthy. Resolve the exact blob, then fetch its public URL directly.
-      // The uploadedAt cache-buster is required because entity blobs are
-      // overwritten in place and an unversioned public URL can serve the
-      // previous run/submission state from an edge cache.
-      const blobs = await this.listAllBlobs(pathname);
-      const blob = blobs.find((candidate) => candidate.pathname === pathname);
-      if (!blob) return undefined;
-      return fetchJson<T>(versionedBlobUrl(blob));
+  private readonly readConcurrency = 8;
+  private activeReads = 0;
+  private readonly readWaiters: Array<() => void> = [];
+
+  private async withReadSlot<T>(read: () => Promise<T>): Promise<T> {
+    if (this.activeReads >= this.readConcurrency) {
+      await new Promise<void>((resolve) => this.readWaiters.push(resolve));
+    }
+    this.activeReads += 1;
+    try {
+      return await read();
+    } finally {
+      this.activeReads -= 1;
+      this.readWaiters.shift()?.();
+    }
+  }
+
+  private async readListedJson<T>(blob: {
+    url: string;
+    pathname: string;
+    uploadedAt: string | Date;
+  }): Promise<T> {
+    // listRuns/listSubmissions/listCompetitions are often requested together.
+    // Keep one instance-wide semaphore across all three so Promise.all cannot
+    // turn a 90-object page read into 90 simultaneous Blob requests.
+    return this.withReadSlot(async () => {
+      try {
+        // Prefer the authenticated read plane. The production app was
+        // receiving persistent 403s from public URLs while get(pathname)
+        // stayed healthy; trying the failing public edge first added ~300 ms
+        // per blob and pushed /status static generation past 60 seconds.
+        return await withRetry(() => getJson<T>(blob.pathname), 2);
+      } catch {
+        // Keep the uploadedAt-versioned public URL as a fallback: a prior Blob
+        // incident had the inverse failure shape (SDK get 403, public URL
+        // healthy), and the version avoids a stale overwritten entity.
+        return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
+      }
     });
+  }
+
+  private async readJson<T>(pathname: string): Promise<T | undefined> {
+    // Resolve the exact current blob before reading. The authenticated fallback
+    // in readListedJson covers the production failure where Vercel Functions
+    // received persistent 403s from the otherwise-public Blob URL.
+    const blobs = await withRetry(() => this.listAllBlobs(pathname));
+    const blob = blobs.find((candidate) => candidate.pathname === pathname);
+    if (!blob) return undefined;
+    return this.readListedJson<T>(blob);
   }
 
   private async writeJson(pathname: string, value: unknown): Promise<void> {
@@ -258,7 +305,7 @@ export class BlobStorage implements Storage {
     const blobs = await this.listAllBlobs("submissions/");
     const results = await Promise.all(
       blobs.map((blob) =>
-        withRetry(() => fetchJson<Submission>(versionedBlobUrl(blob)), 3).catch(() => undefined),
+        this.readListedJson<Submission>(blob).catch(() => undefined),
       ),
     );
     const found = results.filter((s): s is Submission => s !== undefined);
@@ -283,7 +330,7 @@ export class BlobStorage implements Storage {
     const blobs = await this.listAllBlobs("competitions/");
     const results = await Promise.all(
       blobs.map((blob) =>
-        withRetry(() => fetchJson<Competition>(versionedBlobUrl(blob)), 3).catch(() => undefined),
+        this.readListedJson<Competition>(blob).catch(() => undefined),
       ),
     );
     const found = results.filter((c): c is Competition => c !== undefined);
@@ -306,7 +353,7 @@ export class BlobStorage implements Storage {
   async listRuns(): Promise<Run[]> {
     const blobs = await this.listAllBlobs("runs/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Run>(versionedBlobUrl(blob)), 3).catch(() => undefined)),
+      blobs.map((blob) => this.readListedJson<Run>(blob).catch(() => undefined)),
     );
     const found = results.filter((r): r is Run => r !== undefined);
     // Fail loud on an incomplete read -- a missing run silently changes every
@@ -372,7 +419,7 @@ export class BlobStorage implements Storage {
     const results = await Promise.all(
       fresh.map(async (blob) => {
         try {
-          return { event: await withRetry(() => fetchJson<RunEvent>(blob.url), 3), unreadableSeq: null };
+          return { event: await this.readListedJson<RunEvent>(blob), unreadableSeq: null };
         } catch {
           // Don't 500 the route -- but remember WHICH seq we couldn't read.
           return { event: undefined, unreadableSeq: seqFromEventPathname(blob.pathname) };
