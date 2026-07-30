@@ -185,7 +185,7 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Harness Arena");
     expect(html).toContain("Pi");
     expect(html).toContain("glm-5.2");
-    expect(html).toContain("zai");
+    expect(html).toContain("morph");
   });
 
   it("shows provider-versioned competitions separately even when their arena, harness, and model match", async () => {

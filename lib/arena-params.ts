@@ -20,12 +20,11 @@ export const RERUN_OPERATOR_LOGIN = process.env.RERUN_OPERATOR_LOGIN ?? "denniso
 // The gateway providers each model is pinned to. A model absent here is not
 // pinned, and its runs stay comparable only to other unpinned runs.
 //
-// Chosen as the model's own first-party provider where one exists, so the
-// benchmark measures the model as its authors serve it rather than whichever
-// reseller the gateway happened to pick. Verified against the gateway's own
-// provider list on 2026-07-28.
+// Keep each model on one deliberate upstream rather than whichever provider
+// the gateway happened to pick. GLM uses Morph because the first-party z.ai
+// route proved too slow for this benchmark.
 export const PINNED_PROVIDERS: Record<string, string> = {
-  "zai/glm-5.2": "zai",
+  "zai/glm-5.2": "morph",
   "anthropic/claude-sonnet-5": "anthropic",
   "anthropic/claude-opus-5": "anthropic",
   "anthropic/claude-opus-4-8": "anthropic",

@@ -51,7 +51,7 @@ pi (inside the task container)
   │               = http://host.docker.internal:4599/v1
   ▼
 gateway-proxy.mjs (on the sandbox VM)
-  │  injects providerOptions.gateway.only = ["zai"]
+  │  injects providerOptions.gateway.only = ["morph"]
   ▼
 https://ai-gateway.vercel.sh
 ```
@@ -66,9 +66,9 @@ https://ai-gateway.vercel.sh
   to. A model absent from that map is **not** pinned and behaves exactly as
   before.
 
-Providers are pinned to the model's own first-party upstream where one exists,
-so the benchmark measures a model as its authors serve it rather than whichever
-reseller the gateway happened to pick.
+Providers are pinned to one deliberately selected upstream rather than
+whichever provider the gateway happened to pick. GLM 5.2 is pinned to Morph
+because the first-party z.ai route proved too slow for this benchmark.
 
 Runs record two distinct fields:
 
@@ -79,9 +79,9 @@ Runs record two distinct fields:
 
 For legacy competitions, `PINNED_PROVIDERS` remains the fallback. New
 competitions can set `gateway_provider`, which is copied to each submission and
-run as an immutable snapshot. This allows a new Morph competition for
-`zai/glm-5.2` without silently mixing its results with the historical z.ai
-leaderboard.
+run as an immutable snapshot. This also lets future provider changes use a
+separate competition instead of silently mixing results from different
+upstreams.
 
 ## Deprecating old runs
 
