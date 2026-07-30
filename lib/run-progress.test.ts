@@ -3,9 +3,9 @@ import { reconstructRunProgress } from "./run-progress";
 import type { RunEvent } from "./types";
 
 let seq = 0;
-function ev(type: string, payload: Record<string, unknown>): RunEvent {
+function ev(type: string, payload: Record<string, unknown>, ts = "2026-07-23T00:00:00.000Z"): RunEvent {
   seq += 1;
-  return { seq, run_id: "r", ts: "2026-07-23T00:00:00.000Z", type, payload } as RunEvent;
+  return { seq, run_id: "r", ts, type, payload } as RunEvent;
 }
 
 describe("reconstructRunProgress", () => {
@@ -45,6 +45,26 @@ describe("reconstructRunProgress", () => {
     const p = reconstructRunProgress(events);
     expect(p.tasks[0].state).toBe("verifying");
     expect(p.current).toBe("t0");
+  });
+
+  it("retains the full measured task duration through agent execution and verification", () => {
+    seq = 0;
+    const events = [
+      ev("task.started", { task_id: "t0", index: 0 }, "2026-07-23T00:00:00.000Z"),
+      ev(
+        "task.agent_finished",
+        { task_id: "t0", turns: 4, duration_s: 30 },
+        "2026-07-23T00:00:30.000Z",
+      ),
+      ev("task.verify_started", { task_id: "t0" }, "2026-07-23T00:00:31.000Z"),
+      ev(
+        "task.verified",
+        { task_id: "t0", passed: true, duration_s: 9 },
+        "2026-07-23T00:00:40.000Z",
+      ),
+    ];
+
+    expect(reconstructRunProgress(events).tasks[0].durationS).toBe(40);
   });
 
   it("marks a task failed when the agent times out before verification", () => {
