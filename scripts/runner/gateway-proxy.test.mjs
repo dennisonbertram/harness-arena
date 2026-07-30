@@ -149,12 +149,15 @@ describe("gateway proxy", () => {
 import { buildPinnedModelsConfig } from "./lib.mjs";
 
 describe("buildPinnedModelsConfig", () => {
-  it("points pi's gateway provider at the sidecar rather than the real gateway", () => {
+  it("gives pi the sidecar origin without duplicating its /v1/messages path", () => {
     const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model: "zai/glm-5.2" }));
 
     // host.docker.internal, not localhost: pi runs inside the task container
-    // while the proxy runs on the sandbox VM outside it.
-    expect(cfg.providers["vercel-ai-gateway"].baseUrl).toBe("http://host.docker.internal:4599/v1");
+    // while the proxy runs on the sandbox VM outside it. Pi's Anthropic client
+    // appends /v1/messages itself; including /v1 here produced
+    // /v1/v1/messages in production.
+    const piRequestUrl = `${cfg.providers["vercel-ai-gateway"].baseUrl}/v1/messages`;
+    expect(piRequestUrl).toBe("http://host.docker.internal:4599/v1/messages");
   });
 
   it("names the run's own model so the override applies to it", () => {
