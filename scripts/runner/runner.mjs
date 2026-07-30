@@ -542,11 +542,27 @@ async function runOneTask(task, index, systemPrompt) {
     queueEvent("task.agent_finished", {
       task_id: task.id,
       turns,
-      cost_usd: totalCost,
+      ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
       duration_s: (agentFinishedAt - taskStart) / 1000,
     });
     await flushEvents();
+
+    // GNU timeout exits 124 after the configured agent deadline. Without a
+    // kill-after, pi could ignore SIGTERM while three five-minute gateway
+    // retries ran, so one broken provider looked like an ordinary failed task
+    // for ~15 minutes and the run continued. buildPiCommand now hard-kills
+    // after 10 seconds; turn the timeout into a terminal infrastructure error
+    // instead of grading the untouched task and moving on.
+    if (execResult.code === 124 || execResult.code === 137) {
+      const error = new Error(
+        `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
+          `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`,
+      );
+      error.stage = "agent_timeout";
+      error.taskId = task.id;
+      throw error;
+    }
 
     // Verification against a clean copy of the task's tests.
     sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
@@ -747,7 +763,11 @@ async function main() {
   } catch (err) {
     gatewayProxy?.close();
     log(`uncaught error: ${err?.stack ?? err}`);
-    queueEvent("run.failed", { error: String(err?.message ?? err), stage: "run" });
+    queueEvent("run.failed", {
+      error: String(err?.message ?? err),
+      stage: err?.stage ?? "run",
+      ...(err?.taskId ? { task_id: err.taskId } : {}),
+    });
     try {
       await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
     } catch {

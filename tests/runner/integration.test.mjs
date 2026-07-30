@@ -23,6 +23,9 @@ const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
+// Runner integration files execute in parallel workers. Each runner owns one
+// host-side gateway proxy, so file-specific ports prevent preflight collisions.
+const TEST_GATEWAY_PROXY_PORT = "14598";
 // Unique per test file (not just "fix-git") so this suite's container
 // name never collides with other tests/runner/*.test.mjs files that also
 // exercise the fix-git image concurrently under vitest's file parallelism.
@@ -92,6 +95,7 @@ describe.skipIf(!RUNNER_IT)("runner integration (RUNNER_IT=1, real local docker)
         ...process.env,
         RUN_ID,
         CALLBACK_BASE: baseUrl,
+        GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
         RUNNER_CALLBACK_SECRET: "test-secret",
         AI_GATEWAY_API_KEY: "test-gateway-key",
         GATEWAY_UPSTREAM: baseUrl,

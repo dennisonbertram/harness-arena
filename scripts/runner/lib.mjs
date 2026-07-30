@@ -389,8 +389,9 @@ export function buildPiCommand({
   provider = "vercel-ai-gateway",
   model = "zai/glm-5.2",
 }) {
+  const timeoutPrefix = `timeout --signal=TERM --kill-after=10 ${agentTimeoutSec}`;
   if (override) {
-    return `timeout ${agentTimeoutSec} ${override}`;
+    return `${timeoutPrefix} ${override}`;
   }
   // Match harnessarena.xyz's vanilla pi invocation (agent/pi_agent.py): do NOT
   // pass -nc/-ns/--no-extensions -- those strip pi's context/skills/extensions
@@ -401,7 +402,7 @@ export function buildPiCommand({
   // through OpenRouter (provider=openrouter, model=z-ai/glm-5.2) exactly like
   // harnessarena, or the Vercel AI Gateway by default.
   const parts = [
-    `timeout ${agentTimeoutSec} /usr/local/bin/pi`,
+    `${timeoutPrefix} /usr/local/bin/pi`,
     "--print --mode json",
     `--session-dir ${shQuote(sessionDir)}`,
     `--provider ${shQuote(provider)} --model ${shQuote(model)}`,

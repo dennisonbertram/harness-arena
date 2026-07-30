@@ -13,6 +13,7 @@ import { CompetitionAutoRefresh } from "./CompetitionAutoRefresh";
 import { CompetitionLeaderboardTable } from "./competition/CompetitionLeaderboardTable";
 import { CompetitionSubmitModal } from "./competition/CompetitionSubmitModal";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
+import { PINNED_PROVIDERS } from "@/lib/arena-params";
 
 // Same rationale as the main leaderboard: reads shared storage, so a
 // build-time-cached page would never show new submissions.
@@ -65,8 +66,8 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
       <section style={{ marginBottom: 40 }}>
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Harness maxing</h1>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>
-          Help us get the best results out of this harness + model combination. The work is finding the system prompt
-          that does it.
+          Help us get the best results out of this harness + model + provider combination. The work is finding the
+          system prompt that does it.
         </p>
         <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660, marginBottom: 8 }}>
           Harness Arena is harness-maxing. Other kinds of arenas will exist. This is a market of jobs, not a
@@ -188,6 +189,14 @@ function CompetitionSwitcher({
   }
   const harnesses = [...competitionForHarness.values()];
   const withinHarness = withinArena.filter((competition) => competition.harness === selectedCompetition.harness);
+  const competitionForModel = new Map<string, Competition>();
+  for (const competition of withinHarness) {
+    if (!competitionForModel.has(competition.model)) competitionForModel.set(competition.model, competition);
+  }
+  const models = [...competitionForModel.values()];
+  const withinModel = withinHarness.filter((competition) => competition.model === selectedCompetition.model);
+  const providerName = (competition: Competition) =>
+    competition.gateway_provider ?? PINNED_PROVIDERS[competition.model] ?? "automatic";
 
   return (
     <nav aria-label="Competition switcher" style={{ marginBottom: 24 }}>
@@ -206,7 +215,8 @@ function CompetitionSwitcher({
       >
         <SwitcherLevel label="Arena" options={arenas} isSelected={(c) => c.arena === selectedCompetition.arena} value={(competition) => titleCase(competition.arena)} />
         <SwitcherLevel label="Harness" options={harnesses} isSelected={(c) => c.harness === selectedCompetition.harness} value={(competition) => titleCase(competition.harness)} />
-        <SwitcherLevel label="Model" options={withinHarness} isSelected={(c) => c.id === selectedCompetition.id} value={(competition) => modelLabel(competition.model)} />
+        <SwitcherLevel label="Model" options={models} isSelected={(c) => c.model === selectedCompetition.model} value={(competition) => modelLabel(competition.model)} />
+        <SwitcherLevel label="Provider" options={withinModel} isSelected={(c) => c.id === selectedCompetition.id} value={providerName} />
         {meta}
       </div>
     </nav>

@@ -181,9 +181,32 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Arena");
     expect(html).toContain("Harness");
     expect(html).toContain("Model");
+    expect(html).toContain("Provider");
     expect(html).toContain("Harness Arena");
     expect(html).toContain("Pi");
     expect(html).toContain("glm-5.2");
+    expect(html).toContain("zai");
+  });
+
+  it("shows provider-versioned competitions separately even when their arena, harness, and model match", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ gateway_provider: "zai" }));
+    await storage.putCompetition(
+      defaultCompetition({
+        id: "comp-morph",
+        gateway_provider: "morph",
+        created_at: "2026-07-30T00:00:00.000Z",
+      }),
+    );
+
+    const html = renderToStaticMarkup(
+      await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-morph" }) }),
+    );
+
+    expect(html).toContain("Provider");
+    expect(html).toContain("morph");
+    expect(html).toContain("zai");
   });
 
   it("falls back to the default competition when the URL competition id is unknown (issue #78)", async () => {
@@ -251,7 +274,7 @@ describe("CompetitionPage", () => {
     );
 
     // Arena, harness and model pills are all on the selected dimension.
-    expect(html.match(/aria-current="page"/g) ?? []).toHaveLength(3);
+    expect(html.match(/aria-current="page"/g) ?? []).toHaveLength(4);
   });
 
   // A closed competition rejects submissions with 409, and the form maps every

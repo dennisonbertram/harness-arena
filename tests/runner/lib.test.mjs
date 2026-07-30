@@ -332,7 +332,7 @@ describe("buildPiCommand", () => {
       instruction: "Solve it and save to /app/regex.txt. Don't break \"quotes\".",
       hasSystemPrompt: true,
     });
-    expect(cmd).toContain("timeout 900 /usr/local/bin/pi");
+    expect(cmd).toContain("timeout --signal=TERM --kill-after=10 900 /usr/local/bin/pi");
     expect(cmd).toContain("--print --mode json");
     expect(cmd).toContain("--session-dir " + shQuote("/logs/agent/sessions"));
     // Matches harnessarena.xyz: no -nc/-ns/--no-extensions.
@@ -364,7 +364,7 @@ describe("buildPiCommand", () => {
       instruction: "irrelevant",
       override: "/usr/local/bin/fake-pi.sh",
     });
-    expect(cmd).toBe("timeout 60 /usr/local/bin/fake-pi.sh");
+    expect(cmd).toBe("timeout --signal=TERM --kill-after=10 60 /usr/local/bin/fake-pi.sh");
   });
 });
 

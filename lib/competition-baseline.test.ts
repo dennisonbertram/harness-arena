@@ -40,7 +40,7 @@ describe("ensureBaseline", () => {
   it("creates a baseline for a competition that has none", async () => {
     approve();
     const storage = new MemoryStorage();
-    const comp = competition("comp-1");
+    const comp = competition("comp-1", { gateway_provider: "morph" });
     await storage.putCompetition(comp);
 
     const result = await ensureBaseline(storage, comp);
@@ -51,6 +51,9 @@ describe("ensureBaseline", () => {
     // The baseline must run on the COMPETITION's model, not a global default,
     // or the reference point is measured against the wrong thing.
     expect(baselines[0].model).toBe("zai/glm-5.2");
+    // Provider is part of the measurement target too. A new competition's
+    // vanilla baseline must use the same upstream as its entrants.
+    expect(baselines[0].gateway_provider).toBe("morph");
   });
 
   // The whole design rests on this: the trigger is best-effort and the board

@@ -188,7 +188,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     // Pin the gateway to one upstream for this model, so repeated runs measure
     // the same machine. Unpinned models fall through unchanged and their runs
     // are recorded without provider_pinned (see docs/provider-pinning.md).
-    const pinned = PINNED_PROVIDERS[run.model ?? process.env.RUNNER_MODEL ?? ""];
+    const pinned = run.provider_requested ?? PINNED_PROVIDERS[run.model ?? process.env.RUNNER_MODEL ?? ""];
     if (pinned) runnerEnv.PINNED_PROVIDER = pinned;
     const runnerModel = run.model ?? process.env.RUNNER_MODEL;
     if (runnerModel) runnerEnv.RUNNER_MODEL = runnerModel;
