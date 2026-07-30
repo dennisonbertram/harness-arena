@@ -437,6 +437,7 @@ export function buildPiCommand({
   hasSystemPrompt = true,
   provider = "vercel-ai-gateway",
   model = "zai/glm-5.2",
+  thinking,
 }) {
   const timeoutPrefix = `timeout --signal=TERM --kill-after=10 ${agentTimeoutSec}`;
   if (override) {
@@ -456,6 +457,9 @@ export function buildPiCommand({
     `--session-dir ${shQuote(sessionDir)}`,
     `--provider ${shQuote(provider)} --model ${shQuote(model)}`,
   ];
+  if (thinking) {
+    parts.push(`--thinking ${shQuote(thinking)}`);
+  }
   if (hasSystemPrompt) {
     parts.push(`--system-prompt "$(cat ${shQuote(promptFile)})"`);
   }
