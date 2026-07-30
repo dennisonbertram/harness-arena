@@ -167,6 +167,19 @@ describe("buildPinnedModelsConfig", () => {
 
     expect(Object.keys(cfg.providers["vercel-ai-gateway"].modelOverrides)).toEqual(["anthropic/claude-opus-5"]);
   });
+
+  it("marks Z.AI models so Pi sends an explicit disabled-thinking payload", () => {
+    const model = "zai/glm-5.2-fast";
+    const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
+    const override = cfg.providers["vercel-ai-gateway"].modelOverrides[model];
+
+    // Pi only emits `thinking: { type: "disabled" }` when both of these
+    // fields are present. Without them, `--thinking off` is silently omitted
+    // from the OpenAI-compatible request and GLM uses provider-default
+    // reasoning until the task timeout.
+    expect(override.reasoning).toBe(true);
+    expect(override.compat?.thinkingFormat).toBe("zai");
+  });
 });
 
 import { systemPromptOf } from "./gateway-proxy.mjs";
