@@ -68,9 +68,15 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
     run.task_results.length === 0 && (run.status === "running" || run.status === "queued");
   const progress = isLive ? reconstructRunProgress(events) : null;
   const liveDurationSec = progress ? progress.tasks.reduce((s, t) => s + (t.durationS ?? 0), 0) : 0;
-  const failureEvent = [...events].reverse().find((event) => event.type === "run.failed");
+  const failureEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "run.failed" || event.type === "run.reaped");
   const failureMessage =
-    typeof failureEvent?.payload.error === "string" ? failureEvent.payload.error : "The run stopped unexpectedly.";
+    typeof failureEvent?.payload.error === "string"
+      ? failureEvent.payload.error
+      : typeof failureEvent?.payload.reason === "string"
+        ? failureEvent.payload.reason
+        : "The run stopped unexpectedly.";
 
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
@@ -111,7 +117,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         </p>
       </section>
 
-      {failureEvent || run.status === "failed" ? (
+      {failureEvent || run.status === "failed" || run.status === "reaped" ? (
         <section
           role="alert"
           style={{
