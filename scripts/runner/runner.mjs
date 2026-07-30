@@ -38,6 +38,7 @@ import {
   resolveTaskCost,
   safeCleanup,
   sh,
+  shAsync,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -475,11 +476,13 @@ async function runOneTask(task, index, systemPrompt) {
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
-    // through from this process's own environment -- execFileSync inherits
+    // through from this process's own environment -- execFile inherits
     // process.env by default, so no extra plumbing is needed here. maxBuffer is
     // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
-    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks.
-    const execResult = sh(
+    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks. This call
+    // MUST be async: the gateway proxy runs in this same Node process and a
+    // synchronous docker exec starves its event loop for the whole model turn.
+    const execResult = await shAsync(
       DOCKER_CMD,
       [
         "exec",

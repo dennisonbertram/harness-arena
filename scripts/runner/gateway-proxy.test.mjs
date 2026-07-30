@@ -384,6 +384,32 @@ describe("the sidecar is a transparent proxy", () => {
   });
 });
 
+import * as runnerLib from "./lib.mjs";
+
+describe("runner subprocess isolation", () => {
+  it("keeps the in-process gateway proxy responsive while Pi is running", async () => {
+    expect(typeof runnerLib.shAsync).toBe("function");
+
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["wafer"], upstream: upstream.url }));
+    const child = runnerLib.shAsync(process.execPath, ["-e", "setTimeout(() => {}, 250)"]);
+
+    const response = await Promise.race([
+      fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "zai/glm-5.2-fast", messages: [] }),
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("gateway proxy starved while the child process ran")), 100),
+      ),
+    ]);
+
+    expect(response.ok).toBe(true);
+    expect((await child).code).toBe(0);
+  });
+});
+
 import { preflightProxy } from "./lib.mjs";
 
 // The pinning path failed silently: pi could not get a usable answer, so all 16

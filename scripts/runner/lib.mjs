@@ -1,7 +1,7 @@
 // Pure, import-testable helpers used by scripts/runner/runner.mjs. No
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
@@ -190,6 +190,39 @@ export function sh(cmd, args, opts = {}) {
       error: err,
     };
   }
+}
+
+// Async counterpart used for the long-running pi turn. The gateway sidecar
+// runs in this same Node process, so using execFileSync for pi starves the
+// event loop and prevents the sidecar from accepting pi's model request until
+// after the task timeout. Setup/cleanup commands may stay synchronous; the
+// model turn itself must not.
+export function shAsync(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    execFile(
+      cmd,
+      args,
+      {
+        encoding: "buffer",
+        maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
+        timeout: opts.timeout,
+      },
+      (err, stdout, stderr) => {
+        const result = {
+          code: 0,
+          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
+          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
+          timedOut: false,
+        };
+        if (err) {
+          result.code = typeof err.code === "number" ? err.code : 1;
+          result.timedOut = err.signal === "SIGTERM";
+          result.error = err;
+        }
+        resolve(result);
+      },
+    );
+  });
 }
 
 // Wrap a fetch call with a request-scoped abort deadline so a hung
