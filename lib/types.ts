@@ -103,7 +103,13 @@ export const TaskResultSchema = z.object({
   // report it as unknown rather than inventing a number.
   cost_source: z.string().optional(),
   duration_s: z.number().optional(),
+  // Agent execution time excludes verifier work; together with output_tokens
+  // it makes output-token throughput a meaningful model measurement.
+  agent_duration_s: z.number().optional(),
   turns: z.number().optional(),
+  // Sum of assistant output tokens for this task. Absent when the runner's
+  // provider session did not report output usage.
+  output_tokens: z.number().optional(),
   trace_blob_url: z.string().optional(),
   failure_stage: z.string().optional(),
   error: z.string().optional(),

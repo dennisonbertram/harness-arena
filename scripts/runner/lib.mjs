@@ -17,6 +17,7 @@ import { execFile, execFileSync } from "node:child_process";
 export function parseSessionCost(jsonlText) {
   let totalCost = 0;
   let turns = 0;
+  let totalOutputTokens = 0;
   let negativeCostCount = 0;
   // Count of assistant messages carrying a finite, nonnegative cost.total
   // -- i.e. an actually-usable cost record (issue #23 finding G1). A
@@ -24,6 +25,10 @@ export function parseSessionCost(jsonlText) {
   // these (e.g. `{}`, or only non-assistant turns), which must NOT count
   // as "readable" for cost-accounting purposes.
   let validCostCount = 0;
+  // Output usage is captured independently from cost: providers can expose
+  // token counts even when their cost ledger is unavailable. It powers the
+  // task-level output-token throughput measurement.
+  let validOutputTokenCount = 0;
   for (const line of jsonlText.split("\n")) {
     if (!line.trim()) continue;
     let obj;
@@ -34,6 +39,11 @@ export function parseSessionCost(jsonlText) {
     }
     if (obj?.type === "message" && obj?.message?.role === "assistant") {
       turns += 1;
+      const outputTokens = obj.message.usage?.output;
+      if (typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens >= 0) {
+        totalOutputTokens += outputTokens;
+        validOutputTokenCount += 1;
+      }
       const cost = obj.message.usage?.cost?.total;
       if (typeof cost === "number" && Number.isFinite(cost)) {
         if (cost < 0) {
@@ -45,7 +55,7 @@ export function parseSessionCost(jsonlText) {
       }
     }
   }
-  return { totalCost, turns, negativeCostCount, validCostCount };
+  return { totalCost, turns, totalOutputTokens, negativeCostCount, validCostCount, validOutputTokenCount };
 }
 
 /**

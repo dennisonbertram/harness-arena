@@ -305,6 +305,49 @@ describe("aggregateTask", () => {
     expect(byModel["anthropic/claude-sonnet-5"].meanCostUsd).toBeCloseTo(0.3);
   });
 
+  it("reports mean wall-clock time from the attempts that measured it", () => {
+    const runs = [
+      {
+        ...run("r1", "s1", [true, false, false, false]),
+        model: "zai/glm-5.2",
+        task_results: [{ task_id: "t0", attempted: true, passed: true, turns: 2, duration_s: 30 }],
+      },
+      {
+        ...run("r2", "s2", [false, false, false, false]),
+        model: "zai/glm-5.2",
+        task_results: [{ task_id: "t0", attempted: true, passed: false, turns: 4, duration_s: 90 }],
+      },
+      {
+        ...run("r3", "s2", [false, false, false, false]),
+        model: "zai/glm-5.2",
+        // Older attempts have no duration measurement and must not be
+        // converted into a fictional zero-second attempt.
+        task_results: [{ task_id: "t0", attempted: true, passed: false, turns: 1 }],
+      },
+    ];
+
+    const stats = aggregateTask(runs, subs, "t0")!;
+    expect(stats.byModel[0].meanDurationS).toBeCloseTo(60);
+    expect(stats.results.find((r) => r.runId === "r3")!.durationS).toBeNull();
+  });
+
+  it("derives output-token throughput from agent time, not verifier-inclusive wall time", () => {
+    const runs = [
+      {
+        ...run("r1", "s1", [true, false, false, false]),
+        task_results: [{ task_id: "t0", attempted: true, passed: true, turns: 2, duration_s: 40, agent_duration_s: 10, output_tokens: 200 }],
+      },
+      {
+        ...run("r2", "s2", [false, false, false, false]),
+        task_results: [{ task_id: "t0", attempted: true, passed: false, turns: 4, duration_s: 50, agent_duration_s: 20, output_tokens: 600 }],
+      },
+    ];
+
+    const stats = aggregateTask(runs, subs, "t0")!;
+    // 800 output tokens over 30 seconds of agent execution = 26.67 TPS.
+    expect(stats.byModel[0].outputTokensPerSecond).toBeCloseTo(800 / 30);
+  });
+
   it("returns null when no completed run recorded the task", () => {
     const runs = [run("r1", "s1", [true, false, false, false], undefined, "running")];
     expect(aggregateTask(runs, subs, "t0")).toBeNull();

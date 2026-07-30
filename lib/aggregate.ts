@@ -271,6 +271,11 @@ export interface TaskAttempt {
   model: string; // gateway id this attempt ran on (never mix models silently)
   passed: boolean;
   turns: number;
+  agentDurationS: number | null;
+  outputTokens: number | null;
+  // Runner-reported elapsed wall-clock duration. Older attempts did not
+  // persist it, so null means unavailable rather than a zero-second run.
+  durationS: number | null;
   costUsd: number | null; // null = unmeasured (turns 0 / no real cost record)
   submittedAt: string;
 }
@@ -282,6 +287,12 @@ export interface TaskModelSummary {
   passed: number;
   passRate: number;
   meanTurns: number;
+  // Mean only across attempts that recorded a duration. null preserves the
+  // distinction between no measurement and a very fast measured attempt.
+  meanDurationS: number | null;
+  // Weighted output throughput: all measured output tokens divided by all
+  // measured agent-execution seconds, never by verifier-inclusive wall time.
+  outputTokensPerSecond: number | null;
   meanCostUsd: number | null;
 }
 
@@ -322,6 +333,9 @@ function taskAttempts(runs: Run[], submissions: Submission[], taskId: string): T
       model: runModel(run.model ?? submission?.model),
       passed: tr.passed,
       turns,
+      agentDurationS: typeof tr.agent_duration_s === "number" ? tr.agent_duration_s : null,
+      outputTokens: typeof tr.output_tokens === "number" ? tr.output_tokens : null,
+      durationS: typeof tr.duration_s === "number" ? tr.duration_s : null,
       costUsd: typeof tr.cost_usd === "number" && turns > 0 ? tr.cost_usd : null,
       submittedAt: submission?.created_at ?? run.created_at,
     });
@@ -343,12 +357,24 @@ function summariesByModel(attempts: TaskAttempt[]): TaskModelSummary[] {
       const n = atts.length;
       const passed = atts.filter((a) => a.passed).length;
       const measured = atts.filter((a) => a.costUsd !== null) as (TaskAttempt & { costUsd: number })[];
+      const durationMeasured = atts.filter((a) => a.durationS !== null) as (TaskAttempt & { durationS: number })[];
+      const throughputMeasured = atts.filter(
+        (a): a is TaskAttempt & { agentDurationS: number; outputTokens: number } =>
+          a.agentDurationS !== null && a.agentDurationS > 0 && a.outputTokens !== null,
+      );
+      const measuredAgentSeconds = throughputMeasured.reduce((sum, a) => sum + a.agentDurationS, 0);
       return {
         model,
         attempts: n,
         passed,
         passRate: passed / n,
         meanTurns: atts.reduce((s, a) => s + a.turns, 0) / n,
+        meanDurationS: durationMeasured.length > 0
+          ? durationMeasured.reduce((s, a) => s + a.durationS, 0) / durationMeasured.length
+          : null,
+        outputTokensPerSecond: measuredAgentSeconds > 0
+          ? throughputMeasured.reduce((sum, a) => sum + a.outputTokens, 0) / measuredAgentSeconds
+          : null,
         meanCostUsd: measured.length > 0 ? measured.reduce((s, a) => s + a.costUsd, 0) / measured.length : null,
       };
     })

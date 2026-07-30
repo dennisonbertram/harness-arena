@@ -42,8 +42,10 @@ describe("parseSessionCost", () => {
     expect(parseSessionCost("")).toEqual({
       totalCost: 0,
       turns: 0,
+      totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
+      validOutputTokenCount: 0,
     });
   });
 
@@ -52,8 +54,10 @@ describe("parseSessionCost", () => {
     expect(result).toEqual({
       totalCost: 0,
       turns: 0,
+      totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
+      validOutputTokenCount: 0,
     });
   });
 
@@ -79,6 +83,17 @@ describe("parseSessionCost", () => {
     expect(result.negativeCostCount).toBe(1);
     // Only the two nonnegative assistant cost.total values count as "valid".
     expect(result.validCostCount).toBe(2);
+  });
+
+  it("sums finite assistant output tokens separately for throughput measurement", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: 120 } } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: 80 } } }),
+      // Missing or malformed usage is not silently turned into a token count.
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: "unknown" } } }),
+    ].join("\n");
+
+    expect(parseSessionCost(jsonl)).toMatchObject({ totalOutputTokens: 200, validOutputTokenCount: 2 });
   });
 });
 

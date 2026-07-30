@@ -538,6 +538,7 @@ async function runOneTask(task, index, systemPrompt) {
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
+    const agentDurationS = (agentFinishedAt - taskStart) / 1000;
 
     const sessionText = extractNewestSessionJsonl(containerName);
     const sessionUnreadable = isSessionTextUnreadable(sessionText);
@@ -589,9 +590,10 @@ async function runOneTask(task, index, systemPrompt) {
     queueEvent("task.agent_finished", {
       task_id: task.id,
       turns,
+      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
       ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
-      duration_s: (agentFinishedAt - taskStart) / 1000,
+      duration_s: agentDurationS,
     });
     await flushEvents();
 
@@ -611,6 +613,7 @@ async function runOneTask(task, index, systemPrompt) {
         stage: "agent_timeout",
         error,
         duration_s: (Date.now() - taskStart) / 1000,
+        agent_duration_s: agentDurationS,
       });
       await flushEvents();
       return {
@@ -622,6 +625,8 @@ async function runOneTask(task, index, systemPrompt) {
         cost_source: costSource,
         duration_s: (Date.now() - taskStart) / 1000,
         turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_timeout",
         error,
@@ -653,6 +658,8 @@ async function runOneTask(task, index, systemPrompt) {
         cost_source: costSource,
         duration_s: (Date.now() - taskStart) / 1000,
         turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
         trace_blob_url: traceBlobUrl,
         failure_stage: agentError.stage,
         error,
@@ -716,6 +723,8 @@ async function runOneTask(task, index, systemPrompt) {
       cost_source: costSource,
       duration_s: (Date.now() - taskStart) / 1000,
       turns,
+      agent_duration_s: agentDurationS,
+      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
       trace_blob_url: traceBlobUrl,
     };
   } finally {
