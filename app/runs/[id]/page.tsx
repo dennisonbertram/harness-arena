@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import type { ReactNode } from "react";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import { formatDuration, formatUsd } from "@/lib/format";
@@ -13,6 +14,7 @@ import { CompletePromptModal } from "./CompletePromptModal";
 import { PromptDiff } from "./PromptDiff";
 import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
+import { LiveDuration } from "./LiveDuration";
 import { cellStyle } from "../../tableStyles";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
@@ -67,7 +69,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
   const isLive =
     run.task_results.length === 0 && (run.status === "running" || run.status === "queued");
   const progress = isLive ? reconstructRunProgress(events) : null;
-  const liveDurationSec = progress ? progress.tasks.reduce((s, t) => s + (t.durationS ?? 0), 0) : 0;
+  const activeTask = progress?.tasks.find(
+    (task) => task.state === "running" || task.state === "verifying",
+  );
+  const completedLiveDurationSec =
+    progress?.tasks
+      .filter((task) => task.state === "passed" || task.state === "failed")
+      .reduce((sum, task) => sum + (task.durationS ?? 0), 0) ?? 0;
   const taskTimeouts = progress
     ? progress.tasks
         .filter((task) => task.failureStage?.endsWith("_timeout"))
@@ -200,7 +208,15 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
             <Stat label="Passed so far" value={`${progress.passed}/${progress.verified}`} />
             <Stat label="Progress" value={`${progress.started}/${benchmarkTaskCount} started`} />
             <Stat label="Cost so far" value={progress.costSoFar === null ? "—" : formatUsd(progress.costSoFar)} />
-            <Stat label="Elapsed (tasks)" value={formatDuration(liveDurationSec)} />
+            <Stat
+              label="Elapsed (tasks)"
+              value={
+                <LiveDuration
+                  fixedDurationS={completedLiveDurationSec}
+                  activeStartedAtMs={activeTask?.startedAtMs}
+                />
+              }
+            />
           </>
         ) : (
           <>
@@ -251,7 +267,12 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                       {t.costUsd !== undefined ? formatUsd(t.costUsd) : "—"}
                     </td>
                     <td style={cellStyle} className="tabular-nums">
-                      {t.durationS !== undefined ? formatDuration(t.durationS) : "—"}
+                      <LiveDuration
+                        fixedDurationS={t.state === "passed" || t.state === "failed" ? t.durationS : undefined}
+                        activeStartedAtMs={
+                          t.state === "running" || t.state === "verifying" ? t.startedAtMs : undefined
+                        }
+                      />
                     </td>
                     <td style={cellStyle} className="tabular-nums">
                       {t.turns ?? "—"}
@@ -406,7 +427,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <div className="label" style={{ marginBottom: 4 }}>

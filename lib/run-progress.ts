@@ -16,6 +16,7 @@ export interface TaskProgress {
   turns?: number;
   costUsd?: number;
   durationS?: number;
+  startedAtMs?: number;
   hasTrace: boolean;
   failureStage?: string;
   error?: string;
@@ -57,6 +58,7 @@ export function reconstructRunProgress(events: RunEvent[]): RunProgress {
     switch (e.type) {
       case "task.started":
         t.state = "running";
+        if (Number.isFinite(Date.parse(e.ts))) t.startedAtMs = Date.parse(e.ts);
         if (payloadNum(p, "index") !== undefined) t.index = payloadNum(p, "index")!;
         break;
       case "task.agent_finished":
@@ -70,6 +72,10 @@ export function reconstructRunProgress(events: RunEvent[]): RunProgress {
         break;
       case "task.verified":
         t.state = p.passed === true ? "passed" : "failed";
+        if (t.startedAtMs !== undefined && Number.isFinite(Date.parse(e.ts))) {
+          const elapsedS = Math.max(0, (Date.parse(e.ts) - t.startedAtMs) / 1000);
+          t.durationS = Math.max(t.durationS ?? 0, elapsedS);
+        }
         break;
       case "task.failed":
         t.state = "failed";

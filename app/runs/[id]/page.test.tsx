@@ -83,8 +83,13 @@ function run(id: string, overrides: Partial<Run> = {}): Run {
   };
 }
 
-function runEvent(seq: number, type: RunEvent["type"], payload: Record<string, unknown> = {}): RunEvent {
-  return { run_id: "any", seq, ts: "2026-07-25T00:00:00.000Z", type, payload };
+function runEvent(
+  seq: number,
+  type: RunEvent["type"],
+  payload: Record<string, unknown> = {},
+  ts = "2026-07-25T00:00:00.000Z",
+): RunEvent {
+  return { run_id: "any", seq, ts, type, payload };
 }
 
 describe("RunDetailPage", () => {
@@ -332,6 +337,41 @@ describe("RunDetailPage", () => {
     expect(html).not.toContain("No events yet.");
     expect(html).toContain("vs the vanilla baseline");
     expect(html).not.toContain("Starting");
+  });
+
+  it("shows wall-clock elapsed time for the task that is currently running", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-25T00:06:30.000Z"));
+      const storage = resetStorage();
+      await storage.putSubmission(submission("s-live-time"));
+      await storage.putRun(
+        run("r-live-time", {
+          submission_id: "s-live-time",
+          status: "running",
+          task_results: [],
+        }),
+      );
+      await storage.appendRunEvents("r-live-time", [
+        runEvent(
+          1,
+          "task.started",
+          { task_id: "cancel-async-tasks", index: 0 },
+          "2026-07-25T00:00:00.000Z",
+        ),
+      ]);
+
+      const html = renderToStaticMarkup(
+        await RunPage.default({ params: Promise.resolve({ id: "r-live-time" }) }),
+      );
+
+      expect(html).toContain(
+        `data-active-started-at-ms="${new Date("2026-07-25T00:00:00.000Z").getTime()}"`,
+      );
+      expect(html).toContain("now running cancel-async-tasks");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows the starting message and no-events state for a queued run with no task activity yet", async () => {
