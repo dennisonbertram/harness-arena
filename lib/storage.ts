@@ -192,7 +192,15 @@ export async function fetchJson<T>(url: string): Promise<T> {
 export class BlobStorage implements Storage {
   private async readJson<T>(pathname: string): Promise<T | undefined> {
     return withRetry(async () => {
-      const result = await get(pathname, { access: "public" });
+      // A pathname-only get() infers the Blob store from the deployment's
+      // token. Production has returned persistent 403s from that inference
+      // even while list() and the public blob URL remain healthy. Resolve the
+      // exact blob first, then pass its full URL so get() derives the store
+      // from the URL itself (the documented alternative to token inference).
+      const blobs = await this.listAllBlobs(pathname);
+      const blob = blobs.find((candidate) => candidate.pathname === pathname);
+      if (!blob) return undefined;
+      const result = await get(blob.url, { access: "public" });
       if (!result) return undefined;
       const text = await new Response(result.stream).text();
       return JSON.parse(text) as T;

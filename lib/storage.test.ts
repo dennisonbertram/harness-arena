@@ -548,13 +548,52 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
   it("reads entity JSON through get(), including a missing blob", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
-    vi.mocked(get)
-      .mockResolvedValueOnce({ stream: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(run))); controller.close(); } }) } as never)
-      .mockResolvedValueOnce(null as never);
+    const url = "https://blob.example/runs/run-1.json";
+    vi.mocked(list)
+      .mockResolvedValueOnce({
+        blobs: [{ url, pathname: "runs/run-1.json", uploadedAt: "2026-07-21T00:00:00.000Z" }],
+        hasMore: false,
+      } as never)
+      .mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(get).mockResolvedValueOnce({
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+          controller.close();
+        },
+      }),
+    } as never);
 
     expect(await storage.getRun("run-1")).toEqual(run);
     expect(await storage.getSubmission("missing")).toBeUndefined();
-    expect(get).toHaveBeenNthCalledWith(1, "runs/run-1.json", { access: "public" });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(url, { access: "public" });
+  });
+
+  it("resolves an entity's full blob URL before get(), avoiding pathname store-inference 403s", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
+
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ url, pathname: "runs/run-1.json", uploadedAt: "2026-07-21T00:00:00.000Z" }],
+      hasMore: false,
+    } as never);
+    vi.mocked(get).mockImplementation(async (identifier) => {
+      if (identifier !== url) throw new Error("Vercel Blob: Failed to fetch blob: 403 Forbidden");
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
+            controller.close();
+          },
+        }),
+      } as never;
+    });
+
+    await expect(storage.getRun("run-1")).resolves.toEqual(run);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(url, { access: "public" });
   });
 
   it("stores trace data and returns raw trace bytes, or null when the trace is absent", async () => {
