@@ -21,10 +21,10 @@ export const RERUN_OPERATOR_LOGIN = process.env.RERUN_OPERATOR_LOGIN ?? "denniso
 // pinned, and its runs stay comparable only to other unpinned runs.
 //
 // Keep each model on one deliberate upstream rather than whichever provider
-// the gateway happened to pick. GLM uses Morph because the first-party z.ai
-// route proved too slow for this benchmark.
+// the gateway happened to pick. GLM uses Together AI because both the
+// first-party z.ai route and Morph proved too slow for this benchmark.
 export const PINNED_PROVIDERS: Record<string, string> = {
-  "zai/glm-5.2": "morph",
+  "zai/glm-5.2": "togetherai",
   "anthropic/claude-sonnet-5": "anthropic",
   "anthropic/claude-opus-5": "anthropic",
   "anthropic/claude-opus-4-8": "anthropic",

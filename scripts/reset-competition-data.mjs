@@ -5,10 +5,10 @@
 // Usage:
 //   node --env-file=.env.local scripts/reset-competition-data.mjs \
 //     --competition comp-harness-arena-pi-zai-glm-5-2 \
-//     --gateway-provider morph
+//     --gateway-provider togetherai
 //   node --env-file=.env.local scripts/reset-competition-data.mjs \
 //     --competition comp-harness-arena-pi-zai-glm-5-2 \
-//     --gateway-provider morph \
+//     --gateway-provider togetherai \
 //     --yes
 
 import { copy, del, get, list, put } from "@vercel/blob";
