@@ -32,7 +32,7 @@ const HARNESS = "pi";
 // directly -- see file-header comment on why a plain `node` invocation can't
 // import lib/*.ts here.
 const DEFAULT_MODEL = process.env.COMPETITION_MODEL ?? "zai/glm-5.2-fast";
-const DEFAULT_GATEWAY_PROVIDER = process.env.COMPETITION_GATEWAY_PROVIDER ?? "wafer";
+const DEFAULT_GATEWAY_PROVIDER = process.env.COMPETITION_GATEWAY_PROVIDER ?? "fireworks";
 
 /** Deterministic id from (arena, harness, model) -- the whole idempotency mechanism. */
 export function competitionId(arena, harness, model) {
