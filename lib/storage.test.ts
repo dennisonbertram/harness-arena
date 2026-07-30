@@ -270,6 +270,10 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.mocked(list).mockReset();
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("appendRunEvents writes ONE immutable blob per event, not a single rewritten events file", async () => {
     // This is the production data-loss bug: read-modify-rewrite of a single
     // events/<runId>.jsonl blob loses earlier writes under Vercel Blob's
@@ -545,7 +549,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     });
   });
 
-  it("reads entity JSON through get(), including a missing blob", async () => {
+  it("reads entity JSON through an exact public blob URL, including a missing blob", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://blob.example/runs/run-1.json";
@@ -555,59 +559,69 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
         hasMore: false,
       } as never)
       .mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
-    vi.mocked(get).mockResolvedValueOnce({
-      stream: new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
-          controller.close();
-        },
-      }),
+    const fetchSpy = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(run),
     } as never);
+    vi.stubGlobal("fetch", fetchSpy);
 
     expect(await storage.getRun("run-1")).toEqual(run);
     expect(await storage.getSubmission("missing")).toBeUndefined();
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith(url, { access: "public" });
+    expect(get).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining(`${url}?v=`), { cache: "no-store" });
   });
 
-  it("resolves an entity's full blob URL before get(), avoiding pathname store-inference 403s", async () => {
+  it("fetches an entity's versioned public URL without SDK get(), which can 403 even for full URLs", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
 
-    vi.mocked(list).mockResolvedValueOnce({
+    vi.mocked(list).mockResolvedValue({
       blobs: [{ url, pathname: "runs/run-1.json", uploadedAt: "2026-07-21T00:00:00.000Z" }],
       hasMore: false,
     } as never);
-    vi.mocked(get).mockImplementation(async (identifier) => {
-      if (identifier !== url) throw new Error("Vercel Blob: Failed to fetch blob: 403 Forbidden");
-      return {
-        stream: new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(JSON.stringify(run)));
-            controller.close();
-          },
-        }),
-      } as never;
+    vi.mocked(get).mockRejectedValue(new Error("Vercel Blob: Failed to fetch blob: 403 Forbidden"));
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(run),
     });
+    vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith(url, { access: "public" });
+    expect(get).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledWith(expect.stringMatching(/^https:\/\/store-id\.public\.blob\.vercel-storage\.com\/runs\/run-1\.json\?v=\d+$/), {
+      cache: "no-store",
+    });
   });
 
   it("stores trace data and returns raw trace bytes, or null when the trace is absent", async () => {
     const storage = new BlobStorage();
-    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/traces/run-1/task-1/output.log" } as never);
-    vi.mocked(get)
-      .mockResolvedValueOnce({ stream: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("trace output")); controller.close(); } }) } as never)
-      .mockResolvedValueOnce(null as never);
+    const url = "https://blob.example/traces/run-1/task-1/output.log";
+    vi.mocked(put).mockResolvedValueOnce({ url } as never);
+    vi.mocked(list)
+      .mockResolvedValueOnce({
+        blobs: [{ url, pathname: "traces/run-1/task-1/output.log", uploadedAt: "2026-07-21T00:00:00.000Z" }],
+        hasMore: false,
+      } as never)
+      .mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    const bytes = new TextEncoder().encode("trace output");
+    const fetchSpy = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => bytes.buffer,
+    });
+    vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.putTraceBlob("run-1", "task-1", "output.log", "trace output")).resolves.toBe(
-      "https://blob.example/traces/run-1/task-1/output.log",
+      url,
     );
     await expect(storage.getTraceBytes("run-1", "task-1", "output.log")).resolves.toEqual(Buffer.from("trace output"));
     await expect(storage.getTraceBytes("run-1", "task-1", "missing.log")).resolves.toBeNull();
+    expect(get).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining(`${url}?v=`), { cache: "no-store" });
     expect(put).toHaveBeenCalledWith("traces/run-1/task-1/output.log", "trace output", {
       access: "public",
       addRandomSuffix: false,
@@ -617,7 +631,15 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
 
   it("returns null when trace reads keep failing after retries", async () => {
     const storage = new BlobStorage();
-    vi.mocked(get).mockRejectedValue(new Error("temporary blob failure"));
+    vi.mocked(list).mockResolvedValue({
+      blobs: [{
+        url: "https://blob.example/traces/run-1/task-1/output.log",
+        pathname: "traces/run-1/task-1/output.log",
+        uploadedAt: "2026-07-21T00:00:00.000Z",
+      }],
+      hasMore: false,
+    } as never);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("temporary blob failure")));
 
     await expect(storage.getTraceBytes("run-1", "task-1", "output.log")).resolves.toBeNull();
   });
