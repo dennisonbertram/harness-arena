@@ -22,6 +22,7 @@ import { judgeSubmission } from "@/lib/judge";
 import { startRun } from "@/lib/run-trigger";
 import { auth } from "@/auth";
 import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 import { defaultCompetitionId } from "@/lib/competition-leaderboard";
 import { GET, POST } from "./route";
 import { mintAgentToken } from "@/lib/agent-token";
@@ -296,6 +297,38 @@ describe("POST /api/competition/submissions", () => {
 
     const response = await POST(postRequest({ agent_name: "carol", prompt: "BASELINE TEXT" }, "4.4.4.5"));
     expect(response.status).toBe(409);
+    expect(judgeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("rejects the published baseline prompt even when the prior baseline run infra-failed", async () => {
+    const prompt = getBaselinePrompt();
+    await storageRef.current.putSubmission({
+      id: "base-infra-failed",
+      agent_name: "pi-vanilla-baseline",
+      prompt,
+      status: "failed",
+      competition: true,
+      competition_id: defaultCompetitionId(),
+      competition_baseline: true,
+      run_id: "rb-infra-failed",
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+    await storageRef.current.putRun({
+      id: "rb-infra-failed",
+      submission_id: "base-infra-failed",
+      status: "failed",
+      task_results: [],
+      created_at: "2026-07-25T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      postRequest({ agent_name: "baseline-copy", prompt }, "4.4.4.55"),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "the published baseline prompt must be changed before submitting",
+    });
     expect(judgeSubmission).not.toHaveBeenCalled();
   });
 

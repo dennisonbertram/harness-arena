@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { getBaselinePrompt } from "@/lib/baseline-prompt";
 import { resolveIdentity } from "@/lib/identity";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { belongsToCompetition, resolveDefaultCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
@@ -67,6 +68,18 @@ export async function POST(request: NextRequest) {
     );
   }
   const { agent_name: agentName, prompt, competition_id: competitionId } = parsedInput.data;
+
+  // The baseline is the starting material competitors are expected to improve,
+  // not a valid entry by itself. Check the published source directly rather
+  // than relying on a baseline Submission row: an infra-failed baseline is
+  // intentionally retryable, but that must never make a byte-identical copy
+  // eligible as a competitor submission.
+  if (prompt === getBaselinePrompt()) {
+    return NextResponse.json(
+      { error: "the published baseline prompt must be changed before submitting" },
+      { status: 409 },
+    );
+  }
 
   const storage = getStorage();
   const competition = competitionId

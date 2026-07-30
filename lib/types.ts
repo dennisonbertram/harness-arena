@@ -29,6 +29,10 @@ export const RUN_EVENT_TYPES = [
   "task.agent_finished",
   "task.verify_started",
   "task.verified",
+  // A task-level execution failure (for example, the model response timed
+  // out). This is not a run infrastructure failure: the runner records a
+  // failed task result and continues the benchmark.
+  "task.failed",
   "task.trace_uploaded",
   "run.budget_exceeded",
   "run.completed",
@@ -101,6 +105,8 @@ export const TaskResultSchema = z.object({
   duration_s: z.number().optional(),
   turns: z.number().optional(),
   trace_blob_url: z.string().optional(),
+  failure_stage: z.string().optional(),
+  error: z.string().optional(),
 });
 export type TaskResult = z.infer<typeof TaskResultSchema>;
 

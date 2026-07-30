@@ -17,6 +17,8 @@ export interface TaskProgress {
   costUsd?: number;
   durationS?: number;
   hasTrace: boolean;
+  failureStage?: string;
+  error?: string;
 }
 
 export interface RunProgress {
@@ -68,6 +70,11 @@ export function reconstructRunProgress(events: RunEvent[]): RunProgress {
         break;
       case "task.verified":
         t.state = p.passed === true ? "passed" : "failed";
+        break;
+      case "task.failed":
+        t.state = "failed";
+        t.failureStage = payloadStr(p, "stage");
+        t.error = payloadStr(p, "error");
         break;
       case "task.trace_uploaded":
         t.hasTrace = true;

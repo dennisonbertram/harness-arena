@@ -281,6 +281,34 @@ async function uploadTrace(taskId, name, buffer) {
   return postWithRetry(url, gz, false);
 }
 
+// Upload the agent-side evidence on every terminal task path, including an
+// agent timeout that never reaches verification. Previously timeout traces
+// disappeared with the thrown error, leaving only a run-level message and no
+// way to distinguish a provider stall from an agent that produced bad work.
+async function uploadAgentTraces(taskId, sessionText, piStdout) {
+  const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
+  let traceBlobUrl;
+  const redactedSession = redactSecrets(sessionText, secrets);
+  const sessionUpload = await uploadTrace(
+    taskId,
+    "session.jsonl",
+    Buffer.from(redactedSession, "utf8"),
+  );
+  if (sessionUpload?.url) {
+    traceBlobUrl = sessionUpload.url;
+    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: sessionUpload.url });
+  }
+  const redactedStdout = Buffer.from(
+    redactSecrets(piStdout.toString("utf8"), secrets),
+    "utf8",
+  );
+  const stdoutUpload = await uploadTrace(taskId, "pi-stdout.txt", redactedStdout);
+  if (stdoutUpload?.url) {
+    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: stdoutUpload.url });
+  }
+  return { traceBlobUrl, secrets };
+}
+
 // Terminal status delivery (status completed/failed + totals) is the one
 // callback that must never be silently lost: flushEvents already retries
 // the POST 3x with backoff; if it still fails, write the payload to
@@ -558,20 +586,37 @@ async function runOneTask(task, index, systemPrompt) {
     });
     await flushEvents();
 
-    // GNU timeout exits 124 after the configured agent deadline. Without a
-    // kill-after, pi could ignore SIGTERM while three five-minute gateway
-    // retries ran, so one broken provider looked like an ordinary failed task
-    // for ~15 minutes and the run continued. buildPiCommand now hard-kills
-    // after 10 seconds; turn the timeout into a terminal infrastructure error
-    // instead of grading the untouched task and moving on.
+    // GNU timeout exits 124 after the configured agent deadline. This is a
+    // failed task, not a failed benchmark run: a weak or temporarily stalled
+    // model must not discard earlier results or prevent the remaining selected
+    // tasks from running. The hard kill still bounds each task; the runner now
+    // records the timeout transparently and continues.
     if (execResult.code === 124 || execResult.code === 137) {
-      const error = new Error(
+      const error = (
         `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
-          `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`,
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
       );
-      error.stage = "agent_timeout";
-      error.taskId = task.id;
-      throw error;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: "agent_timeout",
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        trace_blob_url: traceBlobUrl,
+        failure_stage: "agent_timeout",
+        error,
+      };
     }
 
     // Verification against a clean copy of the task's tests.
@@ -603,19 +648,7 @@ async function runOneTask(task, index, systemPrompt) {
     // own session/stdout, and these traces are uploaded publicly. The FULL
     // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
     // ~4.5MB callback body limit) -- no truncation.
-    const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
-    let traceBlobUrl;
-    const redactedSession = redactSecrets(sessionText, secrets);
-    const sessionUpload = await uploadTrace(task.id, "session.jsonl", Buffer.from(redactedSession, "utf8"));
-    if (sessionUpload?.url) {
-      traceBlobUrl = sessionUpload.url;
-      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
-    }
-    const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
-    const stdoutUpload = await uploadTrace(task.id, "pi-stdout.txt", redactedStdout);
-    if (stdoutUpload?.url) {
-      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
-    }
+    const { traceBlobUrl, secrets } = await uploadAgentTraces(task.id, sessionText, piStdout);
     // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
     // Verifier tab shows WHY a task passed or failed, not just the reward.
     const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
@@ -662,6 +695,9 @@ async function runOneTask(task, index, systemPrompt) {
 // --- main -------------------------------------------------------------
 async function main() {
   const startedAt = Date.now();
+  const taskResults = [];
+  let cumulativeCost = 0;
+  let overBudget = false;
   try {
     // Must be listening before any task container starts, since pi's models.json
     // points at it. Started here rather than per-task so all 16 tasks in a run
@@ -725,10 +761,6 @@ async function main() {
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
     const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
 
-    const taskResults = [];
-    let cumulativeCost = 0;
-    let overBudget = false;
-
     for (let index = 0; index < tasks.length; index++) {
       const task = tasks[index];
       if (overBudget) {
@@ -783,7 +815,14 @@ async function main() {
     } catch {
       // best-effort only
     }
-    const delivered = await finalizeTerminalStatus({ status: "failed" });
+    const totals = computeTotals(taskResults);
+    const delivered = await finalizeTerminalStatus({
+      status: "failed",
+      totals: { ...totals, over_budget: overBudget },
+      task_results: taskResults,
+      provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
+      resolved_system_prompt: resolvedSystemPrompt,
+    });
     process.exit(delivered ? 0 : 1);
   }
 }
