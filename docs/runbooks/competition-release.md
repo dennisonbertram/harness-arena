@@ -143,16 +143,21 @@ new deployments, so deploy before using the replacement.
 ## 6. Deploy and prove the serving alias
 
 ```sh
-DEPLOYMENT_URL="$(vercel deploy --prod --yes --scope dennisons-projects | tail -n 1)"
-vercel inspect "$DEPLOYMENT_URL" --wait --scope dennisons-projects
-vercel inspect https://harness-arena-psi.vercel.app --scope dennisons-projects
-vercel logs "$DEPLOYMENT_URL" --since 10m --level error --no-follow
+vercel deploy --prod --yes --scope dennisons-projects
+vercel inspect https://harness-arena-psi.vercel.app \
+  --wait --scope dennisons-projects --format json
+vercel logs <deployment-id-from-inspect> --since 10m --level error --no-follow
 ```
 
 The deployment URL and production alias must resolve to the same ready
 deployment. The runner bundle URL is commit-keyed; confirm the deployed commit
 contains the intended runner bundle rather than relying on the stable asset
 pathname.
+
+Do not parse the last line of `vercel deploy`. Build hooks and CLI progress
+output can leave a non-URL line on stdout; one release parsed `}` as `dpl_}` and
+stopped after a successful alias change. Resolve the authoritative deployment
+ID from the production alias with structured `vercel inspect --format json`.
 
 ## 7. Create the successor before closing the predecessor
 
@@ -215,7 +220,22 @@ Stop immediately on:
 - missing correlations or mixed providers;
 - failed/reaped run or an all-infrastructure “completed” run.
 
-Do not submit entrants while the baseline gate is red.
+When a task has emitted only `task.started`, do not call it a provider stall
+from elapsed time alone. Use the `run.sandbox_creating` event's sandbox name
+with a read-only Vercel process check:
+
+```sh
+vercel sandbox exec --sudo --scope dennisons-projects <sandbox-name> ps
+```
+
+An active runner `timeout` + `pi` + task process means work is still in flight.
+A provider stall requires the proxy timing/byte evidence described below.
+
+Do not submit entrants while the baseline gate is red. After the vanilla
+baseline passes, submit one custom-prompt canary and require at least one real
+Gateway response, Pi turn, and verifier result before launching several
+entrants. The vanilla baseline does not exercise Pi's custom system-prompt
+request shape.
 
 ## 9. Failure classification and retry policy
 
@@ -245,7 +265,9 @@ Retry rules:
 Use an authenticated GitHub browser session and the production submission UI.
 Do not write entrant records directly to storage.
 
-For several unique prompts:
+First submit one custom-prompt canary. Follow its first task through the
+Gateway, Pi, and verifier boundaries. Only after that path is productive,
+submit several unique prompts:
 
 1. select the live competition;
 2. submit a unique name and non-baseline prompt;
@@ -268,6 +290,12 @@ Verify with both production APIs and a fresh browser session:
 - entrants move from pending to the correct leaderboard;
 - run detail shows model, pinned provider, and intermediary;
 - closed competition remains searchable but accepts no submissions.
+
+Fetch provider artwork from a first-party source, retain the source URL and
+checksum, and add a focused render test. For Inkling Small, the asset is
+`https://thinkingmachines.ai/images/apple-touch-icon.png`; the fetched 180×180
+PNG has SHA-256
+`ef907e01669290064ce1db3d7902203fb2786dc110d2c496a8a02ad912d32e7e`.
 
 After the browser smoke, query Vercel logs again and confirm the original
 failure signature is absent on the serving deployment.
@@ -310,6 +338,24 @@ This is provider/gateway infrastructure evidence, not a failed task. Preserve
 request ID, pin, byte counts, first-byte/idle timing, and retry evidence. See
 `docs/provider-stream-failure-ab.md`.
 
+### Custom prompt requests the context window as output
+
+```text
+HTTP 400 from Baseten through Vercel AI Gateway
+Invalid request: max_tokens (~994,000) must be <= 262144
+16/16 tasks labelled provider_error
+0 Pi turns, 0 verifier events, $0 cost
+```
+
+Cause: Pi's custom system-prompt path derived `max_tokens` from Inkling's
+roughly one-million-token context metadata, while the live Baseten route caps
+output at 262,144 tokens. This is an application request-construction failure,
+not random provider instability, even though the boundary label is
+`provider_error`. Fix: enforce the model-specific output ceiling in the proxy,
+the authoritative last hop before Vercel AI Gateway, while preserving smaller
+requests. Release gate: a vanilla baseline plus one productive custom-prompt
+canary.
+
 ### Local proxy tests hang at 15 seconds
 
 If every localhost proxy test times out without reaching its assertions, first
@@ -324,4 +370,13 @@ change proxy code or increase test timeouts until the bind itself succeeds.
 | --- | --- | --- | --- | --- | --- |
 | 2026-07-31 07:55 | `dpl_412RFHUaUN7ZyNSJWziurzKTvKTR` / production | `a9728aea-0ee0-47f6-b23c-851d5e12c160` · Inkling Small · Baseten | `339a5d3a-96ea-4030-92af-b2f880802a7b` | STOP | 16/16 requests hit `/v1/v1/messages`; infrastructure-invalid 0/16. Wafer board closed only after successor creation. |
 | 2026-07-31 08:06 | `dpl_7fEAfZV3eGehXHqfU6DYvrCvvJJh` / production | same | `f2f273c6-7b3b-4106-856d-184a6b99e64f` | STOP | Path fixed and Baseten returned 200 plus response ID; Pi was killed by buffered verbose JSON before a tool turn, then verifier ran against untouched workspace. |
-| Pending | pending bounded-output runner deployment | same | pending retry | STOP | Do not admit entrants until real Pi turns and valid gateway correlations are proven. |
+| 2026-07-31 08:31 | `dpl_C2LLr1qAnFRAHfhXGJFkuGdd5gMc` / production | no competition mutation | none | STOP | Bounded-output build deployed, but release automation parsed mixed CLI output as `dpl_}` and stopped before admin calls. Secret was discarded and rotated again. |
+| 2026-07-31 08:33 | `dpl_5mW6nieY9ymp3jsM64cjACPUn7ML` / production | `eda31800-e401-4c40-a112-b101079dd7f4` · Inkling Small · Baseten | `a6afbfa7-7515-4637-9d73-df9eee0bd569` | GO | 9/16, $2.2982. All 16 tasks correlated; 481/481 requests were exact-model, Baseten-only HTTP 200 responses with nonzero bytes/chunks and no stream errors. `headless-terminal` hit its documented 900s agent timeout after 20 turns/1,464 output tokens, so it is a legitimate model/task timeout. Four diagnostic captures truncated without killing Pi. |
+
+## Entrant release record
+
+| Created (UTC) | Entry | Submission | Run | State |
+| --- | --- | --- | --- | --- |
+| 2026-07-31 14:06 | Evidence Loop | `9de8b34e-164c-4ee1-97a5-e81218255650` | `7bc65b8e-ff02-4270-a222-16043a8ee486` | INFRA INVALID · custom prompt sent `max_tokens` above Baseten's 262,144 ceiling; 16/16 HTTP 400 before inference |
+| 2026-07-31 14:06 | Contract First | `b1a70582-277c-410c-8b8b-34d220c4a91a` | `efd6d6c8-41df-42ea-955a-12aa363a5db9` | INFRA INVALID · same deterministic request-construction failure |
+| 2026-07-31 14:07 | Verifier Driven | `fb06836f-8dec-4e62-999e-b2dae1972fb6` | `a760aa4e-643f-4934-94b8-18eccf196793` | INFRA INVALID · same deterministic request-construction failure |

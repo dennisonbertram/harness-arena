@@ -70,15 +70,21 @@ export function normalizeZaiReasoning(body) {
   };
 }
 
+const MODEL_COMPLETION_TOKEN_CEILINGS = new Map([
+  ["zai/glm-5.2-fast", 8_192],
+  ["thinkingmachines/inkling-small", 262_144],
+]);
+
 /**
- * Enforce GLM Fast's per-turn completion ceiling at the last hop before the
- * Gateway. Pi's model metadata should already emit the same value, but the
- * proxy body is the request Vercel actually receives and is therefore the
- * authoritative boundary.
+ * Enforce each model route's observed completion ceiling at the last hop
+ * before the Gateway. Pi derives max_tokens from its model metadata, but that
+ * value can describe the context window rather than the serving provider's
+ * output limit. The proxy body is the request Vercel actually receives and is
+ * therefore the authoritative boundary.
  */
 export function boundCompletionTokens(body) {
-  if (body?.model !== "zai/glm-5.2-fast") return body;
-  const ceiling = 8_192;
+  const ceiling = MODEL_COMPLETION_TOKEN_CEILINGS.get(body?.model);
+  if (ceiling === undefined) return body;
   const field = Object.hasOwn(body, "max_completion_tokens") ? "max_completion_tokens" : "max_tokens";
   const requested = body[field];
   return {

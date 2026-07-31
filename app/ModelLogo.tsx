@@ -1,9 +1,12 @@
 // Brand logomarks (official assets, single-path/single-color) for the
 // providers behind our models, keyed by the gateway id's provider prefix.
+import Image from "next/image";
+
 // Anthropic, Z.ai, Moonshot AI, Google and NVIDIA marks are Simple Icons'
 // (simpleicons.org, CC0) path data; Poolside's is their own official
 // press-kit logomark (poolside.ai/brand/Poolside-logomark.zip, "solid"
-// variant), and Thinking Machines is derived from its official site favicon.
+// variant). Thinking Machines uses the first-party 180px touch icon fetched
+// from thinkingmachines.ai/images/apple-touch-icon.png on 2026-07-31.
 // Rendered with our own theme-aware fill rather than each source's embedded
 // color.
 //
@@ -16,7 +19,11 @@
 // monochrome, so light-on-dark IS their correct rendering, and they fall back
 // to the theme-aware neutral. Where a brand has a real chromatic colour that
 // clears contrast, we use it.
-const PROVIDER_LOGOS: Record<string, { viewBox: string; path: string; color?: string }> = {
+type ProviderLogo =
+  | { viewBox: string; path: string; color?: string }
+  | { src: string };
+
+const PROVIDER_LOGOS: Record<string, ProviderLogo> = {
   anthropic: {
     // Anthropic's mark hex is #191919 (1.13 contrast here). Their clay accent
     // is equally official and clears contrast at 6.34.
@@ -47,10 +54,7 @@ const PROVIDER_LOGOS: Record<string, { viewBox: string; path: string; color?: st
     path: "M8.948 8.798v-1.43a6.7 6.7 0 0 1 .424-.018c3.922-.124 6.493 3.374 6.493 3.374s-2.774 3.851-5.75 3.851c-.398 0-.787-.062-1.158-.185v-4.346c1.528.185 1.837.857 2.747 2.385l2.04-1.714s-1.492-1.952-4-1.952a6.016 6.016 0 0 0-.796.035m0-4.735v2.138l.424-.027c5.45-.185 9.01 4.47 9.01 4.47s-4.08 4.964-8.33 4.964c-.37 0-.733-.035-1.095-.097v1.325c.3.035.61.062.91.062 3.957 0 6.82-2.023 9.593-4.408.459.371 2.34 1.263 2.73 1.652-2.633 2.208-8.772 3.984-12.253 3.984-.335 0-.653-.018-.971-.053v1.864H24V4.063zm0 10.326v1.131c-3.657-.654-4.673-4.46-4.673-4.46s1.758-1.944 4.673-2.262v1.237H8.94c-1.528-.186-2.73 1.245-2.73 1.245s.68 2.412 2.739 3.11M2.456 10.9s2.164-3.197 6.5-3.533V6.201C4.153 6.59 0 10.653 0 10.653s2.35 6.802 8.948 7.42v-1.237c-4.84-.6-6.492-5.936-6.492-5.936z",
   },
   thinkingmachines: {
-    // The official favicon is a dark rounded square on a light rounded-square
-    // tile. The badge supplies the tile; this path is the inner mark.
-    viewBox: "0 0 24 24",
-    path: "M5.5 3h13A2.5 2.5 0 0 1 21 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 18.5v-13A2.5 2.5 0 0 1 5.5 3Z",
+    src: "/logos/thinking-machines.png",
   },
 };
 
@@ -77,6 +81,14 @@ export function ModelLogo({ model, size = 24 }: { model: string; size?: number }
     return (
       <span aria-hidden="true" style={{ ...badgeStyle, color: "var(--gray-700)", fontSize: Math.round(size * 0.46) }}>
         ?
+      </span>
+    );
+  }
+  if ("src" in logo) {
+    const imageSize = Math.round(size * 0.72);
+    return (
+      <span aria-hidden="true" style={badgeStyle}>
+        <Image src={logo.src} alt="" width={imageSize} height={imageSize} unoptimized />
       </span>
     );
   }

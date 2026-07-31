@@ -136,6 +136,46 @@ describe("gateway proxy", () => {
     expect(upstream.received[0].body.max_tokens).toBe(8_192);
   });
 
+  it("caps Inkling completions at Baseten's live output ceiling", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["baseten"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "thinkingmachines/inkling-small",
+        system: "A custom competition prompt",
+        messages: [],
+        max_tokens: 994_589,
+      }),
+    });
+
+    // Three real custom-prompt runs failed 16/16 because Pi used the model's
+    // 1M context metadata as an output request while Baseten rejects any
+    // max_tokens value above 262,144. The sidecar is the authoritative last
+    // hop and must enforce the provider's observed live ceiling.
+    expect(upstream.received[0].body.max_tokens).toBe(262_144);
+  });
+
+  it("preserves a smaller Inkling completion request", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["baseten"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "thinkingmachines/inkling-small",
+        system: "A custom competition prompt",
+        messages: [],
+        max_tokens: 4_096,
+      }),
+    });
+
+    expect(upstream.received[0].body.max_tokens).toBe(4_096);
+  });
+
   // generationId used to be read here, which required buffering the whole
   // upstream response. That buffering is what broke streaming, and the id was
   // never wired up to anything (see docs/provider-pinning.md). Reporting now
@@ -732,7 +772,7 @@ describe("runner subprocess isolation", () => {
 
     const upstream = await fakeUpstream();
     const port = await listen(createGatewayProxy({ only: ["wafer"], upstream: upstream.url }));
-    const child = runnerLib.shAsync(process.execPath, ["-e", "setTimeout(() => {}, 250)"]);
+    const child = runnerLib.shAsync(process.execPath, ["-e", "setTimeout(() => {}, 600)"]);
 
     const response = await Promise.race([
       fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -741,7 +781,11 @@ describe("runner subprocess isolation", () => {
         body: JSON.stringify({ model: "zai/glm-5.2-fast", messages: [] }),
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("gateway proxy starved while the child process ran")), 100),
+        // Parallel full-suite startup can delay this worker by ~180 ms on the
+        // release host. Keep the deadline below the child lifetime so a
+        // synchronous subprocess implementation still fails deterministically
+        // without treating ordinary scheduler contention as proxy starvation.
+        setTimeout(() => reject(new Error("gateway proxy starved while the child process ran")), 400),
       ),
     ]);
 
