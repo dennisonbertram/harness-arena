@@ -9,7 +9,27 @@ import type { Run, Submission } from "./types";
 
 /** A run that ended in infra failure (not the submitter's/admin's fault) — shared by both competition routes' duplicate/retry guards. */
 export function isInfraFailedRun(run: Run | undefined): boolean {
-  return run?.status === "failed" || run?.status === "reaped";
+  if (!run) return false;
+  if (run.status === "failed" || run.status === "reaped") return true;
+
+  // The runner is intentionally task-resilient: it keeps going after a task
+  // cannot reach the model and can therefore finish a broken transport as a
+  // formally "completed" 0/16 run. Treat the narrow zero-output form as
+  // infrastructure failure so a baseline or entrant may be retried. A
+  // provider error after productive turns is deliberately not included; that
+  // can be a real model/provider interaction and needs to remain visible.
+  return (
+    run.status === "completed" &&
+    run.task_results.length > 0 &&
+    run.task_results.every(
+      (result) =>
+        result.attempted &&
+        !result.passed &&
+        (result.failure_stage === "provider_error" || result.failure_stage === "provider_timeout") &&
+        (result.turns ?? 0) <= 1 &&
+        (result.output_tokens ?? 0) === 0,
+    )
+  );
 }
 
 export type JudgeAndDispatchResult =

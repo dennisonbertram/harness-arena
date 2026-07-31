@@ -497,6 +497,13 @@ export function gatewayProxyBaseUrl({ host, port }) {
   return `http://${host}:${port}/v1`;
 }
 
+// Anthropic-compatible clients append /v1/messages themselves. Vercel
+// documents the Gateway origin (without /v1) as their base URL; supplying the
+// OpenAI-style base instead produces /v1/v1/messages.
+export function gatewayProxyRootUrl({ host, port }) {
+  return `http://${host}:${port}`;
+}
+
 // `models.json` cannot change the transport of a built-in Pi model with a
 // provider-level `api` alone. The model must be explicitly upserted through
 // `models`, and Pi's upsert does not inherit the built-in model's accounting
@@ -618,10 +625,13 @@ export function resolvePinnedProvider({ configured, applied }) {
  *
  * pi cannot add arbitrary body fields, so it cannot send the gateway's
  * `providerOptions.gateway.only` itself. It CAN point a provider at a
- * different baseUrl, so we send it to the local proxy's `/v1` endpoint, which
- * injects the pin and forwards. GLM is forced onto Pi's OpenAI-compatible
- * transport because the Anthropic Messages stream repeatedly produced zero
- * agent turns across providers in production. See gateway-proxy.mjs.
+ * different baseUrl, so we send it to the local proxy, which injects the pin
+ * and forwards. GLM is forced onto Pi's OpenAI-compatible `/v1` transport
+ * because the Anthropic Messages stream repeatedly produced zero agent turns
+ * across providers in production. Other catalog models keep Pi's own
+ * transport and receive the proxy origin, allowing an Anthropic-compatible
+ * model such as Inkling to append `/v1/messages` exactly once. See
+ * gateway-proxy.mjs.
  *
  * `host.docker.internal` resolves via the --add-host=host-gateway mapping the
  * runner adds to `docker run`: pi executes inside the task container, and the
@@ -654,10 +664,15 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
     providers: {
       "vercel-ai-gateway": {
         api: "openai-completions",
-        baseUrl: gatewayProxyBaseUrl({
-          host: "host.docker.internal",
-          port: proxyPort,
-        }),
+        baseUrl: zaiMetadata
+          ? gatewayProxyBaseUrl({
+              host: "host.docker.internal",
+              port: proxyPort,
+            })
+          : gatewayProxyRootUrl({
+              host: "host.docker.internal",
+              port: proxyPort,
+            }),
         ...(models ? { models } : {}),
         modelOverrides: { [model]: modelOverride },
       },

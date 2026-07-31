@@ -240,6 +240,21 @@ describe("buildPinnedModelsConfig", () => {
     expect(Object.keys(cfg.providers["vercel-ai-gateway"].modelOverrides)).toEqual(["anthropic/claude-opus-5"]);
   });
 
+  it("gives Pi's Anthropic-compatible Inkling transport a root proxy URL", () => {
+    const model = "thinkingmachines/inkling-small";
+    const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
+    const provider = cfg.providers["vercel-ai-gateway"];
+
+    // Pi's catalog entry for Inkling uses Anthropic Messages and appends
+    // /v1/messages itself. Giving that transport a /v1 base produced the
+    // production-only /v1/v1/messages 404. Preserve Pi's model metadata and
+    // hand it the root sidecar URL, as Vercel documents for Anthropic clients.
+    expect(provider.models).toBeUndefined();
+    expect(`${provider.baseUrl}/v1/messages`).toBe(
+      "http://host.docker.internal:4599/v1/messages",
+    );
+  });
+
   it("marks Z.AI models so Pi sends an explicit disabled-thinking payload", () => {
     const model = "zai/glm-5.2-fast";
     const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
