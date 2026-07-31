@@ -356,6 +356,54 @@ the authoritative last hop before Vercel AI Gateway, while preserving smaller
 requests. Release gate: a vanilla baseline plus one productive custom-prompt
 canary.
 
+### Catalog vs. live-validator discrepancy (verified 2026-07-31)
+
+Both current Vercel catalog surfaces advertise a one-million-token output
+limit for `thinkingmachines/inkling-small`. The Vercel CLI endpoint view uses
+provider-oriented field names:
+
+```sh
+vercel ai-gateway models endpoints thinkingmachines/inkling-small \
+  --format json --scope dennisons-projects \
+  | jq '.endpoints[] | select(.provider_name == "baseten") \
+    | {provider_name, context_length, max_completion_tokens}'
+# {"provider_name":"baseten","context_length":1000000,
+#  "max_completion_tokens":1000000}
+```
+
+The public OpenAI-compatible catalog expresses the same values with different
+field names:
+
+```sh
+curl -fsS https://ai-gateway.vercel.sh/v1/models \
+  | jq '.data[] | select(.id == "thinkingmachines/inkling-small") \
+    | {id, context_window, max_tokens, supported_parameters}'
+# {"id":"thinkingmachines/inkling-small","context_window":1000000,
+#  "max_tokens":1000000,"supported_parameters":[...,"max_tokens",...]}
+```
+
+Thus the field names depend on the catalog surface, but both advertise
+1,000,000. The persisted production event for failed run
+`7bc65b8e-ff02-4270-a222-16043a8ee486` records the other side of the
+discrepancy without exposing credentials:
+
+```sh
+curl -fsS \
+  'https://harness-arena-psi.vercel.app/api/runs/7bc65b8e-ff02-4270-a222-16043a8ee486/events' \
+  | jq '.[] | select(.type == "task.failed") | .payload.error'
+# HTTP 400: Invalid request: ['max_tokens (994589): Input should be less
+# than or equal to 262144']
+# routing: resolvedProvider=baseten, fallbacksAvailable=[], attemptCount=1
+```
+
+Thus a dynamic lookup of this catalog alone remains unsafe: it tells Pi that
+one million output tokens are valid, while the sole live Baseten route rejects
+anything above 262,144 before inference. Keep a verified route-specific output
+ceiling in the model profile, feed it to Pi, and retain the proxy clamp as the
+last-hop guard. Recheck the live catalog and custom-prompt canary after any
+model/provider change; report this catalog-versus-validator mismatch to Vercel
+with the sanitized run ID and error above.
+
 ### Local proxy tests hang at 15 seconds
 
 If every localhost proxy test times out without reaching its assertions, first
@@ -372,6 +420,7 @@ change proxy code or increase test timeouts until the bind itself succeeds.
 | 2026-07-31 08:06 | `dpl_7fEAfZV3eGehXHqfU6DYvrCvvJJh` / production | same | `f2f273c6-7b3b-4106-856d-184a6b99e64f` | STOP | Path fixed and Baseten returned 200 plus response ID; Pi was killed by buffered verbose JSON before a tool turn, then verifier ran against untouched workspace. |
 | 2026-07-31 08:31 | `dpl_C2LLr1qAnFRAHfhXGJFkuGdd5gMc` / production | no competition mutation | none | STOP | Bounded-output build deployed, but release automation parsed mixed CLI output as `dpl_}` and stopped before admin calls. Secret was discarded and rotated again. |
 | 2026-07-31 08:33 | `dpl_5mW6nieY9ymp3jsM64cjACPUn7ML` / production | `eda31800-e401-4c40-a112-b101079dd7f4` · Inkling Small · Baseten | `a6afbfa7-7515-4637-9d73-df9eee0bd569` | GO | 9/16, $2.2982. All 16 tasks correlated; 481/481 requests were exact-model, Baseten-only HTTP 200 responses with nonzero bytes/chunks and no stream errors. `headless-terminal` hit its documented 900s agent timeout after 20 turns/1,464 output tokens, so it is a legitimate model/task timeout. Four diagnostic captures truncated without killing Pi. |
+| 2026-07-31 14:29 | `dpl_8tGwqf5S2EmeGDfbDPEv9aVfb7gU` / production | same live competition | custom-prompt canary `878f8224-e54e-40a9-b6d5-c7f5be83f364` | GO | Proxy now caps Inkling at Baseten's 262,144 output ceiling. Canary task 1 produced 11 exact-model Baseten-only HTTP 200 responses, 11 Pi turns/3,482 output tokens, then passed verification. Official first-party Thinking Machines logo also shipped. |
 
 ## Entrant release record
 
@@ -380,3 +429,6 @@ change proxy code or increase test timeouts until the bind itself succeeds.
 | 2026-07-31 14:06 | Evidence Loop | `9de8b34e-164c-4ee1-97a5-e81218255650` | `7bc65b8e-ff02-4270-a222-16043a8ee486` | INFRA INVALID · custom prompt sent `max_tokens` above Baseten's 262,144 ceiling; 16/16 HTTP 400 before inference |
 | 2026-07-31 14:06 | Contract First | `b1a70582-277c-410c-8b8b-34d220c4a91a` | `efd6d6c8-41df-42ea-955a-12aa363a5db9` | INFRA INVALID · same deterministic request-construction failure |
 | 2026-07-31 14:07 | Verifier Driven | `fb06836f-8dec-4e62-999e-b2dae1972fb6` | `a760aa4e-643f-4934-94b8-18eccf196793` | INFRA INVALID · same deterministic request-construction failure |
+| 2026-07-31 14:31 | Evidence Loop Canary | `4dd8a03d-00b9-4c1b-9a4d-40a7961798e8` | `878f8224-e54e-40a9-b6d5-c7f5be83f364` | RUNNING · custom-prompt canary passed task 1 with productive Baseten/Pi/verifier evidence |
+| 2026-07-31 14:33 | Contract First v2 | `19e8bb7b-adc8-426e-9bb0-7c2cc92805b9` | `c88989a2-9cc1-4173-8752-85c3e784f3a5` | RUNNING |
+| 2026-07-31 14:34 | Verifier Driven v2 | `3375a74e-6885-4440-be39-84a71da5106b` | `f0526281-6f03-4c87-9219-0889d13fa9ae` | RUNNING |
