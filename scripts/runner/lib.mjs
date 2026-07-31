@@ -1,7 +1,7 @@
 // Pure, import-testable helpers used by scripts/runner/runner.mjs. No
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
@@ -328,30 +328,75 @@ export function sh(cmd, args, opts = {}) {
 // model turn itself must not.
 export function shAsync(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(
-      cmd,
-      args,
-      {
-        encoding: "buffer",
-        maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
-        timeout: opts.timeout,
-      },
-      (err, stdout, stderr) => {
-        const result = {
-          code: 0,
-          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
-          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
-          timedOut: false,
-        };
-        if (err) {
-          result.code = typeof err.code === "number" ? err.code : 1;
-          result.timedOut = err.signal === "SIGTERM";
-          result.error = err;
-        }
-        resolve(result);
-      },
-    );
+    const captureLimit = opts.maxBuffer ?? 20 * 1024 * 1024;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let capturedBytes = 0;
+    let outputTruncated = false;
+    let timedOut = false;
+    let spawnError;
+
+    const capture = (chunks, chunk) => {
+      const remaining = Math.max(0, captureLimit - capturedBytes);
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      if (chunk.length > remaining) outputTruncated = true;
+      const accepted = Math.min(chunk.length, remaining);
+      capturedBytes += accepted;
+      return accepted;
+    };
+
+    // spawn drains stdout/stderr incrementally. execFile buffered both streams
+    // internally and killed Pi with ERR_CHILD_PROCESS_STDIO_MAXBUFFER when a
+    // reasoning-heavy JSON event stream crossed the capture bound.
+    const child = spawn(cmd, args);
+    child.stdout.on("data", (chunk) => {
+      stdoutBytes += capture(stdoutChunks, chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBytes += capture(stderrChunks, chunk);
+    });
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+
+    const timer =
+      opts.timeout === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGTERM");
+          }, opts.timeout);
+
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        code: typeof code === "number" ? code : 1,
+        stdout: Buffer.concat(stdoutChunks, stdoutBytes),
+        stderr: Buffer.concat(stderrChunks, stderrBytes),
+        timedOut,
+        outputTruncated,
+        ...(spawnError ? { error: spawnError } : {}),
+      });
+    });
   });
+}
+
+/**
+ * Unexpected Pi exits are runner/client failures, not verifier evidence.
+ * GNU timeout's 124/137 exits have their own explicit agent-timeout path.
+ */
+export function agentProcessFailure(result) {
+  if (result?.code === 0 || result?.code === 124 || result?.code === 137) return undefined;
+  const detail = result?.error?.code ?? result?.error?.message;
+  return [
+    `Pi process exited with code ${result?.code ?? "unknown"}`,
+    detail ? `(${detail})` : undefined,
+    result?.outputTruncated ? "after captured output was truncated" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 // Wrap a fetch call with a request-scoped abort deadline so a hung

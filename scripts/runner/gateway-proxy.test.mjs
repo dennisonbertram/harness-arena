@@ -748,6 +748,34 @@ describe("runner subprocess isolation", () => {
     expect(response.ok).toBe(true);
     expect((await child).code).toBe(0);
   });
+
+  it("drains verbose Pi output without killing the child when capture reaches its bound", async () => {
+    const captureLimit = 64 * 1024;
+    const child = await runnerLib.shAsync(
+      process.execPath,
+      ["-e", "process.stdout.write('x'.repeat(256 * 1024))"],
+      { maxBuffer: captureLimit },
+    );
+
+    // Inkling's JSON event stream repeats its growing reasoning partial on
+    // every delta. The old execFile maxBuffer killed Pi mid-turn; the runner
+    // then verified an untouched workspace and called it a model failure.
+    expect(child.code).toBe(0);
+    expect(child.stdout).toHaveLength(captureLimit);
+    expect(child.outputTruncated).toBe(true);
+  });
+});
+
+describe("agentProcessFailure", () => {
+  it("surfaces an unexpected Pi exit instead of verifying an untouched workspace", () => {
+    expect(
+      runnerLib.agentProcessFailure({
+        code: 1,
+        outputTruncated: true,
+        error: { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+      }),
+    ).toMatch(/Pi process exited with code 1.*ERR_CHILD_PROCESS_STDIO_MAXBUFFER.*truncated/);
+  });
 });
 
 import { preflightProxy } from "./lib.mjs";

@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
+  agentProcessFailure,
   budgetExceeded,
   buildPiSettings,
   buildContainerName,
@@ -527,10 +528,10 @@ async function runOneTask(task, index, systemPrompt) {
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
-    // through from this process's own environment -- execFile inherits
-    // process.env by default, so no extra plumbing is needed here. maxBuffer is
-    // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
-    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks. This call
+    // through from this process's own environment -- spawn inherits
+    // process.env by default, so no extra plumbing is needed here. shAsync
+    // drains both streams continuously and retains only STDOUT_CAP_BYTES for
+    // diagnostics; reaching that capture bound must never kill Pi. This call
     // MUST be async: the gateway proxy runs in this same Node process and a
     // synchronous docker exec starves its event loop for the whole model turn.
     const execResult = await shAsync(
@@ -548,7 +549,7 @@ async function runOneTask(task, index, systemPrompt) {
         "-c",
         piCommand,
       ],
-      { maxBuffer: 64 * 1024 * 1024 },
+      { maxBuffer: STDOUT_CAP_BYTES },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
@@ -614,6 +615,9 @@ async function runOneTask(task, index, systemPrompt) {
       });
     }
 
+    if (execResult.outputTruncated) {
+      log(`task ${task.id}: Pi stdout/stderr capture reached ${STDOUT_CAP_BYTES} bytes; child continued`);
+    }
     queueEvent("task.agent_finished", {
       task_id: task.id,
       turns,
@@ -621,6 +625,7 @@ async function runOneTask(task, index, systemPrompt) {
       ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
       duration_s: agentDurationS,
+      ...(execResult.outputTruncated ? { output_capture_truncated: true } : {}),
     });
     await flushEvents();
 
@@ -656,6 +661,36 @@ async function runOneTask(task, index, systemPrompt) {
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_timeout",
+        error,
+      };
+    }
+
+    const processFailure = agentProcessFailure(execResult);
+    if (processFailure) {
+      const error =
+        `${processFailure} ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: "agent_process_error",
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        failure_stage: "agent_process_error",
         error,
       };
     }

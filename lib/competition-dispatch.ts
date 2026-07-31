@@ -21,14 +21,20 @@ export function isInfraFailedRun(run: Run | undefined): boolean {
   return (
     run.status === "completed" &&
     run.task_results.length > 0 &&
-    run.task_results.every(
-      (result) =>
-        result.attempted &&
-        !result.passed &&
-        (result.failure_stage === "provider_error" || result.failure_stage === "provider_timeout") &&
-        (result.turns ?? 0) <= 1 &&
-        (result.output_tokens ?? 0) === 0,
-    )
+    run.task_results.every((result) => {
+      if (!result.attempted || result.passed || (result.output_tokens ?? 0) !== 0) return false;
+      const surfacedEarlyFailure =
+        (result.failure_stage === "provider_error" ||
+          result.failure_stage === "provider_timeout" ||
+          result.failure_stage === "agent_timeout" ||
+          result.failure_stage === "agent_process_error") &&
+        (result.turns ?? 0) <= 1;
+      const hiddenProcessFailure =
+        (result.turns ?? 0) === 0 &&
+        result.cost_source === "unmeasured" &&
+        result.failure_stage === undefined;
+      return surfacedEarlyFailure || hiddenProcessFailure;
+    })
   );
 }
 
