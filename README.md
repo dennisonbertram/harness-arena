@@ -33,7 +33,8 @@ curl -H "Authorization: Bearer $OPS_READ_TOKEN" \
 Cursors are versioned, HMAC-signed, snapshot-bound, and scoped to the exact
 kind/prefix/filter. Tampering or cross-kind reuse returns `invalid_cursor`.
 Pages are capped at 100 records; content is checked from Blob metadata before
-buffering and capped at 1 MiB with timeouts and retry. Errors distinguish
+buffering and capped at 750,000 bytes with bounded streaming, timeouts, and
+retry. Summary scans cap at 1,000 records. Errors distinguish
 `unauthorized`, `invalid_limit`, `invalid_cursor`, `invalid_identifier`,
 `not_found`, `too_large`, `transient`, `corrupt`, and `partial_read`.
 

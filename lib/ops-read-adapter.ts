@@ -16,10 +16,18 @@ const timeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> =>
   promise,
   new Promise<T>((_, reject) => setTimeout(() => reject(new Error("read_timeout")), timeoutMs)),
 ]);
+async function boundedBytes(stream: ReadableStream<Uint8Array>, maxBytes: number, timeoutMs: number) {
+  const reader=stream.getReader(),chunks:Uint8Array[]=[];let size=0;
+  try { while(true){const {done,value}=await timeout(reader.read(),timeoutMs);if(done)break;if(value){size+=value.byteLength;if(size>maxBytes){await reader.cancel();return undefined;}chunks.push(value);}} }
+  finally { reader.releaseLock(); }
+  return Buffer.concat(chunks.map((chunk)=>Buffer.from(chunk)),size);
+}
 
 export class BlobOpsReadAdapter implements OpsReadAdapter {
   async listPage({ prefix, cursor, limit }: { prefix: string; cursor?: string; limit: number }): Promise<OpsListPage> {
-    const page = await list({ prefix, cursor, limit });
+    let page: Awaited<ReturnType<typeof list>> | undefined;
+    for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list({prefix,cursor,limit}),3_000);break;}catch(error){if(attempt===1)throw error;}}
+    if(!page)throw new Error("list_failed");
     return {
       records: page.blobs.map((blob) => ({ pathname: blob.pathname, size: blob.size, uploaded_at: blob.uploadedAt.toISOString(), etag: blob.etag })),
       cursor: page.hasMore ? page.cursor : undefined,
@@ -42,8 +50,8 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
         const result = await timeout(get(pathname, { access: "public" }), timeoutMs);
         if (!result) return { status: "not_found" };
         if (result.statusCode !== 200 || !result.stream) throw new Error("read_failed");
-        const bytes = Buffer.from(await timeout(new Response(result.stream).arrayBuffer(), timeoutMs));
-        if (bytes.length > maxBytes) return { status: "too_large", size: bytes.length, limit: maxBytes };
+        const bytes = await boundedBytes(result.stream, maxBytes, timeoutMs);
+        if (!bytes) return { status: "too_large", size: maxBytes + 1, limit: maxBytes };
         return { status: "ok", bytes, metadata };
       } catch (error) {
         if (attempt === 1) return { status: "transient", error: error instanceof Error && error.message === "read_timeout" ? "read_timeout" : "read_failed" };

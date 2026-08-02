@@ -19,15 +19,16 @@ export const OPS_RECORD_KINDS = [
   { kind: "archives", prefix: BLOB_PATHS.archives, format: "json" },
 ] as const;
 export type OpsKind = typeof OPS_RECORD_KINDS[number]["kind"];
-const MAX_LIMIT = 100, DEFAULT_LIMIT = 50, MAX_BYTES = 1_048_576, READ_TIMEOUT_MS = 3_000, MAX_SUMMARY_RECORDS = 2_000;
+const MAX_LIMIT = 100, DEFAULT_LIMIT = 50, MAX_BYTES = 750_000, SUMMARY_READ_BYTES = 262_144, READ_TIMEOUT_MS = 3_000, MAX_SUMMARY_RECORDS = 1_000;
 
 export function opsAuthorized(value: string | null) {
   const expected = process.env.OPS_READ_TOKEN ?? "", match = /^Bearer ([^\s]+)$/.exec(value ?? ""), actual = match?.[1] ?? "";
   const digest = (input: string) => createHash("sha256").update(input).digest();
-  return expected.length > 0 && Boolean(match) && timingSafeEqual(digest(expected), digest(actual));
+  const equal = timingSafeEqual(digest(expected), digest(actual));
+  return expected.length > 0 && Boolean(match) && equal;
 }
 const SECRET_KEY = /(authorization|cookie|password|secret|token|api[_-]?key|credential)/i;
-export function redactUrl(value: string) { try { const url = new URL(value); url.search = ""; return url.toString(); } catch { return value; } }
+export function redactUrl(value: string) { return value.replace(/https?:\/\/[^\s"'<>]+/g,(candidate)=>{try{const url=new URL(candidate);url.search="";return url.toString();}catch{return candidate;}}); }
 export function redactOpsValue(value: unknown, key = ""): unknown {
   if (SECRET_KEY.test(key)) return "[REDACTED]";
   if (typeof value === "string") {
@@ -82,7 +83,7 @@ export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter
           scanned.records+=page.records.length;
           if(def.kind==="events") for(const record of page.records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const seq=Number(match[2]),previous=lastEventSeq.get(match[1])??0;if(seq>previous+1)integrity.event_holes+=seq-previous-1;if(seq>previous)lastEventSeq.set(match[1],seq);}
           const inspectJson=["submissions","runs","competitions","events","voice_manifest","voice_judgments","cleanup_operations"].includes(def.kind);
-          if(inspectJson) for(const record of page.records){let result;try{result=await adapter.read({pathname:record.pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});}catch{integrity.unreadable++;continue;}if(result.status!=="ok"){integrity.unreadable++;continue;}try{const value=JSON.parse(result.bytes.toString()) as {status?:string;started_at?:string;created_at?:string};if(def.kind==="runs"){if(value.status==="queued")runStates.queued++;if(value.status==="running"){runStates.running++;const timestamp=Date.parse(value.started_at??value.created_at??"");if(Number.isFinite(timestamp)&&Date.now()-timestamp>20*60_000)runStates.stale++;}if(value.status==="failed")runStates.failed++;}}catch{integrity.corrupt++;}}
+          if(inspectJson) for(const record of page.records){let result;try{result=await adapter.read({pathname:record.pathname,maxBytes:SUMMARY_READ_BYTES,timeoutMs:READ_TIMEOUT_MS});}catch{integrity.unreadable++;continue;}if(result.status!=="ok"){integrity.unreadable++;continue;}try{const value=JSON.parse(result.bytes.toString()) as {status?:string;started_at?:string;created_at?:string};if(def.kind==="runs"){if(value.status==="queued")runStates.queued++;if(value.status==="running"){runStates.running++;const timestamp=Date.parse(value.started_at??value.created_at??"");if(Number.isFinite(timestamp)&&Date.now()-timestamp>20*60_000)runStates.stale++;}if(value.status==="failed")runStates.failed++;}}catch{integrity.corrupt++;}}
           cursor=page.has_more?page.cursor:undefined;
         } while(cursor);
       }
