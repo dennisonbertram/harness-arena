@@ -33,6 +33,7 @@ beforeEach(async () => {
   await db.exec(migration("0001_agent_network.sql"));
   await db.exec(migration("0008_entry_saga.sql"));
   await db.exec(migration("0011_entry_saga_leases.sql"));
+  await db.exec(migration("0012_competition_lifecycle_gates.sql"));
   await db.query(
     "INSERT INTO entrants (id, github_id, github_login) VALUES ($1, $2::bigint, $3)",
     [entrant.entrant_id, entrant.github_id, entrant.github_login],
@@ -178,6 +179,26 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
     await first.release({ operation_id: reserved.operation_id, lease_token: owner.lease_token });
     await expect(second.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 }))
       .resolves.toEqual({ lease_token: expect.any(String) });
+  });
+
+  it("extends a held lease before expiry and rejects the fenced owner after it lapses", async () => {
+    let at = new Date("2026-08-03T00:00:00.000Z");
+    let index = 0;
+    const subject = createPostgresCompetitionEntryLedger(db, {
+      ids: () => ids[index++], now: () => at,
+    });
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-renew" } });
+    const first = await subject.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 });
+    if (!first) throw new Error("fixture lease was not granted");
+
+    at = new Date("2026-08-03T00:00:20.000Z");
+    await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: first.lease_token, lease_ms: 30_000 })).resolves.toBe(true);
+    at = new Date("2026-08-03T00:00:40.000Z");
+    await expect(subject.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 })).resolves.toBeNull();
+
+    at = new Date("2026-08-03T00:00:51.000Z");
+    await expect(subject.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 })).resolves.toEqual({ lease_token: expect.any(String) });
+    await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: first.lease_token, lease_ms: 30_000 })).resolves.toBe(false);
   });
 
   it("completes atomically with submission binding, active membership, audit and outbox records without accepting an external callback", async () => {

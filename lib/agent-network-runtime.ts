@@ -623,10 +623,7 @@ export function getAgentNetworkRuntime() {
       getRun: (id) => storage.getRun(id),
       putSubmission: (value) => storage.putSubmission(value as never),
       putRun: (value) => storage.putRun(value as never),
-      appendRunEvents: async (runId, events) => {
-        await storage.appendRunEvents(runId, events.map((event) => ({ ...event, ts: new Date().toISOString() })));
-      },
-      hasRunCreatedEvent: async (runId) => (await storage.listRunEventsSince(runId, 0)).some((event) => event.type === "run.created"),
+      ensureRunCreatedEvent: ({ run_id, submission_id }) => storage.ensureRunCreatedEvent({ run_id, submission_id }),
     },
     judge: async ({ prompt }) => judgeSubmission(prompt, getTasks()),
     getCompetition: (id) => storage.getCompetition(id),

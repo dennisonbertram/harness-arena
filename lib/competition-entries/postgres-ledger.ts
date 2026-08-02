@@ -13,6 +13,12 @@ type SagaRow = {
   phase: Phase; verdict_json: unknown; response_json: unknown; state: "pending" | "completed";
   lease_token: string | null; lease_expires_at: string | Date | null;
 };
+type LifecycleGateRow = {
+  competition_id: string;
+  state: "live" | "closed";
+  close_generation: string | null;
+  closed_at: string | Date | null;
+};
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
@@ -30,7 +36,7 @@ const json = <Value>(value: unknown): Value => typeof value === "string" ? JSON.
 const isPhase = (value: string): value is Phase => ["reserved", "judge_started", "verdict_persisted", "submission_written", "run_written", "run_created_appended", "committed"].includes(value);
 
 export class CompetitionEntryLedgerError extends Error {
-  constructor(readonly code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" | "ENTRY_SAGA_PHASE_CONFLICT" | "ENTRY_SAGA_NOT_FOUND" | "ENTRY_AUTHORIZATION_REVOKED") {
+  constructor(readonly code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" | "ENTRY_SAGA_PHASE_CONFLICT" | "ENTRY_SAGA_NOT_FOUND" | "ENTRY_AUTHORIZATION_REVOKED" | "COMPETITION_CLOSED") {
     super(code);
   }
 }
@@ -58,6 +64,28 @@ export function createPostgresCompetitionEntryLedger(
     replay: row.state === "completed" && row.response_json !== null ? json<Response>(row.response_json) : undefined,
   });
 
+  async function lockLifecycleGate(sql: Sql, competitionId: string, at: string): Promise<LifecycleGateRow> {
+    await sql.query(
+      `INSERT INTO competition_lifecycle_gates (competition_id, state, created_at, updated_at)
+       VALUES ($1, 'live', $2::timestamptz, $2::timestamptz)
+       ON CONFLICT (competition_id) DO NOTHING`,
+      [competitionId, at],
+    );
+    const result = await sql.query<LifecycleGateRow>(
+      `SELECT competition_id, state, close_generation, closed_at
+       FROM competition_lifecycle_gates WHERE competition_id=$1 FOR UPDATE`,
+      [competitionId],
+    );
+    if (!result.rows[0]) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+    return result.rows[0];
+  }
+
+  async function requireLiveLifecycleGate(sql: Sql, competitionId: string, at: string): Promise<void> {
+    if ((await lockLifecycleGate(sql, competitionId, at)).state !== "live") {
+      throw new CompetitionEntryLedgerError("COMPETITION_CLOSED");
+    }
+  }
+
   async function reserveOne(input: { actor: Actor; request: { competition_id: string; idempotency_key: string } & Record<string, unknown> }): Promise<Reservation> {
     const hash = requestHash(input.request);
     return db.transaction(async (tx) => {
@@ -75,6 +103,7 @@ export function createPostgresCompetitionEntryLedger(
       const submissionId = id();
       const runId = id();
       const at = now().toISOString();
+      await requireLiveLifecycleGate(tx, input.request.competition_id, at);
       const inserted = await tx.query<{ id: string }>(
         `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, state, created_at, updated_at)
          VALUES ($1, $2, $3, 'competition.entry.submit.v1', $4, $5, $6, 'pending', $7::timestamptz, $7::timestamptz)
@@ -117,6 +146,39 @@ export function createPostgresCompetitionEntryLedger(
   }
 
   return {
+    async markCompetitionClosed({ competition_id, closed_at }: { competition_id: string; closed_at: string }) {
+      const parsedClosedAt = new Date(closed_at);
+      if (!competition_id || !Number.isFinite(parsedClosedAt.getTime()) || parsedClosedAt.toISOString() !== closed_at) {
+        throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+      }
+      return db.transaction(async (tx) => {
+        const gate = await lockLifecycleGate(tx, competition_id, closed_at);
+        if (gate.state === "closed") {
+          if (!gate.close_generation || !gate.closed_at) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+          return {
+            competition_id: gate.competition_id,
+            close_generation: gate.close_generation,
+            closed_at: new Date(gate.closed_at).toISOString(),
+          };
+        }
+        const closeGeneration = id();
+        const updated = await tx.query<LifecycleGateRow>(
+          `UPDATE competition_lifecycle_gates
+           SET state='closed', close_generation=$2, closed_at=$3::timestamptz, updated_at=$3::timestamptz
+           WHERE competition_id=$1 AND state='live'
+           RETURNING competition_id, state, close_generation, closed_at`,
+          [competition_id, closeGeneration, closed_at],
+        );
+        const row = updated.rows[0];
+        if (!row?.close_generation || !row.closed_at) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+        return {
+          competition_id: row.competition_id,
+          close_generation: row.close_generation,
+          closed_at: new Date(row.closed_at).toISOString(),
+        };
+      });
+    },
+
     async reserve(input: { actor: Actor; request: { competition_id: string; idempotency_key: string } & Record<string, unknown> }) {
       const key = scope(input.actor, input.request);
       const inFlight = reservations.get(key);
@@ -161,6 +223,23 @@ export function createPostgresCompetitionEntryLedger(
         [operation_id, leaseToken, expiresAt.toISOString(), at.toISOString()],
       );
       return result.rows[0] ? { lease_token: result.rows[0].lease_token } : null;
+    },
+
+    async renew({ operation_id, lease_token, lease_ms }: { operation_id: string; lease_token: string; lease_ms: number }) {
+      if (!Number.isSafeInteger(lease_ms) || lease_ms < 1_000 || lease_ms > 300_000) {
+        throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+      }
+      const at = now();
+      const expiresAt = new Date(at.getTime() + lease_ms);
+      const result = await db.query<{ operation_id: string }>(
+        `UPDATE competition_entry_sagas
+         SET lease_expires_at=$3::timestamptz, updated_at=$4::timestamptz
+         WHERE operation_id=$1 AND state='pending' AND lease_token=$2
+           AND lease_expires_at > $4::timestamptz
+         RETURNING operation_id`,
+        [operation_id, lease_token, expiresAt.toISOString(), at.toISOString()],
+      );
+      return Boolean(result.rows[0]);
     },
 
     async release({ operation_id, lease_token }: { operation_id: string; lease_token: string }) {
@@ -209,6 +288,7 @@ export function createPostgresCompetitionEntryLedger(
           && row.phase === "submission_written"
           && verdict?.verdict === "rejected";
         if (!validQueued && !validRejected) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+        await requireLiveLifecycleGate(tx, row.competition_id, at);
         const membership = await tx.query<{ state: "active" | "left" | "banned" }>(
           `SELECT state FROM competition_memberships
            WHERE competition_id=$1 AND entrant_id=$2 FOR UPDATE`,

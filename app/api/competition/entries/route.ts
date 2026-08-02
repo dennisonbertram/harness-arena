@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseSubmitEntryRequest, type SubmitEntryRequest } from "@/lib/competition-entries";
+import { agentNetworkEntriesEnabled } from "@/lib/competition-entry-lifecycle-runtime";
 import { getAgentNetworkRuntime } from "@/lib/agent-network-runtime";
 
 const MAX_REQUEST_BODY_BYTES = 262_144;
@@ -81,6 +82,7 @@ function entryFailure(code: string) {
 }
 
 export async function POST(request: NextRequest) {
+  if (!agentNetworkEntriesEnabled()) return error("entries_unavailable", 503);
   try {
     const runtime = getAgentNetworkRuntime() as EntryCapableRuntime;
     const authentication = await runtime.authenticateAgentSession(request, { requiredScopes: ["competitions:write"] });

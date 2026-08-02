@@ -130,10 +130,11 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.judge).toHaveBeenCalledWith({ submission_id: f.reservation.submission_id, prompt: request.entry.prompt });
     expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ id: f.reservation.submission_id, github_id: actor.githubId, github_login: actor.githubLogin, competition_id: "comp-live" });
     expect(f.runs.get(f.reservation.run_id)).toMatchObject({ id: f.reservation.run_id, submission_id: f.reservation.submission_id });
-    expect(f.externalEffects).toEqual(["judge-charge", "submission-blob", "run-blob", "run.created"]);
+    expect(f.externalEffects).toEqual(["judge-charge", "submission-blob", "run-blob", "run.created.ensure"]);
   });
 
   it("heartbeats its durable lease through a blocked Blob write so a second recovery cannot claim the same operation", async () => {
+    vi.useFakeTimers();
     const f = fixture();
     let entered!: () => void;
     let release!: () => void;
@@ -144,19 +145,24 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
       await unblock;
     });
 
-    const submitting = f.saga.submit({ actor, request });
-    await blocked;
-    f.expireLease();
+    try {
+      const submitting = f.saga.submit({ actor, request });
+      await blocked;
+      f.expireLease();
+      await vi.advanceTimersByTimeAsync(20_000);
 
-    await expect(f.saga.recover({ operation_id: f.reservation.operation_id })).rejects.toMatchObject({ code: "ENTRY_SAGA_BUSY" });
-    expect(f.ledger.renew).toHaveBeenCalledWith({
-      operation_id: f.reservation.operation_id,
-      lease_token: "lease-op-001",
-      lease_ms: expect.any(Number),
-    });
+      await expect(f.saga.recover({ operation_id: f.reservation.operation_id })).rejects.toMatchObject({ code: "ENTRY_SAGA_BUSY" });
+      expect(f.ledger.renew).toHaveBeenCalledWith({
+        operation_id: f.reservation.operation_id,
+        lease_token: "lease-op-001",
+        lease_ms: expect.any(Number),
+      });
 
-    release();
-    await submitting;
+      release();
+      await submitting;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses a deterministic ensure operation for run.created instead of append-after-read", async () => {

@@ -10,6 +10,7 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
   "0009_chat_safety",
   "0010_submission_trace_closures",
   "0011_entry_saga_leases",
+  "0012_competition_lifecycle_gates",
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };

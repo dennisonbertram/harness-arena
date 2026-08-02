@@ -186,6 +186,7 @@ type DurableLedger = {
     checkpoint_value?: unknown;
   }>;
   claim(input: { operation_id: string; lease_ms: number }): Promise<{ lease_token: string } | null>;
+  renew(input: { operation_id: string; lease_token: string; lease_ms: number }): Promise<boolean>;
   release(input: { operation_id: string; lease_token: string }): Promise<void>;
   checkpoint(input: { operation_id: string; lease_token: string; expected_phase: DurablePhase; phase: DurablePhase; value?: unknown }): Promise<void>;
   complete(input: { operation_id: string; lease_token: string; response: DurableResponse }): Promise<void>;
@@ -196,8 +197,7 @@ type DurableStorage = {
   getRun(id: string): Promise<unknown>;
   putSubmission(value: Record<string, unknown>): Promise<void>;
   putRun(value: Record<string, unknown>): Promise<void>;
-  appendRunEvents(runId: string, events: Array<{ type: "run.created"; payload: Record<string, unknown> }>): Promise<void>;
-  hasRunCreatedEvent?: (runId: string) => Promise<boolean>;
+  ensureRunCreatedEvent(input: { run_id: string; submission_id: string }): Promise<void>;
 };
 
 type DurableDependencies = {
@@ -248,6 +248,7 @@ function persistedSubmissionVerdict(value: unknown): DurableVerdict {
  * writes and the chargeable judge call happen after those transactions close.
  */
 export function createDurableCompetitionEntrySaga({ ledger, memberships, storage, judge, getCompetition }: DurableDependencies) {
+  const leaseMs = 60_000;
   const read = async (value: Promise<unknown>) => {
     try {
       return await value;
@@ -277,14 +278,35 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     checkpoint_value?: unknown;
     lease_token: string;
   }): Promise<DurableResponse> {
-    const competition = await getCompetition(state.request.competition_id);
+    const renew = async () => {
+      if (!await ledger.renew({ operation_id: state.operation_id, lease_token: state.lease_token, lease_ms: leaseMs })) {
+        throw new EntrySagaBusyError();
+      }
+    };
+    const external = async <Value>(work: () => Promise<Value>): Promise<Value> => {
+      await renew();
+      let lost: unknown;
+      const heartbeat = setInterval(() => {
+        void renew().catch((error) => { lost ??= error; });
+      }, Math.floor(leaseMs / 3));
+      try {
+        const result = await work();
+        if (lost) throw lost;
+        await renew();
+        return result;
+      } finally {
+        clearInterval(heartbeat);
+      }
+    };
+
+    const competition = await external(() => getCompetition(state.request.competition_id));
     if (!competition) throw new CompetitionEntryError("COMPETITION_NOT_FOUND");
     if (competition.status !== "live") throw new CompetitionEntryError("COMPETITION_CLOSED");
 
     // A probe at recovery start prevents an unreadable Blob from being treated
     // as missing. It also makes each following put naturally idempotent.
-    const existingSubmission = await read(storage.getSubmission(state.submission_id));
-    const existingRun = await read(storage.getRun(state.run_id));
+    const existingSubmission = await read(external(() => storage.getSubmission(state.submission_id)));
+    const existingRun = await read(external(() => storage.getRun(state.run_id)));
     const submissionExists = assertSameOrAbsent(existingSubmission, {
       id: state.submission_id,
       competition_id: state.request.competition_id,
@@ -293,7 +315,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     });
     const runExists = assertSameOrAbsent(existingRun, { id: state.run_id, submission_id: state.submission_id });
 
-    const membership = await memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId });
+    const membership = await external(() => memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId }));
     if (membership.state !== "active") throw new CompetitionEntryError("COMPETITION_MEMBERSHIP_FORBIDDEN");
 
     let phase = state.phase;
@@ -306,7 +328,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     }
     if (phase === "reserved") {
       await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "reserved", phase: "judge_started" });
-      verdict = await judge({ submission_id: state.submission_id, prompt: state.request.entry.prompt });
+      verdict = await external(() => judge({ submission_id: state.submission_id, prompt: state.request.entry.prompt }));
       await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "judge_started", phase: "verdict_persisted", value: verdict });
       phase = "verdict_persisted";
     } else {
@@ -337,7 +359,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     };
 
     if (phase === "verdict_persisted") {
-      if (!submissionExists) await storage.putSubmission(submission);
+      if (!submissionExists) await external(() => storage.putSubmission(submission));
       await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "verdict_persisted", phase: "submission_written" });
       phase = "submission_written";
     }
@@ -358,14 +380,12 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       created_at: new Date().toISOString(),
     };
     if (phase === "submission_written") {
-      if (!runExists) await storage.putRun(run);
+      if (!runExists) await external(() => storage.putRun(run));
       await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "submission_written", phase: "run_written" });
       phase = "run_written";
     }
     if (phase === "run_written") {
-      if (!storage.hasRunCreatedEvent || !await storage.hasRunCreatedEvent(state.run_id)) {
-        await storage.appendRunEvents(state.run_id, [{ type: "run.created", payload: { submission_id: state.submission_id } }]);
-      }
+      await external(() => storage.ensureRunCreatedEvent({ run_id: state.run_id, submission_id: state.submission_id }));
       await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "run_written", phase: "run_created_appended" });
     }
     const response: DurableResponse = { submission_id: state.submission_id, run_id: state.run_id, status: "queued" };
@@ -382,7 +402,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     phase: DurablePhase;
     checkpoint_value?: unknown;
   }>(state: State): Promise<DurableResponse> {
-    const claim = await ledger.claim({ operation_id: state.operation_id, lease_ms: 60_000 });
+    const claim = await ledger.claim({ operation_id: state.operation_id, lease_ms: leaseMs });
     if (!claim) throw new EntrySagaBusyError();
     try {
       return await advance({ ...state, lease_token: claim.lease_token });
