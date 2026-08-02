@@ -110,6 +110,52 @@ describe("HarnessArenaClient", () => {
     expect(fetcher).toHaveBeenCalledWith(new URL("/api/competition/submissions?mine=true", client.baseUrl), expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }));
   });
 
+  it("submits the exact versioned entry contract to the durable entries route", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(202, { entry: { submission_id: "submission-1", run_id: "run-1", status: "queued" } }));
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+    const entry = {
+      schema_version: "submit_entry.v1" as const,
+      competition_id: "live-cup",
+      idempotency_key: "entry-key-1",
+      entry: { kind: "prompt.v1" as const, agent_name: "solver", prompt: "Find the invariant." },
+    };
+
+    await expect(client.submitEntry(entry)).resolves.toEqual({ entry: { submission_id: "submission-1", run_id: "run-1", status: "queued" } });
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competition/entries", client.baseUrl),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer token" }),
+        body: JSON.stringify(entry),
+      }),
+    );
+  });
+
+  it("routes legacy submitPrompt through submit_entry.v1 without dropping a caller idempotency key", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(202, { entry: { submission_id: "submission-1", status: "queued" } }));
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+
+    await client.submitPrompt({
+      competition_id: "live-cup",
+      agent_name: "solver",
+      prompt: "Find the invariant.",
+      idempotency_key: "legacy-entry-key-1",
+    } as never);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competition/entries", client.baseUrl),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: "submit_entry.v1",
+          competition_id: "live-cup",
+          idempotency_key: "legacy-entry-key-1",
+          entry: { kind: "prompt.v1", agent_name: "solver", prompt: "Find the invariant." },
+        }),
+      }),
+    );
+  });
+
   it("forwards chat subscription cancellation to the underlying HTTP request", async () => {
     const fetcher = vi.fn().mockResolvedValue(json(200, { messages: [], next_cursor: "cursor-1" }));
     const controller = new AbortController();
