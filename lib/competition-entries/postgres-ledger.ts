@@ -88,10 +88,10 @@ export function createPostgresCompetitionEntryLedger(
     });
   }
 
-  async function saga(operationId: string, sql: Sql = db): Promise<SagaRow> {
+  async function saga(operationId: string, sql: Sql = db, lock = false): Promise<SagaRow> {
     const result = await sql.query<SagaRow>(
       `SELECT operation_id, entrant_id, competition_id, idempotency_key, request_hash, request_json, submission_id, run_id, phase, verdict_json, response_json, state
-       FROM competition_entry_sagas WHERE operation_id = $1`, [operationId],
+       FROM competition_entry_sagas WHERE operation_id = $1${lock ? " FOR UPDATE" : ""}`, [operationId],
     );
     if (!result.rows[0]) throw new CompetitionEntryLedgerError("ENTRY_SAGA_NOT_FOUND");
     return result.rows[0];
@@ -141,17 +141,39 @@ export function createPostgresCompetitionEntryLedger(
 
     async complete({ operation_id, response }: { operation_id: string; response: Response }) {
       await db.transaction(async (tx) => {
-        const row = await saga(operation_id, tx);
+        const row = await saga(operation_id, tx, true);
         if (row.state === "completed") {
           if (canonicalJson(json<unknown>(row.response_json)) !== canonicalJson(response)) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
           return;
         }
+        const verdict = row.verdict_json === null ? null : json<{ verdict?: unknown }>(row.verdict_json);
+        const validQueued = response.status === "queued"
+          && response.submission_id === row.submission_id
+          && response.run_id === row.run_id
+          && row.phase === "run_created_appended"
+          && verdict?.verdict === "approved";
+        const validRejected = response.status === "rejected"
+          && response.submission_id === row.submission_id
+          && response.run_id === undefined
+          && row.phase === "submission_written"
+          && verdict?.verdict === "rejected";
+        if (!validQueued && !validRejected) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
         const at = now().toISOString();
         await tx.query(
           `INSERT INTO submission_bindings (submission_id, competition_id, entrant_id, entry_kind, entry_schema_version, created_at)
            VALUES ($1, $2, $3, 'prompt', 'submit_entry.v1', $4::timestamptz)
            ON CONFLICT (submission_id) DO NOTHING`, [row.submission_id, row.competition_id, row.entrant_id, at],
         );
+        const binding = await tx.query<{ competition_id: string; entrant_id: string; entry_kind: string; entry_schema_version: string }>(
+          "SELECT competition_id, entrant_id, entry_kind, entry_schema_version FROM submission_bindings WHERE submission_id=$1",
+          [row.submission_id],
+        );
+        if (binding.rows[0]?.competition_id !== row.competition_id
+          || binding.rows[0]?.entrant_id !== row.entrant_id
+          || binding.rows[0]?.entry_kind !== "prompt"
+          || binding.rows[0]?.entry_schema_version !== "submit_entry.v1") {
+          throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+        }
         await tx.query(
           `INSERT INTO competition_memberships (competition_id, entrant_id, role, state, joined_at, left_at, banned_at, updated_at)
            VALUES ($1, $2, 'entrant', 'active', $3::timestamptz, NULL, NULL, $3::timestamptz)
