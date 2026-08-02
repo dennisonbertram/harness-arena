@@ -16,12 +16,29 @@ beforeEach(async () => {
     "0005_competition_chat_sequences.sql",
     "0006_trace_policy.sql",
     "0007_payout_eligibility.sql",
+    "0012_competition_lifecycle_gates.sql",
   ]) await db.exec(migration(name));
 });
 
 afterEach(async () => { await db.close(); });
 
 describe("0007 immutable payout eligibility freeze", () => {
+  it("pins every freeze batch and row to one immutable competition close generation", async () => {
+    const freezeColumns = await db.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='payout_eligibility_freezes'
+    `);
+    expect(freezeColumns.rows.map((row) => row.column_name)).toContain("close_generation");
+
+    const batchColumns = await db.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='payout_freeze_batches'
+    `);
+    expect(batchColumns.rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      "competition_id", "close_generation", "cutoff_at", "policy_version", "expected_submission_count",
+    ]));
+  });
+
   it("adds an entry-level, immutable cutoff snapshot with no transfer or payment fields", async () => {
     await expect(db.exec(migration("0007_payout_eligibility.sql"))).resolves.toBeDefined();
     const columns = await db.query<{ column_name: string }>(`

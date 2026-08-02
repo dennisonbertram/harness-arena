@@ -24,6 +24,46 @@ const completeReconciledSnapshot = () => ({
 });
 
 describe("payout eligibility freeze service", () => {
+  it("locks and pins the exact durable close generation before writing any eligibility row", async () => {
+    const calls: string[] = [];
+    const closeGeneration = "00000000-0000-0000-0000-000000000901";
+    const sql: SqlFake = {
+      transaction: async <Value>(work: (tx: SqlFake) => Promise<Value>) => work(sql),
+      async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
+        calls.push(statement.trim().split(/\s+/).slice(0, 4).join(" "));
+        if (statement.includes("FROM competition_lifecycle_gates")) {
+          return { rows: [{
+            competition_id: "competition-1", state: "closed", close_generation: closeGeneration,
+            closed_at: "2026-08-03T12:00:00.000Z",
+          }] as Row[] };
+        }
+        if (statement.startsWith("INSERT INTO payout_freeze_batches")) return { rows: [] };
+        if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) return { rows: [] };
+        return { rows: [{
+          id: String(params[0] ?? "00000000-0000-0000-0000-000000000701"),
+          competition_id: "competition-1", submission_id: "submission-1", entrant_id: ENTRANT.id,
+          status: "eligible", reason_code: "eligible", policy_version: "payout-eligibility-policy.v1",
+          cutoff_at: "2026-08-03T12:00:00.000Z", close_generation: closeGeneration,
+          result_rank: 1, result_score: 99.5, judge_revision: "judge-r7", trace_sha256: "a".repeat(64),
+          trace_scan_revision: "scan-r3", payout_address: completeReconciledSnapshot().payout_profile.address,
+          payout_chain_id: 1, payout_profile_verified_at: "2026-08-02T12:00:00.000Z",
+        }] as Row[] };
+      },
+    };
+    const service = createPayoutEligibilityService(sql, {
+      loadCompetitionSnapshot: async () => ({
+        state: "ready", competition_id: "competition-1", close_generation: closeGeneration,
+        closed_at: "2026-08-03T12:00:00.000Z", snapshots: [completeReconciledSnapshot()],
+      }) as never,
+    });
+
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .resolves.toMatchObject({ ok: true, freezes: [{ close_generation: closeGeneration }] });
+    expect(calls[0]).toContain("competition_lifecycle_gates");
+    expect(calls.findIndex((value) => value.includes("payout_eligibility_freezes")))
+      .toBeGreaterThan(calls.findIndex((value) => value.includes("competition_lifecycle_gates")));
+  });
+
   it("allows only an operator to close a competition and freezes one deterministic, complete cutoff row", async () => {
     const service = createPayoutEligibilityService({} as never, {
       now: () => new Date("2026-08-03T12:00:00.000Z"),
