@@ -6,6 +6,14 @@ active OpenTelemetry span, `trace_id` and `span_id`. Domain events add stable
 identifiers such as `run_id` and `submission_id`; they never add request bodies,
 headers, cookies, prompts, credentials, provider tokens, or Blob query strings.
 
+## Delivery dependency and proof status
+
+This change explicitly depends on PR #171 for `/api/ops/v1`. Until #171 lands,
+this PR must remain draft: it does not contain or claim ops-endpoint logging.
+After #171 merges, rebase this branch and add tested `/api/ops/v1` domain events
+before requesting final review. Production trace/redaction proof is also pending;
+local and preview evidence must not be described as live production proof.
+
 ## Vercel investigation
 
 Start from the deployment serving the hostname, then query its logs with the

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ensureBaselines } from "@/lib/competition-baseline";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { reapStaleRuns } from "@/lib/reaper";
 import { getStorage } from "@/lib/storage";
 
@@ -17,7 +17,7 @@ export async function GET() {
   // start queued runs. This is the daily backstop for the lazy dispatch on
   // GET /api/runs and the run-completion trigger.
   const started = await dispatchQueuedRuns(storage).catch((error: unknown) => {
-    log("error", "cron.dispatch_failed", { stage: "dispatch", error });
+    log("error", "cron.dispatch_failed", { ...normalizeError(error, "dispatch") });
     return [] as string[];
   });
   // Backstop for the baseline the create route kicked and the board render

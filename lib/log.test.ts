@@ -45,7 +45,7 @@ describe("observability logger contract", () => {
       callback: "https://blob.example/file",
       configured: "[REDACTED]",
       cycle: { password: "[REDACTED]", self: "[Circular]" },
-      err: { name: "Error", message: "provider timed out" },
+      err: { error_class: "Error", error_message: "provider timed out", error_stage: "unknown" },
     });
   });
 

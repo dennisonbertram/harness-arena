@@ -3,7 +3,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveIdentity } from "@/lib/identity";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
       verdict = await judgeSubmission(submission.prompt, getTasks());
     } catch (err) {
       const detail = (err as Error).message;
-      log("error", "judge.unavailable", { submission_id: submission.id, error: detail });
+      log("error", "judge.unavailable", { submission_id: submission.id, ...normalizeError(err, "judge") });
       return NextResponse.json(
         {
           error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${detail})`,
@@ -173,7 +173,7 @@ export async function POST(request: NextRequest) {
   // dispatch still fires. A failing dispatch must never fail the response.
   const kickDispatch = () =>
     dispatchQueuedRuns(storage).catch((err: unknown) =>
-      log("warn", "dispatch.failed", { submission_id: submission.id, error: (err as Error).message }),
+      log("error", "dispatch.failed", { submission_id: submission.id, ...normalizeError(err, "dispatch") }),
     );
   try {
     after(kickDispatch);

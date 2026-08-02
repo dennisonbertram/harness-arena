@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getBaselinePrompt } from "@/lib/baseline-prompt";
 import { isInfraFailedRun, judgeAndDispatch } from "@/lib/competition-dispatch";
 import { belongsToCompetition, resolveLegacyOwnerId } from "@/lib/competition-leaderboard";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import type { Storage } from "@/lib/storage";
 import type { Competition, Run, Submission } from "@/lib/types";
 
@@ -143,7 +143,7 @@ export async function ensureBaselines(storage: Storage): Promise<EnsureBaselineR
   try {
     competitions = await storage.listCompetitions();
   } catch (error) {
-    log("warn", "competition.baseline.sweep_failed", { error: (error as Error).message });
+    log("error", "competition.baseline.sweep_failed", { ...normalizeError(error, "competition_list") });
     return [];
   }
 
@@ -156,9 +156,9 @@ export async function ensureBaselines(storage: Storage): Promise<EnsureBaselineR
       }
       results.push(result);
     } catch (error) {
-      log("warn", "competition.baseline.ensure_failed", {
+      log("error", "competition.baseline.ensure_failed", {
         competition_id: competition.id,
-        error: (error as Error).message,
+        ...normalizeError(error, "baseline_ensure"),
       });
     }
   }

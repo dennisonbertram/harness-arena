@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { log } from "./log";
+import { log, normalizeError } from "./log";
 import type { Task } from "./tasks";
 
 // An independent, reliable model for the fairness gate — not the model being
@@ -134,12 +134,16 @@ async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> 
     }),
     });
   } catch (error) {
-    log("error", "provider.request_failed", { provider: "ai_gateway", stage: "request", error });
+    log("error", "provider.request_failed", { provider: "ai_gateway", ...normalizeError(error, "provider_request") });
     throw error;
   }
 
   if (!response.ok) {
-    log("error", "provider.response_failed", { provider: "ai_gateway", stage: "response", status: response.status });
+    log("error", "provider.response_failed", {
+      provider: "ai_gateway",
+      status: response.status,
+      ...normalizeError(new Error(`provider response status ${response.status}`), "provider_response"),
+    });
     throw new Error(`judge gateway returned ${response.status}`);
   }
 
