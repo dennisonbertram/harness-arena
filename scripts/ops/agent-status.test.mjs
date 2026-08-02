@@ -24,16 +24,17 @@ import {
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const jsonResponse = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
-function healthyApiFetch({ missingCursor = false, unknownFreshness = false, healthOk = true } = {}) {
+function healthyApiFetch({ missingCursor = false, missingHasMore = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, integrity } = {}) {
   return vi.fn(async (rawUrl, init) => {
     expect(init.method).toBe("GET");
     const url = new URL(rawUrl);
     if (url.pathname === "/api/health") return jsonResponse({ ok: healthOk, sha: "abc123", storage: "up", gateway_key_present: true, runner_secret_present: true });
-    if (url.pathname === "/api/ops/v1") return jsonResponse({ schema_version: "ops.v1", kinds: [{ kind: "runs" }, { kind: "events" }, { kind: "competitions" }], inventory: "/api/ops/v1/inventory", read: "/api/ops/v1/read", summary: "/api/ops/v1/summary" });
-    if (url.pathname === "/api/ops/v1/summary") return jsonResponse({ schema_version: "ops.v1", scan: { complete: true }, latest: { runs: unknownFreshness ? null : "2026-08-03T00:05:00.000Z", events: "2026-08-03T00:06:00.000Z" }, run_states: { queued: 0, running: 1, failed: 0, stale: 0 }, integrity: { unreadable: 0, corrupt: 0, event_holes: 0 } });
+    if (url.pathname === "/api/ops/v1") return jsonResponse({ schema_version: "ops.v1", kinds: advertisedKinds ?? [{ kind: "runs" }, { kind: "events" }, { kind: "competitions" }], inventory: "/api/ops/v1/inventory", read: "/api/ops/v1/read", summary: "/api/ops/v1/summary" });
+    if (url.pathname === "/api/ops/v1/summary") return jsonResponse({ schema_version: "ops.v1", scan: { complete: true }, latest: { runs: unknownFreshness ? null : "2026-08-03T00:05:00.000Z", events: "2026-08-03T00:06:00.000Z" }, run_states: { queued: 0, running: 1, failed: 0, stale: 0 }, integrity: integrity ?? { unreadable: 0, corrupt: 0, event_holes: 0 } });
     if (url.pathname === "/api/ops/v1/inventory") {
       const kind = url.searchParams.get("kind"), cursor = url.searchParams.get("cursor");
-      if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], has_more: true, next_cursor: missingCursor ? null : "runs-2" });
+      if (kind === "runs" && runCount) return jsonResponse({ schema_version: "ops.v1", kind, items: Array.from({ length: runCount }, (_, index) => ({ pathname: `runs/r${index + 1}.json`, uploaded_at: "2026-08-03T00:05:00.000Z" })), has_more: false, next_cursor: null });
+      if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], ...(missingHasMore ? {} : { has_more: true }), next_cursor: missingCursor ? null : "runs-2" });
       if (kind === "runs") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r2.json", uploaded_at: "2026-08-03T00:04:00.000Z" }], has_more: false, next_cursor: null });
       if (kind === "events") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "events/r1/0000000002.json", uploaded_at: "2026-08-03T00:06:00.000Z" }, { pathname: "events/r2/0000000003.json", uploaded_at: "2026-08-03T00:06:00.000Z" }], has_more: false, next_cursor: null });
       return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "competitions/c1.json", uploaded_at: "2026-08-03T00:01:00.000Z" }], has_more: false, next_cursor: null });
@@ -129,6 +130,43 @@ describe("ops evidence and verdict honesty", () => {
     expect(result.findings.map(({ code }) => code)).toEqual(expect.arrayContaining(["deployment_sha_drift", "deployment_ref_drift", "deployment_git_dirty", "required_environment_missing", "recent_runtime_errors", "cron_unknown"]));
     expect(result.ops.capabilities).toMatchObject({ gateway: "present", callback: "present" });
   });
+
+  it("requires a READY serving deployment with identity even when SHA and ref match", async () => {
+    for (const deployment of [
+      { ...healthyPlatform.deployment, state: "ERROR" },
+      { ...healthyPlatform.deployment, state: "FAILED" },
+      { ...healthyPlatform.deployment, state: "CANCELED" },
+      { ...healthyPlatform.deployment, state: null },
+      { ...healthyPlatform.deployment, id: null },
+      { ...healthyPlatform.deployment, hostname: null },
+    ]) {
+      const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch(), now: "2026-08-03T00:10:00.000Z", platform: { ...healthyPlatform, deployment }, environment: "production" });
+      expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
+      expect(result.findings.map(({ code }) => code)).toContain("deployment_not_ready");
+    }
+  });
+
+  it("treats malformed pagination and advertised-kind/run caps as explicit degraded scope", async () => {
+    const malformed = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ missingHasMore: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(malformed).toMatchObject({ verdict: "degraded", exit_code: EXIT_CODES.degraded, ops: { inventory: { runs: { complete: false, error: "malformed_pagination" } } } });
+
+    const kindNames = ["runs", "events", ..."abcdefghijklmnopqrs"].map((kind) => ({ kind }));
+    const kinds = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ advertisedKinds: kindNames }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(kinds).toMatchObject({ verdict: "degraded", ops: { inventory_scope: { advertised: 21, selected: 20, truncated: true } } });
+    expect(kinds.findings.map(({ code }) => code)).toContain("inventory_kind_limit");
+
+    const runs = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 21 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(runs).toMatchObject({ verdict: "degraded", ops: { run_correlation_scope: { available: 21, selected: 20, truncated: true } } });
+    expect(runs.findings.map(({ code }) => code)).toContain("run_correlation_limit");
+  });
+
+  it("classifies unreadable, corrupt, and event-hole integrity evidence as failed", async () => {
+    for (const integrity of [{ unreadable: 1, corrupt: 0, event_holes: 0 }, { unreadable: 0, corrupt: 1, event_holes: 0 }, { unreadable: 0, corrupt: 0, event_holes: 1 }]) {
+      const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ integrity }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+      expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
+      expect(result.findings).toContainEqual(expect.objectContaining({ code: "ops_integrity", severity: "failed" }));
+    }
+  });
 });
 
 describe("redaction, platform wiring, and process bounds", () => {
@@ -136,6 +174,17 @@ describe("redaction, platform wiring, and process bounds", () => {
     const value = { Authorization: "Basic dXNlcjpwYXNz", Cookie: "sid=secret", "Set-Cookie": "sid=secret", "x-api-key": "key", nested: [{ password: "pw", detail: "failed with Bearer abc and literal-needle at https://x.test/a?token=literal-needle" }] };
     const output = JSON.stringify(redactSensitive(value, ["literal-needle", "secret"]));
     for (const leaked of ["dXNlcjpwYXNz", "sid=secret", "literal-needle", "Bearer abc", "https://x.test/a?token="]) expect(output).not.toContain(leaked);
+  });
+
+  it("redacts credential-shaped keys and complete semicolon-delimited cookie headers recursively", () => {
+    const value = {
+      payload: [{ client_secret: "alpha", access_token: "beta", refresh_token: "csrf", apiKey: "alpha" }],
+      error: "upstream failed access_token=beta client_secret=alpha",
+      headers: ["Cookie: alpha=one; beta=two; csrf=three", "Set-Cookie: alpha=one; beta=two; csrf=three; Secure"],
+    };
+    const output = JSON.stringify(redactSensitive(value, ["alpha", "beta", "csrf"]));
+    for (const leaked of ["alpha", "beta", "csrf", "one", "two", "three", "access_token=", "client_secret="]) expect(output).not.toContain(leaked);
+    expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(6);
   });
 
   it("wires the production CLI through injected Vercel/GitHub commands and emits JSON or human output", async () => {
