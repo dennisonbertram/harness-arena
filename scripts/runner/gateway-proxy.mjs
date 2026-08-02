@@ -128,6 +128,7 @@ function textOf(value) {
 }
 
 const SENSITIVE_HEADER_NAMES = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization"]);
+const MAX_CHUNK_DIAGNOSTICS = 16;
 
 function headerRecord(headers) {
   const result = {};
@@ -445,7 +446,6 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
       total_bytes: 0,
       chunk_count: 0,
       max_idle_ms: 0,
-      idle_gaps_ms: [],
     };
     try {
       for await (const chunk of upstreamRes.body) {
@@ -458,15 +458,16 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         streamState.total_bytes += bytes;
         streamState.chunk_count += 1;
         streamState.max_idle_ms = Math.max(streamState.max_idle_ms, idleMs);
-        streamState.idle_gaps_ms.push(idleMs);
         inspectStreamChunk(streamState, chunk);
-        emitDiagnostic(onDiagnostic, {
-          type: "gateway_proxy.response_chunk",
-          request_id: requestId,
-          chunk_index: streamState.chunk_count,
-          bytes,
-          idle_ms: idleMs,
-        });
+        if (streamState.chunk_count <= MAX_CHUNK_DIAGNOSTICS) {
+          emitDiagnostic(onDiagnostic, {
+            type: "gateway_proxy.response_chunk",
+            request_id: requestId,
+            chunk_index: streamState.chunk_count,
+            bytes,
+            idle_ms: idleMs,
+          });
+        }
         let wrote;
         try {
           wrote = res.write(chunk);
@@ -501,7 +502,6 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         total_bytes: streamState.total_bytes,
         chunk_count: streamState.chunk_count,
         max_idle_ms: streamState.max_idle_ms,
-        idle_gaps_ms: streamState.idle_gaps_ms,
         duration_ms: Date.now() - requestStartedAt,
       });
     } catch (error) {
@@ -516,7 +516,6 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         total_bytes: streamState.total_bytes,
         chunk_count: streamState.chunk_count,
         max_idle_ms: streamState.max_idle_ms,
-        idle_gaps_ms: streamState.idle_gaps_ms,
         duration_ms: Date.now() - requestStartedAt,
       });
       // A response that already emitted headers cannot be converted into a

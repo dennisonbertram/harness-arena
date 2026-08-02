@@ -77,6 +77,35 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "cleanup failed";
+    if (
+      error instanceof Error
+      && error.name === "CompetitionCleanupPartialError"
+      && "recovery" in error
+      && error.recovery
+      && typeof error.recovery === "object"
+    ) {
+      const recovery = error.recovery as {
+        archivePrefix: string;
+        deletedGroups: string[];
+        remainingGroups: string[];
+        receiptPath?: string;
+      };
+      log("error", "competition.admin.cleanup.partial", {
+        competition_id: parsed.data.competition_id,
+        submission_ids: parsed.data.submission_ids,
+        archive_prefix: recovery.archivePrefix,
+        deleted_groups: recovery.deletedGroups,
+        remaining_groups: recovery.remainingGroups,
+        receipt_path: recovery.receiptPath,
+      });
+      return NextResponse.json({
+        status: "partial",
+        error: "cleanup partially completed; recover from the archive receipt",
+        archive_prefix: recovery.archivePrefix,
+        deleted_groups: recovery.deletedGroups,
+        remaining_groups: recovery.remainingGroups,
+      }, { status: 500 });
+    }
     // Expected guardrail failures are safe to show. Deliberately avoid
     // serializing raw provider/blob errors into an admin response or logs.
     if (error instanceof Error && error.name === "CompetitionCleanupError") {
@@ -87,6 +116,6 @@ export async function POST(request: NextRequest) {
       submission_ids: parsed.data.submission_ids,
       error: message,
     });
-    return NextResponse.json({ error: "cleanup failed before deletion; inspect server logs" }, { status: 500 });
+    return NextResponse.json({ error: "cleanup failed; inspect server logs and archive receipt" }, { status: 500 });
   }
 }

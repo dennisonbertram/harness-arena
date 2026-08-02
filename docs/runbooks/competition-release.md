@@ -31,7 +31,7 @@ vercel inspect https://harness-arena-psi.vercel.app --scope dennisons-projects
 vercel env ls production --scope dennisons-projects --format json
 vercel logs <serving-deployment-url> --since 30m --no-follow
 vercel curl /api/competitions -- --silent
-vercel curl /api/runs -- --silent
+vercel curl /api/competition/submissions -- --silent
 ```
 
 Before declaring the deployment reproducible, verify the structured Git
@@ -204,11 +204,12 @@ Postconditions:
 
 Creation is not completion. The creation response contains the competition, not
 the asynchronously created baseline run. Find the competition's baseline
-submission, read its `run_id`, then poll that run through Vercel CLI:
+submission, read its `run_id`, then poll its passive event feed through Vercel
+CLI. Do not use `GET /api/runs` or `GET /api/runs/<id>` for monitoring: those
+routes lazily dispatch or reap work.
 
 ```sh
-vercel curl /api/runs/<run-id> -- --silent
-vercel curl /api/runs/<run-id>/events -- --silent
+vercel curl '/api/runs/<run-id>/events?since=0' -- --silent
 ```
 
 Go only when all of these are true:
@@ -405,11 +406,10 @@ discrepancy without exposing credentials:
 
 ```sh
 curl -fsS \
-  'https://harness-arena-psi.vercel.app/api/runs/7bc65b8e-ff02-4270-a222-16043a8ee486/events' \
-  | jq '.[] | select(.type == "task.failed") | .payload.error'
-# HTTP 400: Invalid request: ['max_tokens (994589): Input should be less
-# than or equal to 262144']
-# routing: resolvedProvider=baseten, fallbacksAvailable=[], attemptCount=1
+  'https://harness-arena-psi.vercel.app/api/runs/7bc65b8e-ff02-4270-a222-16043a8ee486/events?since=0' \
+  | jq '.[] | select(.type == "task.failed") | {seq, type, payload}'
+# The public feed confirms the safe task/stage/duration projection. Provider
+# bodies and internal request/response IDs remain available only to operators.
 ```
 
 Thus a dynamic lookup of this catalog alone remains unsafe: it tells Pi that

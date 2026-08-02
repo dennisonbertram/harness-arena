@@ -67,6 +67,7 @@ describe("GET /api/runs/[id]/events", () => {
     const body = await response.json();
 
     expect(body).toEqual([{
+      run_id: "run-private",
       seq: 1,
       ts: "2026-07-21T00:00:00.000Z",
       type: "task.gateway_correlation",

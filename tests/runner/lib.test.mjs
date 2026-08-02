@@ -241,8 +241,9 @@ describe("drainGatewayDiagnostics", () => {
       { type: "gateway_proxy.request", request_id: "gw-1" },
       { type: "gateway_proxy.response_complete", request_id: "gw-1" },
     ];
+    const taskSlice = log.slice(1);
 
-    expect(drainGatewayDiagnostics(log, 1)).toEqual(log.slice(1));
+    expect(drainGatewayDiagnostics(log, 1)).toEqual(taskSlice);
     expect(log).toEqual([]);
   });
 });

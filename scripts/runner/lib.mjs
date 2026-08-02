@@ -144,8 +144,8 @@ export function parsePiCorrelation(sessionText, stdoutText) {
  * a first-byte stall, and a mid-stream interruption in persisted run events.
  */
 export function summarizeGatewayRequests(events) {
-  return events
-    .filter((event) => event.type === "gateway_proxy.request")
+  const requests = events.filter((event) => event.type === "gateway_proxy.request").slice(-128);
+  return requests
     .map((request) => {
       const response = events.find(
         (event) => event.type === "gateway_proxy.response_headers" && event.request_id === request.request_id,
@@ -172,9 +172,25 @@ export function summarizeGatewayRequests(events) {
         chunk_count: terminal?.chunk_count,
         max_idle_ms: terminal?.max_idle_ms,
         duration_ms: terminal?.duration_ms,
-        stream_error: streamError?.error,
+        stream_error: boundedGatewayError(streamError?.error),
       };
     });
+}
+
+function boundedGatewayError(error) {
+  if (!error || typeof error !== "object") return undefined;
+  return {
+    name: String(error.name ?? "Error").slice(0, 64),
+    message: String(error.message ?? "").slice(0, 256),
+    ...(error.code === undefined ? {} : { code: String(error.code).slice(0, 64) }),
+  };
+}
+
+/** Return one task's diagnostics and release all run-global retained detail. */
+export function drainGatewayDiagnostics(events, start = 0) {
+  const taskEvents = events.slice(start);
+  events.length = 0;
+  return taskEvents;
 }
 
 // Distinguishes "session unusable for cost accounting" (no assistant

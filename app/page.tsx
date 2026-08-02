@@ -159,7 +159,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
 
       <CompetitionDetails competition={competition} />
 
-      {competitions.filter((candidate) => candidate.status === "live").length > 1 ? (
+      {competitions.length > 1 ? (
         <CompetitionBrowser key={competition?.id} competitions={competitions} selectedCompetition={competition} />
       ) : null}
 

@@ -11,6 +11,25 @@ export class CompetitionCleanupError extends Error {
   }
 }
 
+export interface CompetitionCleanupRecovery {
+  archivePrefix: string;
+  deletedGroups: string[];
+  remainingGroups: string[];
+  deletedPathnames: string[];
+  remainingPathnames: string[];
+  receiptPath?: string;
+}
+
+export class CompetitionCleanupPartialError extends CompetitionCleanupError {
+  recovery: CompetitionCleanupRecovery;
+
+  constructor(message: string, recovery: CompetitionCleanupRecovery) {
+    super(message);
+    this.name = "CompetitionCleanupPartialError";
+    this.recovery = recovery;
+  }
+}
+
 interface BlobDocument {
   pathname: string;
   value: Record<string, unknown>;
@@ -86,9 +105,12 @@ function batches<T>(values: T[]): T[][] {
   );
 }
 
-async function deletePathnames(pathnames: string[]): Promise<void> {
+async function deletePathnames(pathnames: string[], confirmedDeleted: string[]): Promise<void> {
   for (const batch of batches(pathnames)) {
-    if (batch.length > 0) await del(batch);
+    if (batch.length > 0) {
+      await del(batch);
+      confirmedDeleted.push(...batch);
+    }
   }
 }
 
@@ -183,10 +205,48 @@ export async function archiveAndDeleteCompetitionSubmissions(
     source_pathnames: sourcePathnames,
   }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: false });
 
-  await deletePathnames(eventPathnames);
-  await deletePathnames(tracePathnames);
-  await deletePathnames(runs.map((run) => run.pathname));
-  await deletePathnames(submissions.map((submission) => submission.pathname));
+  const deletionGroups = [
+    { name: "events", pathnames: eventPathnames },
+    { name: "traces", pathnames: tracePathnames },
+    { name: "runs", pathnames: runs.map((run) => run.pathname) },
+    { name: "submissions", pathnames: submissions.map((submission) => submission.pathname) },
+  ];
+  const deletedGroups: string[] = [];
+  const confirmedDeleted: string[] = [];
+  try {
+    for (const group of deletionGroups) {
+      await deletePathnames(group.pathnames, confirmedDeleted);
+      deletedGroups.push(group.name);
+    }
+  } catch {
+    const deleted = new Set(confirmedDeleted);
+    const recovery: CompetitionCleanupRecovery = {
+      archivePrefix,
+      deletedGroups,
+      remainingGroups: deletionGroups
+        .filter((group) => group.pathnames.some((pathname) => !deleted.has(pathname)))
+        .map((group) => group.name),
+      deletedPathnames: confirmedDeleted,
+      remainingPathnames: sourcePathnames.filter((pathname) => !deleted.has(pathname)),
+    };
+    const receiptPath = `${archivePrefix}/recovery.json`;
+    try {
+      await put(receiptPath, JSON.stringify({
+        schema_version: 1,
+        status: "partial",
+        recorded_at: new Date().toISOString(),
+        ...recovery,
+      }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: false });
+      recovery.receiptPath = receiptPath;
+    } catch {
+      // The authenticated response and structured log still carry the archive
+      // prefix if Blob is unavailable for this secondary recovery note.
+    }
+    throw new CompetitionCleanupPartialError(
+      "cleanup partially completed; recover from the archive receipt",
+      recovery,
+    );
+  }
 
   return result;
 }

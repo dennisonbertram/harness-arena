@@ -53,7 +53,10 @@ export function redactRunEventPayload(type: string, payload: unknown): Record<st
 
     return {
       ...(typeof source.task_id === "string" ? { task_id: source.task_id } : {}),
-      proxy_request_count: proxyRequests.length,
+      proxy_request_count:
+        typeof source.proxy_request_count === "number" && Number.isFinite(source.proxy_request_count)
+          ? source.proxy_request_count
+          : proxyRequests.length,
       ...(responseStatuses.length > 0 ? { response_statuses: responseStatuses } : {}),
       retry_count: retryEvents.length,
     };

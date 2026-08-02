@@ -1,6 +1,6 @@
 # GLM Fast provider stream failure A/B
 
-**Investigation date:** 2026-07-31  
+**Investigation date:** 2026-07-31
 **Status:** confirmed Wafer context-sensitive failure; upstream-versus-adapter
 boundary still open
 

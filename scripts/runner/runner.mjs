@@ -30,6 +30,7 @@ import {
   preflightProxy,
   resolvePinnedProvider,
   computeTotals,
+  drainGatewayDiagnostics,
   deliverTerminalStatus,
   fetchWithTimeout,
   flushWithPendingStatus,
@@ -557,10 +558,11 @@ async function runOneTask(task, index, systemPrompt) {
 
     const sessionText = extractNewestSessionJsonl(containerName);
     const piCorrelation = parsePiCorrelation(sessionText, piStdout.toString("utf8"));
-    const taskGatewayDiagnostics = gatewayDiagnosticLog.slice(gatewayDiagnosticStart);
+    const taskGatewayDiagnostics = drainGatewayDiagnostics(gatewayDiagnosticLog, gatewayDiagnosticStart);
     const proxyRequests = summarizeGatewayRequests(taskGatewayDiagnostics);
     const gatewayCorrelation = {
       proxy_requests: proxyRequests,
+      proxy_request_count: taskGatewayDiagnostics.filter((event) => event.type === "gateway_proxy.request").length,
       pi_response_ids: piCorrelation.response_ids,
       pi_retry_events: piCorrelation.retry_events,
     };
@@ -790,6 +792,9 @@ async function runOneTask(task, index, systemPrompt) {
       trace_blob_url: traceBlobUrl,
     };
   } finally {
+    // A task that exits before correlation still must not retain diagnostics
+    // for every later task in the run.
+    gatewayDiagnosticLog.length = 0;
     if (currentGatewayTaskId === task.id) currentGatewayTaskId = undefined;
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its

@@ -259,7 +259,7 @@ describe("CompetitionPage", () => {
     expect(html).toContain("zai");
   });
 
-  it("keeps a direct link to a closed competition working without showing a browser when only one is live", async () => {
+  it("keeps a direct link to a closed competition working and its live successor discoverable", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(
@@ -292,7 +292,8 @@ describe("CompetitionPage", () => {
       }),
     );
 
-    expect(html).not.toContain('role="search"');
+    expect(html).toContain('role="search"');
+    expect(html).toContain("Browse competitions");
     expect(html).toMatch(/<dt[^>]*>Provider<\/dt><dd[^>]*>wafer<\/dd>/);
     expect(html).toContain("This competition is closed — submissions are no longer accepted.");
   });
