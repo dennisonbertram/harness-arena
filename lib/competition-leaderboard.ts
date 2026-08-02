@@ -20,6 +20,14 @@ export interface CompetitionRow {
   githubLogin: string;
 }
 
+export interface CompetitionPendingRow {
+  submissionId: string;
+  runId: string;
+  submittedAt: string;
+  githubLogin: string;
+  status: "queued" | "running";
+}
+
 export type BaselineState = "none" | "running" | "rejected" | "ready";
 
 export interface CompetitionBoard {
@@ -38,6 +46,8 @@ export interface CompetitionBoard {
   pending: number;
   /** Exact runs the open homepage should poll until they become terminal. */
   pendingRunIds: string[];
+  /** Pending competition entries rendered as links to their live run status. */
+  pendingRows: CompetitionPendingRow[];
 }
 
 interface JoinedEntry {
@@ -244,6 +254,15 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
     (e) => e.run !== undefined && (e.run.status === "queued" || e.run.status === "running"),
   ).map((e) => e.run!.id);
   const pending = pendingRunIds.length;
+  const pendingRows = competitorEntries
+    .filter((e): e is JoinedEntry & { run: Run } => e.run !== undefined && (e.run.status === "queued" || e.run.status === "running"))
+    .map(({ submission, run }) => ({
+      submissionId: submission.id,
+      runId: run.id,
+      submittedAt: submission.created_at,
+      githubLogin: submission.github_login ?? UNKNOWN_GITHUB_LOGIN,
+      status: run.status === "running" ? ("running" as const) : ("queued" as const),
+    }));
 
-  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending, pendingRunIds };
+  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending, pendingRunIds, pendingRows };
 }

@@ -8,6 +8,10 @@ import { auth } from "@/auth";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
 import { isBaselinePrompt } from "@/lib/prompt";
+import {
+  competitionBenchmarkRuns,
+  type CompetitionBenchmarkRun,
+} from "@/lib/competition-benchmarks";
 import type { Run } from "@/lib/types";
 import { RerunButton } from "../RerunButton";
 import { ScatterChart, type ScatterItem } from "../ScatterChart";
@@ -23,15 +27,17 @@ export const revalidate = 15;
 
 export default async function LeaderboardPage() {
   const storage = getStorage();
-  const [runs, submissions, session] = await Promise.all([
+  const [runs, submissions, competitions, session] = await Promise.all([
     storage.listRuns(),
     storage.listSubmissions(),
+    storage.listCompetitions(),
     auth(),
   ]);
   const canRerun = session?.user?.githubLogin === RERUN_OPERATOR_LOGIN;
   const tasks = getTasks();
   const totalTasks = tasks.length;
   const standings = aggregatePrompts(runs, submissions, totalTasks);
+  const competitionRuns = competitionBenchmarkRuns(runs, submissions, competitions);
   // The /benchmarks per-task view pools EVERY completed run across ALL prompts — a
   // task-difficulty overview, not one agent's profile.
   const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
@@ -125,7 +131,7 @@ export default async function LeaderboardPage() {
             color: "var(--gray-900)",
           }}
         >
-          <p style={{ marginBottom: 8 }}>No scored runs yet — be the first.</p>
+          <p style={{ marginBottom: 8 }}>No scored prompt runs yet — be the first.</p>
           <p style={{ fontSize: 14 }}>
             <Link href="/submit" style={{ color: "var(--blue-700)" }}>
               Submit a prompt
@@ -141,8 +147,7 @@ export default async function LeaderboardPage() {
           )}
         </div>
       ) : (
-        <>
-          <section style={{ marginBottom: 48, overflowX: "auto" }}>
+          <section data-benchmark-source="main" style={{ marginBottom: 48, overflowX: "auto" }}>
             <h2 className="label" style={{ marginBottom: 16 }}>
               Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by pass rate</span>
             </h2>
@@ -242,7 +247,14 @@ export default async function LeaderboardPage() {
               </Link>
             </p>
           </section>
+      )}
 
+      {competitionRuns.length > 0 && (
+        <CompetitionRunsPanel runs={competitionRuns} totalTasks={totalTasks} />
+      )}
+
+      {standings.length > 0 && (
+        <>
           {scatterItems.length > 0 && (
             <section style={{ overflowX: "auto" }}>
               <h2 className="label" style={{ marginBottom: 8 }}>
@@ -276,6 +288,117 @@ export default async function LeaderboardPage() {
         </>
       )}
     </div>
+  );
+}
+
+const competitionDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+
+function titleCase(value: string): string {
+  return value.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function CompetitionRunsPanel({
+  runs,
+  totalTasks,
+}: {
+  runs: CompetitionBenchmarkRun[];
+  totalTasks: number;
+}) {
+  return (
+    <section
+      data-benchmark-source="competition"
+      aria-labelledby="competition-runs-heading"
+      style={{ marginBottom: 48, overflowX: "auto" }}
+    >
+      <h2 id="competition-runs-heading" className="label" style={{ marginBottom: 8 }}>
+        Competition runs
+        <span style={{ color: "var(--gray-700)" }}> · completed entries, newest first</span>
+      </h2>
+      <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 760, marginBottom: 16 }}>
+        Competition entries are benchmark runs too. They stay separate from the repeated-run prompt leaderboard
+        because each competition fixes its own model and provider and ranks individual entries.
+      </p>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+            <th scope="col" className="label" style={cellStyle}>Competition</th>
+            <th scope="col" className="label" style={cellStyle}>Entry</th>
+            <th scope="col" className="label" style={cellStyle}>Model</th>
+            <th scope="col" className="label" style={cellStyle}>Provider</th>
+            <th scope="col" className="label" style={numCellStyle}>Tasks solved</th>
+            <th scope="col" className="label" style={numCellStyle}>Run cost</th>
+            <th scope="col" className="label" style={numCellStyle}>Submitted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((run) => (
+            <tr key={run.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+              <td style={cellStyle}>
+                {run.competitionId ? (
+                  <Link href={`/?competition=${encodeURIComponent(run.competitionId)}`}>
+                    {titleCase(run.arena)} · {titleCase(run.harness)}
+                  </Link>
+                ) : (
+                  <span>{titleCase(run.arena)} · {titleCase(run.harness)}</span>
+                )}
+                {run.competitionStatus && (
+                  <div style={{ color: "var(--gray-700)", fontSize: 12, marginTop: 3 }}>
+                    {run.competitionStatus}
+                  </div>
+                )}
+              </td>
+              <td style={cellStyle}>
+                <span style={{ display: "inline-flex", alignItems: "center" }}>
+                  {run.isBaseline ? (
+                    <ModelLogo model={run.model} size={20} />
+                  ) : (
+                    <GithubAvatar githubLogin={run.githubLogin} size={20} />
+                  )}
+                  <span>
+                    <Link href={`/runs/${run.runId}`} style={{ fontWeight: 500 }}>
+                      {run.isBaseline ? "Baseline" : run.agentName}
+                    </Link>
+                    {!run.isBaseline && (
+                      <span className="mono" style={{ display: "block", color: "var(--gray-700)", fontSize: 12 }}>
+                        {run.githubLogin}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              </td>
+              <td style={cellStyle}>
+                <span style={{ display: "inline-flex", alignItems: "center" }}>
+                  <ModelLogo model={run.model} size={20} />
+                  {modelLabel(run.model)}
+                </span>
+              </td>
+              <td style={cellStyle}>
+                <span className="mono">{run.provider ?? "not recorded"}</span>
+                {run.provider && (
+                  <span style={{ display: "block", color: "var(--gray-700)", fontSize: 11 }}>
+                    {run.providerPinned ? "pinned" : "requested · not verified"}
+                  </span>
+                )}
+              </td>
+              <td style={numCellStyle} className="tabular-nums">
+                <Link href={`/runs/${run.runId}`}>{run.tasksPassed}/{totalTasks}</Link>
+              </td>
+              <td style={numCellStyle} className="tabular-nums">
+                {run.totalCostUsd === undefined ? "—" : formatUsd(run.totalCostUsd)}
+              </td>
+              <td style={numCellStyle} className="tabular-nums">
+                {competitionDateFormatter.format(new Date(run.submittedAt))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
 

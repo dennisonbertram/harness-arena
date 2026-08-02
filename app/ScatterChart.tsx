@@ -26,13 +26,18 @@ interface Props {
   padding: number;
   xMax: number;
   yMax: number;
+  /** Optional controlled hover state for linked views such as a leaderboard. */
+  hoveredRunId?: string | null;
+  onHoveredRunIdChange?: (runId: string | null) => void;
 }
 
 // Full-width cost-vs-tasks chart. Detail is revealed on hover (the dots
 // cluster tightly, so static labels overlapped) via an SVG-native tooltip
 // that scales with the chart.
-export function ScatterChart({ items, width, height, padding, xMax, yMax }: Props) {
-  const [hovered, setHovered] = useState<string | null>(null);
+export function ScatterChart({ items, width, height, padding, xMax, yMax, hoveredRunId, onHoveredRunIdChange }: Props) {
+  const [uncontrolledHoveredRunId, setUncontrolledHoveredRunId] = useState<string | null>(null);
+  const hovered = hoveredRunId === undefined ? uncontrolledHoveredRunId : hoveredRunId;
+  const setHovered = onHoveredRunIdChange ?? setUncontrolledHoveredRunId;
   const plotRight = width - padding;
   const plotTop = padding;
   const plotBottom = height - padding;
@@ -110,16 +115,19 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
           <a key={item.runId} href={`/runs/${item.runId}`}>
             {/* Invisible larger hit area so hover/click is easy on small dots */}
             <circle
+              data-chart-hit-area={item.runId}
               cx={item.cx}
               cy={item.cy}
               r={14}
               fill="transparent"
               onMouseEnter={() => setHovered(item.runId)}
-              onMouseLeave={() => setHovered((h) => (h === item.runId ? null : h))}
+              onMouseLeave={() => setHovered(null)}
             />
             {/* Fill = model color (per-model comparison); baseline = dashed ring. */}
             {item.isBaseline ? (
               <circle
+                data-chart-point-run-id={item.runId}
+                data-linked-hover={active || undefined}
                 cx={item.cx}
                 cy={item.cy}
                 r={active ? 8 : 6}
@@ -130,7 +138,15 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
                 pointerEvents="none"
               />
             ) : (
-              <circle cx={item.cx} cy={item.cy} r={active ? 7.5 : 5.5} fill={color} pointerEvents="none" />
+              <circle
+                data-chart-point-run-id={item.runId}
+                data-linked-hover={active || undefined}
+                cx={item.cx}
+                cy={item.cy}
+                r={active ? 7.5 : 5.5}
+                fill={color}
+                pointerEvents="none"
+              />
             )}
           </a>
         );

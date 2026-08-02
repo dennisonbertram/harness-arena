@@ -41,7 +41,7 @@ export function EventTimeline({ events }: { events: TimelineEvent[] }) {
               <th style={{ ...cell, width: 40 }} className="label">#</th>
               <th style={{ ...cell, width: 110 }} className="label">Time</th>
               <th style={{ ...cell, width: 200 }} className="label">Event</th>
-              <th style={cell} className="label">Payload</th>
+              <th style={cell} className="label">Public details</th>
             </tr>
           </thead>
           <tbody>
@@ -54,7 +54,7 @@ export function EventTimeline({ events }: { events: TimelineEvent[] }) {
                   <button
                     type="button"
                     onClick={() => setSelected(event)}
-                    title="Click to view formatted JSON"
+                    title="Click to view public event details"
                     style={{
                       display: "block",
                       width: "100%",

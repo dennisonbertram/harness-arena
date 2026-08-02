@@ -228,6 +228,75 @@ describe("RunDetailPage", () => {
     expect(html).toContain("Agent timed out after 300s waiting for model output");
   });
 
+  it("redacts provider error payloads from the run page", async () => {
+    const storage = resetStorage();
+    const privateProviderPayload =
+      '400 {"error":{"message":"Invalid request: [\'max_tokens (994657)\'","providerMetadata":{"secret":"do-not-show"}}}';
+    await storage.putSubmission(submission("s-provider-error"));
+    await storage.putRun(
+      run("r-provider-error", {
+        submission_id: "s-provider-error",
+        status: "failed",
+        task_results: [
+          {
+            task_id: "provider-failure",
+            attempted: true,
+            passed: false,
+            failure_stage: "provider_error",
+            error: privateProviderPayload,
+          },
+        ],
+      }),
+    );
+    await storage.appendRunEvents("r-provider-error", [
+      runEvent(0, "run.failed", { stage: "provider_error", error: privateProviderPayload }),
+    ]);
+
+    const html = await RunPage.default({ params: Promise.resolve({ id: "r-provider-error" }) }).then(renderToStaticMarkup);
+
+    expect(html).toContain("provider_error: 400");
+    expect(html).not.toContain("provider_error: provider_error");
+    expect(html).not.toContain("max_tokens");
+    expect(html).not.toContain("do-not-show");
+    expect(html).not.toContain(privateProviderPayload);
+  });
+
+  it("keeps private identifiers and gateway diagnostics out of the public event timeline", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-timeline-private"));
+    await storage.putRun(run("r-timeline-private", { submission_id: "s-timeline-private" }));
+    await storage.appendRunEvents("r-timeline-private", [
+      runEvent(0, "run.created", { submission_id: "fb06836f-8dec-4e62-999e-b2dae1972fb6" }),
+      runEvent(0, "run.sandbox_creating", { sandbox_id: "silver-appalling-porpoise-AUQuDN" }),
+      runEvent(0, "task.started", { task_id: "cancel-async-tasks", index: 0 }),
+      runEvent(0, "task.gateway_correlation", {
+        task_id: "cancel-async-tasks",
+        proxy_requests: [{
+          request_id: "gw-private",
+          response_id: "gen-private",
+          pinned_provider: "baseten",
+          status: 400,
+        }],
+        pi_response_ids: ["gen-private"],
+        pi_retry_events: [{ error: "private retry detail" }],
+      }),
+      runEvent(0, "task.trace_uploaded", {
+        task_id: "cancel-async-tasks",
+        blob_url: "https://private.example/trace.jsonl?token=secret",
+      }),
+    ]);
+
+    const html = await RunPage.default({ params: Promise.resolve({ id: "r-timeline-private" }) }).then(renderToStaticMarkup);
+
+    expect(html).toContain("cancel-async-tasks");
+    expect(html).not.toContain("fb06836f-8dec-4e62-999e-b2dae1972fb6");
+    expect(html).not.toContain("silver-appalling-porpoise-AUQuDN");
+    expect(html).not.toContain("gw-private");
+    expect(html).not.toContain("gen-private");
+    expect(html).not.toContain("private.example");
+    expect(html).not.toContain("private retry detail");
+  });
+
   // The point of the capture: a baseline's own prompt is empty, so before this
   // the page rendered an empty box that read as "this run had no prompt".
   it("shows the captured prompt for a baseline instead of an empty box", async () => {

@@ -59,7 +59,7 @@ describe("CompetitionLeaderboardTable interactions", () => {
       />,
     );
 
-    await user.click(screen.getByRole("row", { name: /baseline/i }));
+    await user.click(screen.getByText("Baseline").closest("tr")!);
 
     expect(push).toHaveBeenCalledWith("/runs/baseline-run");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
