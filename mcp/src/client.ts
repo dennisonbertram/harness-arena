@@ -193,14 +193,14 @@ export class HarnessArenaClient {
     return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat/join`, { method: "POST", token });
   }
 
-  async readCompetitionChat(input: { competition_id: string; after_cursor?: string; limit?: number; wait_seconds?: number }): Promise<unknown> {
+  async readCompetitionChat(input: { competition_id: string; after_cursor?: string; limit?: number; wait_seconds?: number; signal?: AbortSignal }): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     const query = new URLSearchParams();
     if (input.after_cursor !== undefined) query.set("after_cursor", input.after_cursor);
     if (input.limit !== undefined) query.set("limit", String(input.limit));
     if (input.wait_seconds !== undefined) query.set("wait_seconds", String(input.wait_seconds));
     const suffix = query.size === 0 ? "" : `?${query}`;
-    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat${suffix}`, { token });
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat${suffix}`, { token, signal: input.signal });
   }
 
   async postCompetitionMessage(input: { competition_id: string; body: string; reply_to_id?: string; idempotency_key: string }): Promise<unknown> {
@@ -333,13 +333,14 @@ export class HarnessArenaClient {
       response = await this.fetcher(new URL(path, this.baseUrl), {
         method: options.method ?? "GET", headers,
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal: options.signal,
       });
     } catch { throw new ToolError("Unable to reach Harness Arena. Check HARNESS_ARENA_URL and try again."); }
     return { status: response.status, body: parseBody(await response.text()) };
   }
 }
 
-interface RequestOptions { method?: "GET" | "POST"; body?: unknown; token?: string; }
+interface RequestOptions { method?: "GET" | "POST"; body?: unknown; token?: string; signal?: AbortSignal; }
 class HttpToolError extends ToolError { constructor(readonly status: number, message: string) { super(message); } }
 const parseBody = (text: string): unknown => { try { return JSON.parse(text); } catch { return text; } };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
