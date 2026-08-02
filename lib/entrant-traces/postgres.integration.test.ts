@@ -52,7 +52,7 @@ describe("0003 durable submission artifact metadata", () => {
     `);
     expect(columns.rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
       "id", "submission_id", "owner_entrant_id", "kind", "schema_version", "object_key", "sha256",
-      "compressed_bytes", "uncompressed_bytes", "mime_type", "consent", "state", "reconcile_after",
+      "compression", "compressed_bytes", "uncompressed_bytes", "mime_type", "consent", "state", "reconcile_after",
     ]));
     for (const row of columns.rows) expect(row.column_name).not.toMatch(/(?:prompt|token|trace|url)/i);
   });
@@ -75,12 +75,19 @@ describe("0003 durable submission artifact metadata", () => {
     expect(first).toMatchObject({ ok: true, artifact: { state: "pending_upload", object_key: expect.stringMatching(/^private\//) } });
     await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-1", artifact: { ...execution } })).resolves.toEqual(first);
     await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-1", artifact: { ...execution, sha256: "b".repeat(64) } })).resolves.toEqual({ ok: false, error: { code: "conflict" } });
+
+    const [concurrentOne, concurrentTwo] = await Promise.all([
+      repo.prepare({ actor: BOB, operation_id: "prepare-concurrent", artifact: { ...execution, submission_id: "sub-b" } }),
+      repo.prepare({ actor: BOB, operation_id: "prepare-concurrent", artifact: { submission_id: "sub-b", consent: execution.consent, sha256: SHA, uncompressed_bytes: 512, compressed_bytes: 128, compression: "gzip", mime_type: "application/json", schema_version: "execution.v1", kind: "execution" } }),
+    ]);
+    expect(concurrentTwo).toEqual(concurrentOne);
   });
 
   it("records upload, verifies the final checksum, rejects mismatches, and exposes due reconciliation work", async () => {
     const repo = traces();
     const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-finalize", artifact: execution });
     if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
     await expect(repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toMatchObject({ ok: true, artifact: { state: "uploaded" } });
     await expect(repo.reconcileDue({ before: new Date("2026-08-03T00:00:00.000Z") })).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: prepared.artifact.id, state: "uploaded" }),
@@ -113,6 +120,6 @@ describe("0003 durable submission artifact metadata", () => {
     const own = await repo.getForOwner({ actor: ALICE, artifact_id: prepared.artifact.id });
     expect(own).toMatchObject({ ok: true, artifact: { id: prepared.artifact.id, submission_id: "sub-a" } });
     if (!own.ok) throw new Error("fixture owner read failed");
-    for (const field of ["bytes", "body", "prompt", "token", "url", "signed_url"] as const) expect(own.artifact).not.toHaveProperty(field);
+    for (const field of ["bytes", "body", "prompt", "token", "url", "signed_url", "object_key", "owner_entrant_id"] as const) expect(own.artifact).not.toHaveProperty(field);
   });
 });
