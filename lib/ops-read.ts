@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
 import { getOpsReadAdapter, type OpsReadAdapter, type OpsRecordMetadata } from "./ops-read-adapter";
 import { BLOB_PATHS } from "./blob-paths.mjs";
@@ -58,14 +59,18 @@ function pathnameFor(kind: OpsKind, input: Record<string,string|undefined>) {
   if(kind==="cleanup_archives"||kind==="competition_resets"||kind==="archives"){const path=input.path;if(!path||path.includes("..")||path.startsWith("/")||!`${def.prefix}${path}`.startsWith(def.prefix))throw new Error("invalid_identifier");return `${def.prefix}${path}`;}
   if(!safeSegment(input.id))throw new Error("invalid_identifier"); return `${def.prefix}${input.id}${["submissions","runs","competitions","cleanup_operations"].includes(kind)?".json":""}`;
 }
-function decodeStoredContent(format:string,bytes:Buffer):{value?:unknown;error?:"corrupt"|"too_large"|"unsupported_binary"} {
+function decodeStoredContent(format:string,pathname:string,bytes:Buffer):{value?:unknown;error?:"corrupt"|"too_large"|"unsupported_binary"} {
   let decoded=bytes;
   if(bytes.length>=2&&bytes[0]===0x1f&&bytes[1]===0x8b){try{decoded=gunzipSync(bytes,{maxOutputLength:MAX_BYTES});}catch(error){return {error:error instanceof Error&&/larger|maxOutputLength|too large/i.test(error.message)?"too_large":"corrupt"};}}
   if(format==="binary")return {value:decoded.toString("base64")};
-  const text=decoded.toString("utf8");
+  let text:string;try{text=new TextDecoder("utf-8",{fatal:true}).decode(decoded);}catch{return {error:"unsupported_binary"};}
   if(decoded.includes(0)||/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text))return {error:"unsupported_binary"};
+  const logicalPath=pathname.toLowerCase().replace(/\.gz$/,"");
+  const knownJson=logicalPath.endsWith(".json"),knownText=/\.(?:jsonl|ndjson|txt|log)$/.test(logicalPath);
+  if(format==="json"||knownJson){try{return {value:JSON.parse(text)};}catch{return {error:"corrupt"};}}
+  if(knownText)return {value:text};
   const trimmed=text.trimStart();
-  if(format==="json"||trimmed.startsWith("{")||trimmed.startsWith("[")){try{return {value:JSON.parse(text)};}catch{return format==="json"?{error:"corrupt"}:{value:text};}}
+  if(trimmed.startsWith("{")||trimmed.startsWith("[")){try{return {value:JSON.parse(text)};}catch{return {value:text};}}
   return {value:text};
 }
 export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter(),options:{summaryDeadlineMs?:number}={}) {
@@ -80,7 +85,7 @@ export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter
       try {const page=await adapter.listPage({prefix,cursor:state?.blob_cursor,limit});const records=page.records.filter((record)=>record.uploaded_at<=snapshot);const integrity={event_holes:0,corrupt:0};let lastEvent=state?.last_event;if(kind==="events")for(const record of records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const current={run_id:match[1],seq:Number(match[2])};const previous=lastEvent?.run_id===current.run_id?lastEvent.seq:0;if(current.seq>previous+1)integrity.event_holes+=current.seq-previous-1;if(current.seq>previous)lastEvent=current;}const partial=integrity.event_holes>0||integrity.corrupt>0;return {items:records,next_cursor:page.has_more&&page.cursor?encodeOpsCursor({kind,prefix,blob_cursor:page.cursor,snapshot_at:snapshot,run_id:options.run_id,last_event:lastEvent}):null,has_more:page.has_more,snapshot_at:snapshot,integrity,partial,errors:partial?[{code:"event_integrity",...integrity}]:[]};}
       catch{return {error:{code:"partial_read",prefix},partial:true};}
     },
-    async read(kind:OpsKind,input:Record<string,string|undefined>){let pathname:string;try{pathname=pathnameFor(kind,input);}catch{return {error:{code:"invalid_identifier"}};}let result;try{result=await adapter.read({pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});}catch{return {error:{code:"transient",error:"read_failed"}};}if(result.status!=="ok")return {error:{code:result.status,...result}};const decoded=decodeStoredContent(definition(kind).format,result.bytes);if(decoded.error)return {error:{code:decoded.error,pathname}};return {item:redactOpsValue(decoded.value),metadata:result.metadata};},
+    async read(kind:OpsKind,input:Record<string,string|undefined>){let pathname:string;try{pathname=pathnameFor(kind,input);}catch{return {error:{code:"invalid_identifier"}};}let result;try{result=await adapter.read({pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});}catch{return {error:{code:"transient",error:"read_failed"}};}if(result.status!=="ok")return {error:{code:result.status,...result}};const decoded=decodeStoredContent(definition(kind).format,pathname,result.bytes);if(decoded.error)return {error:{code:decoded.error,pathname}};return {item:redactOpsValue(decoded.value),metadata:result.metadata};},
     async summary() {
       const counts:Record<string,number>={}, latest:Record<string,string|null>={};
       const runStates={queued:0,running:0,failed:0,stale:0};
