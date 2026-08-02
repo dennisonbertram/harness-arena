@@ -99,7 +99,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     if (id.length === 0 || id.length > 256 || body.manifest.submission_id !== id) return error("invalid_body", 400);
     const result = await runtime.prepareSubmissionTrace({ actor: authentication.actor, submission_id: id, ...body });
     if (!result.ok) {
-      if (result.error.code === "not_found" || result.error.code === "forbidden") return error("submission_not_found", 404);
+      if (result.error.code === "not_found") return error("submission_not_found", 404);
       if (result.error.code === "conflict") return error("idempotency_conflict", 409);
       return error("trace_unavailable", 503);
     }

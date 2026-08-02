@@ -52,7 +52,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     if (id.length === 0 || id.length > 256) return error("invalid_body", 400);
     const result = await runtime.finalizeSubmissionTrace({ actor: authentication.actor, artifact_id: id, sha256: body.sha256 });
     if (!result.ok) {
-      if (result.error.code === "not_found" || result.error.code === "forbidden") return error("artifact_not_found", 404);
+      if (result.error.code === "not_found") return error("artifact_not_found", 404);
       if (result.error.code === "invalid_state") return error("invalid_artifact_state", 409);
       if (result.error.code === "conflict") return error("checksum_conflict", 409);
       return error("trace_unavailable", 503);
