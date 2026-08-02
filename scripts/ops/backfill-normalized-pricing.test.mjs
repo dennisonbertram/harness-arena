@@ -16,7 +16,7 @@ function fixtureStorage() {
     async putCompetition(value) { competitionWrites.push(structuredClone(value)); },
     async listSubmissions() { return [{ id: "submission-1", competition_id: COMPETITION_ID, model: "thinkingmachines/inkling-small", gateway_provider: "baseten" }]; },
     async listRuns() { return runs; },
-    async listRunEvents() { return [{ type: "task.gateway_correlation", payload: { task_id: "task-1", proxy_requests: [{ response_id: "gen-1" }] } }]; },
+    async listRunEvents() { return [{ type: "task.gateway_correlation", payload: { task_id: "task-1", proxy_requests: [{ response_id: "gen-1" }], proxy_request_count: 1, gateway_diagnostics_dropped: 0 } }]; },
     async putRun(value) { writes.push(structuredClone(value)); },
   };
 }
@@ -54,5 +54,17 @@ describe("backfillNormalizedPricing", () => {
     const result = await backfillNormalizedPricing(storage, { competitionId: COMPETITION_ID, readGeneration: async () => generation(), confirm: true });
     expect(result).toMatchObject({ repriced: 0, unavailable: 1, written: 0 });
     expect(storage.writes).toHaveLength(0);
+  });
+  it("fails closed when the host reported dropped or omitted gateway requests", async () => {
+    for (const payload of [
+      { task_id: "task-1", proxy_requests: [{ response_id: "gen-1" }], proxy_request_count: 1, gateway_diagnostics_dropped: 1 },
+      { task_id: "task-1", proxy_requests: [{ response_id: "gen-1" }], proxy_request_count: 2, gateway_diagnostics_dropped: 0 },
+    ]) {
+      const storage = fixtureStorage();
+      storage.listRunEvents = async () => [{ type: "task.gateway_correlation", payload }];
+      const result = await backfillNormalizedPricing(storage, { competitionId: COMPETITION_ID, readGeneration: async () => generation(), confirm: true });
+      expect(result).toMatchObject({ repriced: 0, unavailable: 1, written: 0 });
+      expect(storage.writes).toHaveLength(0);
+    }
   });
 });

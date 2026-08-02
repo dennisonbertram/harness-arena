@@ -29,6 +29,11 @@ function responseIdsByTask(events) {
     const taskId = event.payload?.task_id;
     const requests = event.payload?.proxy_requests;
     if (typeof taskId !== "string" || !Array.isArray(requests)) continue;
+    if (
+      event.payload?.gateway_diagnostics_dropped !== 0 ||
+      !Number.isInteger(event.payload?.proxy_request_count) ||
+      event.payload.proxy_request_count !== requests.length
+    ) continue;
     const ids = requests.map((request) => request?.response_id).filter((id) => typeof id === "string" && id);
     if (ids.length === requests.length && ids.length > 0) result.set(taskId, ids);
   }
