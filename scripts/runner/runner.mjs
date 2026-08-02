@@ -454,6 +454,9 @@ async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
   const tempDirs = [];
+  // The proxy preflight uses the same sidecar before task 1. Establish the
+  // task scope here so preflight requests/statuses never enter task evidence.
+  gatewayDiagnosticLog.beginScope();
   currentGatewayTaskId = task.id;
 
   try {

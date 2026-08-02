@@ -3,6 +3,7 @@ import { copy, del, get, list, put } from "@vercel/blob";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "reaped"]);
 const DELETE_BATCH_SIZE = 100;
+const OPERATION_INDEX_PREFIX = "archives/competition-cleanup-operations";
 
 export class CompetitionCleanupError extends Error {
   constructor(message: string) {
@@ -41,6 +42,7 @@ interface CleanupDeletionGroup {
 }
 
 interface CleanupOperation {
+  operationId: string;
   result: CompetitionCleanupResult;
   reason: string;
   sourcePathnames: string[];
@@ -57,6 +59,7 @@ export interface ArchiveAndDeleteCompetitionSubmissionsInput {
 
 export interface CompetitionCleanupResult {
   archivePrefix: string;
+  receiptPath: string;
   submissionIds: string[];
   runIds: string[];
   counts: {
@@ -151,6 +154,95 @@ function sameStrings(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+interface CleanupOperationIdentity {
+  schema_version: 1;
+  action: "archive-and-delete";
+  operation_id: string;
+  competition_id: string;
+  submission_ids: string[];
+  reason: string;
+  archive_prefix: string;
+  manifest_path: string;
+}
+
+function operationIndexPath(operationId: string): string {
+  return `${OPERATION_INDEX_PREFIX}/${operationId}.json`;
+}
+
+function operationIdentity({
+  operationId,
+  competitionId,
+  submissionIds,
+  reason,
+  archivePrefix,
+  manifestPath,
+}: {
+  operationId: string;
+  competitionId: string;
+  submissionIds: string[];
+  reason: string;
+  archivePrefix: string;
+  manifestPath: string;
+}): CleanupOperationIdentity {
+  return {
+    schema_version: 1,
+    action: "archive-and-delete",
+    operation_id: operationId,
+    competition_id: competitionId,
+    submission_ids: [...submissionIds].sort(),
+    reason,
+    archive_prefix: archivePrefix,
+    manifest_path: manifestPath,
+  };
+}
+
+function validateOperationIdentity(
+  value: Record<string, unknown>,
+  expected: CleanupOperationIdentity,
+): void {
+  const submissionIds = stringArray(value.submission_ids);
+  if (value.operation_id === expected.operation_id && value.competition_id !== expected.competition_id) {
+    throw new CompetitionCleanupError("operation ID is already bound to a different cleanup intent");
+  }
+  if (
+    value.schema_version !== expected.schema_version
+    || value.action !== expected.action
+    || value.operation_id !== expected.operation_id
+    || value.competition_id !== expected.competition_id
+    || !submissionIds
+    || !sameStrings([...submissionIds].sort(), expected.submission_ids)
+    || value.reason !== expected.reason
+    || value.archive_prefix !== expected.archive_prefix
+    || value.manifest_path !== expected.manifest_path
+  ) {
+    throw new CompetitionCleanupError("operation does not match archived cleanup intent");
+  }
+}
+
+async function claimOperationIdentity(expected: CleanupOperationIdentity): Promise<void> {
+  const pathname = operationIndexPath(expected.operation_id);
+  const existing = await readOptionalJson(pathname);
+  if (existing) {
+    validateOperationIdentity(existing.value, expected);
+    return;
+  }
+
+  try {
+    await put(pathname, JSON.stringify(expected, null, 2), {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: false,
+    });
+  } catch (error) {
+    // A concurrent claimant may have won the write-once race. Only the exact
+    // same global intent may continue; a different competition/intent stops
+    // before either losing caller archives or deletes anything.
+    const winner = await readOptionalJson(pathname);
+    if (!winner) throw error;
+    validateOperationIdentity(winner.value, expected);
+  }
+}
+
 function cleanupOperationFromManifest(
   manifest: Record<string, unknown>,
   input: ArchiveAndDeleteCompetitionSubmissionsInput,
@@ -230,11 +322,13 @@ function cleanupOperationFromManifest(
   }
 
   return {
+    operationId: String(manifest.operation_id),
     reason: String(manifest.reason),
     sourcePathnames,
     deletionGroups,
     result: {
       archivePrefix,
+      receiptPath: `${archivePrefix}/recovery.json`,
       submissionIds,
       runIds,
       counts: {
@@ -258,7 +352,8 @@ function recoveryFromReceipt(
   const remainingPathnames = stringArray(receipt.remainingPathnames);
   const known = new Set(operation.sourcePathnames);
   if (
-    receipt.archivePrefix !== operation.result.archivePrefix
+    receipt.operationId !== operation.operationId
+    || receipt.archivePrefix !== operation.result.archivePrefix
     || !deletedPathnames
     || !remainingPathnames
     || [...deletedPathnames, ...remainingPathnames].some((pathname) => !known.has(pathname))
@@ -277,7 +372,6 @@ async function deleteOperation(
   operation: CleanupOperation,
   previousDeletedPathnames: string[] = [],
   remainingPathnames: string[] = operation.sourcePathnames,
-  writeCompletionReceipt = false,
 ): Promise<void> {
   const remaining = new Set(remainingPathnames);
   const groups = operation.deletionGroups.map((group) => ({
@@ -307,6 +401,7 @@ async function deleteOperation(
         schema_version: 2,
         status: "partial",
         recorded_at: new Date().toISOString(),
+        operationId: operation.operationId,
         ...recovery,
       }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: true });
     } catch {
@@ -318,19 +413,18 @@ async function deleteOperation(
     );
   }
 
-  if (writeCompletionReceipt) {
-    await put(receiptPath, JSON.stringify({
-      schema_version: 2,
-      status: "completed",
-      recorded_at: new Date().toISOString(),
-      archivePrefix: operation.result.archivePrefix,
-      deletedGroups: operation.deletionGroups.map((group) => group.name),
-      remainingGroups: [],
-      deletedPathnames: operation.sourcePathnames,
-      remainingPathnames: [],
-      receiptPath,
-    }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: true });
-  }
+  await put(receiptPath, JSON.stringify({
+    schema_version: 2,
+    status: "completed",
+    recorded_at: new Date().toISOString(),
+    operationId: operation.operationId,
+    archivePrefix: operation.result.archivePrefix,
+    deletedGroups: operation.deletionGroups.map((group) => group.name),
+    remainingGroups: [],
+    deletedPathnames: operation.sourcePathnames,
+    remainingPathnames: [],
+    receiptPath,
+  }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: true });
 }
 
 /**
@@ -358,6 +452,16 @@ export async function archiveAndDeleteCompetitionSubmissions(
   }
   const archivePrefix = `archives/competition-cleanups/${input.competitionId}/${archiveId}`;
   const manifestPath = `${archivePrefix}/manifest.json`;
+  const identity = operationIdentity({
+    operationId: archiveId,
+    competitionId: input.competitionId,
+    submissionIds,
+    reason,
+    archivePrefix,
+    manifestPath,
+  });
+  const existingIndex = await readOptionalJson(operationIndexPath(archiveId));
+  if (existingIndex) validateOperationIdentity(existingIndex.value, identity);
 
   const existingManifest = await readOptionalJson(manifestPath);
   if (existingManifest) {
@@ -366,10 +470,11 @@ export async function archiveAndDeleteCompetitionSubmissions(
       { ...input, archiveId, reason },
       archivePrefix,
     );
+    if (!existingIndex) await claimOperationIdentity(identity);
     const receipt = await readOptionalJson(`${archivePrefix}/recovery.json`);
     const recovery = recoveryFromReceipt(receipt?.value, operation);
     if (recovery.completed) return operation.result;
-    await deleteOperation(operation, recovery.deletedPathnames, recovery.remainingPathnames, true);
+    await deleteOperation(operation, recovery.deletedPathnames, recovery.remainingPathnames);
     return operation.result;
   }
 
@@ -417,6 +522,11 @@ export async function archiveAndDeleteCompetitionSubmissions(
     { name: "submissions", pathnames: submissions.map((submission) => submission.pathname) },
   ];
 
+  // Claim the operation UUID globally after live safety preflight but before
+  // the first archive copy. allowOverwrite:false makes this a write-once key;
+  // a racing loser may proceed only if it claimed the exact same intent.
+  await claimOperationIdentity(identity);
+
   // Nothing is removed until the entire live set and the manifest are durably
   // copied. A copy failure leaves the leaderboard exactly as it was.
   for (const pathname of sourcePathnames) {
@@ -429,6 +539,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
 
   const result: CompetitionCleanupResult = {
     archivePrefix,
+    receiptPath: `${archivePrefix}/recovery.json`,
     submissionIds,
     runIds: runs.map((run) => String(run.value.id)),
     counts: {
@@ -450,7 +561,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
     deletion_groups: deletionGroups,
   }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: false });
 
-  await deleteOperation({ result, reason, sourcePathnames, deletionGroups });
+  await deleteOperation({ operationId: archiveId, result, reason, sourcePathnames, deletionGroups });
 
   return result;
 }

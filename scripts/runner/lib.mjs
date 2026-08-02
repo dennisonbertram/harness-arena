@@ -218,6 +218,13 @@ export function createBoundedGatewayDiagnosticCollector({
   let requestCount = 0;
   let droppedEvents = 0;
 
+  function reset() {
+    events.length = 0;
+    retainedBytes = 0;
+    requestCount = 0;
+    droppedEvents = 0;
+  }
+
   return {
     push(event) {
       if (event?.type === "gateway_proxy.request") requestCount += 1;
@@ -234,16 +241,16 @@ export function createBoundedGatewayDiagnosticCollector({
       events.push({ event, bytes: eventBytes });
       retainedBytes += eventBytes;
     },
+    beginScope() {
+      reset();
+    },
     drain() {
       const snapshot = {
         events: events.map((entry) => entry.event),
         requestCount,
         droppedEvents,
       };
-      events.length = 0;
-      retainedBytes = 0;
-      requestCount = 0;
-      droppedEvents = 0;
+      reset();
       return snapshot;
     },
   };

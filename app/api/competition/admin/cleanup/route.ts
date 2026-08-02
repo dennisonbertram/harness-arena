@@ -71,11 +71,13 @@ export async function POST(request: NextRequest) {
       run_ids: cleanup.runIds,
       counts: cleanup.counts,
       archive_prefix: cleanup.archivePrefix,
+      receipt_path: cleanup.receiptPath,
     });
     return NextResponse.json({
       status: "deleted",
       operation_id: parsed.data.operation_id,
       archive_prefix: cleanup.archivePrefix,
+      receipt_path: cleanup.receiptPath,
       submission_ids: cleanup.submissionIds,
       run_ids: cleanup.runIds,
       counts: cleanup.counts,

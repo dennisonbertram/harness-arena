@@ -225,6 +225,7 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
     })).rejects.toThrow("archive unavailable");
 
     expect(blob.operations).toEqual([
+      `put:${OPERATION_INDEX_PREFIX}/test-cleanup.json`,
       `copy:submissions/${SUBMISSION_ID}.json`,
       `copy:runs/${RUN_ID}.json`,
     ]);
