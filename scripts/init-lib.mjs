@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import { acquireDirectoryLock, atomicWriteFile, isProcessAlive as processAlive } from "../lib/file-storage-lock.mjs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { acquireDirectoryLock, assertNoSymlinksInTree, atomicWriteFile, isProcessAlive as processAlive } from "../lib/file-storage-lock.mjs";
 
 const MANAGED_ENV_MARKER = "# harness-arena-init:v2";
 const NEXT_DEV_ENV_FILES = new Set([".env", ".env.local", ".env.development", ".env.development.local"]);
@@ -133,7 +133,7 @@ function parseEnvAssignments(content) {
 export function isProcessAlive(pid) { return processAlive(pid); }
 
 export async function acquireInitLock(lockPath, options) {
-  return acquireDirectoryLock(lockPath, options);
+  return acquireDirectoryLock(lockPath, { confinementRoot: dirname(lockPath), ...options });
 }
 
 export function spawnProcessGroup(command, args, options = {}) {
@@ -182,19 +182,33 @@ export async function resetLocalData(worktree) {
   const root = await realpath(resolve(worktree));
   const state = join(root, ".harness-arena");
   const stateInfo = await safeLstat(state);
-  if (!stateInfo) return { removed: false, storage: join(state, "local-data") };
+  if (!stateInfo) return { removed: false, stale_pid_recovered: false, storage: join(state, "local-data") };
   if (stateInfo.isSymbolicLink()) throw new Error("refusing reset: state directory is a symlink and is not confined");
   if (!stateInfo.isDirectory()) throw new Error("refusing reset: state path is not a directory");
   assertWithin(root, await realpath(state));
-  const metadata = await readInstanceMetadata(state);
-  if (metadata && isProcessAlive(metadata.pid)) throw new Error(`refusing reset: local instance ${metadata.pid} is still running`);
+  await assertNoSymlinksInTree(state);
+  const ownership = await readPidOwnership(state);
+  if (ownership.pid && isProcessAlive(ownership.pid)) throw new Error(`refusing reset: local instance ${ownership.pid} is still running`);
   const data = join(state, "local-data");
   const dataInfo = await safeLstat(data);
   if (dataInfo?.isSymbolicLink()) throw new Error("refusing reset: local data is a symlink and is not confined");
   if (dataInfo) assertWithin(state, await realpath(data));
   await rm(data, { recursive: true, force: true });
   await rm(join(state, "init.pid"), { force: true });
-  return { removed: Boolean(dataInfo), storage: data };
+  return { removed: Boolean(dataInfo), stale_pid_recovered: ownership.present, storage: data };
+}
+
+async function readPidOwnership(state) {
+  let raw;
+  try { raw = await readFile(join(state, "init.pid"), "utf8"); } catch (error) {
+    if (error?.code === "ENOENT") return { present: false, pid: undefined };
+    throw error;
+  }
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new Error("refusing reset: unrecognized PID metadata"); }
+  const pid = Number.isSafeInteger(value) ? value : value?.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("refusing reset: unrecognized PID metadata");
+  return { present: true, pid };
 }
 
 async function safeLstat(path) {
@@ -215,6 +229,7 @@ export async function assertSafeStateDirectory(worktree) {
   if (info && !info.isDirectory()) throw new Error("state path must be a directory");
   if (!info) await mkdir(state, { recursive: false, mode: 0o700 });
   assertWithin(root, await realpath(state));
+  await assertNoSymlinksInTree(state);
   const data = join(state, "local-data");
   const dataInfo = await safeLstat(data);
   if (dataInfo?.isSymbolicLink()) throw new Error("local data directory must not be a symlink");

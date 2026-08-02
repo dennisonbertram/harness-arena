@@ -31,8 +31,10 @@ also refuses to start under `NODE_ENV=production` or Vercel.
   recovered within a bounded wait.
 - Stop the printed PID/process group, then use `./scripts/init.sh --reset` to
   explicitly remove only that worktree's local data. Reset refuses symlinked
-  state/data paths. The script refuses to overwrite an operator-owned
-  `.env.local`.
+  state/data paths at any depth, refuses a live legacy numeric PID, and reports
+  stale PID recovery explicitly. File and voice storage apply the same
+  per-component symlink refusal before local reads or mutations. The script
+  refuses to overwrite an operator-owned `.env.local`.
 
 For a manually-managed environment, copy `.env.example`, populate only the
 credentials needed for that environment, then use `pnpm dev`; this is not the

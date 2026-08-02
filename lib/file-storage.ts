@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { appendRunEventsFile, atomicWriteFile, safeStoragePart } from "./file-storage-lock.mjs";
-import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
+import { appendRunEventsFile, assertSafeStoragePath, atomicWriteFile, safeStoragePart } from "./file-storage-lock.mjs";
+import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type RunEvent, type Submission } from "./types";
 import type { Storage } from "./storage";
 
 export class LocalStorageReadError extends Error {
@@ -34,6 +34,7 @@ export class FileStorage implements Storage {
   }
 
   private async readJson<T>(path: string): Promise<T | undefined> {
+    await assertSafeStoragePath(this.root, path);
     try {
       return JSON.parse(await readFile(path, "utf8")) as T;
     } catch (cause) {
@@ -43,10 +44,11 @@ export class FileStorage implements Storage {
   }
 
   private async putJson(path: string, value: unknown): Promise<void> {
-    await atomicWriteFile(path, JSON.stringify(value));
+    await atomicWriteFile(path, JSON.stringify(value), 0o600, this.root);
   }
 
   private async listJson<T>(directory: string): Promise<T[]> {
+    await assertSafeStoragePath(this.root, directory);
     try {
       const { readdir } = await import("node:fs/promises");
       const names = await readdir(directory);
@@ -86,11 +88,12 @@ export class FileStorage implements Storage {
   }
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string) {
     const path = this.path("traces", safeStoragePart(runId), safeStoragePart(taskId), safeStoragePart(name));
-    await atomicWriteFile(path, data);
+    await atomicWriteFile(path, data, 0o600, this.root);
     return `file://${path}`;
   }
   async getTraceBytes(runId: string, taskId: string, name: string) {
     const path = this.path("traces", safeStoragePart(runId), safeStoragePart(taskId), safeStoragePart(name));
+    await assertSafeStoragePath(this.root, path);
     try { return await readFile(path); } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new LocalStorageReadError(path, cause);
@@ -98,13 +101,24 @@ export class FileStorage implements Storage {
   }
 
   async checkReady(): Promise<{ seeded: true; writable: true }> {
-    const seeded = await this.getCompetition("local-development");
-    if (!seeded || seeded.auto_baseline !== false) throw new Error("local storage seed is missing or unsafe");
+    const parsed = CompetitionSchema.safeParse(await this.getCompetition("local-development"));
+    const seeded = parsed.success ? parsed.data : undefined;
+    if (!seeded
+      || seeded.id !== "local-development"
+      || seeded.arena !== "harness-arena"
+      || seeded.harness !== "pi"
+      || seeded.model !== "local"
+      || seeded.status !== "live"
+      || seeded.auto_baseline !== false) {
+      throw new Error("local-development competition seed is missing, invalid, or has the wrong identity");
+    }
     const probe = this.path("ready", `probe-${process.pid}-${crypto.randomUUID()}.txt`);
     try {
-      await atomicWriteFile(probe, "ready");
+      await atomicWriteFile(probe, "ready", 0o600, this.root);
+      await assertSafeStoragePath(this.root, probe);
       if (await readFile(probe, "utf8") !== "ready") throw new Error("local storage write probe mismatch");
     } finally {
+      await assertSafeStoragePath(this.root, probe);
       await rm(probe, { force: true });
     }
     return { seeded: true, writable: true };

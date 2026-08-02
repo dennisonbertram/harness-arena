@@ -16,7 +16,11 @@ Use `--check` for prerequisite/port/PID validation without side effects and
 reported PID and remove `.harness-arena/init.pid`. To reset development data,
 then run `./scripts/init.sh --reset`; reset is explicit and only deletes that
 worktree's `.harness-arena/local-data` directory after realpath/lstat
-confinement checks. It refuses symlinked state or data. A readiness timeout
+confinement checks. It refuses symlinks anywhere below state or local data and
+fails closed when either current JSON metadata or a legacy numeric PID names a
+live process; stale PID recovery is reported in the reset output. File and
+voice storage likewise reject any symlink component before reading or mutating
+local data. A readiness timeout
 terminates the owned process group and retains secret-safe evidence in
 `.harness-arena/init-failure.json` plus `.harness-arena/init.log`. Do not use
 production cleanup or Blob scripts for local development.
