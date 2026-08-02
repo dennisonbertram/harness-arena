@@ -2,6 +2,10 @@
 
 Next.js (App Router, TypeScript strict) scaffold for Harness Arena.
 
+## Read-only operations API
+
+Provision `OPS_READ_TOKEN` server-side, then use GET only: `curl -H "Authorization: Bearer $OPS_READ_TOKEN" "$HOST/api/ops/v1/inventory?kind=runs&limit=50"`. The versioned index, inventory, read, and summary routes live below `/api/ops/v1`; all are `no-store`, cursor-bounded, and redact URL query credentials. This is distinct from and never returns `BLOB_READ_WRITE_TOKEN`.
+
 ## Getting started
 
 ```bash
