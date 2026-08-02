@@ -2,9 +2,6 @@ import { get, list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
-  /** Strictly read-only raw inventory for the operations plane. No callers receive Blob URLs. */
-  listOpsRecords(prefix: string, options: { limit: number; cursor?: string }): Promise<{ records: { pathname: string }[]; nextCursor?: string; partial: string[] }>;
-  readOpsRecord(pathname: string): Promise<{ found: boolean; value?: unknown; partial?: string }>;
   getSubmission(id: string): Promise<Submission | undefined>;
   putSubmission(submission: Submission): Promise<void>;
   listSubmissions(): Promise<Submission[]>;
@@ -46,15 +43,6 @@ export class MemoryStorage implements Storage {
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
   private traces = new Map<string, Buffer>();
-
-  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) {
-    const paths = [...this.submissions.keys()].map((id) => `submissions/${id}.json`)
-      .concat([...this.competitions.keys()].map((id) => `competitions/${id}.json`), [...this.runs.keys()].map((id) => `runs/${id}.json`), [...this.events.entries()].flatMap(([run, events]) => events.map((event) => `events/${run}/${String(event.seq).padStart(10, "0")}.json`)), [...this.traces.keys()])
-      .filter((p) => p.startsWith(prefix)).sort(); const offset = Number(options.cursor ?? 0); const records=paths.slice(offset, offset+options.limit).map((pathname)=>({pathname}));
-    const partial = prefix.startsWith("events/") ? paths.flatMap((pathname, index) => { const current=Number(/(\d+)\.json$/.exec(pathname)?.[1]); const next=Number(/(\d+)\.json$/.exec(paths[index+1]??"")?.[1]); return Number.isSafeInteger(current)&&Number.isSafeInteger(next)&&next>current+1 ? Array.from({length:next-current-1},(_,i)=>pathname.replace(/\d+\.json$/,String(current+i+1).padStart(10,"0")+".json")) : []; }) : [];
-    return { records, nextCursor: offset + records.length < paths.length ? String(offset + records.length) : undefined, partial };
-  }
-  async readOpsRecord(pathname: string) { const m=/^(submissions|competitions|runs)\/(.+)\.json$/.exec(pathname); if(m){const value=m[1]==="submissions"?this.submissions.get(m[2]):m[1]==="competitions"?this.competitions.get(m[2]):this.runs.get(m[2]);return value?{found:true,value}:{found:false};} const event=/^events\/([^/]+)\/(\d+)\.json$/.exec(pathname); if(event){const value=(this.events.get(event[1])??[]).find((x)=>x.seq===Number(event[2]));return value?{found:true,value}:{found:false};} const bytes=this.traces.get(pathname);return bytes?{found:true,value:bytes.toString("utf8")}:{found:false}; }
 
   async getSubmission(id: string): Promise<Submission | undefined> {
     return this.submissions.get(id);
@@ -319,9 +307,6 @@ export class BlobStorage implements Storage {
     } while (cursor);
     return blobs;
   }
-  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) { const page=await withRetry(()=>list({prefix,limit:options.limit,cursor:options.cursor})); return {records:page.blobs.map((b)=>({pathname:b.pathname})),nextCursor:page.hasMore?page.cursor:undefined,partial:[]}; }
-  async readOpsRecord(pathname: string) { try { if(pathname.startsWith("traces/")){const result=await get(pathname,{access:"public"});if(!result||result.statusCode!==200||!result.stream)return {found:false};return {found:true,value:await new Response(result.stream).text()};} const value=await this.readJson<unknown>(pathname); return value===undefined?{found:false}:{found:true,value}; } catch { return {found:false,partial:pathname}; } }
-
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
     const results = await Promise.all(

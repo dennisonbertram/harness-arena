@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOpsReadService, type OpsKind } from "./ops-read";
+import { createOpsReadService } from "./ops-read";
 import type { OpsReadAdapter } from "./ops-read-adapter";
 
 describe("ops summary integrity", () => {
@@ -11,7 +11,7 @@ describe("ops summary integrity", () => {
           { pathname: "events/run-1/0000000003.json", size: 10, uploaded_at: "2026-08-02T00:00:03.000Z", etag: "3" },
         ] : [], has_more: false,
       })),
-      read: vi.fn(),
+      read: vi.fn(async ({ pathname }) => ({ status: "ok" as const, bytes: Buffer.from(JSON.stringify({ type: "event" })), metadata: { pathname, size: 1, uploaded_at: "2026-08-02T00:00:00.000Z", etag: "e" } })),
     };
     const summary = await createOpsReadService(adapter).summary();
     expect(summary.integrity.event_holes).toBe(1);

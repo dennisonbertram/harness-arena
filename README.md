@@ -4,7 +4,48 @@ Next.js (App Router, TypeScript strict) scaffold for Harness Arena.
 
 ## Read-only operations API
 
-Provision `OPS_READ_TOKEN` server-side, then use GET only: `curl -H "Authorization: Bearer $OPS_READ_TOKEN" "$HOST/api/ops/v1/inventory?kind=runs&limit=50"`. The versioned index, inventory, read, and summary routes live below `/api/ops/v1`; all are `no-store`, cursor-bounded, and redact URL query credentials. This is distinct from and never returns `BLOB_READ_WRITE_TOKEN`.
+Provision a random 32+ byte `OPS_READ_TOKEN` server-side. It is distinct from,
+and never returns, `BLOB_READ_WRITE_TOKEN`. Optionally set a separate
+`OPS_READ_CURSOR_SECRET`; rotating either effective cursor key invalidates all
+outstanding cursors.
+
+All routes require the exact header `Authorization: Bearer <token>`, export
+GET plus explicit 405 handlers for POST/PUT/PATCH/DELETE/OPTIONS, and return
+`Cache-Control: no-store`:
+
+- `GET /api/ops/v1` — machine-readable schema, kinds, endpoints, and limits.
+- `GET /api/ops/v1/inventory?kind=<kind>&limit=50&cursor=<opaque>` — bounded
+  pathname/size/uploaded-at/etag metadata. `events` optionally accepts
+  `run_id`; without it, all event paths are enumerated.
+- `GET /api/ops/v1/read?kind=<kind>&...` — bounded content. Entity kinds use
+  `id`; events use `run_id` + `seq`; traces use `run_id` + `task_id` + `name`;
+  judgments use `evaluator_id` + `comparison_id`; voice audio uses `id`.
+- `GET /api/ops/v1/summary` — numeric counts, latest timestamps, run-state and
+  integrity totals, plus explicit scan completeness/truncation.
+
+Example:
+
+```bash
+curl -H "Authorization: Bearer $OPS_READ_TOKEN" \
+  "$HOST/api/ops/v1/inventory?kind=runs&limit=50"
+```
+
+Cursors are versioned, HMAC-signed, snapshot-bound, and scoped to the exact
+kind/prefix/filter. Tampering or cross-kind reuse returns `invalid_cursor`.
+Pages are capped at 100 records; content is checked from Blob metadata before
+buffering and capped at 1 MiB with timeouts and retry. Errors distinguish
+`unauthorized`, `invalid_limit`, `invalid_cursor`, `invalid_identifier`,
+`not_found`, `too_large`, `transient`, `corrupt`, and `partial_read`.
+
+The inventory covers submissions, runs, competitions, global/per-run events,
+trace metadata/content, voice manifest/judgments/audio prompts/audio responses,
+cleanup operation indexes/archives, competition-reset archives, and the
+general archive root. Responses recursively remove URL query credentials,
+secret-like keys, and exact secret-like environment values.
+
+Rollback is code-only: remove the `/api/ops/v1` deployment and then remove or
+rotate `OPS_READ_TOKEN`/`OPS_READ_CURSOR_SECRET`. No data migration or Blob
+mutation is involved. Do not provision the caller with the Blob write token.
 
 ## Getting started
 
