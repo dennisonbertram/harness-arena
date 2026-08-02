@@ -198,6 +198,13 @@ describe("ops evidence and verdict honesty", () => {
     }
   });
 
+  it("reserves exit 64 for argv misuse rather than invalid environment configuration", async () => {
+    const writes = [];
+    expect(await executeCli(["--env", "local", "--json"], { env: { HARNESS_ARENA_LOCAL_URL: "not a URL" }, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value) })).toBe(EXIT_CODES.failed);
+    expect(JSON.parse(writes[0])).toMatchObject({ verdict: "failed", findings: expect.arrayContaining([expect.objectContaining({ code: "environment_configuration" })]) });
+    expect(await executeCli(["--env", "bogus"], { env: {}, writeOut: vi.fn(), writeErr: vi.fn() })).toBe(EXIT_CODES.usage_error);
+  });
+
   it("reports malformed run inventory records instead of silently dropping them", async () => {
     const records = [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }, { pathname: "runs/../../hidden.json", uploaded_at: "2026-08-03T00:04:00.000Z" }];
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runRecords: records }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });

@@ -168,15 +168,15 @@ export function parseVercelInspect(text, { now = new Date().toISOString() } = {}
   return { deployment: deploymentModel(value, now), cron: { state: crons === null ? "unknown" : crons.length ? "configured" : "missing", count: crons?.length ?? null } };
 }
 
-export function parseVercelEnvironment(text, environment, { now = new Date().toISOString() } = {}) {
+export function parseVercelEnvironment(text, target, { now = new Date().toISOString() } = {}) {
   const value = parseJson(text, "invalid_vercel_env_json");
   const source = Array.isArray(value) ? value : Array.isArray(value.envs) ? value.envs : Array.isArray(value.environments) ? value.environments : [];
   const records = source.slice(0, 500).map((item) => {
     const created_at = item.createdAt ?? item.created_at ?? null;
     return { name: item.key ?? item.name ?? "unknown", targets: Array.isArray(item.target) ? item.target : item.target ? [item.target] : [], type: item.type ?? "unknown", created_at, age_ms: ageMs(created_at, now) };
   });
-  const present = new Set(records.filter((item) => item.targets.length === 0 || item.targets.includes(environment)).map((item) => item.name));
-  return { records, required: [...REQUIRED_ENVIRONMENT], required_missing: REQUIRED_ENVIRONMENT.filter((name) => !present.has(name)) };
+  const present = new Set(records.filter((item) => item.targets.length === 0 || item.targets.includes(target)).map((item) => item.name));
+  return { target, records, required: [...REQUIRED_ENVIRONMENT], required_missing: REQUIRED_ENVIRONMENT.filter((name) => !present.has(name)) };
 }
 
 export function parseVercelLogs(text) {
@@ -202,15 +202,15 @@ function provenance(binary, args, result) {
 
 export async function collectPlatformEvidence({ environment, commandRunner = spawnCommand, env = process.env, now = new Date().toISOString(), target, expectedRef } = {}) {
   const config = resolveEnvironment(environment, env);
-  if (!config.collect_platform) return { state: "not_applicable", expected_sha: null, deployment: null, environment: { records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "not_applicable" }, blockers: [], command_provenance: [] };
+  if (!config.collect_platform) return { requested_environment: environment, state: "not_applicable", expected_sha: null, deployment: null, environment: { target: null, records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "not_applicable" }, blockers: [], command_provenance: [] };
   const resolvedTarget = target ?? config.vercel_target;
   const resolvedRef = expectedRef ?? config.expected_ref;
-  if (!resolvedTarget) return { state: "access_blocked", expected_sha: null, deployment: null, environment: { records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "unknown" }, blockers: [{ code: "platform_target_missing", detail: `Set HARNESS_ARENA_${environment.toUpperCase()}_URL to a deployed hostname` }], command_provenance: [] };
+  if (!resolvedTarget) return { requested_environment: environment, state: "access_blocked", expected_sha: null, deployment: null, environment: { target: config.vercel_environment, records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "unknown" }, blockers: [{ code: "platform_target_missing", detail: `Set HARNESS_ARENA_${environment.toUpperCase()}_URL to a deployed hostname` }], command_provenance: [] };
   const vercel = createVercelCommandAdapter(commandRunner), github = createGitHubCommandAdapter(commandRunner);
   const operations = [
     { name: "vercel_list", binary: "vercel", args: ["ls", "--json", "--environment", config.vercel_environment], promise: vercel.list(config.vercel_environment), parse: (output) => parseVercelList(output, { now }) },
     { name: "vercel_inspect", binary: "vercel", args: ["inspect", resolvedTarget, "--json"], promise: vercel.inspect(resolvedTarget), parse: (output) => parseVercelInspect(output, { now }) },
-    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--json"], promise: vercel.environment(config.vercel_environment), parse: (output) => parseVercelEnvironment(output, environment, { now }) },
+    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--json"], promise: vercel.environment(config.vercel_environment), parse: (output) => parseVercelEnvironment(output, config.vercel_environment, { now }) },
     { name: "vercel_logs", binary: "vercel", args: ["logs", resolvedTarget, "--json", "--since", "1h"], promise: vercel.logs(resolvedTarget), parse: parseVercelLogs },
     { name: "github_expected_sha", binary: "gh", args: ["api", `repos/dennisonbertram/harness-arena/commits/${resolvedRef}`, "--jq", ".sha"], promise: github.expectedSha(resolvedRef), parse: parseGitHubExpectedSha },
   ];
@@ -237,7 +237,7 @@ export async function collectPlatformEvidence({ environment, commandRunner = spa
     }
   }
   const deployment = inspectDeployment ? { ...listDeployment, ...inspectDeployment } : listDeployment;
-  return redactSensitive({ state: blockers.length ? "access_blocked" : "ok", expected_sha: parsed.github_expected_sha ?? null, deployment, contradictions, environment: parsed.vercel_env ?? { records: [], required_missing: [...REQUIRED_ENVIRONMENT] }, logs: parsed.vercel_logs ?? { recent_errors: [] }, cron: parsed.vercel_inspect?.cron ?? { state: "unknown" }, blockers, command_provenance });
+  return redactSensitive({ requested_environment: environment, state: blockers.length ? "access_blocked" : "ok", expected_sha: parsed.github_expected_sha ?? null, deployment, contradictions, environment: parsed.vercel_env ?? { target: config.vercel_environment, records: [], required_missing: [...REQUIRED_ENVIRONMENT] }, logs: parsed.vercel_logs ?? { recent_errors: [] }, cron: parsed.vercel_inspect?.cron ?? { state: "unknown" }, blockers, command_provenance });
 }
 
 function requestKind(result) {
@@ -283,7 +283,9 @@ async function inventoryKind({ kind, ...options }) {
     if (!response.ok) { complete = false; error = response.kind === "access" ? "access_blocked" : response.error ?? `http_${response.status}`; break; }
     const body = response.body ?? {};
     if (body.schema_version !== "ops.v1" || body.kind !== kind || !Array.isArray(body.items)) { complete = false; error = "malformed_contract"; break; }
-    if (typeof body.has_more !== "boolean" || (body.next_cursor !== null && body.next_cursor !== undefined && typeof body.next_cursor !== "string")) { complete = false; error = "malformed_pagination"; break; }
+    const hasCursorField = Object.hasOwn(body, "next_cursor");
+    const cursorTypeValid = body.has_more === true ? body.next_cursor === null || typeof body.next_cursor === "string" : body.has_more === false ? body.next_cursor === null : false;
+    if (typeof body.has_more !== "boolean" || !hasCursorField || !cursorTypeValid) { complete = false; error = "malformed_pagination"; break; }
     const pageItems = body.items;
     items.push(...pageItems); records += pageItems.length; pages += 1;
     if (body.partial === true) { complete = false; error = "partial_read"; break; }
@@ -298,14 +300,14 @@ async function inventoryKind({ kind, ...options }) {
 function runIdFromPath(pathname) { return /^runs\/([A-Za-z0-9._-]+)\.json$/.exec(pathname ?? "")?.[1] ?? null; }
 function eventFromPath(pathname) { const match = /^events\/([A-Za-z0-9._-]+)\/(\d+)\.json$/.exec(pathname ?? ""); return match ? { run_id: match[1], seq: Number(match[2]) } : null; }
 
-async function correlateRuns(inventory, options) {
+async function correlateRuns(inventory, options, validRunRecords) {
   const eventByRun = new Map();
   for (const record of inventory.events?.items ?? []) {
     const event = eventFromPath(record.pathname); if (!event) continue;
     const previous = eventByRun.get(event.run_id); if (!previous || event.seq > previous.seq) eventByRun.set(event.run_id, event);
   }
   const runs = [];
-  const selectedRuns = [...(inventory.runs?.items ?? [])].sort((left, right) => String(right.uploaded_at ?? "").localeCompare(String(left.uploaded_at ?? ""))).slice(0, MAX_RUN_READS);
+  const selectedRuns = [...validRunRecords].sort((left, right) => String(right.uploaded_at).localeCompare(String(left.uploaded_at))).slice(0, MAX_RUN_READS);
   for (const record of selectedRuns) {
     const run_id = runIdFromPath(record.pathname); if (!run_id) continue;
     const runResponse = await requestOpsJson({ ...options, path: `/api/ops/v1/read?kind=runs&id=${encodeURIComponent(run_id)}` });
@@ -371,7 +373,11 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
     return redactSensitive({ schema_version: STATUS_SCHEMA_VERSION, checked_at: now, environment, ...status, health: health.body, platform, ops: null, freshness: { state: "unknown" }, findings, blockers }, token ? [token] : []);
   }
   if (root.body?.schema_version !== "ops.v1") findings.push(issue("ops_schema_drift", "failed", `expected ops.v1, received ${root.body?.schema_version ?? "missing"}`));
-  const advertisedKinds = [...new Set((root.body?.kinds ?? []).map((entry) => typeof entry === "string" ? entry : entry?.kind).filter((kind) => typeof kind === "string" && /^[a-z_]+$/.test(kind)))];
+  const rootKinds = root.body?.kinds;
+  const rawKinds = Array.isArray(rootKinds) ? rootKinds.map((entry) => typeof entry === "string" ? entry : entry?.kind) : [];
+  const validKindContract = Array.isArray(rootKinds) && rawKinds.every((kind) => typeof kind === "string" && /^[a-z_]+$/.test(kind)) && new Set(rawKinds).size === rawKinds.length;
+  if (!validKindContract) findings.push(issue("ops_root_contract", "failed", "ops root kinds must be an array of entries with unique valid kind strings"));
+  const advertisedKinds = validKindContract ? rawKinds : [];
   const kinds = advertisedKinds.slice(0, MAX_INVENTORY_KINDS);
   const inventoryScope = { advertised: advertisedKinds.length, selected: kinds.length, truncated: advertisedKinds.length > kinds.length };
   if (inventoryScope.truncated) findings.push(issue("inventory_kind_limit", "degraded", `inventory limited to ${kinds.length} of ${advertisedKinds.length} advertised kinds`));
@@ -388,10 +394,14 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
       else findings.push(issue(`inventory_${kind}_partial`, "degraded", `${kind} inventory incomplete: ${snapshot.error}`));
     }
   }
-  const runs = await correlateRuns(inventory, requestOptions);
-  const availableRuns = inventory.runs?.items?.length ?? 0;
-  const runCorrelationScope = { available: availableRuns, selected: Math.min(availableRuns, MAX_RUN_READS), truncated: availableRuns > MAX_RUN_READS };
-  if (runCorrelationScope.truncated) findings.push(issue("run_correlation_limit", "degraded", `run correlation limited to ${runCorrelationScope.selected} of ${runCorrelationScope.available} inventoried runs`));
+  const runRecords = inventory.runs?.items ?? [];
+  const validRunRecords = runRecords.filter((record) => runIdFromPath(record?.pathname) && Number.isFinite(Date.parse(record?.uploaded_at ?? "")));
+  const invalidRunRecords = runRecords.length - validRunRecords.length;
+  if (invalidRunRecords) findings.push(issue("run_inventory_record_invalid", "failed", `${invalidRunRecords} malformed run inventory records`));
+  const runs = await correlateRuns(inventory, requestOptions, validRunRecords);
+  const availableRuns = runRecords.length;
+  const runCorrelationScope = { available: availableRuns, valid: validRunRecords.length, selected: Math.min(validRunRecords.length, MAX_RUN_READS), invalid: invalidRunRecords, truncated: validRunRecords.length > MAX_RUN_READS };
+  if (runCorrelationScope.truncated) findings.push(issue("run_correlation_limit", "degraded", `run correlation limited to ${runCorrelationScope.selected} of ${runCorrelationScope.valid} valid inventoried runs`));
   if (runs.some((run) => run.evidence === "unavailable" || (run.unavailable ?? []).length)) findings.push(issue("run_correlation_partial", "degraded", "one or more run correlations have unavailable fields"));
   const publicInventory = Object.fromEntries(Object.entries(inventory).map(([kind, snapshot]) => [kind, { records: snapshot.records, pages: snapshot.pages, complete: snapshot.complete, ...(snapshot.error ? { error: snapshot.error } : {}) }]));
   const summaryBody = summary.ok ? summary.body : {};
@@ -406,6 +416,7 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
 
   const deployment = platform.deployment;
   if (ENVIRONMENTS[environment]?.collect_platform && (deployment?.state !== "READY" || !deployment?.id || !SAFE_TARGET.test(deployment.id) || !deployment?.hostname || !SAFE_TARGET.test(deployment.hostname))) findings.push(issue("deployment_not_ready", "failed", "serving deployment must have a valid identity and READY state"));
+  if (ENVIRONMENTS[environment]?.collect_platform && (!deployment?.sha || !deployment?.ref)) findings.push(issue("deployment_lineage_missing", "failed", "serving deployment must report a nonempty SHA and ref"));
   if (deployment?.sha && health.body?.sha && deployment.sha !== health.body.sha) findings.push(issue("deployment_sha_drift", "failed", "serving deployment SHA differs from health SHA"));
   if (platform.expected_sha && deployment?.sha && platform.expected_sha !== deployment.sha) findings.push(issue("expected_sha_drift", "failed", "serving deployment SHA differs from expected GitHub SHA"));
   const expectedRef = ENVIRONMENTS[environment]?.expected_ref;
@@ -455,15 +466,30 @@ export function formatHumanStatus(status) {
 }
 
 export async function executeCli(argv, { commandRunner = spawnCommand, fetchImpl = fetch, env = process.env, writeOut = (value) => process.stdout.write(`${value}\n`), writeErr = (value) => process.stderr.write(`${value}\n`), now = new Date().toISOString() } = {}) {
+  let options;
   try {
-    const options = parseCliArgs(argv, env);
+    options = parseCliArgs(argv, env);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "configuration_error";
+    const usage = message === "invalid_environment" || message === "environment_required" || message === "token_argument_not_allowed" || message.startsWith("usage:");
+    if (usage) {
+      writeErr(redactSensitive(message, env.OPS_READ_TOKEN ? [env.OPS_READ_TOKEN] : []));
+      return EXIT_CODES.usage_error;
+    }
+    const requestedEnvironment = argv[argv.indexOf("--env") + 1] ?? "unknown";
+    const result = redactSensitive({ schema_version: STATUS_SCHEMA_VERSION, checked_at: now, environment: requestedEnvironment, verdict: "failed", exit_code: EXIT_CODES.failed, health: null, platform: null, ops: null, freshness: { state: "unknown" }, findings: [issue("environment_configuration", "failed", message)], blockers: [] }, env.OPS_READ_TOKEN ? [env.OPS_READ_TOKEN] : []);
+    writeOut(argv.includes("--json") ? JSON.stringify(result) : formatHumanStatus(result));
+    return EXIT_CODES.failed;
+  }
+  try {
     const platform = options.collect_platform ? await collectPlatformEvidence({ environment: options.environment, commandRunner, env, now, target: options.vercel_target, expectedRef: options.expected_ref }) : await collectPlatformEvidence({ environment: "local", commandRunner, env, now });
     const result = await collectAgentOpsStatus({ baseUrl: options.base_url, token: options.token, fetchImpl, now, platform, environment: options.environment });
     writeOut(options.json ? JSON.stringify(result) : formatHumanStatus(result));
     return result.exit_code;
   } catch (error) {
-    writeErr(redactSensitive(error instanceof Error ? error.message : "usage_error", env.OPS_READ_TOKEN ? [env.OPS_READ_TOKEN] : []));
-    return EXIT_CODES.usage_error;
+    const result = redactSensitive({ schema_version: STATUS_SCHEMA_VERSION, checked_at: now, environment: options.environment, verdict: "failed", exit_code: EXIT_CODES.failed, health: null, platform: null, ops: null, freshness: { state: "unknown" }, findings: [issue("internal_collection_error", "failed", error instanceof Error ? error.message : "collection failed")], blockers: [] }, options.token ? [options.token] : []);
+    writeOut(options.json ? JSON.stringify(result) : formatHumanStatus(result));
+    return EXIT_CODES.failed;
   }
 }
 
