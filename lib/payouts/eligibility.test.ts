@@ -77,4 +77,38 @@ describe("payout eligibility freeze service", () => {
       "transfer", "pay", "sendPayment", "createSettlement", "signTransaction",
     ]));
   });
+
+  it("persists a versioned complete evidence snapshot, not only denormalized columns", async () => {
+    let persistedSnapshot: unknown;
+    const sql = {
+      async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
+        if (statement.startsWith("INSERT")) {
+          persistedSnapshot = JSON.parse(String(params[9]));
+          return { rows: [] };
+        }
+        return { rows: [{
+          id: "00000000-0000-0000-0000-000000000701", competition_id: "competition-1", submission_id: "submission-1",
+          entrant_id: ENTRANT.id, status: "eligible", reason_code: "eligible", policy_version: "policy-2026-08",
+          cutoff_at: "2026-08-03T12:00:00.000Z", result_rank: 1, result_score: 99.5, judge_revision: "judge-r7",
+          trace_sha256: "a".repeat(64), trace_scan_revision: "scan-r3", payout_address: completeReconciledSnapshot().payout_profile.address,
+          payout_chain_id: 1, payout_profile_verified_at: "2026-08-02T12:00:00.000Z",
+        }] as Row[] };
+      },
+    };
+    const service = createPayoutEligibilityService(sql, {
+      now: () => new Date("2026-08-03T12:00:00.000Z"),
+      policyVersion: "policy-2026-08",
+      loadCompetitionSnapshot: async () => [completeReconciledSnapshot()],
+    });
+
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" })).resolves.toMatchObject({ ok: true });
+    expect(persistedSnapshot).toEqual(expect.objectContaining({
+      schema_version: "payout-eligibility.v1",
+      policy_version: "policy-2026-08",
+      ownership: completeReconciledSnapshot().ownership,
+      final_result: completeReconciledSnapshot().final_result,
+      trace_artifact: completeReconciledSnapshot().trace_artifact,
+      payout_profile: completeReconciledSnapshot().payout_profile,
+    }));
+  });
 });

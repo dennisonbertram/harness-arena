@@ -23,6 +23,7 @@ afterEach(async () => { await db.close(); });
 
 describe("0007 immutable payout eligibility freeze", () => {
   it("adds an entry-level, immutable cutoff snapshot with no transfer or payment fields", async () => {
+    await expect(db.exec(migration("0007_payout_eligibility.sql"))).resolves.toBeDefined();
     const columns = await db.query<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'payout_eligibility_freezes'
@@ -30,7 +31,7 @@ describe("0007 immutable payout eligibility freeze", () => {
     const names = columns.rows.map(({ column_name }) => column_name);
     expect(names).toEqual(expect.arrayContaining([
       "id", "competition_id", "submission_id", "entrant_id", "frozen_by_entrant_id",
-      "status", "reason_code", "cutoff_at", "snapshot", "created_at",
+      "status", "reason_code", "policy_version", "cutoff_at", "snapshot", "created_at",
     ]));
     expect(names).toEqual(expect.arrayContaining([
       "result_rank", "result_score", "judge_revision", "trace_sha256", "trace_scan_revision",
@@ -47,6 +48,7 @@ describe("0007 immutable payout eligibility freeze", () => {
     expect(rules).toMatch(/FOREIGN KEY.*entrants/i);
     expect(rules).toMatch(/CHECK.*payout_chain_id.*1/i);
     expect(rules).toMatch(/CHECK.*trace_sha256/i);
+    expect(rules).toMatch(/schema_version.*payout-eligibility\.v1/i);
 
     const triggers = await db.query<{ tgname: string }>(`
       SELECT tgname FROM pg_trigger
@@ -60,13 +62,14 @@ describe("0007 immutable payout eligibility freeze", () => {
       INSERT INTO entrants (id, github_id, github_login)
       VALUES ('00000000-0000-0000-0000-000000000101', 101, 'freeze-owner');
       INSERT INTO payout_eligibility_freezes (
-        id, competition_id, submission_id, entrant_id, frozen_by_entrant_id, status, reason_code,
+        id, competition_id, submission_id, entrant_id, frozen_by_entrant_id, status, reason_code, policy_version,
         cutoff_at, snapshot, result_rank, result_score, judge_revision, trace_sha256, trace_scan_revision,
         payout_address, payout_chain_id, payout_profile_verified_at, created_at
       ) VALUES (
         '00000000-0000-0000-0000-000000000601', 'competition-1', 'submission-1',
         '00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000101',
-        'eligible', 'eligible', '2026-08-03T12:00:00Z', '{}'::jsonb, 1, 99.5, 'judge-r7',
+        'eligible', 'eligible', 'policy-2026-08', '2026-08-03T12:00:00Z',
+        '{"schema_version":"payout-eligibility.v1","policy_version":"policy-2026-08"}'::jsonb, 1, 99.5, 'judge-r7',
         repeat('a', 64), 'scan-r3', '0x52908400098527886E0F7030069857D2E4169EE7', 1,
         '2026-08-02T12:00:00Z', '2026-08-03T12:00:00Z'
       );
