@@ -20,8 +20,10 @@ type DurableFactory = (deps: {
   ledger: {
     reserve(input: { actor: { entrant_id: string; github_id: number; github_login: string }; request: typeof request }): Promise<{ operation_id: string; submission_id: string; run_id: string; phase: Phase; replay?: unknown }>;
     load(input: { operation_id: string }): Promise<{ operation_id: string; submission_id: string; run_id: string; actor: typeof actor; request: typeof request; phase: Phase; checkpoint_value?: unknown }>;
-    checkpoint(input: { operation_id: string; expected_phase: Phase; phase: Phase; value?: unknown }): Promise<void>;
-    complete(input: { operation_id: string; response: unknown }): Promise<void>;
+    claim(input: { operation_id: string; lease_ms: number }): Promise<{ lease_token: string } | null>;
+    release(input: { operation_id: string; lease_token: string }): Promise<void>;
+    checkpoint(input: { operation_id: string; lease_token: string; expected_phase: Phase; phase: Phase; value?: unknown }): Promise<void>;
+    complete(input: { operation_id: string; lease_token: string; response: unknown }): Promise<void>;
     conflict?(input: unknown): Promise<never>;
   };
   memberships: { activate(input: { competition_id: string; entrant_id: string }): Promise<{ state: "active" }> };
@@ -72,6 +74,8 @@ function fixture(failAt?: Phase) {
       return { ...reservation, ...(replay === undefined ? {} : { replay }) };
     }),
     load: vi.fn(async () => ({ ...reservation, actor, request, phase: checkpointPhase, checkpoint_value: checkpointValue })),
+    claim: vi.fn(async () => ({ lease_token: "lease-op-001" })),
+    release: vi.fn(async () => undefined),
     checkpoint: vi.fn(async ({ expected_phase, phase, value }: { expected_phase: Phase; phase: Phase; value?: unknown }) => {
       if (expected_phase !== checkpointPhase) throw Object.assign(new Error("phase conflict"), { code: "ENTRY_SAGA_PHASE_CONFLICT" });
       phases.push(phase);
@@ -104,6 +108,10 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
       actor: { entrant_id: actor.entrantId, github_id: actor.githubId, github_login: actor.githubLogin },
       request,
     });
+    expect(f.ledger.claim).toHaveBeenCalledWith({ operation_id: f.reservation.operation_id, lease_ms: expect.any(Number) });
+    expect(f.ledger.claim.mock.invocationCallOrder[0]).toBeLessThan(f.judge.mock.invocationCallOrder[0]);
+    expect(f.ledger.checkpoint.mock.calls.every(([value]) => value.lease_token === "lease-op-001")).toBe(true);
+    expect(f.ledger.release).toHaveBeenCalledWith({ operation_id: f.reservation.operation_id, lease_token: "lease-op-001" });
     expect(f.judge).toHaveBeenCalledWith({ submission_id: f.reservation.submission_id, prompt: request.entry.prompt });
     expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ id: f.reservation.submission_id, github_id: actor.githubId, github_login: actor.githubLogin, competition_id: "comp-live" });
     expect(f.runs.get(f.reservation.run_id)).toMatchObject({ id: f.reservation.run_id, submission_id: f.reservation.submission_id });

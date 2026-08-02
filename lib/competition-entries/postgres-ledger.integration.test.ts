@@ -106,6 +106,27 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
     expect(JSON.stringify(publicView)).not.toContain("request_json");
   });
 
+  it("grants one durable recovery lease and fences phase writes from every non-owner", async () => {
+    const first = ledger();
+    const second = ledger();
+    const reserved = await first.reserve({ actor: entrant, request });
+
+    const owner = await first.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 });
+    expect(owner).toEqual({ lease_token: expect.any(String) });
+    await expect(second.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 })).resolves.toBeNull();
+    await expect(second.checkpoint({
+      operation_id: reserved.operation_id,
+      lease_token: "00000000-0000-0000-0000-000000009999",
+      expected_phase: "reserved",
+      phase: "judge_started",
+    })).rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+
+    if (!owner) throw new Error("fixture lease was not granted");
+    await first.release({ operation_id: reserved.operation_id, lease_token: owner.lease_token });
+    await expect(second.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 }))
+      .resolves.toEqual({ lease_token: expect.any(String) });
+  });
+
   it("completes atomically with submission binding, active membership, audit and outbox records without accepting an external callback", async () => {
     const subject = ledger();
     const reserved = await subject.reserve({ actor: entrant, request });
@@ -131,6 +152,34 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
       operation_id: reserved.operation_id,
       replay: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" },
     });
+  });
+
+  it("refuses final commit after an operator ban and emits no binding, audit, or outbox", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-banned" } });
+    const claim = await subject.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 });
+    if (!claim) throw new Error("fixture lease was not granted");
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: claim.lease_token, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: claim.lease_token, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: claim.lease_token, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: claim.lease_token, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: claim.lease_token, expected_phase: "run_written", phase: "run_created_appended" });
+    await db.query(
+      "INSERT INTO competition_memberships (competition_id, entrant_id, role, state) VALUES ($1,$2,'entrant','banned')",
+      [request.competition_id, entrant.entrant_id],
+    );
+
+    await expect(subject.complete({
+      operation_id: reserved.operation_id,
+      lease_token: claim.lease_token,
+      response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" },
+    })).rejects.toMatchObject({ code: "ENTRY_AUTHORIZATION_REVOKED" });
+    await expect(db.query("SELECT count(*)::int AS count FROM submission_bindings WHERE submission_id=$1", [reserved.submission_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_outbox WHERE operation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
   it("collapses the same reservation across independent service instances", async () => {
