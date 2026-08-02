@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:http";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,10 +18,12 @@ type Message = { id?: number; method?: string; result?: unknown; error?: unknown
 class BuiltStdioClient {
   private nextId = 1;
   private readonly pending = new Map<number, (message: Message) => void>();
-  private readonly process = execFile(process.execPath, [join(packageDirectory, "dist/index.js")], { cwd: packageDirectory });
-  private readonly lines = createInterface({ input: this.process.stdout! });
+  private readonly process;
+  private readonly lines;
 
-  constructor() {
+  constructor(env: NodeJS.ProcessEnv = {}) {
+    this.process = execFile(process.execPath, [join(packageDirectory, "dist/index.js")], { cwd: packageDirectory, env: { ...process.env, ...env } });
+    this.lines = createInterface({ input: this.process.stdout! });
     this.lines.on("line", (line) => {
       const message = JSON.parse(line) as Message;
       if (message.id !== undefined) this.pending.get(message.id)?.(message);
@@ -26,16 +31,20 @@ class BuiltStdioClient {
   }
 
   async request(method: string, params?: Record<string, unknown>): Promise<Message> {
+    return await this.startRequest(method, params).response;
+  }
+
+  startRequest(method: string, params?: Record<string, unknown>): { id: number; response: Promise<Message> } {
     const id = this.nextId++;
     const response = new Promise<Message>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(`timed out waiting for ${method}`)), 2_000);
       this.pending.set(id, (message) => { clearTimeout(timeout); this.pending.delete(id); resolve(message); });
     });
     this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-    return response;
+    return { id, response };
   }
 
-  notify(method: string): void { this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`); }
+  notify(method: string, params?: Record<string, unknown>): void { this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`); }
   async close(): Promise<void> { this.process.stdin!.end(); await once(this.process, "exit"); this.lines.close(); }
 }
 
@@ -62,6 +71,55 @@ describe("competition chat MCP tools", () => {
 
     const denied = new HarnessArenaClient({ baseUrl: "https://arena.example.test", credentials: credentials(), fetch: vi.fn().mockResolvedValue(json(403, { error: "not a competition participant" })) });
     await expect(denied.readCompetitionChat({ competition_id: "summer-2029" })).rejects.toThrow("Harness Arena request failed: not a competition participant");
+  });
+
+  it("propagates MCP cancellation to an in-flight HTTP-backed chat tool", async () => {
+    const home = await mkdtemp(join(tmpdir(), "harness-arena-mcp-cancel-"));
+    const credentialDirectory = join(home, ".harness-arena");
+    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(join(credentialDirectory, "credentials.json"), JSON.stringify({
+      version: 1,
+      credentials: { "http://127.0.0.1": { token: "local-test-token", github_login: "octo", expires_at: "2030-01-01T00:00:00Z" } },
+    }), { mode: 0o600 });
+
+    let releaseResponse: (() => void) | undefined;
+    let sawRequest!: () => void;
+    const requestStarted = new Promise<void>((resolve) => { sawRequest = resolve; });
+    let sawAbort!: () => void;
+    const requestAborted = new Promise<void>((resolve) => { sawAbort = resolve; });
+    const stub = createServer((request, response) => {
+      if (request.url?.startsWith("/api/competitions/live-cup/chat")) {
+        sawRequest();
+        request.once("aborted", sawAbort);
+        releaseResponse = () => response.end(JSON.stringify({ page: { messages: [], next_cursor: null } }));
+      } else response.statusCode = 404;
+    });
+    await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+    const address = stub.address();
+    if (!address || typeof address === "string") throw new Error("local HTTP stub did not bind a TCP port");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    await writeFile(join(credentialDirectory, "credentials.json"), JSON.stringify({
+      version: 1,
+      credentials: { [baseUrl]: { token: "local-test-token", github_login: "octo", expires_at: "2030-01-01T00:00:00Z" } },
+    }), { mode: 0o600 });
+    const client = new BuiltStdioClient({ HOME: home, HARNESS_ARENA_URL: baseUrl });
+
+    try {
+      await client.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "cancellation-regression", version: "0.0.0" } });
+      client.notify("notifications/initialized");
+      const call = client.startRequest("tools/call", { name: "read_competition_chat", arguments: { competition_id: "live-cup", wait_seconds: 25 } });
+      await requestStarted;
+      client.notify("notifications/cancelled", { requestId: call.id, reason: "test cancellation" });
+      await Promise.race([
+        requestAborted,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("HTTP request was not aborted after MCP cancellation")), 500)),
+      ]);
+    } finally {
+      releaseResponse?.();
+      await client.close();
+      await new Promise<void>((resolve) => stub.close(() => resolve()));
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   it("exposes strict bounded chat schemas, delegates handlers, and marks participant content untrusted", async () => {

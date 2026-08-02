@@ -111,6 +111,48 @@ describe("0003 durable submission artifact metadata", () => {
     expect(concurrentTwo).toEqual(concurrentOne);
   });
 
+  it("makes a submission close durable across repository instances and refuses a later trace prepare", async () => {
+    const closer = traces();
+    const laterWriter = traces();
+    const prepared = await closer.prepare({ actor: ALICE, operation_id: "close-seed", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await closer.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await closer.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+    await expect(closer.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })).resolves.toMatchObject({ ok: true });
+
+    await expect(laterWriter.prepare({
+      actor: ALICE,
+      operation_id: "prepare-after-close",
+      artifact: { ...execution, kind: "rationale", schema_version: "rationale.v1" },
+    })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("does not report upload success when its conditional state update loses a concurrent rejection", async () => {
+    const seed = traces();
+    const prepared = await seed.prepare({ actor: ALICE, operation_id: "upload-zero-row", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    const racingDb = {
+      query: async <Row>(sql: string, params?: unknown[]) => {
+        if (sql.startsWith("UPDATE submission_artifacts SET state='uploaded'")) {
+          await db.query(
+            "UPDATE submission_artifacts SET state='rejected', rejected_at=$2, updated_at=$2 WHERE id=$1 AND state='pending_upload'",
+            [prepared.artifact.id, "2026-08-02T12:00:00.000Z"],
+          );
+        }
+        return db.query<Row>(sql, params);
+      },
+      transaction: db.transaction.bind(db),
+    };
+    const racer = createPostgresEntrantTraces(racingDb as never, {
+      ids: { next: () => "00000000-0000-0000-0000-000000000999" },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+
+    await expect(racer.recordUpload({
+      actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128,
+    })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
   it("pins every prepare write to the injected transaction-scoped SQL client", async () => {
     type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
     let transactionCount = 0;

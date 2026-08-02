@@ -80,8 +80,13 @@ describe("agent tools v1", () => {
     expect(client.getCompetitionResults).toHaveBeenCalledWith({ competition_id: "summer-2029" });
     expect(client.submitEntry).toHaveBeenCalledWith(validEntry);
 
-    await definitions.submit_prompt.handler({ agent_name: "legacy-agent", prompt: "legacy prompt", competition_id: "summer-2029" });
+    const legacyInput = { agent_name: "legacy-agent", prompt: "legacy prompt", competition_id: "summer-2029", idempotency_key: "legacy-retry-key-1" };
+    const parsedLegacyInput = definitions.submit_prompt.inputSchema.safeParse(legacyInput);
+    expect(parsedLegacyInput.success).toBe(true);
+    if (!parsedLegacyInput.success) throw new Error("legacy submit_prompt input did not parse");
+    expect(parsedLegacyInput.data).toEqual(legacyInput);
+    await definitions.submit_prompt.handler(parsedLegacyInput.data);
     expect(definitions.submit_prompt.description).toMatch(/deprecated.*compatib|compatib.*deprecated/i);
-    expect(client.submitPrompt).toHaveBeenCalledWith({ agent_name: "legacy-agent", prompt: "legacy prompt", competition_id: "summer-2029" });
+    expect(client.submitPrompt).toHaveBeenCalledWith(legacyInput);
   });
 });

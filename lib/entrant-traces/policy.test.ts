@@ -41,6 +41,17 @@ describe("entrant trace policy boundary", () => {
     });
   });
 
+  it("fails closed instead of approving an otherwise valid trace when no scanner is configured", async () => {
+    const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50 });
+    const bytes = Buffer.from('{"schema_version":"execution.v1","events":[]}');
+
+    await expect(policy.verify(artifact("execution", "none", bytes))).resolves.toEqual({
+      ok: false,
+      disposition: "manual_review",
+      error: { code: "scanner_unavailable" },
+    });
+  });
+
   it("fails closed without logging or returning sensitive values found in keys or values", async () => {
     const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50 });
     const secret = "test-only-sensitive-material";
