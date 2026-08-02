@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Pool as NeonPool } from "@neondatabase/serverless";
 
 import { createPostgresCompetitionChat } from "../competition-chat/postgres";
+import { createPostgresCompetitionEntryLedger } from "../competition-entries/postgres-ledger";
 import { createPostgresEntrantTraces } from "../entrant-traces/postgres";
 import { createExternalPayoutAddressService } from "../payouts/external-address";
 import { createPayoutEligibilityService } from "../payouts/eligibility";
@@ -104,5 +105,6 @@ export function createAgentNetworkServices(
     traces: createPostgresEntrantTraces(sql, { ids, now }),
     payouts: createExternalPayoutAddressService(sql, { ids, now }),
     eligibility: createPayoutEligibilityService(sql, { ids, now }),
+    entries: createPostgresCompetitionEntryLedger(sql, { ids: ids.next.bind(ids), now }),
   };
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { get, issueSignedToken, presignUrl, put } from "@vercel/blob";
 
 import {
@@ -8,10 +8,18 @@ import {
   verifyAgentSessionToken,
 } from "./agent-token";
 import { createAgentNetworkServices, createNeonRuntime } from "./agent-network-data/neon-runtime";
+import {
+  createDurableCompetitionEntrySaga,
+  type SubmitEntryRequest,
+} from "./competition-entries";
+import { dispatchQueuedRuns } from "./dispatch";
 import { validateEntrantTraceManifest, type EntrantTraceManifest } from "./entrant-traces/manifest";
 import { createEntrantTracePolicy } from "./entrant-traces/policy";
 import { createPrivateArtifactBlob } from "./entrant-traces/private-blob";
+import { judgeSubmission } from "./judge";
+import { log } from "./log";
 import { getStorage } from "./storage";
+import { getTasks } from "./tasks";
 
 const SESSION_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_SCOPES = Object.freeze([
@@ -115,6 +123,12 @@ type Storage = {
 
 type PrivateArtifactBlob = ReturnType<typeof createPrivateArtifactBlob>;
 type EntrantTracePolicy = ReturnType<typeof createEntrantTracePolicy>;
+type CompetitionEntrySaga = {
+  submit(input: {
+    actor: { entrantId: string; githubId: number; githubLogin: string };
+    request: SubmitEntryRequest;
+  }): Promise<{ replayed: boolean; response: { submission_id: string; run_id?: string; status: "queued" | "rejected" } }>;
+};
 
 type Tokens = {
   mint: typeof mintAgentSessionToken;
@@ -129,6 +143,8 @@ type RuntimeOptions = {
   now?: () => Date;
   privateBlob?: PrivateArtifactBlob;
   tracePolicy?: EntrantTracePolicy;
+  entrySaga?: CompetitionEntrySaga;
+  onQueuedEntry?: (input: { submission_id: string; run_id: string; replayed: boolean }) => Promise<void>;
   tokenConfiguration: { issuer: string; audience: string; keyId: string };
 };
 
@@ -194,6 +210,8 @@ export function createAgentNetworkRuntime({
   now = () => new Date(),
   privateBlob,
   tracePolicy,
+  entrySaga,
+  onQueuedEntry,
   tokenConfiguration,
 }: RuntimeOptions) {
   return {
@@ -290,6 +308,33 @@ export function createAgentNetworkRuntime({
     async getLiveCompetition(id: string) {
       const competition = await storage.getCompetition(id);
       return competition?.status === "live" ? { id: competition.id, status: "live" as const } : null;
+    },
+
+    async submitCompetitionEntry({ actor, request }: { actor: SessionActor; request: SubmitEntryRequest }) {
+      if (!entrySaga) return { ok: false as const, error: { code: "entries_unavailable" as const } };
+      try {
+        const result = await entrySaga.submit({
+          actor: { entrantId: actor.id, githubId: actor.github_id, githubLogin: actor.github_login },
+          request,
+        });
+        const response = result.response;
+        if (response.status === "queued" && response.run_id && onQueuedEntry) {
+          await onQueuedEntry({ submission_id: response.submission_id, run_id: response.run_id, replayed: result.replayed });
+        }
+        return { ok: true as const, entry: response, replayed: result.replayed };
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+          ? error.code
+          : undefined;
+        if (code === "COMPETITION_NOT_FOUND") return { ok: false as const, error: { code: "competition_not_found" as const } };
+        if (code === "COMPETITION_CLOSED") return { ok: false as const, error: { code: "competition_closed" as const } };
+        if (code === "COMPETITION_MEMBERSHIP_FORBIDDEN") return { ok: false as const, error: { code: "forbidden" as const } };
+        if (code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST") return { ok: false as const, error: { code: "idempotency_conflict" as const } };
+        if (code === "ENTRY_RECONCILIATION_REQUIRED" || code === "ENTRY_SAGA_PHASE_CONFLICT") {
+          return { ok: false as const, error: { code: "reconciliation_required" as const } };
+        }
+        return { ok: false as const, error: { code: "entries_unavailable" as const } };
+      }
     },
 
     async joinCompetitionChat(
@@ -564,12 +609,44 @@ export function getAgentNetworkRuntime() {
   };
   const sql = createNeonRuntime({ databaseUrl: process.env.DATABASE_URL, maxPoolSize: poolSize() });
   const services = createAgentNetworkServices(sql, { cursorSecret: required("AGENT_CHAT_CURSOR_SECRET") });
+  const storage = getStorage();
+  const entrySaga = createDurableCompetitionEntrySaga({
+    ledger: services.entries,
+    memberships: {
+      activate: async ({ competition_id, entrant_id }) => {
+        const membership = await services.repositories.memberships.activate({
+          competitionId: competition_id,
+          entrantId: entrant_id,
+        });
+        return { state: membership.state === "active" ? "active" as const : "banned" as const };
+      },
+    },
+    storage: {
+      getSubmission: (id) => storage.getSubmission(id),
+      getRun: (id) => storage.getRun(id),
+      putSubmission: (value) => storage.putSubmission(value as never),
+      putRun: (value) => storage.putRun(value as never),
+      appendRunEvents: async (runId, events) => {
+        await storage.appendRunEvents(runId, events.map((event) => ({ ...event, ts: new Date().toISOString() })));
+      },
+      hasRunCreatedEvent: async (runId) => (await storage.listRunEventsSince(runId, 0)).some((event) => event.type === "run.created"),
+    },
+    judge: async ({ prompt }) => judgeSubmission(prompt, getTasks()),
+    getCompetition: (id) => storage.getCompetition(id),
+  });
   runtime = createAgentNetworkRuntime({
     services,
-    storage: getStorage(),
+    storage,
     tokenConfiguration,
     privateBlob: configuredPrivateArtifactBlob(),
     tracePolicy: createEntrantTracePolicy({ maxUncompressedBytes: 8_388_608, scanTimeoutMs: 5_000 }),
+    entrySaga,
+    onQueuedEntry: async ({ submission_id }) => {
+      const kick = () => dispatchQueuedRuns(storage).catch(() => {
+        log("warn", "competition.entry.dispatch_failed", { submission_id });
+      });
+      try { after(kick); } catch { void kick(); }
+    },
   });
   return runtime;
 }

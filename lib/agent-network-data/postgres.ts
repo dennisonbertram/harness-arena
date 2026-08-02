@@ -143,6 +143,24 @@ export function createPostgresAgentNetworkRepositories(db: SqlClient, options: {
   };
 
   const memberships = {
+    async activate({ competitionId, entrantId }: { competitionId: string; entrantId: string }) {
+      const at = currentTime().toISOString();
+      const result = await db.query<MembershipRow>(
+        `INSERT INTO competition_memberships (competition_id, entrant_id, role, state, joined_at, left_at, banned_at, updated_at)
+         VALUES ($1, $2, 'entrant', 'active', $3::timestamptz, NULL, NULL, $3::timestamptz)
+         ON CONFLICT (competition_id, entrant_id) DO UPDATE SET
+           role = 'entrant',
+           state = CASE WHEN competition_memberships.state = 'banned' THEN 'banned' ELSE 'active' END,
+           joined_at = CASE WHEN competition_memberships.state = 'banned' THEN competition_memberships.joined_at ELSE EXCLUDED.updated_at END,
+           left_at = CASE WHEN competition_memberships.state = 'banned' THEN competition_memberships.left_at ELSE NULL END,
+           banned_at = competition_memberships.banned_at,
+           updated_at = EXCLUDED.updated_at
+         RETURNING competition_id, entrant_id, role, state, joined_at, left_at, banned_at, updated_at`,
+        [competitionId, entrantId, at],
+      );
+      const row = result.rows[0];
+      return cloneAndFreeze({ competitionId: row.competition_id, entrantId: row.entrant_id, role: row.role, state: row.state, joinedAt: iso(row.joined_at), leftAt: row.left_at === null ? null : iso(row.left_at), bannedAt: row.banned_at === null ? null : iso(row.banned_at), updatedAt: iso(row.updated_at) });
+    },
     async set({ competitionId, entrantId, state }: { competitionId: string; entrantId: string; state: "active" | "left" | "banned" }) {
       const at = currentTime().toISOString();
       const result = await db.query<MembershipRow>(

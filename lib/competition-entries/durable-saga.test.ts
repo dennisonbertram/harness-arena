@@ -18,9 +18,9 @@ type DurableFactory = (deps: {
   // The Postgres boundary must reserve IDs and an outbox item in a short
   // transaction; it deliberately exposes no callback transaction around I/O.
   ledger: {
-    reserve(input: { actor_id: string; competition_id: string; idempotency_key: string; request: unknown }): Promise<{ operation_id: string; submission_id: string; run_id: string; replay?: unknown }>;
+    reserve(input: { actor: { entrant_id: string; github_id: number; github_login: string }; request: typeof request }): Promise<{ operation_id: string; submission_id: string; run_id: string; phase: Phase; replay?: unknown }>;
     load(input: { operation_id: string }): Promise<{ operation_id: string; submission_id: string; run_id: string; actor: typeof actor; request: typeof request; phase: Phase; checkpoint_value?: unknown }>;
-    checkpoint(input: { operation_id: string; phase: Phase; value?: unknown }): Promise<void>;
+    checkpoint(input: { operation_id: string; expected_phase: Phase; phase: Phase; value?: unknown }): Promise<void>;
     complete(input: { operation_id: string; response: unknown }): Promise<void>;
     conflict?(input: unknown): Promise<never>;
   };
@@ -51,10 +51,11 @@ function fixture(failAt?: Phase) {
   const submissions = new Map<string, Record<string, unknown>>();
   const runs = new Map<string, Record<string, unknown>>();
   const events = new Map<string, Array<{ type: "run.created"; payload: Record<string, unknown> }>>();
-  const reservation = { operation_id: "op-001", submission_id: "submission-reserved", run_id: "run-reserved" };
+  const reservation = { operation_id: "op-001", submission_id: "submission-reserved", run_id: "run-reserved", phase: "reserved" as const };
   let completed: unknown;
   let replay: unknown;
   let checkpointPhase: Phase = "reserved";
+  let reservationCrashObserved = false;
   let checkpointValue: unknown;
   let reservedRequest: unknown;
   const ledger = {
@@ -63,10 +64,16 @@ function fixture(failAt?: Phase) {
         throw Object.assign(new Error("idempotency key reused"), { code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" });
       }
       reservedRequest = input.request;
+      if (failAt === "reserved" && !reservationCrashObserved) {
+        reservationCrashObserved = true;
+        phases.push("reserved");
+        throw new Error("crash after reserved");
+      }
       return { ...reservation, ...(replay === undefined ? {} : { replay }) };
     }),
     load: vi.fn(async () => ({ ...reservation, actor, request, phase: checkpointPhase, checkpoint_value: checkpointValue })),
-    checkpoint: vi.fn(async ({ phase, value }: { phase: Phase; value?: unknown }) => {
+    checkpoint: vi.fn(async ({ expected_phase, phase, value }: { expected_phase: Phase; phase: Phase; value?: unknown }) => {
+      if (expected_phase !== checkpointPhase) throw Object.assign(new Error("phase conflict"), { code: "ENTRY_SAGA_PHASE_CONFLICT" });
       phases.push(phase);
       checkpointPhase = phase;
       checkpointValue = value;
@@ -93,7 +100,10 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
 
     await f.saga.submit({ actor, request });
 
-    expect(f.ledger.reserve).toHaveBeenCalledWith(expect.objectContaining({ actor_id: actor.entrantId, competition_id: "comp-live" }));
+    expect(f.ledger.reserve).toHaveBeenCalledWith({
+      actor: { entrant_id: actor.entrantId, github_id: actor.githubId, github_login: actor.githubLogin },
+      request,
+    });
     expect(f.judge).toHaveBeenCalledWith({ submission_id: f.reservation.submission_id, prompt: request.entry.prompt });
     expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ id: f.reservation.submission_id, github_id: actor.githubId, github_login: actor.githubLogin, competition_id: "comp-live" });
     expect(f.runs.get(f.reservation.run_id)).toMatchObject({ id: f.reservation.run_id, submission_id: f.reservation.submission_id });

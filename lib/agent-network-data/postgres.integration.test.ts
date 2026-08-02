@@ -98,6 +98,18 @@ describe("PostgreSQL agent-network repositories", () => {
     });
   });
 
+  it("reactivates a voluntary leave but never reactivates an operator ban", async () => {
+    const repos = repositories();
+    const entrant = await repos.entrants.upsert({ githubId: "430", githubLogin: "member-safe-reactivation" });
+    const competitionId = "competition-membership-safety";
+
+    await repos.memberships.set({ competitionId, entrantId: entrant.id, state: "left" });
+    await expect(repos.memberships.activate({ competitionId, entrantId: entrant.id })).resolves.toMatchObject({ state: "active" });
+    await repos.memberships.set({ competitionId, entrantId: entrant.id, state: "banned" });
+    await expect(repos.memberships.activate({ competitionId, entrantId: entrant.id })).resolves.toMatchObject({ state: "banned" });
+    await expect(repos.memberships.isActive({ competitionId, entrantId: entrant.id })).resolves.toBe(false);
+  });
+
   it("exposes audit as append/list-only with detached records", async () => {
     const repos = repositories();
     await repos.audit.append({

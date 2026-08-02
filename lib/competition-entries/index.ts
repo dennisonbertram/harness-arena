@@ -114,8 +114,8 @@ export function projectCompetitionResults({
 }
 
 export class CompetitionEntryError extends Error {
-  constructor(readonly code: "COMPETITION_NOT_FOUND" | "COMPETITION_CLOSED") {
-    super(code === "COMPETITION_NOT_FOUND" ? "competition not found" : "competition is closed");
+  constructor(readonly code: "COMPETITION_NOT_FOUND" | "COMPETITION_CLOSED" | "COMPETITION_MEMBERSHIP_FORBIDDEN") {
+    super(code === "COMPETITION_NOT_FOUND" ? "competition not found" : code === "COMPETITION_CLOSED" ? "competition is closed" : "competition membership is forbidden");
   }
 }
 
@@ -167,11 +167,15 @@ type DurableReservation = {
   operation_id: string;
   submission_id: string;
   run_id: string;
+  phase: DurablePhase;
   replay?: unknown;
 };
 
 type DurableLedger = {
-  reserve(input: { actor_id: string; competition_id: string; idempotency_key: string; request: unknown }): Promise<DurableReservation>;
+  reserve(input: {
+    actor: { entrant_id: string; github_id: number; github_login: string };
+    request: SubmitEntryRequest;
+  }): Promise<DurableReservation>;
   load(input: { operation_id: string }): Promise<{
     operation_id: string;
     submission_id: string;
@@ -181,7 +185,7 @@ type DurableLedger = {
     phase: DurablePhase;
     checkpoint_value?: unknown;
   }>;
-  checkpoint(input: { operation_id: string; phase: DurablePhase; value?: unknown }): Promise<void>;
+  checkpoint(input: { operation_id: string; expected_phase: DurablePhase; phase: DurablePhase; value?: unknown }): Promise<void>;
   complete(input: { operation_id: string; response: DurableResponse }): Promise<void>;
 };
 
@@ -196,10 +200,10 @@ type DurableStorage = {
 
 type DurableDependencies = {
   ledger: DurableLedger;
-  memberships: { activate(input: { competition_id: string; entrant_id: string }): Promise<{ state: "active" }> };
+  memberships: { activate(input: { competition_id: string; entrant_id: string }): Promise<{ state: "active" | "banned" }> };
   storage: DurableStorage;
   judge: (input: { submission_id: string; prompt: string }) => Promise<DurableVerdict>;
-  getCompetition(id: string): Promise<{ id: string; status: "live" | "closed"; model: string } | undefined>;
+  getCompetition(id: string): Promise<{ id: string; status: "live" | "closed"; model: string; gateway_provider?: string } | undefined>;
 };
 
 export class EntryReconciliationRequiredError extends Error {
@@ -278,7 +282,8 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     });
     const runExists = assertSameOrAbsent(existingRun, { id: state.run_id, submission_id: state.submission_id });
 
-    await memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId });
+    const membership = await memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId });
+    if (membership.state !== "active") throw new CompetitionEntryError("COMPETITION_MEMBERSHIP_FORBIDDEN");
 
     let phase = state.phase;
     let verdict: DurableVerdict;
@@ -289,9 +294,9 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       throw new EntryReconciliationRequiredError();
     }
     if (phase === "reserved") {
-      await ledger.checkpoint({ operation_id: state.operation_id, phase: "judge_started" });
+      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "reserved", phase: "judge_started" });
       verdict = await judge({ submission_id: state.submission_id, prompt: state.request.entry.prompt });
-      await ledger.checkpoint({ operation_id: state.operation_id, phase: "verdict_persisted", value: verdict });
+      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: verdict });
       phase = "verdict_persisted";
     } else {
       // The verdict checkpoint is the only phase that needs to carry a
@@ -311,6 +316,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       judge_reason: verdict.reason,
       judged_at: new Date().toISOString(),
       model: competition.model,
+      ...(competition.gateway_provider === undefined ? {} : { gateway_provider: competition.gateway_provider }),
       competition: true,
       competition_id: competition.id,
       github_id: state.actor.githubId,
@@ -321,7 +327,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
 
     if (phase === "verdict_persisted") {
       if (!submissionExists) await storage.putSubmission(submission);
-      await ledger.checkpoint({ operation_id: state.operation_id, phase: "submission_written" });
+      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
       phase = "submission_written";
     }
 
@@ -336,19 +342,20 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       submission_id: state.submission_id,
       status: "queued",
       model: competition.model,
+      ...(competition.gateway_provider === undefined ? {} : { provider_requested: competition.gateway_provider }),
       task_results: [],
       created_at: new Date().toISOString(),
     };
     if (phase === "submission_written") {
       if (!runExists) await storage.putRun(run);
-      await ledger.checkpoint({ operation_id: state.operation_id, phase: "run_written" });
+      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "submission_written", phase: "run_written" });
       phase = "run_written";
     }
     if (phase === "run_written") {
       if (!storage.hasRunCreatedEvent || !await storage.hasRunCreatedEvent(state.run_id)) {
         await storage.appendRunEvents(state.run_id, [{ type: "run.created", payload: { submission_id: state.submission_id } }]);
       }
-      await ledger.checkpoint({ operation_id: state.operation_id, phase: "run_created_appended" });
+      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "run_written", phase: "run_created_appended" });
     }
     const response: DurableResponse = { submission_id: state.submission_id, run_id: state.run_id, status: "queued" };
     await ledger.complete({ operation_id: state.operation_id, response });
@@ -362,14 +369,11 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       if (!competition) throw new CompetitionEntryError("COMPETITION_NOT_FOUND");
       if (competition.status !== "live") throw new CompetitionEntryError("COMPETITION_CLOSED");
       const reservation = await ledger.reserve({
-        actor_id: actor.entrantId,
-        competition_id: competition.id,
-        idempotency_key: parsed.idempotency_key,
+        actor: { entrant_id: actor.entrantId, github_id: actor.githubId, github_login: actor.githubLogin },
         request: parsed,
       });
       if (reservation.replay !== undefined) return { replayed: true, response: reservation.replay as DurableResponse };
-      await ledger.checkpoint({ operation_id: reservation.operation_id, phase: "reserved" });
-      const response = await advance({ ...reservation, actor, request: parsed, phase: "reserved" });
+      const response = await advance({ ...reservation, actor, request: parsed });
       return { replayed: false, response };
     },
     async recover({ operation_id }: { operation_id: string }) {
