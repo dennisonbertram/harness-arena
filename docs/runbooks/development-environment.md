@@ -1,9 +1,8 @@
 # Development environment runbook
 
 This runbook is only for the independently reserved **development** Vercel
-project. It must never be used to configure, deploy, inspect, or mutate the
-live project, its aliases, production Blob, production environment values, or
-production data.
+project. Read-only inspection of live identifiers, routing, and deployment metadata is required to establish and refresh the isolation boundary.
+The boundary forbids all live mutations, deploys, promotions, rollbacks, alias changes, environment changes, store changes, data changes, credential value reads, and mutating application access.
 
 ## PR #174 preview-routing disclosure source
 
@@ -65,7 +64,8 @@ Rollback means removing a development alias or redeploying a prior `dev`
 revision in the reserved project only. Never roll back by changing the live
 project or its data.
 
-Stop immediately if a command, dashboard, callback, alias, token, project ID,
-or Blob store could target production. Stop if the verifier reports a missing
-live store ID or any violation. Escalate with identifiers only—never paste
-tokens or secrets into an issue, PR, log, or this repository.
+Stop immediately if an operation goes beyond read-only inspection of live
+identifiers, routing, or deployment metadata, or if it could read credential
+values or mutate the live project or application. Stop if the verifier reports
+a missing live store ID or any violation. Escalate with identifiers only—never
+paste tokens or secrets into an issue, PR, log, or this repository.
