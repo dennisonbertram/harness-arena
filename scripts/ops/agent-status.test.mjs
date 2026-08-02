@@ -35,12 +35,12 @@ function healthyApiFetch({ missingCursor = false, unknownFreshness = false, heal
       const kind = url.searchParams.get("kind"), cursor = url.searchParams.get("cursor");
       if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], has_more: true, next_cursor: missingCursor ? null : "runs-2" });
       if (kind === "runs") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r2.json", uploaded_at: "2026-08-03T00:04:00.000Z" }], has_more: false, next_cursor: null });
-      if (kind === "events") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "events/r1/0000000002.json", uploaded_at: "2026-08-03T00:06:00.000Z" }], has_more: false, next_cursor: null });
+      if (kind === "events") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "events/r1/0000000002.json", uploaded_at: "2026-08-03T00:06:00.000Z" }, { pathname: "events/r2/0000000003.json", uploaded_at: "2026-08-03T00:06:00.000Z" }], has_more: false, next_cursor: null });
       return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "competitions/c1.json", uploaded_at: "2026-08-03T00:01:00.000Z" }], has_more: false, next_cursor: null });
     }
     if (url.pathname === "/api/ops/v1/read" && url.searchParams.get("kind") === "runs") {
       const id = url.searchParams.get("id");
-      return jsonResponse({ schema_version: "ops.v1", kind: "runs", item: { id, status: id === "r1" ? "running" : "completed", sandbox_id: id === "r1" ? "sbx-1" : undefined, callback_status: "delivered", total_cost_usd: 1.25, task_results: [{ passed: true }, { passed: false }], provider: "vercel-ai-gateway", model: "test/model" } });
+      return jsonResponse({ schema_version: "ops.v1", kind: "runs", item: { id, status: id === "r1" ? "running" : "completed", sandbox_id: id === "r1" ? "sbx-1" : "sbx-2", callback_status: "delivered", total_cost_usd: 1.25, task_results: [{ passed: true }, { passed: false }], provider: "vercel-ai-gateway", model: "test/model" } });
     }
     if (url.pathname === "/api/ops/v1/read" && url.searchParams.get("kind") === "events") return jsonResponse({ schema_version: "ops.v1", kind: "events", item: { type: "task.completed", action: "judge", created_at: "2026-08-03T00:06:00.000Z" } });
     throw new Error(`unexpected URL ${url}`);
@@ -87,7 +87,7 @@ describe("fixture-driven evidence parsers", () => {
   it("parses Vercel inspect metadata and cron capability", () => expect(parseVercelInspect(fixture("vercel-inspect.json"))).toMatchObject({ deployment: { hostname: "arena.example", id: "dpl_1", created_at: "2026-08-03T00:00:00.000Z", ref: "main", sha: "abc123", git_dirty: false }, cron: { state: "configured" } }));
   it("parses environment metadata without values and reports required names", () => {
     const parsed = parseVercelEnvironment(fixture("vercel-env.json"), "production");
-    expect(parsed).toMatchObject({ records: [{ name: "OPS_READ_TOKEN", targets: ["production"], type: "encrypted" }], required_missing: ["OPS_READ_CURSOR_SECRET"] });
+    expect(parsed).toMatchObject({ records: expect.arrayContaining([{ name: "OPS_READ_TOKEN", targets: ["production"], type: "encrypted", created_at: expect.any(String), age_ms: expect.any(Number) }]), required_missing: ["OPS_READ_CURSOR_SECRET"] });
     expect(JSON.stringify(parsed)).not.toContain("super-secret-value");
   });
   it("parses recent Vercel errors from bounded NDJSON", () => expect(parseVercelLogs(fixture("vercel-logs.ndjson"))).toMatchObject({ recent_errors: [{ level: "error", status_code: 503, message: "gateway failed Bearer [REDACTED]" }] }));
@@ -98,7 +98,7 @@ describe("ops evidence and verdict honesty", () => {
   it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
     const fetchImpl = healthyApiFetch();
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
-    expect(result).toMatchObject({ schema_version: "agent_ops_status.v1", verdict: "healthy", exit_code: EXIT_CODES.healthy, ops: { inventory: { runs: { records: 2, pages: 2, complete: true }, events: { records: 1 }, competitions: { records: 1 } }, runs: [expect.objectContaining({ run_id: "r1", state: "running", sandbox_id: "sbx-1", callback: "delivered", cost_usd: 1.25, tasks: { total: 2, passed: 1 }, provider: "vercel-ai-gateway", latest_event: { seq: 2, type: "task.completed", action: "judge" } })] } });
+    expect(result).toMatchObject({ schema_version: "agent_ops_status.v1", verdict: "healthy", exit_code: EXIT_CODES.healthy, ops: { inventory: { runs: { records: 2, pages: 2, complete: true }, events: { records: 2 }, competitions: { records: 1 } }, runs: expect.arrayContaining([expect.objectContaining({ run_id: "r1", state: "running", sandbox_id: "sbx-1", callback: "delivered", cost_usd: 1.25, tasks: { total: 2, passed: 1 }, provider: "vercel-ai-gateway", latest_event: expect.objectContaining({ seq: 2, type: "task.completed", action: "judge" }) })]) } });
     expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
     expect(JSON.stringify(result)).not.toContain("not-for-output");
   });
@@ -161,7 +161,7 @@ describe("redaction, platform wiring, and process bounds", () => {
     for (const code of ["ENOENT", "command_timeout"]) {
       const commandRunner = vi.fn().mockRejectedValue(Object.assign(new Error(code), { code }));
       const result = await collectPlatformEvidence({ environment: "production", commandRunner });
-      expect(result).toMatchObject({ state: "access_blocked", blockers: [expect.objectContaining({ code: expect.stringContaining("command") })] });
+      expect(result).toMatchObject({ state: "access_blocked", blockers: expect.arrayContaining([expect.objectContaining({ code: expect.stringContaining("command") })]) });
     }
   });
 
@@ -172,6 +172,12 @@ describe("redaction, platform wiring, and process bounds", () => {
     await expect(pending).rejects.toThrow(/command_(?:output_limit|timeout)/);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("bounds a silent subprocess timeout through SIGTERM and SIGKILL", async () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn((signal) => { if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", null, signal)); return true; });
+    await expect(spawnCommand("vercel", ["ls"], { spawnImpl: () => child, timeoutMs: 1, killGraceMs: 1 })).rejects.toThrow("command_timeout");
+    expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
   it("keeps human output concise and names contradictory evidence", () => {
