@@ -34,6 +34,22 @@ vercel curl /api/competitions -- --silent
 vercel curl /api/runs -- --silent
 ```
 
+Before declaring the deployment reproducible, verify the structured Git
+metadata rather than treating `Ready` as sufficient. `vercel inspect --json`
+does not include the Git metadata, so select the serving record from the
+production-list response:
+
+```sh
+vercel ls --prod --format json > /tmp/harness-arena-deployments.json
+jq '.deployments[0]' /tmp/harness-arena-deployments.json > /tmp/harness-arena-serving.json
+node scripts/ops/check-deploy-provenance.mjs /tmp/harness-arena-serving.json \
+  --branch main --sha "$(git rev-parse HEAD)"
+```
+
+The checker fails for a non-main branch, SHA mismatch, `gitDirty: "1"`, or
+missing branch/SHA metadata. A missing `gitDirty` field is accepted because
+Vercel's normal GitHub deployments omit it; it still must never be `"1"`.
+
 Record:
 
 - serving deployment ID, URL, commit, readiness, and aliases;

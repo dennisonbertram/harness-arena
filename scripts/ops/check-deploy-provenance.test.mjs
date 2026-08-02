@@ -8,7 +8,7 @@ const expected = {
 };
 
 describe("checkDeployProvenance", () => {
-  it("fails closed when Vercel metadata is missing, dirty, on another branch, or at another SHA", () => {
+  it("fails closed when source metadata is missing, dirty, on another branch, or at another SHA", () => {
     const result = checkDeployProvenance({
       deployment: {
         meta: {
@@ -39,7 +39,6 @@ describe("checkDeployProvenance", () => {
       errors: [
         "missing branch metadata",
         "missing sha metadata",
-        "missing gitDirty metadata",
       ],
       actual: { branch: undefined, sha: undefined, gitDirty: undefined },
     });
@@ -51,14 +50,13 @@ describe("checkDeployProvenance", () => {
         meta: {
           githubCommitRef: expected.branch,
           githubCommitSha: expected.sha,
-          gitDirty: "0",
         },
       },
       expected,
     })).toEqual({
       ok: true,
       errors: [],
-      actual: { branch: expected.branch, sha: expected.sha, gitDirty: "0" },
+      actual: { branch: expected.branch, sha: expected.sha, gitDirty: undefined },
     });
   });
 });
