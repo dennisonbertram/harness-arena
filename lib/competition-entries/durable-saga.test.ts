@@ -177,6 +177,15 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.storage.appendRunEvents).not.toHaveBeenCalled();
   });
 
+  it("defers membership creation to the lifecycle-gated ledger completion transaction", async () => {
+    const f = fixture();
+
+    await f.saga.submit({ actor, request });
+
+    expect(f.memberships.activate).not.toHaveBeenCalled();
+    expect(f.ledger.complete).toHaveBeenCalledTimes(1);
+  });
+
   it("replays an exact completed request, conflicts a changed one, and never judges or writes twice", async () => {
     const f = fixture();
     f.setReplay({ submission_id: f.reservation.submission_id, run_id: f.reservation.run_id, status: "queued" });
