@@ -67,6 +67,7 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
         await db.query("UPDATE submission_artifacts SET state='rejected', rejected_at=$2, updated_at=$2 WHERE id=$1", [artifact_id, options.now().toISOString()]);
         return fail("conflict");
       }
+      if (a.state === "verified") return { ok: true as const, artifact: a };
       if (a.state !== "uploaded") return fail("invalid_state");
       await db.query("UPDATE submission_artifacts SET state='verified', verified_at=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='uploaded'", [artifact_id, actor.id, options.now().toISOString()]); return { ok: true as const, artifact: await read(artifact_id) };
     },
