@@ -32,6 +32,21 @@ describe("runtime SQL adapter", () => {
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
+  it("redacts standalone and connection-level driver failures", async () => {
+    const connectionString = "postgres://user:very-secret@db.example/app";
+    const pool = poolFixture();
+    const runtime = createRuntimeSqlAdapter({ pool, databaseUrl: connectionString });
+    pool.query.mockRejectedValueOnce(new Error(`query failed for ${connectionString}`));
+    const queryFailure = await runtime.query("SELECT 1").then(() => null, (error: Error) => error);
+    expect(queryFailure?.message).toBe("database query failed");
+    expect(queryFailure?.message).not.toContain(connectionString);
+
+    pool.connect.mockRejectedValueOnce(new Error(`connect failed for ${connectionString}`));
+    const transactionFailure = await runtime.transaction(async () => undefined).then(() => null, (error: Error) => error);
+    expect(transactionFailure?.message).toBe("database transaction failed");
+    expect(transactionFailure?.message).not.toContain(connectionString);
+  });
+
   it("pins every interactive transaction query to one acquired client, then commits and releases it", async () => {
     const pool = poolFixture();
     const runtime = createRuntimeSqlAdapter({ pool, databaseUrl: "postgres://user:secret@db.example/app" });
@@ -71,7 +86,7 @@ describe("runtime SQL adapter", () => {
       .mockRejectedValueOnce(new Error("commit failed"))
       .mockResolvedValueOnce({ rows: [] });
 
-    await expect(runtime.transaction(async (tx) => tx.query("SELECT 1", []))).rejects.toThrow("commit failed");
+    await expect(runtime.transaction(async (tx) => tx.query("SELECT 1", []))).rejects.toThrow("database transaction failed");
     expect(pool.query).not.toHaveBeenCalled();
     expect(pool.client.query.mock.calls).toEqual([["BEGIN"], ["SELECT 1", []], ["COMMIT"], ["ROLLBACK"]]);
     expect(pool.client.release).toHaveBeenCalledTimes(1);
