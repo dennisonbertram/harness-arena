@@ -5,7 +5,7 @@ import { verifyPullRequestLineage } from "./verify-pr-lineage.mjs";
 
 const GRAPHQL_URL = "https://api.github.com/graphql";
 
-const LINEAGE_QUERY = `query PullRequestLineage($owner: String!, $name: String!, $number: Int!) {
+const LINEAGE_QUERY = `query PullRequestLineage($owner: String!, $name: String!, $number: Int!, $issueNumber: Int!) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
     defaultBranchRef { name }
@@ -24,8 +24,40 @@ const LINEAGE_QUERY = `query PullRequestLineage($owner: String!, $name: String!,
         }
       }
     }
+    issue(number: $issueNumber) {
+      number
+      repository { nameWithOwner }
+      parent {
+        number
+        repository { nameWithOwner }
+        labels(first: 100) { nodes { name } }
+      }
+    }
   }
 }`;
+
+function fail(message) {
+  throw new Error(`PR lineage check failed: ${message}`);
+}
+
+export function parseDevelopmentClosingIssue(body) {
+  if (typeof body !== "string") {
+    fail("dev PR body must contain exactly one local Closes #N reference.");
+  }
+
+  const candidates = [...body.matchAll(/^\s*Closes\s+([^\s]+)\s*$/gm)];
+  if (candidates.length !== 1) {
+    fail("dev PR body must contain exactly one local Closes #N reference.");
+  }
+
+  const reference = candidates[0][1];
+  const match = /^#([1-9]\d*)$/.exec(reference);
+  if (!match) {
+    fail("dev PR body must contain exactly one local Closes #N reference; cross-repository and malformed references are not allowed.");
+  }
+
+  return Number(match[1]);
+}
 
 function repositoryParts(repository) {
   if (typeof repository !== "string") {
@@ -48,6 +80,8 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
     throw new Error("PR lineage check failed: pull request event metadata is missing or malformed.");
   }
 
+  const developmentIssueNumber = baseRefName === "dev" ? parseDevelopmentClosingIssue(event.pull_request.body) : 1;
+
   let response;
   try {
     response = await fetchImpl(GRAPHQL_URL, {
@@ -58,7 +92,7 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
       },
       body: JSON.stringify({
         query: LINEAGE_QUERY,
-        variables: { owner, name, number },
+        variables: { owner, name, number, issueNumber: developmentIssueNumber },
       }),
     });
   } catch {
@@ -101,6 +135,34 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
             labels: issue?.parent?.labels?.nodes?.map((label) => label?.name),
           },
   }));
+
+  if (baseRefName === "dev") {
+    const issue = graphRepository.issue;
+    if (!issue) {
+      throw new Error("GitHub GraphQL response was malformed.");
+    }
+
+    return verifyPullRequestLineage({
+      baseRepositoryNameWithOwner: graphRepository.nameWithOwner,
+      baseRefName: graphRepository.defaultBranchRef.name,
+      defaultBranchName: graphRepository.defaultBranchRef.name,
+      closingIssueCount: 1,
+      closingIssues: [
+        {
+          number: issue.number,
+          repositoryNameWithOwner: issue.repository?.nameWithOwner,
+          parent:
+            issue.parent === null
+              ? null
+              : {
+                  number: issue.parent?.number,
+                  repositoryNameWithOwner: issue.parent?.repository?.nameWithOwner,
+                  labels: issue.parent?.labels?.nodes?.map((label) => label?.name),
+                },
+        },
+      ],
+    });
+  }
 
   return verifyPullRequestLineage({
     baseRepositoryNameWithOwner: graphRepository.nameWithOwner,

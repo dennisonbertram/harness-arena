@@ -1,0 +1,16 @@
+{
+  "environment": "development",
+  "branch": "dev",
+  "vercelProject": {
+    "id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+    "name": "harness-arena-development"
+  },
+  "host": null,
+  "store": { "id": null },
+  "callbackOrigin": null,
+  "live": {
+    "projectId": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
+    "aliases": ["harness-arena-psi.vercel.app"],
+    "storeIds": []
+  }
+}
