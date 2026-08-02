@@ -9,9 +9,12 @@ const event = {
   },
 };
 
+const repositoryNameWithOwner = "dennisonbertram/harness-arena";
+
 const validPayload = {
   data: {
     repository: {
+      nameWithOwner: repositoryNameWithOwner,
       defaultBranchRef: { name: "main" },
       pullRequest: {
         number: 149,
@@ -20,8 +23,10 @@ const validPayload = {
           nodes: [
             {
               number: 141,
+              repository: { nameWithOwner: repositoryNameWithOwner },
               parent: {
                 number: 139,
+                repository: { nameWithOwner: repositoryNameWithOwner },
                 labels: { nodes: [{ name: "epic" }] },
               },
             },
@@ -57,12 +62,48 @@ describe("checkPullRequestLineage", () => {
     expect(request.variables).toEqual({ owner: "dennisonbertram", name: "harness-arena", number: 149 });
   });
 
+  it("rejects a foreign closing issue and foreign Epic from the GraphQL fixture", async () => {
+    const payload = structuredClone(validPayload);
+    const [issue] = payload.data.repository.pullRequest.closingIssuesReferences.nodes;
+    issue.repository.nameWithOwner = "attacker/foreign-repo";
+    issue.parent.repository.nameWithOwner = "attacker/foreign-repo";
+
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("closing issue repository must match the pull request base repository");
+  });
+
+  it("rejects a base-repository closing issue with a foreign Epic from the GraphQL fixture", async () => {
+    const payload = structuredClone(validPayload);
+    const [issue] = payload.data.repository.pullRequest.closingIssuesReferences.nodes;
+    issue.parent.repository.nameWithOwner = "attacker/foreign-repo";
+
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("parent issue repository must match the pull request base repository");
+  });
+
   it("fails closed when native metadata reports multiple closing issues", async () => {
     const payload = structuredClone(validPayload);
     payload.data.repository.pullRequest.closingIssuesReferences.totalCount = 2;
     payload.data.repository.pullRequest.closingIssuesReferences.nodes.push({
       number: 142,
-      parent: { number: 139, labels: { nodes: [{ name: "epic" }] } },
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
     });
 
     await expect(

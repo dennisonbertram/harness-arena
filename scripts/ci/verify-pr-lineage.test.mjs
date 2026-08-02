@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { verifyPullRequestLineage } from "./verify-pr-lineage.mjs";
 
+const repositoryNameWithOwner = "dennisonbertram/harness-arena";
+
 const validIssue = {
   number: 141,
-  parent: { number: 139, labels: ["epic"] },
+  repositoryNameWithOwner,
+  parent: { number: 139, repositoryNameWithOwner, labels: ["epic"] },
 };
 
 async function verify({
@@ -14,6 +17,7 @@ async function verify({
   closingIssues = [validIssue],
 } = {}) {
   return verifyPullRequestLineage({
+    baseRepositoryNameWithOwner: repositoryNameWithOwner,
     baseRefName,
     defaultBranchName,
     closingIssueCount,
@@ -52,6 +56,40 @@ describe("verifyPullRequestLineage", () => {
       issueNumber: 141,
       parentEpicNumber: 139,
     });
+  });
+
+  it("rejects a closing issue and Epic from a foreign repository", async () => {
+    await expect(
+      verify({
+        closingIssues: [
+          {
+            number: 141,
+            repositoryNameWithOwner: "attacker/foreign-repo",
+            parent: {
+              number: 139,
+              repositoryNameWithOwner: "attacker/foreign-repo",
+              labels: ["epic"],
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("closing issue repository must match the pull request base repository");
+  });
+
+  it("rejects a base-repository closing issue whose Epic is foreign", async () => {
+    await expect(
+      verify({
+        closingIssues: [
+          {
+            ...validIssue,
+            parent: {
+              ...validIssue.parent,
+              repositoryNameWithOwner: "attacker/foreign-repo",
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("parent issue repository must match the pull request base repository");
   });
 
   it("fails closed when the native issue metadata is malformed", async () => {
