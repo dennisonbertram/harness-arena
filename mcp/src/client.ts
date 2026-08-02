@@ -167,7 +167,7 @@ export class HarnessArenaClient {
     }
     if (response.status === 400) {
       await this.deviceAttempts.consume(this.baseUrl, attemptId);
-      throw new ToolError("Device login was denied or expired. Run login again to get a new code.", { code: "device_login_denied" });
+      throw new ToolError(`Device login ${publicErrorMessage(response.body, "was denied or expired")}. Run login again to get a new code.`, { code: "device_login_denied" });
     }
     throw responseError(response.status, response.body);
   }
@@ -369,6 +369,16 @@ class HttpToolError extends ToolError {
 const parseBody = (text: string): unknown => { try { return JSON.parse(text); } catch { return text; } };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const numericProperty = (value: unknown, key: string): number | undefined => isRecord(value) && typeof value[key] === "number" ? value[key] : undefined;
+const containsSensitiveValue = (value: string) => /(?:postgres(?:ql)?:\/\/|\b(?:secret|token|private[ _-]?key)\b|0x[0-9a-f]{8,})/i.test(value);
+const publicErrorMessage = (body: unknown, fallback: string): string => {
+  const candidate = isRecord(body) && typeof body.error === "string" ? body.error : undefined;
+  return candidate
+    && candidate.length <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9 _.,'():-]*$/.test(candidate)
+    && !containsSensitiveValue(candidate)
+    ? candidate
+    : fallback;
+};
 const errorCode = (body: unknown): string | undefined => {
   if (!isRecord(body) || !isRecord(body.error) || typeof body.error.code !== "string") return undefined;
   return /^[a-z][a-z0-9_]{0,63}$/.test(body.error.code) ? body.error.code : undefined;
@@ -377,7 +387,7 @@ const isRetryableStatus = (status: number) => status === 408 || status === 425 |
 const responseError = (status: number, body: unknown): HttpToolError => {
   if (status === 401) return new HttpToolError(status, "Not authenticated; run the login tool first.", { code: "unauthenticated" });
   if (status === 404) return new HttpToolError(status, "The requested Harness Arena resource was not found.", { code: "not_found" });
-  return new HttpToolError(status, "Harness Arena request failed.", { code: errorCode(body) ?? "request_failed" });
+  return new HttpToolError(status, `Harness Arena request failed: ${publicErrorMessage(body, "an unexpected response was returned")}`, { code: errorCode(body) ?? "request_failed" });
 };
 const isDeviceSuccess = (value: unknown): value is DeviceSuccess => isRecord(value) && typeof value.token === "string" && typeof value.github_login === "string" && typeof value.expires_at === "string";
 const pendingResult = (attempt: DeviceAttempt): Extract<LoginStatusResult, { status: "pending" }> => ({
