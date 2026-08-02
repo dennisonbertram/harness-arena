@@ -147,4 +147,33 @@ describe("0003 durable submission artifact metadata", () => {
     if (!own.ok) throw new Error("fixture owner read failed");
     for (const field of ["bytes", "body", "prompt", "token", "url", "signed_url", "object_key", "owner_entrant_id"] as const) expect(own.artifact).not.toHaveProperty(field);
   });
+
+  it("separates the internal storage lookup from owner-safe submission status listing", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-internal", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+
+    await expect(repo.getInternalForOwner({ actor: BOB, artifact_id: prepared.artifact.id }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.getInternalForOwner({ actor: ALICE, artifact_id: prepared.artifact.id }))
+      .resolves.toMatchObject({
+        ok: true,
+        artifact: {
+          id: prepared.artifact.id,
+          owner_entrant_id: ALICE.id,
+          object_key: expect.stringMatching(/^private\/artifacts\//),
+        },
+      });
+
+    const status = await repo.listForOwner({ actor: ALICE, submission_id: "sub-a" });
+    expect(status).toMatchObject({ ok: true, traces: [expect.objectContaining({ id: prepared.artifact.id })] });
+    if (!status.ok) throw new Error("fixture status failed");
+    for (const trace of status.traces) {
+      for (const field of ["object_key", "owner_entrant_id", "token", "url", "bytes", "body"] as const) {
+        expect(trace).not.toHaveProperty(field);
+      }
+    }
+    await expect(repo.listForOwner({ actor: BOB, submission_id: "sub-a" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+  });
 });
