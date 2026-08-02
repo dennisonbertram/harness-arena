@@ -4,6 +4,7 @@ import { Pool as NeonPool } from "@neondatabase/serverless";
 import { createPostgresCompetitionChat } from "../competition-chat/postgres";
 import { createPostgresEntrantTraces } from "../entrant-traces/postgres";
 import { createExternalPayoutAddressService } from "../payouts/external-address";
+import { createPayoutEligibilityService } from "../payouts/eligibility";
 import { createPostgresAgentNetworkRepositories } from "./postgres";
 import { createRuntimeSqlAdapter, type RuntimeSqlAdapter } from "./runtime";
 
@@ -102,5 +103,6 @@ export function createAgentNetworkServices(
     chat: createPostgresCompetitionChat(sql, { cursorSecret: options.cursorSecret, ids, now }),
     traces: createPostgresEntrantTraces(sql, { ids, now }),
     payouts: createExternalPayoutAddressService(sql, { ids, now }),
+    eligibility: createPayoutEligibilityService(sql, { ids, now }),
   };
 }

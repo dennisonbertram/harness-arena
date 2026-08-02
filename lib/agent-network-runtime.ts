@@ -99,6 +99,13 @@ type Services = {
     verify(input: { actor: { id: string }; challenge_id: string; signature: string; consent_version: string; idempotency_key: string }): Promise<any>;
     getProfile(input: { actor: { id: string } }): Promise<any>;
   };
+  eligibility?: {
+    getOwnEligibility(input: {
+      actor: { id: string };
+      competition_id: string;
+      submission_id: string;
+    }): Promise<{ ok: true; eligibility: { entrant_id: string; competition_id: string; submission_id: string } | null }>;
+  };
 };
 
 type Storage = {
@@ -487,6 +494,36 @@ export function createAgentNetworkRuntime({
     async getPayoutProfile({ actor }: { actor: SessionActor }) {
       if (!services.payouts) return { ok: false as const, error: { code: "unavailable" as const } };
       return services.payouts.getProfile({ actor: payoutActor(actor) });
+    },
+
+    async getOwnPayoutEligibility({
+      actor,
+      competition_id,
+      submission_id,
+    }: {
+      actor: SessionActor;
+      competition_id: string;
+      submission_id: string;
+    }) {
+      if (!services.eligibility) return { ok: false as const, error: { code: "unavailable" as const } };
+      try {
+        const result = await services.eligibility.getOwnEligibility({
+          actor: payoutActor(actor),
+          competition_id,
+          submission_id,
+        });
+        const eligibility = result.eligibility;
+        // Defense in depth: even a faulty repository must not make another
+        // entrant's frozen snapshot observable through the agent runtime.
+        if (!eligibility || eligibility.entrant_id !== actor.id
+          || eligibility.competition_id !== competition_id
+          || eligibility.submission_id !== submission_id) {
+          return { ok: false as const, error: { code: "not_found" as const } };
+        }
+        return { ok: true as const, eligibility };
+      } catch {
+        return { ok: false as const, error: { code: "unavailable" as const } };
+      }
     },
   };
 }

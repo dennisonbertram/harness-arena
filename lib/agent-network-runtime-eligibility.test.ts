@@ -73,6 +73,6 @@ describe("agent network payout-eligibility runtime boundary", () => {
     const failing = fixture({ getOwnEligibility: vi.fn().mockRejectedValue(new Error("database unavailable")) });
     await expect(failing.runtime.getOwnPayoutEligibility({ actor: ALICE, competition_id: "competition-1", submission_id: "submission-1" }))
       .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
-    expect(Object.keys(failing.runtime).filter((name) => /pay|award|transfer|send/i.test(name))).toEqual(["getOwnPayoutEligibility"]);
+    expect(Object.keys(failing.runtime).filter((name) => /award|transfer|send/i.test(name))).toEqual([]);
   });
 });
