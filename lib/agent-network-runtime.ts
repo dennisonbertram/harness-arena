@@ -52,6 +52,13 @@ type Services = {
       }): Promise<unknown>;
       isAuthenticated(input: { jti: string; issuer: string; audience: string; keyId: string; tokenVersion: number; now: Date }): Promise<boolean>;
       touch(jti: string): Promise<void>;
+      list?(input: { entrantId: string }): Promise<Array<{
+        jti: string;
+        expiresAt: string;
+        lastUsedAt: string | null;
+        authenticatedAt: string;
+      }>>;
+      revokeForEntrant?(input: { jti: string; entrantId: string }): Promise<boolean>;
     };
     memberships: {
       set(input: { competitionId: string; entrantId: string; state: "active" | "left" | "banned" }): Promise<{
@@ -183,6 +190,37 @@ export function createAgentNetworkRuntime({
       } catch (error) {
         return { ok: false, error: { code: tokenErrorCode(error) } };
       }
+    },
+
+    async listAgentSessions({ actor }: { actor: SessionActor }) {
+      const list = services.repositories.sessions.list;
+      if (!list) throw new Error("agent session repository is unavailable");
+      const sessions = await list({ entrantId: actor.id });
+      return {
+        sessions: sessions.map((value) => ({
+          session_id: value.jti,
+          authenticated_at: value.authenticatedAt,
+          expires_at: value.expiresAt,
+          last_active_at: value.lastUsedAt,
+          current: value.jti === actor.session_id,
+        })),
+      };
+    },
+
+    async revokeCurrentAgentSession({ actor }: { actor: SessionActor }) {
+      const revokeForEntrant = services.repositories.sessions.revokeForEntrant;
+      if (!revokeForEntrant) throw new Error("agent session repository is unavailable");
+      // A current authenticated session is already owned by this actor.  The
+      // repository operation is idempotent and this public result is too.
+      await revokeForEntrant({ jti: actor.session_id, entrantId: actor.id });
+      return { revoked: true as const };
+    },
+
+    async revokeAgentSession({ actor, session_id }: { actor: SessionActor; session_id: string }) {
+      const revokeForEntrant = services.repositories.sessions.revokeForEntrant;
+      if (!revokeForEntrant) throw new Error("agent session repository is unavailable");
+      const revoked = await revokeForEntrant({ jti: session_id, entrantId: actor.id });
+      return revoked ? { ok: true as const, revoked: true as const } : { ok: false as const, error: { code: "not_found" as const } };
     },
 
     async getLiveCompetition(id: string) {

@@ -116,6 +116,21 @@ export function createPostgresAgentNetworkRepositories(db: SqlClient, options: {
     },
     async touch(jti: string) { await db.query(`UPDATE agent_sessions SET last_used_at = $2::timestamptz WHERE jti = $1`, [jti, currentTime().toISOString()]); },
     async revoke(jti: string) { await db.query(`UPDATE agent_sessions SET revoked_at = $2::timestamptz WHERE jti = $1`, [jti, currentTime().toISOString()]); },
+    /**
+     * Revocation used by the public session-management surface.  Keeping the
+     * entrant predicate in the mutation makes a cross-entrant id
+     * indistinguishable from a missing id to callers above this boundary.
+     */
+    async revokeForEntrant({ jti, entrantId }: { jti: string; entrantId: string }) {
+      const result = await db.query<{ jti: string }>(
+        `UPDATE agent_sessions
+         SET revoked_at = COALESCE(revoked_at, $3::timestamptz)
+         WHERE jti = $1 AND entrant_id = $2
+         RETURNING jti`,
+        [jti, entrantId, currentTime().toISOString()],
+      );
+      return result.rows.length > 0;
+    },
     async isAuthenticated(input: { jti: string; issuer: string; audience: string; keyId: string; tokenVersion?: number; now?: Date }) {
       const result = await db.query<{ authenticated: boolean }>(
         `SELECT EXISTS(SELECT 1 FROM agent_sessions
