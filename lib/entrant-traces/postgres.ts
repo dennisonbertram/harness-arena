@@ -11,6 +11,10 @@ const hash = (value: unknown) => createHash("sha256").update(canonical(value)).d
 
 export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): string }; now(): Date }) {
   const tails = new Map<string, Promise<void>>();
+  const safeArtifact = (artifact: any) => {
+    const { object_key, owner_entrant_id, ...safe } = artifact;
+    return safe;
+  };
   async function read(id: string, sql: Sql = db) {
     const result = await sql.query<any>(`SELECT id, submission_id, owner_entrant_id, kind, schema_version, object_key, sha256, compression, compressed_bytes, uncompressed_bytes, mime_type, consent, state, reconcile_after FROM submission_artifacts WHERE id = $1`, [id]);
     const artifact = result.rows[0];
@@ -66,7 +70,37 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       if (a.state !== "uploaded") return fail("invalid_state");
       await db.query("UPDATE submission_artifacts SET state='verified', verified_at=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='uploaded'", [artifact_id, actor.id, options.now().toISOString()]); return { ok: true as const, artifact: await read(artifact_id) };
     },
-    async getForOwner({ actor, artifact_id }: { actor: Actor | null; artifact_id: string }) { if (!actor) return fail("unauthenticated"); const a = await read(artifact_id); if (!a || a.owner_entrant_id !== actor.id) return fail("not_found"); const { object_key, owner_entrant_id, ...safe } = a; return { ok: true as const, artifact: safe }; },
+    async getInternalForOwner({ actor, artifact_id }: { actor: Actor | null; artifact_id: string }) {
+      if (!actor) return fail("unauthenticated");
+      const artifact = await read(artifact_id);
+      if (!artifact || artifact.owner_entrant_id !== actor.id) return fail("not_found");
+      return { ok: true as const, artifact };
+    },
+    async getForOwner({ actor, artifact_id }: { actor: Actor | null; artifact_id: string }) {
+      if (!actor) return fail("unauthenticated");
+      const artifact = await read(artifact_id);
+      if (!artifact || artifact.owner_entrant_id !== actor.id) return fail("not_found");
+      return { ok: true as const, artifact: safeArtifact(artifact) };
+    },
+    async listForOwner({ actor, submission_id }: { actor: Actor | null; submission_id: string }) {
+      if (!actor) return fail("unauthenticated");
+      const binding = await db.query<{ entrant_id: string }>(
+        "SELECT entrant_id FROM submission_bindings WHERE submission_id = $1 AND entrant_id = $2",
+        [submission_id, actor.id],
+      );
+      if (!binding.rows[0]) return fail("not_found");
+      const result = await db.query<{ id: string }>(
+        `SELECT id FROM submission_artifacts
+         WHERE submission_id = $1 AND owner_entrant_id = $2
+         ORDER BY kind, schema_version, id`,
+        [submission_id, actor.id],
+      );
+      const artifacts = await Promise.all(result.rows.map((row) => read(row.id)));
+      return {
+        ok: true as const,
+        traces: artifacts.filter((artifact) => artifact !== null).map(safeArtifact),
+      };
+    },
     async reconcileDue({ before }: { before: Date }) { const rows = await db.query<any>("SELECT id,submission_id,owner_entrant_id,kind,schema_version,object_key,sha256,compressed_bytes,uncompressed_bytes,mime_type,consent,state,reconcile_after FROM submission_artifacts WHERE state IN ('pending_upload','uploaded') AND reconcile_after <= $1 ORDER BY reconcile_after", [before.toISOString()]); return rows.rows; },
   };
 }
