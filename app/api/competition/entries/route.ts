@@ -85,6 +85,9 @@ export async function POST(request: NextRequest) {
     const authentication = await runtime.authenticateAgentSession(request, { requiredScopes: ["competitions:write"] });
     if (!authentication.ok) return authenticationError(authentication.error.code);
 
+    const contentType = request.headers.get("content-type")?.trim() ?? "";
+    if (!/^application\/json(?:\s*;|$)/i.test(contentType)) return error("unsupported_media_type", 415);
+
     const value = await readJson(request);
     if (value === 400 || value === 413) return error(value === 413 ? "body_too_large" : "invalid_body", value);
     const body = parseBody(value);
