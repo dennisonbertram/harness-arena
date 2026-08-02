@@ -83,7 +83,7 @@ function fixture() {
     }),
   };
   const tracePolicy = {
-    verify: vi.fn(async ({ sha256: checksum }: { sha256: string }) => ({ ok: true, verified_sha256: checksum })),
+    verify: vi.fn(async ({ sha256: checksum }: { sha256: string }): Promise<any> => ({ ok: true, verified_sha256: checksum })),
   };
   const payouts = {
     prepare: vi.fn(async ({ actor, address, reauthenticated_at }) => ({

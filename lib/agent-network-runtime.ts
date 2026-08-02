@@ -9,6 +9,7 @@ import {
 } from "./agent-token";
 import { createAgentNetworkServices, createNeonRuntime } from "./agent-network-data/neon-runtime";
 import { validateEntrantTraceManifest, type EntrantTraceManifest } from "./entrant-traces/manifest";
+import { createEntrantTracePolicy } from "./entrant-traces/policy";
 import { createPrivateArtifactBlob } from "./entrant-traces/private-blob";
 import { getStorage } from "./storage";
 
@@ -90,7 +91,7 @@ type Services = {
     prepare(input: { actor: SessionActor; operation_id: string; artifact: EntrantTraceManifest["artifacts"][number] & { submission_id: string; consent: string } }): Promise<any>;
     getInternalForOwner(input: { actor: SessionActor; artifact_id: string }): Promise<any>;
     recordUpload(input: { actor: SessionActor; artifact_id: string; sha256: string; compressed_bytes: number }): Promise<any>;
-    finalize(input: { actor: SessionActor; artifact_id: string; sha256: string }): Promise<any>;
+    finalize(input: { actor: SessionActor; artifact_id: string; sha256: string; policy: { verified_sha256: string; scan_revision: string } }): Promise<any>;
     listForOwner(input: { actor: SessionActor; submission_id: string }): Promise<any>;
   };
   payouts?: {
@@ -106,6 +107,7 @@ type Storage = {
 };
 
 type PrivateArtifactBlob = ReturnType<typeof createPrivateArtifactBlob>;
+type EntrantTracePolicy = ReturnType<typeof createEntrantTracePolicy>;
 
 type Tokens = {
   mint: typeof mintAgentSessionToken;
@@ -119,6 +121,7 @@ type RuntimeOptions = {
   ids?: { next(): string };
   now?: () => Date;
   privateBlob?: PrivateArtifactBlob;
+  tracePolicy?: EntrantTracePolicy;
   tokenConfiguration: { issuer: string; audience: string; keyId: string };
 };
 
@@ -183,6 +186,7 @@ export function createAgentNetworkRuntime({
   ids = { next: randomUUID },
   now = () => new Date(),
   privateBlob,
+  tracePolicy,
   tokenConfiguration,
 }: RuntimeOptions) {
   return {
@@ -406,7 +410,7 @@ export function createAgentNetworkRuntime({
       artifact_id: string;
       sha256: string;
     }) {
-      if (!services.traces || !privateBlob) return traceFailure("unavailable");
+      if (!services.traces || !privateBlob || !tracePolicy) return traceFailure("unavailable");
       const owned = await services.traces.getInternalForOwner({ actor, artifact_id });
       if (!owned?.ok) return traceFailure(owned?.error?.code ?? "not_found");
       if (owned.artifact.sha256 !== sha256) return traceFailure("conflict");
@@ -433,7 +437,20 @@ export function createAgentNetworkRuntime({
         });
         if (!uploaded?.ok) return traceFailure(uploaded?.error?.code ?? "unavailable");
       }
-      const finalized = await services.traces.finalize({ actor, artifact_id, sha256 });
+      const verified = await tracePolicy.verify({
+        kind: owned.artifact.kind,
+        compression: owned.artifact.compression,
+        sha256,
+        uncompressed_bytes: Number(owned.artifact.uncompressed_bytes),
+        bytes: read.bytes,
+      });
+      if (!verified.ok) return traceFailure("invalid_state");
+      const finalized = await services.traces.finalize({
+        actor,
+        artifact_id,
+        sha256,
+        policy: { verified_sha256: verified.verified_sha256, scan_revision: "trace-policy.v1" },
+      });
       if (!finalized?.ok) return traceFailure(finalized?.error?.code ?? "unavailable");
       return { ok: true as const, artifact: safeTraceArtifact(finalized.artifact) };
     },
@@ -515,6 +532,7 @@ export function getAgentNetworkRuntime() {
     storage: getStorage(),
     tokenConfiguration,
     privateBlob: configuredPrivateArtifactBlob(),
+    tracePolicy: createEntrantTracePolicy({ maxUncompressedBytes: 8_388_608, scanTimeoutMs: 5_000 }),
   });
   return runtime;
 }

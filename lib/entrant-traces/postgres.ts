@@ -4,7 +4,8 @@ type Sql = { query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[] }> }
 type Db = Sql & { transaction<T>(work: (tx: Sql) => Promise<T>): Promise<T> };
 type Actor = { id: string; github_id: number; github_login: string };
 type Artifact = { submission_id: string; kind: string; schema_version: string; mime_type: string; compression: string; compressed_bytes: number; uncompressed_bytes: number; sha256: string; consent: string };
-type Failure = { ok: false; error: { code: "unauthenticated" | "not_found" | "conflict" | "invalid_state" } };
+type Failure = { ok: false; error: { code: "unauthenticated" | "not_found" | "conflict" | "invalid_state" | "policy_required" } };
+type VerifiedPolicy = { verified_sha256: string; scan_revision: string };
 const fail = (code: Failure["error"]["code"]): Failure => ({ ok: false, error: { code } });
 const canonical = (value: any): string => value && typeof value === "object" && !Array.isArray(value) ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}` : JSON.stringify(value);
 const hash = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
@@ -16,7 +17,7 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
     return safe;
   };
   async function read(id: string, sql: Sql = db) {
-    const result = await sql.query<any>(`SELECT id, submission_id, owner_entrant_id, kind, schema_version, object_key, sha256, compression, compressed_bytes, uncompressed_bytes, mime_type, consent, state, reconcile_after FROM submission_artifacts WHERE id = $1`, [id]);
+    const result = await sql.query<any>(`SELECT id, submission_id, owner_entrant_id, kind, schema_version, object_key, sha256, compression, compressed_bytes, uncompressed_bytes, mime_type, consent, state, reconcile_after, scan_state, scan_revision, policy_verified_at FROM submission_artifacts WHERE id = $1`, [id]);
     const artifact = result.rows[0];
     if (!artifact) return null;
     return Object.fromEntries(Object.entries(artifact).map(([key, value]) => [key, value instanceof Date ? value.toISOString() : value]));
@@ -60,16 +61,39 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       if (a.sha256 !== sha256 || Number(a.compressed_bytes) !== compressed_bytes) { await db.query("UPDATE submission_artifacts SET state='rejected', rejected_at=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='pending_upload'", [artifact_id, actor.id, now]); return { ok: false as const, error: { code: "checksum_mismatch" }, artifact: await read(artifact_id) }; }
       await db.query("UPDATE submission_artifacts SET state='uploaded', reconcile_after=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='pending_upload'", [artifact_id, actor.id, now]); return { ok: true as const, artifact: await read(artifact_id) };
     },
-    async finalize({ actor, artifact_id, sha256 }: { actor: Actor | null; artifact_id: string; sha256: string }) {
+    async finalize({ actor, artifact_id, sha256, policy }: { actor: Actor | null; artifact_id: string; sha256: string; policy?: VerifiedPolicy }) {
       if (!actor) return fail("unauthenticated"); const a = await read(artifact_id); if (!a || a.owner_entrant_id !== actor.id) return fail("not_found");
       if (a.sha256 !== sha256) {
         if (a.state === "verified") return fail("conflict");
         await db.query("UPDATE submission_artifacts SET state='rejected', rejected_at=$2, updated_at=$2 WHERE id=$1", [artifact_id, options.now().toISOString()]);
         return fail("conflict");
       }
-      if (a.state === "verified") return { ok: true as const, artifact: a };
+      if (a.state === "verified") return a.scan_state === "approved" && typeof a.scan_revision === "string"
+        ? { ok: true as const, artifact: a }
+        : fail("invalid_state");
       if (a.state !== "uploaded") return fail("invalid_state");
-      await db.query("UPDATE submission_artifacts SET state='verified', verified_at=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='uploaded'", [artifact_id, actor.id, options.now().toISOString()]); return { ok: true as const, artifact: await read(artifact_id) };
+      if (!policy
+        || policy.verified_sha256 !== sha256
+        || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(policy.scan_revision)) return fail("policy_required");
+      const now = options.now().toISOString();
+      const updated = await db.query<{ id: string }>(
+        `UPDATE submission_artifacts
+         SET state='verified', verified_at=$3, scan_state='approved', scan_revision=$4,
+             policy_verified_at=$3, updated_at=$3
+         WHERE id=$1 AND owner_entrant_id=$2 AND state='uploaded' AND sha256=$5
+         RETURNING id`,
+        [artifact_id, actor.id, now, policy.scan_revision, sha256],
+      );
+      if (!updated.rows[0]) {
+        const current = await read(artifact_id);
+        return current?.owner_entrant_id === actor.id
+          && current.state === "verified"
+          && current.sha256 === sha256
+          && current.scan_state === "approved"
+          ? { ok: true as const, artifact: current }
+          : fail("invalid_state");
+      }
+      return { ok: true as const, artifact: await read(artifact_id) };
     },
     async getInternalForOwner({ actor, artifact_id }: { actor: Actor | null; artifact_id: string }) {
       if (!actor) return fail("unauthenticated");
