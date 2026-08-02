@@ -22,6 +22,7 @@ function isAlreadyExistsError(err: unknown): boolean {
 }
 
 export interface VoiceStorage {
+  listOpsRecords(prefix: string, options: { limit: number; cursor?: string }): Promise<{ records: { pathname: string }[]; nextCursor?: string; partial: string[] }>;
   getManifest(): Promise<VoiceManifest | undefined>;
   putManifest(manifest: VoiceManifest): Promise<void>;
   /** Write-once: a duplicate comparison_id/evaluator_id key returns { created: false } instead of throwing. */
@@ -35,6 +36,7 @@ export interface VoiceStorage {
 export class MemoryVoiceStorage implements VoiceStorage {
   private manifest: VoiceManifest | undefined;
   private judgments = new Map<string, VoiceJudgment>();
+  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) { const paths=[...(this.manifest?[MANIFEST_PATH]:[]),...this.judgments.keys()].filter((p)=>p.startsWith(prefix)).sort();const offset=Number(options.cursor??0),records=paths.slice(offset,offset+options.limit).map((pathname)=>({pathname}));return {records,nextCursor:offset+records.length<paths.length?String(offset+records.length):undefined,partial:[]}; }
 
   async getManifest(): Promise<VoiceManifest | undefined> {
     return this.manifest;
@@ -64,6 +66,7 @@ export class MemoryVoiceStorage implements VoiceStorage {
 }
 
 export class BlobVoiceStorage implements VoiceStorage {
+  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) { try { const page=await withRetry(()=>list({prefix,limit:options.limit,cursor:options.cursor})); return {records:page.blobs.map((b)=>({pathname:b.pathname})),nextCursor:page.hasMore?page.cursor:undefined,partial:[]}; } catch { return {records:[],partial:[prefix]}; } }
   private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string }[]> {
     const blobs: { url: string; pathname: string }[] = [];
     let cursor: string | undefined;
