@@ -1,0 +1,8 @@
+{
+  "id": "dpl_1",
+  "url": "arena.example",
+  "readyState": "READY",
+  "createdAt": "2026-08-03T00:00:00.000Z",
+  "gitSource": { "ref": "main", "sha": "abc123", "dirty": false },
+  "crons": [{ "path": "/api/cron/reap", "schedule": "*/5 * * * *" }]
+}
