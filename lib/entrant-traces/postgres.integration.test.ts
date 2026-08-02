@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPostgresEntrantTraces } from "./postgres";
 
 const migration = (name: string) => readFileSync(path.join(process.cwd(), "db", "migrations", name), "utf8");
@@ -85,14 +85,17 @@ describe("0003 durable submission artifact metadata", () => {
 
   it("pins every prepare write to the injected transaction-scoped SQL client", async () => {
     type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
-    const transaction = vi.fn(async <Result>(callback: (tx: TransactionSql) => Promise<Result>) =>
-      db.transaction((tx) => callback(tx as unknown as TransactionSql)));
-    const repo = createPostgresEntrantTraces({ exec: db.exec.bind(db), query: db.query.bind(db), transaction }, {
+    let transactionCount = 0;
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>): Promise<Result> => {
+      transactionCount += 1;
+      return db.transaction((tx) => callback(tx as unknown as TransactionSql));
+    };
+    const repo = createPostgresEntrantTraces({ query: db.query.bind(db), transaction }, {
       ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
       now: () => new Date("2026-08-02T12:00:00.000Z"),
     });
     await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-transaction", artifact: execution })).resolves.toMatchObject({ ok: true });
-    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(transactionCount).toBe(1);
   });
 
   it("records upload, verifies the final checksum, rejects mismatches, and exposes due reconciliation work", async () => {
@@ -129,8 +132,9 @@ describe("0003 durable submission artifact metadata", () => {
   it("derives storage keys only from server IDs, never owner-controlled submission text", async () => {
     await db.exec(`INSERT INTO submission_bindings (submission_id, competition_id, entrant_id) VALUES ('../../escape', 'comp-a', '${ALICE.id}')`);
     const prepared = await traces().prepare({ actor: ALICE, operation_id: "prepare-path", artifact: { ...execution, submission_id: "../../escape" } });
-    expect(prepared).toMatchObject({ ok: true, artifact: { object_key: expect.stringMatching(/^private\/artifacts\/[0-9a-f-]{36}$/) } });
-    expect(JSON.stringify(prepared)).not.toContain("..");
+    expect(prepared).toMatchObject({ ok: true, artifact: { submission_id: "../../escape", object_key: expect.stringMatching(/^private\/artifacts\/[0-9a-f-]{36}$/) } });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    expect(prepared.artifact.object_key).not.toContain("..");
   });
 
   it("denies cross-user reads and returns public metadata DTOs without bytes, prompts, tokens, or URLs", async () => {
