@@ -4,6 +4,8 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
   "0003_submission_artifacts",
   "0004_payout_profiles",
   "0005_competition_chat_sequences",
+  "0006_trace_policy",
+  "0007_payout_eligibility",
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };
