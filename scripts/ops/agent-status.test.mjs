@@ -24,7 +24,7 @@ import {
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const jsonResponse = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
-function healthyApiFetch({ missingCursor = false, missingHasMore = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, integrity } = {}) {
+function healthyApiFetch({ missingCursor = false, missingHasMore = false, missingTerminalCursor = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, runRecords, integrity } = {}) {
   return vi.fn(async (rawUrl, init) => {
     expect(init.method).toBe("GET");
     const url = new URL(rawUrl);
@@ -33,9 +33,10 @@ function healthyApiFetch({ missingCursor = false, missingHasMore = false, unknow
     if (url.pathname === "/api/ops/v1/summary") return jsonResponse({ schema_version: "ops.v1", scan: { complete: true }, latest: { runs: unknownFreshness ? null : "2026-08-03T00:05:00.000Z", events: "2026-08-03T00:06:00.000Z" }, run_states: { queued: 0, running: 1, failed: 0, stale: 0 }, integrity: integrity ?? { unreadable: 0, corrupt: 0, event_holes: 0 } });
     if (url.pathname === "/api/ops/v1/inventory") {
       const kind = url.searchParams.get("kind"), cursor = url.searchParams.get("cursor");
+      if (kind === "runs" && runRecords) return jsonResponse({ schema_version: "ops.v1", kind, items: runRecords, has_more: false, next_cursor: null });
       if (kind === "runs" && runCount) return jsonResponse({ schema_version: "ops.v1", kind, items: Array.from({ length: runCount }, (_, index) => ({ pathname: `runs/r${index + 1}.json`, uploaded_at: "2026-08-03T00:05:00.000Z" })), has_more: false, next_cursor: null });
       if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], ...(missingHasMore ? {} : { has_more: true }), next_cursor: missingCursor ? null : "runs-2" });
-      if (kind === "runs") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r2.json", uploaded_at: "2026-08-03T00:04:00.000Z" }], has_more: false, next_cursor: null });
+      if (kind === "runs") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r2.json", uploaded_at: "2026-08-03T00:04:00.000Z" }], has_more: false, ...(missingTerminalCursor ? {} : { next_cursor: null }) });
       if (kind === "events") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "events/r1/0000000002.json", uploaded_at: "2026-08-03T00:06:00.000Z" }, { pathname: "events/r2/0000000003.json", uploaded_at: "2026-08-03T00:06:00.000Z" }], has_more: false, next_cursor: null });
       return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "competitions/c1.json", uploaded_at: "2026-08-03T00:01:00.000Z" }], has_more: false, next_cursor: null });
     }
@@ -93,6 +94,24 @@ describe("fixture-driven evidence parsers", () => {
   });
   it("parses recent Vercel errors from bounded NDJSON", () => expect(parseVercelLogs(fixture("vercel-logs.ndjson"))).toMatchObject({ recent_errors: [{ level: "error", status_code: 503, message: "gateway failed Bearer [REDACTED]" }] }));
   it("parses only a complete expected GitHub SHA", () => { expect(parseGitHubExpectedSha(fixture("github-sha.txt"))).toBe("abc123"); expect(() => parseGitHubExpectedSha("main\nabc123")).toThrow("invalid_expected_sha"); });
+
+  it("maps requested environments to actual Vercel metadata targets", async () => {
+    const commandRunner = vi.fn(async (binary, args) => {
+      if (binary === "gh") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (args[0] === "ls") return { stdout: fixture("vercel-list.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "inspect") return { stdout: fixture("vercel-inspect.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "env") return { stdout: fixture("vercel-env-preview.json"), stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const development = await collectPlatformEvidence({ environment: "development", target: "preview.example", expectedRef: "dev", commandRunner });
+    expect(development).toMatchObject({ requested_environment: "development", environment: { target: "preview", required_missing: [] } });
+    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "preview", "--json"], expect.any(Object)]);
+    const production = await collectPlatformEvidence({ environment: "production", target: "arena.example", commandRunner });
+    expect(production).toMatchObject({ requested_environment: "production", environment: { target: "production" } });
+    const localRunner = vi.fn();
+    await expect(collectPlatformEvidence({ environment: "local", commandRunner: localRunner })).resolves.toMatchObject({ requested_environment: "local", state: "not_applicable" });
+    expect(localRunner).not.toHaveBeenCalled();
+  });
 });
 
 describe("ops evidence and verdict honesty", () => {
@@ -139,10 +158,12 @@ describe("ops evidence and verdict honesty", () => {
       { ...healthyPlatform.deployment, state: null },
       { ...healthyPlatform.deployment, id: null },
       { ...healthyPlatform.deployment, hostname: null },
+      { ...healthyPlatform.deployment, sha: null },
+      { ...healthyPlatform.deployment, ref: null },
     ]) {
       const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch(), now: "2026-08-03T00:10:00.000Z", platform: { ...healthyPlatform, deployment }, environment: "production" });
       expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
-      expect(result.findings.map(({ code }) => code)).toContain("deployment_not_ready");
+      expect(result.findings.map(({ code }) => code)).toEqual(expect.arrayContaining([expect.stringMatching(/^deployment_(?:not_ready|lineage_missing)$/)]));
     }
   });
 
@@ -166,6 +187,27 @@ describe("ops evidence and verdict honesty", () => {
       expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
       expect(result.findings).toContainEqual(expect.objectContaining({ code: "ops_integrity", severity: "failed" }));
     }
+  });
+
+  it("turns malformed ops-root kinds into operational evidence, never usage exit 64", async () => {
+    for (const advertisedKinds of [{ runs: true }, [{ kind: "runs" }, { kind: "BAD!" }]]) {
+      const writes = [];
+      const exit = await executeCli(["--env", "local", "--json"], { fetchImpl: healthyApiFetch({ advertisedKinds }), env: {}, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
+      expect(exit).toBe(EXIT_CODES.failed);
+      expect(JSON.parse(writes[0])).toMatchObject({ verdict: "failed", findings: expect.arrayContaining([expect.objectContaining({ code: "ops_root_contract" })]) });
+    }
+  });
+
+  it("reports malformed run inventory records instead of silently dropping them", async () => {
+    const records = [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }, { pathname: "runs/../../hidden.json", uploaded_at: "2026-08-03T00:04:00.000Z" }];
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runRecords: records }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(result).toMatchObject({ verdict: "failed", ops: { run_correlation_scope: { available: 2, valid: 1, selected: 1, invalid: 1, truncated: false } } });
+    expect(result.findings).toContainEqual(expect.objectContaining({ code: "run_inventory_record_invalid" }));
+  });
+
+  it("requires an explicit null next_cursor on a terminal inventory page", async () => {
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ missingTerminalCursor: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(result).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { complete: false, error: "malformed_pagination" } } } });
   });
 });
 
