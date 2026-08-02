@@ -251,6 +251,55 @@ export class HarnessArenaClient {
     return this.requestJson("/api/competition/submissions?mine=true", { token });
   }
 
+  async listSessions(): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/sessions", { token });
+  }
+
+  async logout(): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/sessions/current/revoke", { method: "POST", token, body: {} });
+  }
+
+  async revokeSession(input: { session_id: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson(`/api/agent/sessions/${encodeURIComponent(input.session_id)}/revoke`, { method: "POST", token, body: {} });
+  }
+
+  async prepareSubmissionTrace(input: { submission_id: string; manifest: unknown; idempotency_key: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson(`/api/submissions/${encodeURIComponent(input.submission_id)}/traces/prepare`, {
+      method: "POST", token, body: { manifest: input.manifest, idempotency_key: input.idempotency_key },
+    });
+  }
+
+  async finalizeSubmissionTrace(input: { artifact_id: string; sha256: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson(`/api/submission-artifacts/${encodeURIComponent(input.artifact_id)}/finalize`, {
+      method: "POST", token, body: { sha256: input.sha256 },
+    });
+  }
+
+  async getSubmissionTraceStatus(input: { submission_id: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson(`/api/submissions/${encodeURIComponent(input.submission_id)}/traces`, { token });
+  }
+
+  async prepareExternalPayoutAddress(input: { address: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/payout-profile/challenge", { method: "POST", token, body: { address: input.address } });
+  }
+
+  async verifyExternalPayoutAddress(input: { challenge_id: string; signature: string; consent_version: string; idempotency_key: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/payout-profile/verify", { method: "POST", token, body: input });
+  }
+
+  async getPayoutProfile(): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/payout-profile", { token });
+  }
+
   private async requireCredentials(): Promise<Credentials> {
     const credentials = await this.credentials.get(this.baseUrl);
     if (!credentials || Date.parse(credentials.expires_at) <= this.now()) {

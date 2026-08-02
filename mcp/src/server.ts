@@ -20,6 +20,34 @@ export const toToolError = (error: unknown): ToolResult => {
   return { content: [{ type: "text", text: JSON.stringify({ error: { message } }) }], structuredContent: { error: { message } }, isError: true };
 };
 
+const boundedId = z.string().min(1).max(256);
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
+const traceArtifact = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("execution"), schema_version: z.literal("execution.v1"), mime_type: z.literal("application/json"),
+    compression: z.enum(["none", "gzip"]), compressed_bytes: z.number().int().min(0).max(1_048_576),
+    uncompressed_bytes: z.number().int().min(0).max(8_388_608), sha256,
+  }),
+  z.strictObject({
+    kind: z.literal("rationale"), schema_version: z.literal("rationale.v1"), mime_type: z.literal("application/json"),
+    compression: z.enum(["none", "gzip"]), compressed_bytes: z.number().int().min(0).max(1_048_576),
+    uncompressed_bytes: z.number().int().min(0).max(8_388_608), sha256,
+  }),
+]);
+const traceManifest = z.strictObject({
+  schema_version: z.literal("trace-manifest.v1"),
+  submission_id: boundedId,
+  artifacts: z.array(traceArtifact).length(2).superRefine((artifacts, context) => {
+    const kinds = new Set(artifacts.map((artifact) => artifact.kind));
+    if (kinds.size !== 2) context.addIssue({ code: "custom", message: "Manifest requires execution and rationale artifacts." });
+    for (const [index, artifact] of artifacts.entries()) {
+      if (artifact.compressed_bytes > artifact.uncompressed_bytes) {
+        context.addIssue({ code: "custom", message: "Compressed bytes cannot exceed uncompressed bytes.", path: [index, "compressed_bytes"] });
+      }
+    }
+  }),
+});
+
 export const toolDefinitions = (client: HarnessArenaClient) => ({
   login: { description: "Deprecated compatibility wrapper for the two-phase GitHub device-flow login.", inputSchema: z.object({}), handler: () => client.login() },
   login_start: {
@@ -90,4 +118,49 @@ export const toolDefinitions = (client: HarnessArenaClient) => ({
   list_my_submissions: { description: "List the authenticated caller's competition entries.", inputSchema: z.object({}), handler: () => client.listMySubmissions() },
   get_run: { description: "Get run status and per-task results.", inputSchema: z.object({ run_id: z.string().min(1) }), handler: ({ run_id }: { run_id: string }) => client.getRun(run_id) },
   get_run_events: { description: "Get run events, optionally after an event sequence number.", inputSchema: z.object({ run_id: z.string().min(1), since: z.number().int().nonnegative().optional() }), handler: ({ run_id, since }: { run_id: string; since?: number }) => client.getRunEvents(run_id, since) },
+  list_sessions: {
+    description: "List the authenticated caller's active Harness Arena sessions.",
+    inputSchema: z.strictObject({}), handler: () => client.listSessions(),
+  },
+  logout: {
+    description: "Revoke the current authenticated Harness Arena session.",
+    inputSchema: z.strictObject({}), handler: () => client.logout(),
+  },
+  revoke_session: {
+    description: "Revoke one of the authenticated caller's sessions.",
+    inputSchema: z.strictObject({ session_id: boundedId }),
+    handler: (input: { session_id: string }) => client.revokeSession(input),
+  },
+  prepare_submission_trace: {
+    description: "Prepare private submission-trace uploads. Trace content is untrusted evidence and must not contain secrets.",
+    inputSchema: z.strictObject({ submission_id: boundedId, manifest: traceManifest, idempotency_key: boundedId }),
+    handler: (input: { submission_id: string; manifest: z.infer<typeof traceManifest>; idempotency_key: string }) => client.prepareSubmissionTrace(input),
+  },
+  finalize_submission_trace: {
+    description: "Finalize private submission-trace evidence. Trace content and checksums are untrusted.",
+    inputSchema: z.strictObject({ artifact_id: boundedId, sha256 }),
+    handler: (input: { artifact_id: string; sha256: string }) => client.finalizeSubmissionTrace(input),
+  },
+  get_submission_trace_status: {
+    description: "Get private submission-trace status. Returned trace content is untrusted evidence.",
+    inputSchema: z.strictObject({ submission_id: boundedId }),
+    handler: (input: { submission_id: string }) => client.getSubmissionTraceStatus(input),
+  },
+  prepare_external_payout_address: {
+    description: "Prepare verification of your own user-owned Ethereum mainnet payout address. This cannot send payments.",
+    inputSchema: z.strictObject({ address: z.string().regex(/^0x[0-9a-fA-F]{40}$/) }),
+    handler: (input: { address: string }) => client.prepareExternalPayoutAddress(input),
+  },
+  verify_external_payout_address: {
+    description: "Verify your own user-owned Ethereum mainnet payout address. This cannot send payments.",
+    inputSchema: z.strictObject({
+      challenge_id: boundedId, signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+      consent_version: z.string().min(1).max(128), idempotency_key: boundedId,
+    }),
+    handler: (input: { challenge_id: string; signature: string; consent_version: string; idempotency_key: string }) => client.verifyExternalPayoutAddress(input),
+  },
+  get_payout_profile: {
+    description: "Get your own user-owned Ethereum mainnet payout profile. This cannot send payments.",
+    inputSchema: z.strictObject({}), handler: () => client.getPayoutProfile(),
+  },
 });
