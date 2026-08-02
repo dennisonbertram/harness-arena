@@ -30,8 +30,10 @@ export function createOpsReadService() {
     if (kind === "events") return runId ? s.listRunEvents(runId) : [];
     if (kind === "voice_manifest") return [await getVoiceStorage().getManifest()].filter(Boolean);
     if (kind === "voice_judgments") return (await getVoiceStorage().listAllJudgments()).judgments;
-    // Trace metadata derives from actual run documents, avoiding a second hand-maintained prefix list.
-    return (await s.listRuns()).flatMap((run) => run.task_results.filter((t) => t.trace_blob_url).map((t) => ({ run_id: run.id, task_id: t.task_id, url: redactUrl(t.trace_blob_url!) })));
+    // Raw Blob metadata is intentionally pathname-only; URLs may carry signed credentials.
+    const raw = await s.listOpsRecords("traces/", { limit: MAX_LIMIT });
+    if (raw.partial.length) throw new PartialReadError("traces/", raw.partial.length, raw.records.length + raw.partial.length);
+    return raw.records;
   }
   return { async list(kind: OpsKind, options: { limit?: number; cursor?: string; run_id?: string }) {
     if (!Number.isSafeInteger(options.limit ?? 50) || (options.limit ?? 50) < 1 || (options.limit ?? 50) > MAX_LIMIT) return { error: { code: "invalid_limit" } };
