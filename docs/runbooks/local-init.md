@@ -1,7 +1,8 @@
 # Safe local startup
 
 Run `./scripts/init.sh` from the worktree root. Its JSON output has the URL,
-PID, local storage directory, and log file. The process uses `STORAGE=file`;
+PID, local storage directory, and log file. Node.js 20.9.0 or newer is
+required. The process uses `STORAGE=file`;
 it does not use Blob or production variables. `/api/ready` is the startup gate
 and matches the owner PID/nonce while checking the seed and a real storage
 write, so an open port alone is not ready. Concurrent or repeat invocations
@@ -9,6 +10,12 @@ wait on the same immutable claim queue and report the existing healthy
 instance. Each contender fsyncs a unique owner record before atomically
 publishing its `.claim`; unpublished temp records do not participate, and
 dead owners are reclaimed only through their never-reused claim pathname.
+Cold-start contenders wait at most 120 seconds for installation, seed, and
+readiness before emitting the queue's bounded blocker diagnostics. The
+detached wrapper fsyncs its `init.pid` ownership and handshakes it to the
+launcher before Next starts, so launcher failure cannot leave an untracked
+server. Init-managed environment and seed files, plus write-once local voice
+judgments, use fsynced unique temp files and atomic no-replace publication.
 
 The child environment is a strict allowlist. Every key discovered in Next's
 development `.env*` inputs is preempted before startup and removed after Next
@@ -16,8 +23,8 @@ loads configuration. `STORAGE=file` fails closed in production and Vercel.
 
 Use `--check` for prerequisite/port/PID validation without side effects and
 `--no-install` for an already-installed worktree. To stop, terminate the
-reported PID and remove `.harness-arena/init.pid`. To reset development data,
-then run `./scripts/init.sh --reset`; reset is explicit and only deletes that
+reported PID/process group and wait for its ownership metadata to clear. Then
+run `./scripts/init.sh --reset`; reset is explicit and only deletes that
 worktree's `.harness-arena/local-data` directory after realpath/lstat
 confinement checks. It refuses symlinks anywhere below state or local data and
 fails closed when either current JSON metadata or a legacy numeric PID names a

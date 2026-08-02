@@ -9,8 +9,8 @@ Next.js (App Router, TypeScript strict) scaffold for Harness Arena.
 ```
 
 This is the supported safe local startup path. It installs the pinned lockfile,
-creates a mode-`0600` `.env.local` containing only `STORAGE=file` and a
-worktree-local `.harness-arena/local-data` path, seeds a local development
+requires Node.js 20.9.0 or newer, creates a mode-`0600` `.env.local` containing
+only `STORAGE=file` and a worktree-local `.harness-arena/local-data` path, seeds a local development
 competition idempotently, starts one dev server on a deterministic free port,
 waits for `/api/ready`, and prints one secret-free JSON record. It never runs
 Vercel commands, reads a production env file, accepts a Blob token, or writes
@@ -30,7 +30,12 @@ also refuses to start under `NODE_ENV=production` or Vercel.
   serialize through a per-worktree immutable claim queue: owner metadata is
   fsynced before atomic publication, unpublished temp files never own, and a
   dead claim is removed only by its unique path. Stale PID metadata is
-  recovered within a bounded wait.
+  recovered within a bounded wait. A simultaneous cold start can wait up to
+  120 seconds for the owner to finish installation and readiness.
+- The detached wrapper fsyncs `init.pid` and handshakes that ownership before
+  it launches Next. The init-managed `.env.local`, local seed, and write-once
+  voice judgments likewise publish complete fsynced temp files atomically
+  without replacing an existing final path.
 - Stop the printed PID/process group, then use `./scripts/init.sh --reset` to
   explicitly remove only that worktree's local data. Reset refuses symlinked
   state/data paths at any depth, refuses a live legacy numeric PID, and reports

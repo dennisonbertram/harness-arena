@@ -1,14 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { acquireDirectoryLock, assertNoSymlinksInTree, atomicWriteFile, isProcessAlive as processAlive } from "../lib/file-storage-lock.mjs";
+import { acquireDirectoryLock, assertNoSymlinksInTree, atomicCreateFile, atomicWriteFile, isProcessAlive as processAlive } from "../lib/file-storage-lock.mjs";
 
 const MANAGED_ENV_MARKER = "# harness-arena-init:v2";
 const NEXT_DEV_ENV_FILES = new Set([".env", ".env.local", ".env.development", ".env.development.local"]);
 const INHERITED_ALLOWLIST = new Set(["PATH", "TMPDIR", "LANG", "LC_ALL", "TERM", "COLORTERM", "CI", "NO_COLOR", "FORCE_COLOR", "SystemRoot", "ComSpec"]);
 const SAFE_LOCAL_KEYS = new Set(["STORAGE", "LOCAL_STORAGE_DIR", "AUTH_SECRET", "LOCAL_INSTANCE_NONCE", "HARNESS_LOCAL_INIT", "LOCAL_NEUTRALIZED_ENV_KEYS", "NODE_ENV"]);
+const REQUIRED_NODE_VERSION = [20, 9, 0];
+const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 
 export function choosePort(worktree) {
@@ -18,12 +20,22 @@ export function choosePort(worktree) {
 }
 
 export function assertNodeVersion(version = process.versions.node) {
-  const major = Number.parseInt(String(version).split(".")[0] ?? "", 10);
-  if (!Number.isSafeInteger(major) || major < 20) throw new Error(`Node.js 20+ is required (found ${version})`);
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(version));
+  const parsed = match?.slice(1).map(Number);
+  const valid = parsed?.length === 3 && parsed.every(Number.isSafeInteger);
+  let comparison = 0;
+  if (valid) {
+    for (let index = 0; index < REQUIRED_NODE_VERSION.length; index++) {
+      if (parsed[index] === REQUIRED_NODE_VERSION[index]) continue;
+      comparison = parsed[index] > REQUIRED_NODE_VERSION[index] ? 1 : -1;
+      break;
+    }
+  }
+  if (!valid || comparison < 0) throw new Error(`Node.js 20.9.0+ is required (found ${version})`);
 }
 
 export function validateStartup({ node, nodeVersion = process.versions.node, pnpm, portAvailable, stalePid }) {
-  if (!node) throw new Error("Node.js 20+ is required");
+  if (!node) throw new Error("Node.js 20.9.0+ is required");
   assertNodeVersion(nodeVersion);
   if (!pnpm) throw new Error("pnpm is required");
   if (!portAvailable) throw new Error("selected port is already in use");
@@ -47,22 +59,19 @@ export async function chooseAvailablePort(worktree) {
   throw new Error("no available deterministic local port found in the worktree range");
 }
 
-export function localEnv(worktree, { write = false } = {}) {
+export function localEnv(worktree, { write = false, beforePublish } = {}) {
   const root = resolve(worktree, ".harness-arena", "local-data");
   const content = `${MANAGED_ENV_MARKER}\n# Local-only; never copy production secrets here.\nSTORAGE=file\nLOCAL_STORAGE_DIR=${root}\nAUTH_SECRET=${randomBytes(32).toString("base64url")}\n`;
   if (!write) return content;
-  return writeLocalEnv(worktree, content);
+  return writeLocalEnv(worktree, content, beforePublish);
 }
 
-async function writeLocalEnv(worktree, content) {
+async function writeLocalEnv(worktree, content, beforePublish) {
   const path = join(resolve(worktree), ".env.local");
-  let file;
-  try { file = await open(path, "wx", 0o600); } catch (error) {
+  try { await atomicCreateFile(path, content, 0o600, resolve(worktree), { beforePublish }); } catch (error) {
     if (error?.code === "EEXIST") throw new Error(`.env.local already exists at ${path}; refusing to overwrite operator file`);
     throw error;
   }
-  await file.writeFile(content);
-  await file.close();
   return path;
 }
 
@@ -133,7 +142,7 @@ function parseEnvAssignments(content) {
 export function isProcessAlive(pid) { return processAlive(pid); }
 
 export async function acquireInitLock(lockPath, options) {
-  return acquireDirectoryLock(lockPath, { confinementRoot: dirname(lockPath), ...options });
+  return acquireDirectoryLock(lockPath, { timeoutMs: DEFAULT_INIT_LOCK_TIMEOUT_MS, confinementRoot: dirname(lockPath), ...options });
 }
 
 export function spawnProcessGroup(command, args, options = {}) {
@@ -166,6 +175,57 @@ export async function readInstanceMetadata(state) {
 
 export async function writeInstanceMetadata(state, metadata) {
   await atomicWriteFile(join(state, "init.pid"), JSON.stringify(metadata));
+}
+
+export async function removeInstanceMetadataIfOwned(state, metadata) {
+  const current = await readInstanceMetadata(state);
+  if (current?.pid === metadata.pid && current?.nonce === metadata.nonce) await rm(join(state, "init.pid"), { force: true });
+}
+
+export function waitForOwnershipHandshake(child, expected, timeoutMs = 10_000) {
+  return new Promise((resolveHandshake, rejectHandshake) => {
+    const channel = child.stdio?.[3];
+    if (!channel) {
+      rejectHandshake(new Error("local wrapper ownership handshake channel is unavailable"));
+      return;
+    }
+    let buffer = "";
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error(`local wrapper ownership handshake timed out after ${timeoutMs}ms`)), timeoutMs);
+    const onError = (error) => finish(error);
+    const onExit = (code, signal) => finish(new Error(`local wrapper exited before ownership handshake (${signal ?? code})`));
+    const onData = (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      try {
+        const message = JSON.parse(buffer.slice(0, newline));
+        if (message?.type !== "ownership-durable"
+          || message.pid !== expected.pid
+          || message.nonce !== expected.nonce
+          || message.port !== expected.port) {
+          finish(new Error("local wrapper returned mismatched ownership metadata"));
+          return;
+        }
+        finish(undefined, message);
+      } catch (error) { finish(error); }
+    };
+    channel.on("data", onData);
+    channel.once("error", onError);
+    child.once("error", onError);
+    child.once("exit", onExit);
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      channel.off("data", onData);
+      channel.off("error", onError);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      if (error) rejectHandshake(error); else resolveHandshake(value);
+    }
+  });
 }
 
 export async function probeInstance(metadata, timeoutMs = 1000) {

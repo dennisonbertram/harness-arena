@@ -31,6 +31,15 @@ async function waitForFile(path, timeoutMs = 5_000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
+async function waitForProcessGroupExit(pid, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(-pid, 0); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for process group ${pid} to exit`);
+}
+
 afterAll(async () => {
   for (const pid of ownedPids) { try { process.kill(-pid, "SIGTERM"); } catch {} }
   await rm(`${state}/init.pid`, { force: true });
@@ -73,6 +82,7 @@ describe.sequential("init process ownership integration", () => {
     if (prior) {
       try { process.kill(-prior.pid, "SIGTERM"); } catch {}
       ownedPids.delete(prior.pid);
+      await waitForProcessGroupExit(prior.pid);
     }
     await rm(`${state}/init.pid`, { force: true });
 
@@ -96,6 +106,9 @@ describe.sequential("init process ownership integration", () => {
       await waitForFile(marker);
       const simultaneous = runInitWithEnv(env, "--no-install");
       const [first, second] = await Promise.all([owner, simultaneous]);
+      for (const result of [first, second].filter((candidate) => candidate.code === 0)) {
+        ownedPids.add(JSON.parse(result.stdout.trim().split("\n").at(-1)).pid);
+      }
       expect([first.code, second.code]).toEqual([0, 0]);
       const firstInstance = JSON.parse(first.stdout.trim().split("\n").at(-1));
       const secondInstance = JSON.parse(second.stdout.trim().split("\n").at(-1));

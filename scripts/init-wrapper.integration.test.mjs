@@ -24,6 +24,17 @@ async function waitForFile(path, timeoutMs = 5_000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
+async function waitForJson(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { return JSON.parse(await readFile(path, "utf8")); } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+    await delay(10);
+  }
+  throw new Error(`timed out waiting for complete JSON at ${path}`);
+}
+
 describe("detached local ownership handoff", () => {
   it("publishes wrapper ownership before Next starts when the launcher dies immediately after spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "harness-arena-wrapper-handoff-"));
@@ -69,7 +80,7 @@ describe("detached local ownership handoff", () => {
     expect(launcherExit).toEqual({ code: 23, signal: null });
     const wrapperPid = Number.parseInt(await waitForFile(wrapperPidPath), 10);
     processGroups.add(wrapperPid);
-    const started = JSON.parse(await waitForFile(marker));
+    const started = await waitForJson(marker);
     const reset = await resetLocalData(root).then(
       (value) => ({ status: "resolved", value }),
       (error) => ({ status: "rejected", message: error.message }),

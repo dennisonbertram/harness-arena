@@ -12,10 +12,12 @@ import {
   probeInstance,
   readInstanceMetadata,
   readManagedLocalConfig,
+  removeInstanceMetadataIfOwned,
   resetLocalData,
   safeChildEnv,
   spawnProcessGroup,
-  writeInstanceMetadata,
+  terminateProcessGroup,
+  waitForOwnershipHandshake,
 } from "./init-lib.mjs";
 
 const worktree = resolve(process.cwd());
@@ -82,15 +84,24 @@ async function initialize() {
 
   const nonce = randomUUID();
   const serverEnv = await safeChildEnv(worktree, process.env, { ...localConfig, LOCAL_INSTANCE_NONCE: nonce });
+  serverEnv.HARNESS_INIT_STATE = state;
+  serverEnv.LOCAL_INSTANCE_PORT = String(port);
   const logHandle = await open(logPath, "a", 0o600);
   const child = spawnProcessGroup(process.execPath, ["scripts/local-next-wrapper.mjs", nextBin, "dev", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: worktree,
     env: serverEnv,
-    stdio: ["ignore", logHandle.fd, logHandle.fd],
+    stdio: ["ignore", logHandle.fd, logHandle.fd, "pipe"],
   });
   await logHandle.close();
   const instance = { pid: child.pid, nonce, port, started_at: new Date().toISOString() };
-  await writeInstanceMetadata(state, instance);
+  try {
+    await waitForOwnershipHandshake(child, instance);
+  } catch (error) {
+    await terminateProcessGroup(child.pid);
+    await removeInstanceMetadataIfOwned(state, instance);
+    throw error;
+  }
+  child.stdio[3]?.destroy();
   child.unref();
 
   const timeoutMs = Number.parseInt(process.env.HARNESS_INIT_READY_TIMEOUT_MS ?? "30000", 10);

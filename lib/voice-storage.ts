@@ -1,8 +1,8 @@
 import { list, put } from "@vercel/blob";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertLocalFileStorageAllowed, LocalStorageReadError, safeStoragePart } from "./file-storage";
-import { assertSafeStoragePath, atomicWriteFile } from "./file-storage-lock.mjs";
+import { assertSafeStoragePath, atomicCreateFile, atomicWriteFile } from "./file-storage-lock.mjs";
 import { fetchJson, withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
@@ -71,7 +71,14 @@ export class MemoryVoiceStorage implements VoiceStorage {
 export class FileVoiceStorage implements VoiceStorage {
   private readonly storageRoot: string;
   private readonly root: string;
-  constructor(root: string) { assertLocalFileStorageAllowed(); if (!root) throw new Error("LOCAL_STORAGE_DIR is required when STORAGE=file"); this.storageRoot = resolve(root); this.root = resolve(root, "voice"); }
+  private readonly beforeJudgmentPublish?: () => void | Promise<void>;
+  constructor(root: string, { beforeJudgmentPublish }: { beforeJudgmentPublish?: () => void | Promise<void> } = {}) {
+    assertLocalFileStorageAllowed();
+    if (!root) throw new Error("LOCAL_STORAGE_DIR is required when STORAGE=file");
+    this.storageRoot = resolve(root);
+    this.root = resolve(root, "voice");
+    this.beforeJudgmentPublish = beforeJudgmentPublish;
+  }
   private path(...parts: string[]) { return join(this.root, ...parts); }
   async getManifest(): Promise<VoiceManifest | undefined> {
     const path = this.path("manifest.json");
@@ -86,7 +93,10 @@ export class FileVoiceStorage implements VoiceStorage {
     await assertSafeStoragePath(this.storageRoot, path);
     await mkdir(resolve(path, ".."), { recursive: true });
     await assertSafeStoragePath(this.storageRoot, path);
-    try { await writeFile(path, JSON.stringify(valid), { flag: "wx", mode: 0o600 }); return { created: true }; }
+    try {
+      await atomicCreateFile(path, JSON.stringify(valid), 0o600, this.storageRoot, { beforePublish: this.beforeJudgmentPublish });
+      return { created: true };
+    }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return { created: false }; throw error; }
   }
   async listJudgmentKeys(evaluatorId: string): Promise<string[]> {
