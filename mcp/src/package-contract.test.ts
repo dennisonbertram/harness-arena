@@ -20,6 +20,16 @@ describe("published MCP package contract", () => {
     expect(workflow).toMatch(/run:\s*npm pack --dry-run/);
   });
 
+  it("ships an operator-safe usage contract for auth, untrusted content, traces, and payouts", () => {
+    const readme = readFileSync(join(packageDirectory, "README.md"), "utf8");
+    expect(readme).toMatch(/stdio/i);
+    expect(readme).toMatch(/login_start/);
+    expect(readme).toMatch(/untrusted/i);
+    expect(readme).toMatch(/private key.*never|never.*private key/i);
+    expect(readme).toMatch(/ensure_payout_wallet.*feature_unavailable/is);
+    expect(readme).toMatch(/development environment|non-production/i);
+  });
+
   it("cleans before compiling, excludes test sources from dist, and keeps test discovery source-only", () => {
     const packageJson = readJson("package.json") as { scripts?: Record<string, string> };
     const tsconfig = readJson("tsconfig.json") as { exclude?: string[] };
