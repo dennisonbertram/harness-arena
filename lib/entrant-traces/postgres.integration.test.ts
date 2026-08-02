@@ -9,6 +9,29 @@ const ALICE = { id: "00000000-0000-0000-0000-000000000101", github_id: 101, gith
 const BOB = { id: "00000000-0000-0000-0000-000000000202", github_id: 202, github_login: "bob" };
 const SHA = "a".repeat(64);
 
+/**
+ * The reconciler is deliberately defined against a narrow repository port.
+ * Keep this contract test at the concrete Postgres boundary so a future
+ * in-memory fake cannot accidentally become the only implementation of the
+ * close/payout safety path.
+ */
+type ReconciliationPort = {
+  withSubmissionLock<T>(submissionId: string, work: () => Promise<T>): Promise<T>;
+  settleReconciliation(input: {
+    artifact_id: string;
+    state: "pending_upload" | "verified" | "rejected";
+    reason?: string;
+    verified_sha256?: string;
+  }): Promise<unknown>;
+  eligibleVerifiedArtifacts(input: { submission_id: string }): Promise<Array<{
+    id: string;
+    sha256: string;
+    state: string;
+    immutable: boolean;
+  }>>;
+  closeSubmission(input: { submission_id: string; artifact_shas: string[] }): Promise<unknown>;
+};
+
 let db: PGlite;
 let serial = 400;
 
@@ -35,6 +58,10 @@ function traces() {
     ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
     now: () => new Date("2026-08-02T12:00:00.000Z"),
   });
+}
+
+function reconcilerPort(): ReconciliationPort {
+  return traces() as unknown as ReconciliationPort;
 }
 
 const execution = {
@@ -179,5 +206,60 @@ describe("0003 durable submission artifact metadata", () => {
     }
     await expect(repo.listForOwner({ actor: BOB, submission_id: "sub-a" }))
       .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+  });
+
+  it("settles reconciliation durably: an approved policy trace alone is eligible, while manual review and rejection are terminally ineligible", async () => {
+    const repo = reconcilerPort();
+    const artifactRepo = traces();
+
+    const approved = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-approved", artifact: execution });
+    const manual = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-manual", artifact: { ...execution, kind: "rationale", schema_version: "rationale.v1" } });
+    const rejected = await artifactRepo.prepare({ actor: BOB, operation_id: "reconcile-rejected", artifact: { ...execution, submission_id: "sub-b" } });
+    if (!approved.ok || !manual.ok || !rejected.ok) throw new Error("fixture prepare failed");
+
+    for (const artifact of [approved, manual, rejected]) {
+      const actor = artifact.artifact.submission_id === "sub-b" ? BOB : ALICE;
+      await expect(artifactRepo.recordUpload({ actor, artifact_id: artifact.artifact.id, sha256: artifact.artifact.sha256, compressed_bytes: 128 }))
+        .resolves.toMatchObject({ ok: true, artifact: { state: "uploaded" } });
+    }
+
+    await expect(repo.settleReconciliation({ artifact_id: approved.artifact.id, state: "verified", verified_sha256: SHA }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved", policy_verified_at: expect.any(String) } });
+    await expect(repo.settleReconciliation({ artifact_id: manual.artifact.id, state: "pending_upload", reason: "invalid_json" }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "pending_upload", scan_state: "manual_review" } });
+    await expect(repo.settleReconciliation({ artifact_id: rejected.artifact.id, state: "rejected", reason: "sensitive_content" }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "rejected", scan_state: "rejected" } });
+
+    await expect(repo.eligibleVerifiedArtifacts({ submission_id: "sub-a" })).resolves.toEqual([
+      expect.objectContaining({ id: approved.artifact.id, sha256: SHA, state: "verified", immutable: true }),
+    ]);
+    await expect(repo.eligibleVerifiedArtifacts({ submission_id: "sub-b" })).resolves.toEqual([]);
+  });
+
+  it("serializes finalization and closing per submission, rejecting a close before every trace has policy approval", async () => {
+    const port = reconcilerPort();
+    const artifactRepo = traces();
+    const prepared = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-close", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await artifactRepo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+
+    // The first close observes an uploaded (not policy-approved) trace and
+    // must not create an eligibility-bearing close.  The second runs through
+    // the same submission lock after reconciliation has advanced it.
+    await expect(port.withSubmissionLock("sub-a", async () => port.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })))
+      .resolves.toEqual({ ok: false, error: { code: "traces_not_eligible" } });
+
+    await port.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+    await expect(port.withSubmissionLock("sub-a", async () => port.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })))
+      .resolves.toMatchObject({ ok: true });
+
+    const audit = await db.query<{ action: string; safe_metadata: unknown }>(
+      "SELECT action, safe_metadata FROM domain_audit_events WHERE entity_id = $1 ORDER BY occurred_at",
+      ["sub-a"],
+    );
+    expect(audit.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "entrant.trace.submission_closed" }),
+    ]));
+    expect(JSON.stringify(audit.rows)).not.toContain("object_key");
   });
 });

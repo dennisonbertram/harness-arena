@@ -120,4 +120,23 @@ describe("runtime SQL adapter", () => {
     pool.query.mockRejectedValueOnce(new Error(`connect failed for ${connectionString}`));
     await runtime.readiness().catch((error: Error) => expect(error.message).not.toContain(connectionString));
   });
+
+  it("derives migration readiness from the complete migration directory, including entry and chat safety versions, and reports their exact absence", async () => {
+    const pool = poolFixture();
+    const runtime = createRuntimeSqlAdapter({ pool, databaseUrl: "postgres://user:secret@db.example/app" });
+
+    expect(REQUIRED_SCHEMA_MIGRATIONS).toEqual(expectedMigrations);
+    expect(REQUIRED_SCHEMA_MIGRATIONS).toEqual(expect.arrayContaining([
+      "0008_entry_saga",
+      "0009_chat_safety",
+    ]));
+
+    const present = REQUIRED_SCHEMA_MIGRATIONS.filter((version) => version !== "0008_entry_saga" && version !== "0009_chat_safety");
+    pool.query.mockResolvedValueOnce({ rows: present.map((version) => ({ version })) });
+    await expect(runtime.readiness()).resolves.toEqual({ ready: false, schemaVersions: present });
+    expect(pool.query).toHaveBeenLastCalledWith(
+      expect.stringContaining("schema_migrations"),
+      [REQUIRED_SCHEMA_MIGRATIONS],
+    );
+  });
 });
