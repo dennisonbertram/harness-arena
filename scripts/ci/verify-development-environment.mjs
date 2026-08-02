@@ -1,43 +1,191 @@
+import { readFile } from "node:fs/promises";
+import { domainToASCII, pathToFileURL } from "node:url";
+
+const CREDENTIAL_KEY = /(?:token|secret|password|credential|api[_-]?key)/i;
+
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasTokenShapedField(value) {
-  return isObject(value) && Object.keys(value).some((key) => /(?:token|secret|password|api[_-]?key)/i.test(key));
+function addOnce(items, value) {
+  if (!items.includes(value)) items.push(value);
+}
+
+function credentialKeyPaths(value, prefix = "", seen = new WeakSet()) {
+  if (value === null || typeof value !== "object" || seen.has(value)) return [];
+  seen.add(value);
+
+  const paths = [];
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => paths.push(...credentialKeyPaths(item, `${prefix}[${index}]`, seen)));
+    return paths;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (CREDENTIAL_KEY.test(key)) paths.push(path);
+    paths.push(...credentialKeyPaths(child, path, seen));
+  }
+  return paths;
+}
+
+function requiredString(value, path, missing, violations) {
+  if (value === null || value === undefined || value === "") {
+    addOnce(missing, path);
+    return null;
+  }
+  if (typeof value !== "string") {
+    addOnce(violations, path);
+    return null;
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    addOnce(missing, path);
+    return null;
+  }
+  return normalized;
+}
+
+function normalizeIdentity(value) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeHostname(value) {
+  const withoutTrailingDot = value.trim().replace(/\.$/, "");
+  const ascii = domainToASCII(withoutTrailingDot).toLowerCase();
+  if (!ascii || ascii.length > 253) return null;
+  const labels = ascii.split(".");
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+  ) {
+    return null;
+  }
+  return ascii;
+}
+
+function hostname(value, path, missing, violations) {
+  const stringValue = requiredString(value, path, missing, violations);
+  if (stringValue === null) return null;
+  const normalized = normalizeHostname(stringValue);
+  if (!normalized) addOnce(violations, path);
+  return normalized;
+}
+
+function normalizedArray(value, path, normalizer, missing, violations) {
+  if (value === null || value === undefined || (Array.isArray(value) && value.length === 0)) {
+    addOnce(missing, path);
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    addOnce(violations, path);
+    return [];
+  }
+
+  return value.flatMap((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      addOnce(violations, `${path}[${index}]`);
+      return [];
+    }
+    const normalized = normalizer(item);
+    if (!normalized) {
+      addOnce(violations, `${path}[${index}]`);
+      return [];
+    }
+    return [normalized];
+  });
+}
+
+function callbackHostname(value, developmentHost, missing, violations) {
+  const stringValue = requiredString(value, "callbackOrigin", missing, violations);
+  if (stringValue === null) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(stringValue);
+  } catch {
+    addOnce(violations, "callbackOrigin");
+    return null;
+  }
+
+  const normalizedHost = normalizeHostname(parsed.hostname);
+  const canonical =
+    parsed.protocol === "https:" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    parsed.port === "" &&
+    parsed.pathname === "/" &&
+    parsed.search === "" &&
+    parsed.hash === "" &&
+    normalizedHost !== null;
+
+  if (!canonical || (developmentHost !== null && normalizedHost !== developmentHost)) {
+    addOnce(violations, "callbackOrigin");
+  }
+  return normalizedHost;
 }
 
 export function verifyDevelopmentEnvironment({ development, live }) {
   const missing = [];
   const violations = [];
 
-  if (!isObject(development) || development.environment !== "development") violations.push("environment");
-  if (!isObject(development) || development.branch !== "dev") violations.push("branch");
-  if (!isObject(development?.vercelProject) || !development.vercelProject.id || !development.vercelProject.name) {
-    missing.push("vercelProject");
-  }
-  if (!development?.host) missing.push("host");
-  if (!development?.store?.id) missing.push("store.id");
-  if (!development?.callbackOrigin) missing.push("callbackOrigin");
-  if (!isObject(live) || !live.projectId) missing.push("live.projectId");
-  if (!Array.isArray(live?.aliases) || live.aliases.length === 0) missing.push("live.aliases");
-  if (!Array.isArray(live?.storeIds) || live.storeIds.length === 0) missing.push("live.storeIds");
+  for (const path of credentialKeyPaths(development)) addOnce(violations, path);
+  for (const path of credentialKeyPaths(live, "live")) addOnce(violations, path);
 
-  if (hasTokenShapedField(development)) {
-    violations.push(...Object.keys(development).filter((key) => /(?:token|secret|password|api[_-]?key)/i.test(key)));
+  if (!isObject(development)) {
+    addOnce(violations, "development");
+    return { ok: false, missing, violations };
+  }
+  if (!isObject(live)) {
+    addOnce(violations, "live");
+    return { ok: false, missing, violations };
   }
 
-  if (development?.vercelProject?.id && development.vercelProject.id === live?.projectId) violations.push("vercelProject.id");
-  if (development?.host && live?.aliases?.includes(development.host)) violations.push("host");
-  if (development?.store?.id && live?.storeIds?.includes(development.store.id)) violations.push("store.id");
-  if (development?.callbackOrigin) {
-    let callbackHost;
-    try {
-      callbackHost = new URL(development.callbackOrigin).host;
-    } catch {
-      violations.push("callbackOrigin");
+  const environment = requiredString(development.environment, "environment", missing, violations);
+  if (environment !== null && environment !== "development") addOnce(violations, "environment");
+  const branch = requiredString(development.branch, "branch", missing, violations);
+  if (branch !== null && branch !== "dev") addOnce(violations, "branch");
+
+  let developmentProjectId = null;
+  if (!isObject(development.vercelProject)) {
+    if (development.vercelProject === null || development.vercelProject === undefined) {
+      addOnce(missing, "vercelProject");
+    } else {
+      addOnce(violations, "vercelProject");
     }
-    if (callbackHost && live?.aliases?.includes(callbackHost)) violations.push("callbackOrigin");
+  } else {
+    const projectId = requiredString(development.vercelProject.id, "vercelProject.id", missing, violations);
+    developmentProjectId = projectId === null ? null : normalizeIdentity(projectId);
+    requiredString(development.vercelProject.name, "vercelProject.name", missing, violations);
   }
+
+  const developmentHost = hostname(development.host, "host", missing, violations);
+
+  let developmentStoreId = null;
+  if (!isObject(development.store)) {
+    if (development.store === null || development.store === undefined) addOnce(missing, "store");
+    else addOnce(violations, "store");
+  } else {
+    const storeId = requiredString(development.store.id, "store.id", missing, violations);
+    developmentStoreId = storeId === null ? null : normalizeIdentity(storeId);
+  }
+
+  const callbackHost = callbackHostname(development.callbackOrigin, developmentHost, missing, violations);
+  const liveProjectIdValue = requiredString(live.projectId, "live.projectId", missing, violations);
+  const liveProjectId = liveProjectIdValue === null ? null : normalizeIdentity(liveProjectIdValue);
+  const liveAliases = normalizedArray(live.aliases, "live.aliases", normalizeHostname, missing, violations);
+  const liveStoreIds = normalizedArray(live.storeIds, "live.storeIds", normalizeIdentity, missing, violations);
+
+  if (developmentProjectId && liveProjectId && developmentProjectId === liveProjectId) {
+    addOnce(violations, "vercelProject.id");
+  }
+  if (developmentHost && liveAliases.includes(developmentHost)) addOnce(violations, "host");
+  if (developmentStoreId && liveStoreIds.includes(developmentStoreId)) addOnce(violations, "store.id");
+  if (callbackHost && liveAliases.includes(callbackHost)) addOnce(violations, "callbackOrigin");
 
   return { ok: missing.length === 0 && violations.length === 0, missing, violations };
 }
@@ -53,5 +201,3 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main();
 }
-import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";

@@ -5,6 +5,20 @@ project. It must never be used to configure, deploy, inspect, or mutate the
 live project, its aliases, production Blob, production environment values, or
 production data.
 
+## PR #174 preview-routing disclosure source
+
+At commit `f15ba57`, Git integration created an automatic non-production preview
+in the existing live Vercel project before the separate development project was
+configured. It had no alias, no data mutation, and no request traffic. It did
+not change the production deployment or live aliases.
+
+Before any further push or deploy, the infrastructure owner must verify
+live-project branch-ignore routing that allows only production-bound Git work
+to build there. A skipped or canceled live-project check—not a preview
+deployment—is the required evidence after each development-branch push. This
+text is the source disclosure for the draft PR body until the routing gate and
+review are complete.
+
 ## Before any integration
 
 1. Work from the `dev` branch and a PR whose body contains exactly one line of

@@ -42,18 +42,22 @@ function fail(message) {
 
 export function parseDevelopmentClosingIssue(body) {
   if (typeof body !== "string") {
-    fail("dev PR body must contain exactly one local Closes #N reference.");
+    fail(
+      "dev PR body must contain exactly one entire canonical local Closes #N reference " +
+        "(exactly one local Closes #N).",
+    );
   }
 
-  const candidates = [...body.matchAll(/^\s*Closes\s+([^\s]+)\s*$/gm)];
-  if (candidates.length !== 1) {
-    fail("dev PR body must contain exactly one local Closes #N reference.");
-  }
-
-  const reference = candidates[0][1];
-  const match = /^#([1-9]\d*)$/.exec(reference);
+  const candidates = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/i.test(line));
+  const match = candidates.length === 1 ? /^Closes #([1-9]\d*)$/.exec(candidates[0]) : null;
   if (!match) {
-    fail("dev PR body must contain exactly one local Closes #N reference; cross-repository and malformed references are not allowed.");
+    fail(
+      "dev PR body must contain exactly one entire canonical local Closes #N reference " +
+        "(exactly one local Closes #N); extra, cross-repository, and malformed closing directives are not allowed.",
+    );
   }
 
   return Number(match[1]);
@@ -140,6 +144,9 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
     const issue = graphRepository.issue;
     if (!issue) {
       throw new Error("GitHub GraphQL response was malformed.");
+    }
+    if (issue.number !== developmentIssueNumber) {
+      fail(`GitHub issue #${issue.number} does not match parsed Closes #${developmentIssueNumber}.`);
     }
 
     return verifyPullRequestLineage({
