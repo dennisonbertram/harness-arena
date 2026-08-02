@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPostgresEntrantTraces } from "./postgres";
 
 const migration = (name: string) => readFileSync(path.join(process.cwd(), "db", "migrations", name), "utf8");
@@ -81,6 +81,16 @@ describe("0003 durable submission artifact metadata", () => {
       repo.prepare({ actor: BOB, operation_id: "prepare-concurrent", artifact: { submission_id: "sub-b", consent: execution.consent, sha256: SHA, uncompressed_bytes: 512, compressed_bytes: 128, compression: "gzip", mime_type: "application/json", schema_version: "execution.v1", kind: "execution" } }),
     ]);
     expect(concurrentTwo).toEqual(concurrentOne);
+  });
+
+  it("pins every prepare write to the injected transaction-scoped SQL client", async () => {
+    const transaction = vi.fn(async <Result>(callback: (tx: PGlite) => Promise<Result>) => db.transaction(callback));
+    const repo = createPostgresEntrantTraces({ exec: db.exec.bind(db), query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+    await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-transaction", artifact: execution })).resolves.toMatchObject({ ok: true });
+    expect(transaction).toHaveBeenCalledTimes(1);
   });
 
   it("records upload, verifies the final checksum, rejects mismatches, and exposes due reconciliation work", async () => {
