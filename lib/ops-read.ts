@@ -36,7 +36,7 @@ export function redactOpsValue(value: unknown, key = ""): unknown {
   if (Array.isArray(value)) return value.map((item) => redactOpsValue(item));
   return value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactOpsValue(item, name)])) : value;
 }
-type CursorPayload = { kind: OpsKind; prefix: string; blob_cursor?: string; snapshot_at: string; filter?: string; run_id?: string; root?: string; v?: 1 };
+type CursorPayload = { kind: OpsKind; prefix: string; blob_cursor?: string; snapshot_at: string; filter?: string; run_id?: string; root?: string; last_event?: { run_id: string; seq: number }; v?: 1 };
 const cursorKey = () => process.env.OPS_READ_CURSOR_SECRET || process.env.OPS_READ_TOKEN || "";
 export function encodeOpsCursor(payload: CursorPayload) { const body=Buffer.from(JSON.stringify({...payload,v:1})).toString("base64url");return `${body}.${createHmac("sha256",cursorKey()).update(body).digest("base64url")}`; }
 export function decodeOpsCursor(cursor:string, context:Pick<CursorPayload,"kind"|"prefix">):CursorPayload { try {const [body,sig,...extra]=cursor.split(".");if(!body||!sig||extra.length)throw 0;const expected=createHmac("sha256",cursorKey()).update(body).digest(),actual=Buffer.from(sig,"base64url");if(actual.length!==expected.length||!timingSafeEqual(expected,actual))throw 0;const value=JSON.parse(Buffer.from(body,"base64url").toString()) as CursorPayload;if(value.v!==1||value.kind!==context.kind||value.prefix!==context.prefix)throw 0;return value;}catch{throw new Error("invalid_cursor");} }
@@ -58,10 +58,32 @@ export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter
       let prefix:string;try{prefix=prefixFor(kind,options.run_id);}catch{return {error:{code:"invalid_filter"}};}
       let state:CursorPayload|undefined;try{state=options.cursor?decodeOpsCursor(options.cursor,{kind,prefix}):undefined;}catch{return {error:{code:"invalid_cursor"}};}
       const snapshot=state?.snapshot_at??new Date().toISOString();
-      try {const page=await adapter.listPage({prefix,cursor:state?.blob_cursor,limit});const records=page.records.filter((record)=>record.uploaded_at<=snapshot);return {items:records,next_cursor:page.has_more&&page.cursor?encodeOpsCursor({kind,prefix,blob_cursor:page.cursor,snapshot_at:snapshot,run_id:options.run_id}):null,has_more:page.has_more,snapshot_at:snapshot};}
+      try {const page=await adapter.listPage({prefix,cursor:state?.blob_cursor,limit});const records=page.records.filter((record)=>record.uploaded_at<=snapshot);const integrity={event_holes:0,corrupt:0};let lastEvent=state?.last_event;if(kind==="events")for(const record of records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const current={run_id:match[1],seq:Number(match[2])};const previous=lastEvent?.run_id===current.run_id?lastEvent.seq:0;if(current.seq>previous+1)integrity.event_holes+=current.seq-previous-1;if(current.seq>previous)lastEvent=current;}return {items:records,next_cursor:page.has_more&&page.cursor?encodeOpsCursor({kind,prefix,blob_cursor:page.cursor,snapshot_at:snapshot,run_id:options.run_id,last_event:lastEvent}):null,has_more:page.has_more,snapshot_at:snapshot,integrity};}
       catch{return {error:{code:"partial_read",prefix},partial:true};}
     },
     async read(kind:OpsKind,input:Record<string,string|undefined>){let pathname:string;try{pathname=pathnameFor(kind,input);}catch{return {error:{code:"invalid_identifier"}};}const result=await adapter.read({pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});if(result.status!=="ok")return {error:{code:result.status,...result}};const def=definition(kind);let content:unknown=result.bytes.toString("utf8");if(def.format==="json")try{content=JSON.parse(content as string);}catch{return {error:{code:"corrupt",pathname}};}if(def.format==="binary")content=result.bytes.toString("base64");return {item:redactOpsValue(content),metadata:result.metadata};},
-    async summary(){const counts:Record<string,number>={},latest:Record<string,string|null>={},runStates={queued:0,running:0,failed:0,stale:0},integrity={event_holes:0,unreadable:0,corrupt:0},scanned= {records:0,complete:true,truncated:false};for(const def of OPS_RECORD_KINDS.filter((item)=>item.kind!=="archives")){let cursor:string|undefined;do{if(scanned.records>=MAX_SUMMARY_RECORDS){scanned.complete=false;scanned.truncated=true;break;}let page;try{page=await adapter.listPage({prefix:def.prefix,cursor,limit:Math.min(MAX_LIMIT,MAX_SUMMARY_RECORDS-scanned.records)});}catch{integrity.unreadable++;scanned.complete=false;break;}counts[def.kind]=(counts[def.kind]??0)+page.records.length;latest[def.kind]=page.records.reduce((value,record)=>!value||record.uploaded_at>value?record.uploaded_at:value,latest[def.kind]??null);scanned.records+=page.records.length;if(def.kind==="runs")for(const record of page.records){const result=await adapter.read({pathname:record.pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});if(result.status!=="ok"){integrity.unreadable++;continue;}try{const value=JSON.parse(result.bytes.toString()) as {status?:string};if(value.status&&value.status in runStates)runStates[value.status as keyof typeof runStates]++;}catch{integrity.corrupt++;}}cursor=page.has_more?page.cursor:undefined;}while(cursor);}return {counts,latest,run_states:runStates,integrity,scan:scanned};},
+    async summary() {
+      const counts:Record<string,number>={}, latest:Record<string,string|null>={};
+      const runStates={queued:0,running:0,failed:0,stale:0};
+      const integrity={event_holes:0,unreadable:0,corrupt:0};
+      const scanned={records:0,complete:true,truncated:false};
+      const lastEventSeq=new Map<string,number>();
+      for(const def of OPS_RECORD_KINDS.filter((item)=>item.kind!=="archives")){
+        let cursor:string|undefined;
+        do {
+          if(scanned.records>=MAX_SUMMARY_RECORDS){scanned.complete=false;scanned.truncated=true;break;}
+          let page;
+          try{page=await adapter.listPage({prefix:def.prefix,cursor,limit:Math.min(MAX_LIMIT,MAX_SUMMARY_RECORDS-scanned.records)});}
+          catch{integrity.unreadable++;scanned.complete=false;break;}
+          counts[def.kind]=(counts[def.kind]??0)+page.records.length;
+          latest[def.kind]=page.records.reduce((value,record)=>!value||record.uploaded_at>value?record.uploaded_at:value,latest[def.kind]??null);
+          scanned.records+=page.records.length;
+          if(def.kind==="events") for(const record of page.records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const seq=Number(match[2]),previous=lastEventSeq.get(match[1])??0;if(seq>previous+1)integrity.event_holes+=seq-previous-1;if(seq>previous)lastEventSeq.set(match[1],seq);}
+          if(def.kind==="runs") for(const record of page.records){const result=await adapter.read({pathname:record.pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});if(result.status!=="ok"){integrity.unreadable++;continue;}try{const value=JSON.parse(result.bytes.toString()) as {status?:string;started_at?:string;created_at?:string};if(value.status==="queued")runStates.queued++;if(value.status==="running"){runStates.running++;const timestamp=Date.parse(value.started_at??value.created_at??"");if(Number.isFinite(timestamp)&&Date.now()-timestamp>20*60_000)runStates.stale++;}if(value.status==="failed")runStates.failed++;}catch{integrity.corrupt++;}}
+          cursor=page.has_more?page.cursor:undefined;
+        } while(cursor);
+      }
+      return {counts,latest,run_states:runStates,integrity,scan:scanned};
+    },
   };
 }
