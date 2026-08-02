@@ -1,4 +1,4 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -27,7 +27,11 @@ describe("HarnessArenaClient", () => {
       .mockResolvedValueOnce(json(200, { token: "token", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" }));
     const announced = vi.fn();
     const client = new HarnessArenaClient({ credentials: store, fetch: fetcher, now: () => now, sleep: async (ms) => { now += ms; }, onDeviceCode: announced, deviceAttempts: await isolatedAttemptStore(() => now) });
-    await expect(client.login()).resolves.toMatchObject({ status: "authenticated", github_login: "octo", authorization: { user_code: "ABCD" } });
+    await expect(client.login()).resolves.toMatchObject({
+      status: "authenticated",
+      github_login: "octo",
+      authorization: { user_code: "ABCD", expires_in: 60 },
+    });
     expect(announced).toHaveBeenCalledWith(expect.objectContaining({ user_code: "ABCD", verification_uri: "https://github.com/login/device" }));
     expect(store.set).toHaveBeenCalledWith("https://harness-arena-psi.vercel.app", expect.objectContaining({ token: "token" }));
     expect(fetcher).toHaveBeenCalledTimes(3);
@@ -177,14 +181,16 @@ describe("HarnessArenaClient", () => {
 
   it("reports device expiry and unexpected poll responses", async () => {
     let now = 0;
+    const expiringAttempts = await isolatedAttemptStore(() => now);
     const expiringClient = new HarnessArenaClient({
       credentials: testStore(),
       fetch: vi.fn().mockResolvedValue(json(200, { device_code: "secret", user_code: "ABCD", verification_uri: "https://example.test", expires_in: 1, interval: 1 })),
       now: () => now,
       sleep: async (ms) => { now += ms; },
-      deviceAttempts: await isolatedAttemptStore(() => now),
+      deviceAttempts: expiringAttempts,
     });
     await expect(expiringClient.login()).rejects.toThrow("Device login expired before it was approved. Run login again to get a new code.");
+    expect(JSON.parse(await readFile(expiringAttempts.path, "utf8")).attempts).toEqual({});
 
     now = 0;
     const unexpectedClient = new HarnessArenaClient({
