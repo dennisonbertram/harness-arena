@@ -68,6 +68,11 @@ describe("POST /api/competitions/[id]/chat/join", () => {
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toEqual({ error: { code: "membership_conflict" } });
 
+    runtime.joinCompetitionChat.mockResolvedValueOnce({ ok: false, error: { code: "forbidden" } });
+    const forbidden = await POST(request(), context());
+    expect(forbidden.status).toBe(403);
+    await expect(forbidden.json()).resolves.toEqual({ error: { code: "forbidden" } });
+
     runtime.joinCompetitionChat.mockRejectedValueOnce(new Error("postgres://private-host"));
     const unavailable = await POST(request(), context());
     expect(unavailable.status).toBe(503);

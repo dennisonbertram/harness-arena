@@ -81,6 +81,10 @@ type Services = {
     };
   };
   chat: {
+    join?(input: {
+      actor: { id: string; github_id: number; github_login: string };
+      competition_id: string;
+    }): Promise<any>;
     list(input: {
       actor: { id: string; github_id: number; github_login: string };
       competition_id: string;
@@ -341,21 +345,12 @@ export function createAgentNetworkRuntime({
       { actor, competition_id }: { actor: SessionActor; competition_id: string },
     ): Promise<
       | { ok: true; membership: { competition_id: string; state: string; joined_at: string } }
-      | { ok: false; error: { code: "conflict" | "unavailable" } }
+      | { ok: false; error: { code: "forbidden" | "conflict" | "unavailable" } }
     > {
-      const membership = await services.repositories.memberships.set({
-        competitionId: competition_id,
-        entrantId: actor.id,
-        state: "active",
-      });
-      return {
-        ok: true as const,
-        membership: {
-          competition_id: membership.competitionId,
-          state: membership.state,
-          joined_at: membership.joinedAt,
-        },
-      };
+      if (!services.chat.join) return { ok: false, error: { code: "unavailable" } };
+      const result = await services.chat.join({ actor: chatActor(actor), competition_id });
+      if (!result?.ok) return { ok: false, error: { code: result?.error?.code === "forbidden" ? "forbidden" : "unavailable" } };
+      return { ok: true, membership: result.membership };
     },
 
     async readCompetitionChat({

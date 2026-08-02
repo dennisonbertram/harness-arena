@@ -234,7 +234,20 @@ export function createPostgresCompetitionChat(
     },
     async join({ actor, competition_id }: { actor: PostgresChatActor | null; competition_id: string }) {
       if (!actor) return fail("unauthenticated");
-      return (await member(competition_id, actor)) ? { ok: true as const } : fail("forbidden");
+      const membership = await db.query<{ state: string; joined_at: Date | string }>(
+        "SELECT state, joined_at FROM competition_memberships WHERE competition_id=$1 AND entrant_id=$2 AND state='active'",
+        [competition_id, actor.id],
+      );
+      const row = membership.rows[0];
+      if (!row) return fail("forbidden");
+      return {
+        ok: true as const,
+        membership: {
+          competition_id,
+          state: row.state,
+          joined_at: row.joined_at instanceof Date ? row.joined_at.toISOString() : String(row.joined_at),
+        },
+      };
     },
     async subscribe({ actor, competition_id }: { actor: PostgresChatActor | null; competition_id: string }) {
       if (!actor) return fail("unauthenticated");

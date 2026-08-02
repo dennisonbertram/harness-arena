@@ -20,7 +20,10 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     const { id } = await params;
     if (!await runtime.getLiveCompetition(id)) return error("competition_not_found", 404);
     const result = await runtime.joinCompetitionChat({ actor: authentication.actor, competition_id: id });
-    if (!result.ok) return result.error.code === "conflict" ? error("membership_conflict", 409) : error("chat_unavailable", 503);
+    if (!result.ok) {
+      if (result.error.code === "forbidden") return error("forbidden", 403);
+      return result.error.code === "conflict" ? error("membership_conflict", 409) : error("chat_unavailable", 503);
+    }
     return NextResponse.json({ membership: result.membership });
   } catch {
     return error("chat_unavailable", 503);
