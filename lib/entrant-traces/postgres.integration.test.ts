@@ -17,6 +17,7 @@ beforeEach(async () => {
   await db.exec(migration("0001_agent_network.sql"));
   await db.exec(migration("0002_competition_chat.sql"));
   await db.exec(migration("0003_submission_artifacts.sql"));
+  await db.exec(migration("0006_trace_policy.sql"));
   serial = 400;
   await db.exec(`
     INSERT INTO entrants (id, github_id, github_login) VALUES
@@ -107,8 +108,10 @@ describe("0003 durable submission artifact metadata", () => {
     await expect(repo.reconcileDue({ before: new Date("2026-08-03T00:00:00.000Z") })).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: prepared.artifact.id, state: "uploaded" }),
     ]));
-    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toMatchObject({ ok: true, artifact: { state: "verified" } });
-    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toMatchObject({ ok: true, artifact: { state: "verified" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+    const policy = { verified_sha256: SHA, scan_revision: "trace-policy.v1" };
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy })).resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved", scan_revision: "trace-policy.v1" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy })).resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved" } });
     await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: "b".repeat(64) })).resolves.toEqual({ ok: false, error: { code: "conflict" } });
     await expect(db.query(
       "UPDATE submission_artifacts SET object_key = $2 WHERE id = $1",

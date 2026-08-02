@@ -82,6 +82,9 @@ function fixture() {
       return { ok: true, bytes };
     }),
   };
+  const tracePolicy = {
+    verify: vi.fn(async ({ sha256: checksum }: { sha256: string }) => ({ ok: true, verified_sha256: checksum })),
+  };
   const payouts = {
     prepare: vi.fn(async ({ actor, address, reauthenticated_at }) => ({
       ok: true,
@@ -103,15 +106,16 @@ function fixture() {
     services: { ...baseServices, traces, payouts },
     storage,
     privateBlob,
+    tracePolicy,
     now: () => NOW,
     tokenConfiguration: { issuer: "harness-arena", audience: "harness-arena-mcp", keyId: "key-1" },
   });
-  return { runtime, traces, privateBlob, payouts, storage, records };
+  return { runtime, traces, privateBlob, tracePolicy, payouts, storage, records };
 }
 
 describe("agent network runtime trace and payout orchestration", () => {
   it("prepares exactly execution and rationale artifacts with stable operation ids, private uploads, and safe replay DTOs", async () => {
-    const { runtime, traces, privateBlob } = fixture();
+    const { runtime, traces, privateBlob, tracePolicy } = fixture();
 
     const first = await runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "prepare-1" });
     const second = await runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "prepare-1" });
@@ -154,16 +158,29 @@ describe("agent network runtime trace and payout orchestration", () => {
   });
 
   it("owner-checks internal trace metadata before a bounded private checksum read and only then records and finalizes", async () => {
-    const { runtime, traces, privateBlob } = fixture();
+    const { runtime, traces, privateBlob, tracePolicy } = fixture();
     await runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "finalize-prepare" });
 
     const result = await runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: manifest.artifacts[0].sha256 });
 
     expect(privateBlob.readVerified).toHaveBeenCalledWith({ object_key: expect.stringMatching(/^private\/artifacts\//), sha256: manifest.artifacts[0].sha256, max_bytes: EXECUTION_BYTES.length });
+    expect(tracePolicy.verify).toHaveBeenCalledWith(expect.objectContaining({ kind: "execution", compression: "gzip", sha256: manifest.artifacts[0].sha256, bytes: EXECUTION_BYTES }));
     expect(traces.recordUpload).toHaveBeenCalledWith({ actor: ALICE, artifact_id: "artifact-execution", sha256: manifest.artifacts[0].sha256, compressed_bytes: EXECUTION_BYTES.length });
-    expect(traces.finalize).toHaveBeenCalledWith({ actor: ALICE, artifact_id: "artifact-execution", sha256: manifest.artifacts[0].sha256 });
+    expect(traces.finalize).toHaveBeenCalledWith({ actor: ALICE, artifact_id: "artifact-execution", sha256: manifest.artifacts[0].sha256, policy: { verified_sha256: manifest.artifacts[0].sha256, scan_revision: "trace-policy.v1" } });
+    expect(privateBlob.readVerified.mock.invocationCallOrder[0]).toBeLessThan(tracePolicy.verify.mock.invocationCallOrder[0]);
+    expect(tracePolicy.verify.mock.invocationCallOrder[0]).toBeLessThan(traces.finalize.mock.invocationCallOrder[0]);
     expect(result).toMatchObject({ ok: true, artifact: { id: "artifact-execution", state: "verified" } });
     expect(JSON.stringify(result)).not.toMatch(/object_key|owner_entrant_id|token/i);
+  });
+
+  it("never verifies eligibility state when trace policy rejects or requires manual review", async () => {
+    const { runtime, traces, tracePolicy } = fixture();
+    await runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "policy-prepare" });
+    tracePolicy.verify.mockResolvedValueOnce({ ok: false, disposition: "manual_review", error: { code: "scan_timeout" } });
+
+    await expect(runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: manifest.artifacts[0].sha256 }))
+      .resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+    expect(traces.finalize).not.toHaveBeenCalled();
   });
 
   it("returns not_found for a foreign artifact without attempting a private Blob read", async () => {
