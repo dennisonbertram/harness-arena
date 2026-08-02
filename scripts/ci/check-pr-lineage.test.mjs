@@ -120,8 +120,18 @@ describe("checkPullRequestLineage", () => {
   it("fails closed with explicit semantics for dev targets", async () => {
     const devEvent = structuredClone(event);
     devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
     const payload = structuredClone(validPayload);
     payload.data.repository.pullRequest.closingIssuesReferences = { totalCount: 0, nodes: [] };
+    payload.data.repository.issue = {
+      number: 173,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
 
     await expect(
       checker()({
@@ -130,7 +140,27 @@ describe("checkPullRequestLineage", () => {
         repository: "dennisonbertram/harness-arena",
         fetchImpl: async () => response(payload),
       }),
-    ).rejects.toThrow("GitHub only populates native closing issue references for the default branch");
+    ).resolves.toEqual({ issueNumber: 173, parentEpicNumber: 139 });
+  });
+
+  it("rejects a dev PR without exactly one local Closes #N reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173\nCloses #174";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one local Closes #N");
+  });
+
+  it("rejects cross-repository closing syntax for a dev PR", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes attacker/foreign-repo#173";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("local Closes #N");
   });
 
   it("fails closed when GitHub returns an HTTP error", async () => {
