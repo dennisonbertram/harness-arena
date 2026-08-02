@@ -67,6 +67,8 @@ describe("agent network durable entry runtime boundary", () => {
       ["COMPETITION_CLOSED", "competition_closed"],
       ["IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST", "idempotency_conflict"],
       ["ENTRY_RECONCILIATION_REQUIRED", "reconciliation_required"],
+      ["ENTRY_SAGA_BUSY", "entry_in_progress"],
+      ["ENTRY_AUTHORIZATION_REVOKED", "forbidden"],
     ] as const) {
       const entrySaga = { submit: vi.fn().mockRejectedValue(Object.assign(new Error(source), { code: source })) };
       const subject = fixture(entrySaga);
