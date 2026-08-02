@@ -5,8 +5,8 @@ type Sql = {
 };
 type Db = Sql & { transaction<T>(work: (tx: Sql) => Promise<T>): Promise<T> };
 
-export type PostgresChatActor = { id: string; github_id: number; github_login: string };
-type ErrorCode = "unauthenticated" | "forbidden" | "not_found" | "conflict" | "invalid_body" | "invalid_pagination" | "invalid_cursor";
+export type PostgresChatActor = { id: string; github_id: number; github_login: string; role?: "operator" };
+type ErrorCode = "unauthenticated" | "forbidden" | "not_found" | "conflict" | "invalid_body" | "invalid_pagination" | "invalid_cursor" | "rate_limited";
 type Failure = { ok: false; error: { code: ErrorCode } };
 export type PostgresChatMessage = {
   id: string;
@@ -38,7 +38,7 @@ function requestHash(body: string, replyToId: string | undefined): string {
 
 export function createPostgresCompetitionChat(
   db: Db,
-  options: { cursorSecret: string; ids: { next(): string }; now(): Date },
+  options: { cursorSecret: string; ids: { next(): string }; now(): Date; quotas?: { posts?: { limit: number; windowMs: number } } },
 ) {
   const tails = new Map<string, Promise<void>>();
   const hmac = (value: string) => createHmac("sha256", options.cursorSecret).update(value).digest();
@@ -61,10 +61,10 @@ export function createPostgresCompetitionChat(
         : null;
     } catch { return null; }
   };
-  async function member(competitionId: string, actor: PostgresChatActor | null, sql: Sql = db): Promise<boolean> {
+  async function member(competitionId: string, actor: PostgresChatActor | null, sql: Sql = db, lock = false): Promise<boolean> {
     if (!actor) return false;
     const result = await sql.query<{ ok: number }>(
-      "SELECT 1 AS ok FROM competition_memberships WHERE competition_id = $1 AND entrant_id = $2 AND state = 'active'",
+      `SELECT 1 AS ok FROM competition_memberships WHERE competition_id = $1 AND entrant_id = $2 AND state = 'active'${lock ? " FOR UPDATE" : ""}`,
       [competitionId, actor.id],
     );
     return result.rows.length === 1;
@@ -114,6 +114,28 @@ export function createPostgresCompetitionChat(
       ...(row.reply_to_id ? { reply_to_id: row.reply_to_id } : {}), mentions: resolved, unresolved_mentions,
     };
   }
+  const plainText = (body: string) => body.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+  const operator = (actor: PostgresChatActor | null): actor is PostgresChatActor => Boolean(actor && actor.role === "operator");
+
+  async function consumePostQuota(competitionId: string, entrantId: string, sql: Sql): Promise<boolean> {
+    const quota = options.quotas?.posts;
+    if (!quota) return true;
+    if (!Number.isSafeInteger(quota.limit) || quota.limit < 1 || !Number.isSafeInteger(quota.windowMs) || quota.windowMs < 1) return false;
+    const now = options.now();
+    const cutoff = new Date(now.getTime() - quota.windowMs).toISOString();
+    const result = await sql.query<{ used: number }>(
+      `INSERT INTO competition_chat_quotas (competition_id, entrant_id, window_started_at, used, updated_at)
+       VALUES ($1,$2,$3::timestamptz,1,$3::timestamptz)
+       ON CONFLICT (competition_id, entrant_id) DO UPDATE SET
+         used = CASE WHEN competition_chat_quotas.window_started_at <= $4::timestamptz THEN 1 ELSE competition_chat_quotas.used + 1 END,
+         window_started_at = CASE WHEN competition_chat_quotas.window_started_at <= $4::timestamptz THEN EXCLUDED.window_started_at ELSE competition_chat_quotas.window_started_at END,
+         updated_at = EXCLUDED.updated_at
+       WHERE competition_chat_quotas.window_started_at <= $4::timestamptz OR competition_chat_quotas.used < $5
+       RETURNING used`,
+      [competitionId, entrantId, now.toISOString(), cutoff, quota.limit],
+    );
+    return result.rows.length === 1;
+  }
 
   return {
     async post({ actor, competition_id, body, operation_id, reply_to_id }: { actor: PostgresChatActor | null; competition_id: string; body: string; operation_id: string; reply_to_id?: string }) {
@@ -135,7 +157,9 @@ export function createPostgresCompetitionChat(
         }
         try {
           return await db.transaction(async (tx): Promise<Success | Failure> => {
-            if (!(await member(competition_id, actor, tx))) return fail("forbidden");
+            // Locking the membership row makes a concurrent ban win before a
+            // message can be committed, including across service instances.
+            if (!(await member(competition_id, actor, tx, true))) return fail("forbidden");
             const concurrent = await tx.query<{ request_hash: string; entity_id: string | null; response_json: unknown }>(
               `SELECT request_hash, entity_id, response_json FROM idempotency_operations
                WHERE actor_id = $1 AND competition_id = $2 AND operation = 'competition.chat.post' AND idempotency_key = $3`,
@@ -147,6 +171,7 @@ export function createPostgresCompetitionChat(
               const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
               return replay as Success;
             }
+            if (!(await consumePostQuota(competition_id, actor.id, tx))) return fail("rate_limited");
             if (reply_to_id) {
               const parent = await tx.query<{ id: string }>("SELECT id FROM competition_messages WHERE id = $1 AND competition_id = $2", [reply_to_id, competition_id]);
               if (!parent.rows[0]) return fail("not_found");
@@ -167,12 +192,13 @@ export function createPostgresCompetitionChat(
             const messageId = options.ids.next();
             const operationId = options.ids.next();
             const outboxId = options.ids.next();
+            const renderedBody = plainText(body);
             const mention = await resolveMentions(competition_id, handles(body), tx);
             const createdAt = options.now().toISOString();
             await tx.query(
               `INSERT INTO competition_messages (id, competition_id, sequence, author_entrant_id, reply_to_id, body, body_format, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,'plain',$7)`,
-              [messageId, competition_id, next.rows[0].sequence, actor.id, reply_to_id ?? null, body, createdAt],
+              [messageId, competition_id, next.rows[0].sequence, actor.id, reply_to_id ?? null, renderedBody, createdAt],
             );
             for (const target of mention.resolved) await tx.query(
               "INSERT INTO message_mentions (message_id, target_entrant_id, handle_snapshot) VALUES ($1,$2,$3)", [messageId, target.id, target.login],
@@ -205,6 +231,56 @@ export function createPostgresCompetitionChat(
           throw error;
         }
       });
+    },
+    async join({ actor, competition_id }: { actor: PostgresChatActor | null; competition_id: string }) {
+      if (!actor) return fail("unauthenticated");
+      return (await member(competition_id, actor)) ? { ok: true as const } : fail("forbidden");
+    },
+    async subscribe({ actor, competition_id }: { actor: PostgresChatActor | null; competition_id: string }) {
+      if (!actor) return fail("unauthenticated");
+      return (await member(competition_id, actor)) ? { ok: true as const } : fail("forbidden");
+    },
+    async ban({ actor, competition_id, entrant_id, operation_id }: { actor: PostgresChatActor | null; competition_id: string; entrant_id: string; operation_id: string }) {
+      if (!operator(actor)) return fail(actor ? "forbidden" : "unauthenticated");
+      return serialized(competition_id, async () => db.transaction(async (tx) => {
+        if (!(await member(competition_id, actor, tx, true))) return fail("forbidden");
+        const existing = await tx.query<{ id: string }>(
+          "SELECT id FROM competition_chat_audit_events WHERE actor_entrant_id=$1 AND competition_id=$2 AND action='entrant.banned' AND operation_id=$3",
+          [actor.id, competition_id, operation_id],
+        );
+        if (existing.rows[0]) return { ok: true as const };
+        const updated = await tx.query<{ entrant_id: string }>(
+          "UPDATE competition_memberships SET state='banned' WHERE competition_id=$1 AND entrant_id=$2 RETURNING entrant_id",
+          [competition_id, entrant_id],
+        );
+        if (!updated.rows[0]) return fail("not_found");
+        await tx.query(
+          "INSERT INTO competition_chat_audit_events (id,competition_id,action,actor_entrant_id,entrant_id,operation_id,created_at) VALUES ($1,$2,'entrant.banned',$3,$4,$5,$6::timestamptz)",
+          [options.ids.next(), competition_id, actor.id, entrant_id, operation_id, options.now().toISOString()],
+        );
+        return { ok: true as const };
+      }));
+    },
+    async tombstone({ actor, competition_id, message_id, operation_id }: { actor: PostgresChatActor | null; competition_id: string; message_id: string; operation_id: string }) {
+      if (!operator(actor)) return fail(actor ? "forbidden" : "unauthenticated");
+      return serialized(competition_id, async () => db.transaction(async (tx) => {
+        if (!(await member(competition_id, actor, tx, true))) return fail("forbidden");
+        const existing = await tx.query<{ id: string }>(
+          "SELECT id FROM competition_chat_audit_events WHERE actor_entrant_id=$1 AND competition_id=$2 AND action='message.tombstoned' AND operation_id=$3",
+          [actor.id, competition_id, operation_id],
+        );
+        if (existing.rows[0]) return { ok: true as const };
+        const updated = await tx.query<{ id: string }>(
+          "UPDATE competition_messages SET body='[message removed]', tombstoned_at=$3::timestamptz, tombstoned_by_entrant_id=$4 WHERE id=$1 AND competition_id=$2 AND tombstoned_at IS NULL RETURNING id",
+          [message_id, competition_id, options.now().toISOString(), actor.id],
+        );
+        if (!updated.rows[0]) return fail("not_found");
+        await tx.query(
+          "INSERT INTO competition_chat_audit_events (id,competition_id,action,actor_entrant_id,message_id,operation_id,created_at) VALUES ($1,$2,'message.tombstoned',$3,$4,$5,$6::timestamptz)",
+          [options.ids.next(), competition_id, actor.id, message_id, operation_id, options.now().toISOString()],
+        );
+        return { ok: true as const };
+      }));
     },
     async list({ actor, competition_id, cursor: inputCursor, limit = defaultPage }: { actor: PostgresChatActor | null; competition_id: string; cursor?: string | null; limit?: number }) {
       if (!actor) return fail("unauthenticated");

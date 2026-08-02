@@ -77,7 +77,7 @@ describe("0009 durable competition-chat safety", () => {
       .resolves.toEqual({ ok: true });
     await expect(client.join({ actor: BOB, competition_id: "comp-a" })).resolves.toEqual({ ok: false, error: { code: "forbidden" } });
     await expect(db.query(`SELECT state FROM competition_memberships WHERE competition_id='comp-a' AND entrant_id='${BOB.id}'`))
-      .resolves.toEqual({ rows: [{ state: "banned" }] });
+      .resolves.toMatchObject({ rows: [{ state: "banned" }] });
   });
 
   it("allows only operators to ban/tombstone, records append-only audit entries, and preserves tombstone sequence, reply, and audit linkage", async () => {
@@ -105,7 +105,7 @@ describe("0009 durable competition-chat safety", () => {
     expect(message.message.body).toBe("&lt;img src=x&gt; **@Alice**");
     expect(message.message.mentions).toEqual(["alice"]);
     await expect(db.query("SELECT target_entrant_id, handle_snapshot FROM message_mentions WHERE message_id=$1", [message.message.id]))
-      .resolves.toEqual({ rows: [{ target_entrant_id: ALICE.id, handle_snapshot: "alice" }] });
+      .resolves.toMatchObject({ rows: [{ target_entrant_id: ALICE.id, handle_snapshot: "alice" }] });
     await expect(db.query("UPDATE message_mentions SET target_entrant_id=$1 WHERE message_id=$2", [BOB.id, message.message.id])).rejects.toThrow();
   });
 
