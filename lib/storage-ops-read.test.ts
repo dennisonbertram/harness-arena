@@ -15,4 +15,9 @@ describe("read-only ops storage", () => {
     await storage.appendRunEvents("run-a", [{ ts: "2026-01-01T00:00:00.000Z", type: "run.created", payload: {} }]);
     await expect(storage.listOpsRecords("events/", { limit: 10 })).resolves.toMatchObject({ records: [{ pathname: "events/run-a/0000000001.json" }] });
   });
+  it("reports a hole between persisted event sequence numbers", async () => {
+    const storage = new MemoryStorage();
+    (storage as any).events.set("run-hole", [{ run_id: "run-hole", seq: 1, ts: "2026-01-01T00:00:00.000Z", type: "run.created", payload: {} }, { run_id: "run-hole", seq: 3, ts: "2026-01-01T00:00:02.000Z", type: "run.completed", payload: {} }]);
+    await expect(storage.listOpsRecords("events/run-hole/", { limit: 10 })).resolves.toMatchObject({ partial: ["events/run-hole/0000000002.json"] });
+  });
 });
