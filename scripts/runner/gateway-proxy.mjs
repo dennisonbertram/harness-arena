@@ -129,6 +129,27 @@ function textOf(value) {
 
 const SENSITIVE_HEADER_NAMES = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization"]);
 const MAX_CHUNK_DIAGNOSTICS = 16;
+const MAX_DIAGNOSTIC_STRING_BYTES = 512;
+const MAX_DIAGNOSTIC_EVENT_BYTES = 8 * 1024;
+const MAX_DIAGNOSTIC_OBJECT_KEYS = 32;
+const MAX_DIAGNOSTIC_ARRAY_ENTRIES = 16;
+const TRUNCATION_MARKER = "[TRUNCATED]";
+
+function truncateUtf8(value, maxBytes = MAX_DIAGNOSTIC_STRING_BYTES) {
+  const text = String(value);
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+  const contentBudget = Math.max(0, maxBytes - markerBytes);
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${TRUNCATION_MARKER}`;
+}
 
 function headerRecord(headers) {
   const result = {};
@@ -138,28 +159,66 @@ function headerRecord(headers) {
   return result;
 }
 
-function serializeError(error, seen = new Set(), depth = 0) {
+export function serializeDiagnosticError(error, seen = new Set(), depth = 0) {
   if (error === undefined || error === null) return undefined;
   if (depth > 4 || seen.has(error)) return { name: "Error", message: "[circular cause]" };
-  if (typeof error !== "object") return { name: typeof error, message: String(error) };
+  if (typeof error !== "object") {
+    return { name: truncateUtf8(typeof error, 64), message: truncateUtf8(error) };
+  }
   seen.add(error);
   const result = {
-    name: typeof error.name === "string" && error.name ? error.name : "Error",
-    message: typeof error.message === "string" ? error.message : String(error),
+    name: truncateUtf8(typeof error.name === "string" && error.name ? error.name : "Error", 64),
+    message: truncateUtf8(typeof error.message === "string" ? error.message : String(error)),
   };
-  if (error.code !== undefined) result.code = String(error.code);
-  if (error.cause !== undefined) result.cause = serializeError(error.cause, seen, depth + 1);
+  if (error.code !== undefined) result.code = truncateUtf8(error.code, 64);
+  if (error.cause !== undefined) result.cause = serializeDiagnosticError(error.cause, seen, depth + 1);
   return result;
 }
 
+function sanitizeDiagnosticValue(value, key, depth = 0) {
+  if (SENSITIVE_HEADER_NAMES.has(String(key ?? "").toLowerCase())) return "[REDACTED]";
+  if (typeof value === "string") return truncateUtf8(value);
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  if (depth >= 5) return TRUNCATION_MARKER;
+  if (Array.isArray(value)) {
+    const kept = value
+      .slice(0, MAX_DIAGNOSTIC_ARRAY_ENTRIES - 1)
+      .map((entry) => sanitizeDiagnosticValue(entry, undefined, depth + 1));
+    if (value.length >= MAX_DIAGNOSTIC_ARRAY_ENTRIES) kept.push(TRUNCATION_MARKER);
+    return kept;
+  }
+  const entries = Object.entries(value);
+  const result = {};
+  for (const [entryKey, entryValue] of entries.slice(0, MAX_DIAGNOSTIC_OBJECT_KEYS - 1)) {
+    result[entryKey] = sanitizeDiagnosticValue(entryValue, entryKey, depth + 1);
+  }
+  if (entries.length >= MAX_DIAGNOSTIC_OBJECT_KEYS) result._truncated_fields = TRUNCATION_MARKER;
+  return result;
+}
+
+export function sanitizeDiagnosticEvent(event) {
+  const sanitized = sanitizeDiagnosticValue(event, undefined);
+  if (Buffer.byteLength(JSON.stringify(sanitized)) <= MAX_DIAGNOSTIC_EVENT_BYTES) return sanitized;
+  return {
+    type: truncateUtf8(event?.type ?? "gateway_proxy.diagnostic", 128),
+    ...(event?.at === undefined ? {} : { at: truncateUtf8(event.at, 64) }),
+    ...(event?.request_id === undefined ? {} : { request_id: truncateUtf8(event.request_id) }),
+    ...(event?.response_id === undefined ? {} : { response_id: truncateUtf8(event.response_id) }),
+    ...(event?.phase === undefined ? {} : { phase: truncateUtf8(event.phase, 128) }),
+    ...(event?.status === undefined ? {} : { status: event.status }),
+    ...(event?.error === undefined ? {} : { error: serializeDiagnosticError(event.error) }),
+    diagnostic_truncation: TRUNCATION_MARKER,
+  };
+}
+
 function emitDiagnostic(onDiagnostic, event) {
-  const enriched = { at: new Date().toISOString(), ...event };
+  const enriched = sanitizeDiagnosticEvent({ at: new Date().toISOString(), ...event });
   try {
     onDiagnostic?.(enriched);
   } catch (error) {
     // Diagnostics must never become a new model-serving failure. Preserve the
     // sink failure locally so it is visible without breaking the proxy.
-    console.error(`[gateway-proxy] diagnostic sink failed: ${JSON.stringify(serializeError(error))}`);
+    console.error(`[gateway-proxy] diagnostic sink failed: ${JSON.stringify(serializeDiagnosticError(error))}`);
   }
   if (!onDiagnostic) console.error(`[gateway-proxy] ${JSON.stringify(enriched)}`);
   return enriched;
@@ -287,7 +346,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
       emitDiagnostic(onDiagnostic, {
         type: "gateway_proxy.client_disconnect",
         request_id: requestId,
-        error: serializeError(reason),
+        error: serializeDiagnosticError(reason),
       });
       abortController.abort(reason);
     };
@@ -297,7 +356,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.request_error",
         request_id: requestId,
         phase: "downstream_request",
-        error: serializeError(error),
+        error: serializeDiagnosticError(error),
       });
       abortController.abort(error);
     });
@@ -306,7 +365,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.write_error",
         request_id: requestId,
         phase: "downstream_write",
-        error: serializeError(error),
+        error: serializeDiagnosticError(error),
       });
       abortController.abort(error);
     });
@@ -322,7 +381,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.request_error",
         request_id: requestId,
         phase: "downstream_request",
-        error: serializeError(error),
+        error: serializeDiagnosticError(error),
       });
       if (!res.destroyed) res.destroy(error);
       return;
@@ -380,7 +439,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.fetch_error",
         request_id: requestId,
         phase: "upstream_fetch",
-        error: serializeError(error),
+        error: serializeDiagnosticError(error),
         aborted_by_client: downstreamDisconnected,
       });
       // The agent must see a real failure, not a hang: a dead proxy that
@@ -476,7 +535,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
             type: "gateway_proxy.write_error",
             request_id: requestId,
             phase: "downstream_write",
-            error: serializeError(error),
+            error: serializeDiagnosticError(error),
           });
           throw error;
         }
@@ -509,7 +568,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.stream_error",
         request_id: requestId,
         phase: downstreamDisconnected ? "downstream_disconnect" : "upstream_read",
-        error: serializeError(error),
+        error: serializeDiagnosticError(error),
         response_id: streamState.response_id,
         first_byte_at: streamState.first_byte_at,
         last_byte_at: streamState.last_byte_at,

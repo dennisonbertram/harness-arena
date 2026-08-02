@@ -30,7 +30,8 @@ import {
   preflightProxy,
   resolvePinnedProvider,
   computeTotals,
-  drainGatewayDiagnostics,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
   fetchWithTimeout,
   flushWithPendingStatus,
@@ -81,6 +82,14 @@ const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
 // well under this. gzip keeps even this bound's worth of text far below the
 // callback body limit.
 const STDOUT_CAP_BYTES = parseInt(process.env.RUNNER_STDOUT_CAP_BYTES ?? String(16 * 1024 * 1024), 10);
+const GATEWAY_DIAGNOSTIC_MAX_ENTRIES = parseInt(process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_ENTRIES ?? "1024", 10);
+const GATEWAY_DIAGNOSTIC_MAX_BYTES = parseInt(
+  process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_BYTES ?? String(512 * 1024),
+  10,
+);
+const RUNNER_LOG_MAX_ENTRIES = parseInt(process.env.RUNNER_LOG_MAX_ENTRIES ?? "2000", 10);
+const RUNNER_LOG_MAX_BYTES = parseInt(process.env.RUNNER_LOG_MAX_BYTES ?? String(1024 * 1024), 10);
+const RUNNER_LOG_MAX_LINE_BYTES = parseInt(process.env.RUNNER_LOG_MAX_LINE_BYTES ?? String(8 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -103,11 +112,14 @@ if (!RUN_ID || !CALLBACK_BASE || !RUNNER_CALLBACK_SECRET) {
   process.exit(1);
 }
 
-const runnerLogLines = [];
+const runnerLogLines = createBoundedLogBuffer({
+  maxEntries: RUNNER_LOG_MAX_ENTRIES,
+  maxBytes: RUNNER_LOG_MAX_BYTES,
+  maxLineBytes: RUNNER_LOG_MAX_LINE_BYTES,
+});
 function log(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`;
-  runnerLogLines.push(stamped);
-  console.log(stamped);
+  console.log(runnerLogLines.append(stamped));
 }
 
 function sleep(ms) {
@@ -397,7 +409,10 @@ function readRewardFile(containerName) {
 }
 
 let gatewayProxy = null;
-const gatewayDiagnosticLog = [];
+const gatewayDiagnosticLog = createBoundedGatewayDiagnosticCollector({
+  maxEntries: GATEWAY_DIAGNOSTIC_MAX_ENTRIES,
+  maxBytes: GATEWAY_DIAGNOSTIC_MAX_BYTES,
+});
 let currentGatewayTaskId;
 
 /**
@@ -428,7 +443,6 @@ async function startGatewayProxy() {
         ...event,
       };
       gatewayDiagnosticLog.push(correlated);
-      log(`gateway-proxy ${JSON.stringify(correlated)}`);
     },
   });
   await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
@@ -440,7 +454,6 @@ async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
   const tempDirs = [];
-  const gatewayDiagnosticStart = gatewayDiagnosticLog.length;
   currentGatewayTaskId = task.id;
 
   try {
@@ -558,11 +571,12 @@ async function runOneTask(task, index, systemPrompt) {
 
     const sessionText = extractNewestSessionJsonl(containerName);
     const piCorrelation = parsePiCorrelation(sessionText, piStdout.toString("utf8"));
-    const taskGatewayDiagnostics = drainGatewayDiagnostics(gatewayDiagnosticLog, gatewayDiagnosticStart);
-    const proxyRequests = summarizeGatewayRequests(taskGatewayDiagnostics);
+    const diagnosticSnapshot = gatewayDiagnosticLog.drain();
+    const proxyRequests = summarizeGatewayRequests(diagnosticSnapshot.events);
     const gatewayCorrelation = {
       proxy_requests: proxyRequests,
-      proxy_request_count: taskGatewayDiagnostics.filter((event) => event.type === "gateway_proxy.request").length,
+      proxy_request_count: diagnosticSnapshot.requestCount,
+      gateway_diagnostics_dropped: diagnosticSnapshot.droppedEvents,
       pi_response_ids: piCorrelation.response_ids,
       pi_retry_events: piCorrelation.retry_events,
     };
@@ -794,7 +808,7 @@ async function runOneTask(task, index, systemPrompt) {
   } finally {
     // A task that exits before correlation still must not retain diagnostics
     // for every later task in the run.
-    gatewayDiagnosticLog.length = 0;
+    gatewayDiagnosticLog.drain();
     if (currentGatewayTaskId === task.id) currentGatewayTaskId = undefined;
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its
@@ -908,7 +922,7 @@ async function main() {
       duration_s: durationS,
     });
 
-    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
 
     gatewayProxy?.close();
     const delivered = await finalizeTerminalStatus({
@@ -928,7 +942,7 @@ async function main() {
       ...(err?.taskId ? { task_id: err.taskId } : {}),
     });
     try {
-      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
     } catch {
       // best-effort only
     }

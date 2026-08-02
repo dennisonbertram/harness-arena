@@ -7,6 +7,7 @@ import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 
 const CleanupRequestSchema = z.object({
+  operation_id: z.string().uuid(),
   competition_id: z.string().uuid(),
   submission_ids: z.array(z.string().uuid()).min(1).max(10).refine((ids) => new Set(ids).size === ids.length, {
     message: "submission_ids must be unique",
@@ -26,8 +27,9 @@ function isValidToken(token: string | null, expected: string): boolean {
 
 /**
  * Archive-and-delete is deliberately a POST action rather than a general
- * deletion API. It only accepts an explicit, small set of UUIDs and requires
- * the caller to acknowledge the archive-first operation verbatim.
+ * deletion API. It only accepts an explicit, small set of UUIDs, a stable
+ * operation UUID for safe replay, and requires the caller to acknowledge the
+ * archive-first operation verbatim.
  */
 export async function POST(request: NextRequest) {
   const expectedToken = competitionAdminToken();
@@ -57,12 +59,14 @@ export async function POST(request: NextRequest) {
 
   try {
     const cleanup = await archiveAndDeleteCompetitionSubmissions({
+      archiveId: parsed.data.operation_id,
       competitionId: parsed.data.competition_id,
       submissionIds: parsed.data.submission_ids,
       reason: parsed.data.reason,
     });
     log("info", "competition.admin.cleanup.completed", {
       competition_id: parsed.data.competition_id,
+      operation_id: parsed.data.operation_id,
       submission_ids: cleanup.submissionIds,
       run_ids: cleanup.runIds,
       counts: cleanup.counts,
@@ -70,6 +74,7 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json({
       status: "deleted",
+      operation_id: parsed.data.operation_id,
       archive_prefix: cleanup.archivePrefix,
       submission_ids: cleanup.submissionIds,
       run_ids: cleanup.runIds,
@@ -92,6 +97,7 @@ export async function POST(request: NextRequest) {
       };
       log("error", "competition.admin.cleanup.partial", {
         competition_id: parsed.data.competition_id,
+        operation_id: parsed.data.operation_id,
         submission_ids: parsed.data.submission_ids,
         archive_prefix: recovery.archivePrefix,
         deleted_groups: recovery.deletedGroups,
@@ -100,6 +106,7 @@ export async function POST(request: NextRequest) {
       });
       return NextResponse.json({
         status: "partial",
+        operation_id: parsed.data.operation_id,
         error: "cleanup partially completed; recover from the archive receipt",
         archive_prefix: recovery.archivePrefix,
         deleted_groups: recovery.deletedGroups,

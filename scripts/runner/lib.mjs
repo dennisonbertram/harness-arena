@@ -186,6 +186,126 @@ function boundedGatewayError(error) {
   };
 }
 
+const TRUNCATION_MARKER = "[TRUNCATED]";
+
+function truncateUtf8(value, maxBytes) {
+  const text = String(value);
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+  const contentBudget = Math.max(0, maxBytes - markerBytes);
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${TRUNCATION_MARKER}`;
+}
+
+/**
+ * Retains a byte- and entry-bounded tail of proxy diagnostics. Request count
+ * is aggregated separately so correlation remains exact even when raw detail
+ * is evicted. The newest terminal records win over old chunk/request detail.
+ */
+export function createBoundedGatewayDiagnosticCollector({
+  maxEntries = 1_024,
+  maxBytes = 512 * 1024,
+} = {}) {
+  const events = [];
+  let retainedBytes = 0;
+  let requestCount = 0;
+  let droppedEvents = 0;
+
+  return {
+    push(event) {
+      if (event?.type === "gateway_proxy.request") requestCount += 1;
+      const eventBytes = Buffer.byteLength(JSON.stringify(event)) + 1;
+      if (eventBytes > maxBytes) {
+        droppedEvents += 1;
+        return;
+      }
+      while (events.length > 0 && (events.length >= maxEntries || retainedBytes + eventBytes > maxBytes)) {
+        const removed = events.shift();
+        retainedBytes -= removed.bytes;
+        droppedEvents += 1;
+      }
+      events.push({ event, bytes: eventBytes });
+      retainedBytes += eventBytes;
+    },
+    drain() {
+      const snapshot = {
+        events: events.map((entry) => entry.event),
+        requestCount,
+        droppedEvents,
+      };
+      events.length = 0;
+      retainedBytes = 0;
+      requestCount = 0;
+      droppedEvents = 0;
+      return snapshot;
+    },
+  };
+}
+
+/**
+ * Ring buffer for the run-level uploaded log. Every line is bounded before it
+ * is returned to the console caller or retained; the upload string adds one
+ * deterministic marker when earlier lines were evicted.
+ */
+export function createBoundedLogBuffer({
+  maxEntries = 2_000,
+  maxBytes = 1024 * 1024,
+  maxLineBytes = 8 * 1024,
+} = {}) {
+  const lines = [];
+  let droppedLines = 0;
+
+  function marker() {
+    return `${TRUNCATION_MARKER} ${droppedLines} earlier log line(s) omitted`;
+  }
+
+  function rendered() {
+    return (droppedLines > 0 ? [marker(), ...lines] : lines).join("\n");
+  }
+
+  function rebalance() {
+    const retainedLimit = Math.max(0, maxEntries - (droppedLines > 0 ? 1 : 0));
+    while (lines.length > retainedLimit) {
+      lines.shift();
+      droppedLines += 1;
+    }
+    while (lines.length > 0 && Buffer.byteLength(rendered()) > maxBytes) {
+      lines.shift();
+      droppedLines += 1;
+    }
+  }
+
+  return {
+    append(line) {
+      const bounded = truncateUtf8(line, Math.min(maxLineBytes, maxBytes));
+      lines.push(bounded);
+      if (lines.length > maxEntries) {
+        lines.shift();
+        droppedLines += 1;
+      }
+      rebalance();
+      return bounded;
+    },
+    toString() {
+      rebalance();
+      return rendered();
+    },
+    get length() {
+      return lines.length + (droppedLines > 0 ? 1 : 0);
+    },
+    get byteLength() {
+      return Buffer.byteLength(rendered());
+    },
+  };
+}
+
 /** Return one task's diagnostics and release all run-global retained detail. */
 export function drainGatewayDiagnostics(events, start = 0) {
   const taskEvents = events.slice(start);
