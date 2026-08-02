@@ -18,6 +18,7 @@ type Message = { id?: number; method?: string; result?: unknown; error?: unknown
 class BuiltStdioClient {
   private nextId = 1;
   private readonly pending = new Map<number, (message: Message) => void>();
+  private readonly notifications: Message[] = [];
   private readonly process;
   private readonly lines;
 
@@ -27,6 +28,7 @@ class BuiltStdioClient {
     this.lines.on("line", (line) => {
       const message = JSON.parse(line) as Message;
       if (message.id !== undefined) this.pending.get(message.id)?.(message);
+      else this.notifications.push(message);
     });
   }
 
@@ -45,6 +47,14 @@ class BuiltStdioClient {
   }
 
   notify(method: string, params?: Record<string, unknown>): void { this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`); }
+  async notification(method: string, matches: (message: Message) => boolean = () => true): Promise<Message> {
+    const deadline = Date.now() + 1_000;
+    while (!this.notifications.some((message) => message.method === method && matches(message))) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${method}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return this.notifications.find((message) => message.method === method && matches(message))!;
+  }
   async close(): Promise<void> { this.process.stdin!.end(); await once(this.process, "exit"); this.lines.close(); }
 }
 
@@ -116,6 +126,62 @@ describe("competition chat MCP tools", () => {
       ]);
     } finally {
       releaseResponse?.();
+      await client.close();
+      await new Promise<void>((resolve) => stub.close(() => resolve()));
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("ships cursor-backed resource updates and aborts an outstanding long poll on unsubscribe", async () => {
+    const home = await mkdtemp(join(tmpdir(), "harness-arena-mcp-subscribe-"));
+    const credentialDirectory = join(home, ".harness-arena");
+    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    let sawSecondRequest!: () => void;
+    const secondRequestStarted = new Promise<void>((resolve) => { sawSecondRequest = resolve; });
+    let sawAbort!: () => void;
+    const secondRequestAborted = new Promise<void>((resolve) => { sawAbort = resolve; });
+    let releaseSecondResponse: (() => void) | undefined;
+    let polls = 0;
+    const stub = createServer((request, response) => {
+      if (!request.url?.startsWith("/api/competitions/live-cup/chat")) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+      polls += 1;
+      if (polls === 1) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ page: { messages: [{ id: "message-1" }], next_cursor: "cursor-1" } }));
+        return;
+      }
+      sawSecondRequest();
+      request.once("aborted", sawAbort);
+      releaseSecondResponse = () => response.end(JSON.stringify({ page: { messages: [], next_cursor: "cursor-1" } }));
+    });
+    await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
+    const address = stub.address();
+    if (!address || typeof address === "string") throw new Error("local HTTP stub did not bind a TCP port");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    await writeFile(join(credentialDirectory, "credentials.json"), JSON.stringify({
+      version: 1,
+      credentials: { [baseUrl]: { token: "local-test-token", github_login: "octo", expires_at: "2030-01-01T00:00:00Z" } },
+    }), { mode: 0o600 });
+    const client = new BuiltStdioClient({ HOME: home, HARNESS_ARENA_URL: baseUrl });
+    const uri = "harness-arena://competitions/live-cup/chat";
+
+    try {
+      await client.request("initialize", { protocolVersion: "2025-11-25", capabilities: { resources: { subscribe: true } }, clientInfo: { name: "subscription-regression", version: "0.0.0" } });
+      client.notify("notifications/initialized");
+      expect((await client.request("resources/subscribe", { uri })).error).toBeUndefined();
+      await expect(client.notification("notifications/resources/updated", (message) => (message as { params?: { uri?: string } }).params?.uri === uri)).resolves.toBeDefined();
+      await secondRequestStarted;
+      expect((await client.request("resources/unsubscribe", { uri })).error).toBeUndefined();
+      await Promise.race([
+        secondRequestAborted,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("chat long poll was not aborted after resources/unsubscribe")), 500)),
+      ]);
+    } finally {
+      releaseSecondResponse?.();
       await client.close();
       await new Promise<void>((resolve) => stub.close(() => resolve()));
       await rm(home, { recursive: true, force: true });

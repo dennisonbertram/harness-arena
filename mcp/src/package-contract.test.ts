@@ -28,6 +28,11 @@ describe("published MCP package contract", () => {
     expect(readme).toMatch(/private key.*never|never.*private key/i);
     expect(readme).toMatch(/ensure_payout_wallet.*feature_unavailable/is);
     expect(readme).toMatch(/development environment|non-production/i);
+    expect(readme).toMatch(/prepare.*upload.*finalize/is);
+    expect(readme).toMatch(/signed upload url.*secret|secret.*signed upload url/is);
+    expect(readme).toMatch(/compressed bytes.*sha-?256|sha-?256.*compressed bytes/is);
+    expect(readme).toMatch(/expire|expiry/i);
+    expect(readme).toMatch(/manual[- ]review/i);
   });
 
   it("cleans before compiling, excludes test sources from dist, and keeps test discovery source-only", () => {
