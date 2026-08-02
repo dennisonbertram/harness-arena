@@ -154,4 +154,19 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.judge).not.toHaveBeenCalled();
     expect(f.ledger.complete).not.toHaveBeenCalled();
   });
+
+  it("treats a same-id Blob owned by another entrant as a collision, never as this reservation", async () => {
+    const f = fixture();
+    f.submissions.set(f.reservation.submission_id, {
+      id: f.reservation.submission_id,
+      github_id: 999,
+      competition_id: "comp-live",
+      prompt: request.entry.prompt,
+    });
+
+    await expect(f.saga.recover({ operation_id: f.reservation.operation_id }))
+      .rejects.toMatchObject({ code: "ENTRY_RECONCILIATION_REQUIRED" });
+    expect(f.judge).not.toHaveBeenCalled();
+    expect(f.ledger.complete).not.toHaveBeenCalled();
+  });
 });
