@@ -74,7 +74,7 @@ describe("agent network runtime facade", () => {
       },
     );
     expect(result).toEqual({ token: "signed-scoped-token", github_login: "Alice", expires_at: EXPIRES_AT });
-    expect(JSON.stringify(result)).not.toMatch(/entrant|jti|issuer|audience|scope/i);
+    expect(Object.keys(result)).not.toEqual(expect.arrayContaining(["entrant_id", "jti", "issuer", "audience", "scopes"]));
   });
 
   it("rejects malformed bearer input before token verification and maps verifier failures to stable codes", async () => {

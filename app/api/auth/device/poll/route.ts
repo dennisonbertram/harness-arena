@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { AGENT_TOKEN_EXPIRY_SECONDS, mintAgentToken } from "@/lib/agent-token";
+import { issueScopedAgentSession } from "@/lib/agent-network-runtime";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 
 // A device code is valid for ~15 minutes and GitHub's advertised poll interval
@@ -45,6 +46,13 @@ export async function POST(request: NextRequest) {
   const user = (await userResponse.json().catch(() => null)) as Record<string, unknown> | null;
   if (!userResponse.ok || !user || typeof user.id !== "number" || typeof user.login !== "string") {
     return NextResponse.json({ error: "GitHub could not verify the authorized user" }, { status: 502 });
+  }
+  if (process.env.AGENT_NETWORK_ENABLED === "true") {
+    try {
+      return NextResponse.json(await issueScopedAgentSession({ githubId: user.id, githubLogin: user.login }));
+    } catch {
+      return NextResponse.json({ error: "agent session service unavailable" }, { status: 503 });
+    }
   }
   const token = await mintAgentToken({ githubId: user.id, githubLogin: user.login });
   return NextResponse.json({ token, github_login: user.login, expires_at: new Date(Date.now() + AGENT_TOKEN_EXPIRY_SECONDS * 1000).toISOString() });
