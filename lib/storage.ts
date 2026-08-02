@@ -51,7 +51,8 @@ export class MemoryStorage implements Storage {
     const paths = [...this.submissions.keys()].map((id) => `submissions/${id}.json`)
       .concat([...this.competitions.keys()].map((id) => `competitions/${id}.json`), [...this.runs.keys()].map((id) => `runs/${id}.json`), [...this.events.entries()].flatMap(([run, events]) => events.map((event) => `events/${run}/${String(event.seq).padStart(10, "0")}.json`)), [...this.traces.keys()])
       .filter((p) => p.startsWith(prefix)).sort(); const offset = Number(options.cursor ?? 0); const records=paths.slice(offset, offset+options.limit).map((pathname)=>({pathname}));
-    return { records, nextCursor: offset + records.length < paths.length ? String(offset + records.length) : undefined, partial: [] };
+    const partial = prefix.startsWith("events/") ? paths.flatMap((pathname, index) => { const current=Number(/(\d+)\.json$/.exec(pathname)?.[1]); const next=Number(/(\d+)\.json$/.exec(paths[index+1]??"")?.[1]); return Number.isSafeInteger(current)&&Number.isSafeInteger(next)&&next>current+1 ? Array.from({length:next-current-1},(_,i)=>pathname.replace(/\d+\.json$/,String(current+i+1).padStart(10,"0")+".json")) : []; }) : [];
+    return { records, nextCursor: offset + records.length < paths.length ? String(offset + records.length) : undefined, partial };
   }
   async readOpsRecord(pathname: string) { const m=/^(submissions|competitions|runs)\/(.+)\.json$/.exec(pathname); if(m){const value=m[1]==="submissions"?this.submissions.get(m[2]):m[1]==="competitions"?this.competitions.get(m[2]):this.runs.get(m[2]);return value?{found:true,value}:{found:false};} const event=/^events\/([^/]+)\/(\d+)\.json$/.exec(pathname); if(event){const value=(this.events.get(event[1])??[]).find((x)=>x.seq===Number(event[2]));return value?{found:true,value}:{found:false};} const bytes=this.traces.get(pathname);return bytes?{found:true,value:bytes.toString("utf8")}:{found:false}; }
 
