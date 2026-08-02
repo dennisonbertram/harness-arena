@@ -3,6 +3,10 @@ import { createPayoutEligibilityService } from "./eligibility";
 
 const OWNER = { id: "00000000-0000-0000-0000-000000000101", role: "operator" as const };
 const ENTRANT = { id: "00000000-0000-0000-0000-000000000202", role: "entrant" as const };
+type SqlFake = {
+  query<Row>(statement: string, params?: unknown[]): Promise<{ rows: Row[] }>;
+  transaction<Value>(work: (tx: SqlFake) => Promise<Value>): Promise<Value>;
+};
 
 const completeReconciledSnapshot = () => ({
   competition_id: "competition-1",
@@ -65,6 +69,21 @@ describe("payout eligibility freeze service", () => {
     expect(writes).toEqual([]);
   });
 
+  it("fails closed without writing when a SQL freeze client cannot provide a transaction", async () => {
+    const writes: unknown[] = [];
+    const sql = { query: async <Row>(statement: string): Promise<{ rows: Row[] }> => {
+      if (statement.startsWith("INSERT")) writes.push(statement);
+      return { rows: [] };
+    } };
+    const service = createPayoutEligibilityService(sql, {
+      loadCompetitionSnapshot: async () => [completeReconciledSnapshot()],
+    });
+
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "snapshot_unavailable" } });
+    expect(writes).toEqual([]);
+  });
+
   it("lets an MCP caller read only its own safe entry and provides no settlement capability", async () => {
     const service = createPayoutEligibilityService({} as never, {
       loadOwnFreeze: async ({ entrant_id }: { entrant_id: string }) => entrant_id === ENTRANT.id
@@ -80,7 +99,8 @@ describe("payout eligibility freeze service", () => {
 
   it("persists a versioned complete evidence snapshot, not only denormalized columns", async () => {
     let persistedSnapshot: unknown;
-    const sql = {
+    const sql: SqlFake = {
+      transaction: async <Value>(work: (tx: SqlFake) => Promise<Value>) => work(sql),
       async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
         if (statement.startsWith("INSERT")) {
           persistedSnapshot = JSON.parse(String(params[9]));
@@ -117,16 +137,14 @@ describe("payout eligibility freeze service", () => {
     let failSecondWrite = true;
     let firstWriteComplete!: () => void;
     const firstWritten = new Promise<void>((resolve) => { firstWriteComplete = resolve; });
-    const sql = {
-      transaction: async <Value>(work: (tx: typeof sql) => Promise<Value>) => work(sql),
-      async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
+    const queryFor = (target: Map<string, Record<string, unknown>>) => async <Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> => {
         if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) {
           const submissionId = String(params[2]);
           if (submissionId === "submission-2" && failSecondWrite) {
             await firstWritten;
             throw new Error("injected second immutable freeze failure");
           }
-          rows.set(submissionId, {
+          target.set(submissionId, {
             id: params[0], competition_id: params[1], submission_id: submissionId, entrant_id: params[3],
             status: params[5], reason_code: params[6], policy_version: params[7], cutoff_at: params[8],
             result_rank: params[10], result_score: params[11], judge_revision: params[12], trace_sha256: params[13],
@@ -135,8 +153,17 @@ describe("payout eligibility freeze service", () => {
           if (submissionId === "submission-1") firstWriteComplete();
           return { rows: [] as Row[] };
         }
-        const row = rows.get(String(params[1]));
+        const row = target.get(String(params[1]));
         return { rows: row ? [row as Row] : [] };
+      };
+    const sql = {
+      query: queryFor(rows),
+      transaction: async <Value>(work: (tx: { query: ReturnType<typeof queryFor> }) => Promise<Value>) => {
+        const staged = new Map(rows);
+        const result = await work({ query: queryFor(staged) });
+        rows.clear();
+        for (const [key, value] of staged) rows.set(key, value);
+        return result;
       },
     };
     const snapshot = [

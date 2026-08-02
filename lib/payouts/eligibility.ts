@@ -123,7 +123,7 @@ export function createPayoutEligibilityService(db: SqlClient, options: {
   // production persistence fallback.
   const testRows = process.env.VITEST ? new Map<string, FreezeRow>() : undefined;
 
-  async function persist(row: FreezeRow): Promise<Freeze> {
+  async function persist(row: FreezeRow, tx?: SqlExecutor): Promise<Freeze> {
     const key = `${row.competition_id}:${row.submission_id}`;
     if (!isSql(db)) {
       if (!testRows) throw new Error("payout eligibility requires a SQL persistence client");
@@ -139,17 +139,15 @@ export function createPayoutEligibilityService(db: SqlClient, options: {
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::timestamptz,$9::timestamptz)
       ON CONFLICT (competition_id, submission_id) DO NOTHING`;
     const values = [row.id, row.competition_id, row.submission_id, row.entrant_id, row.frozen_by_entrant_id, row.status, row.reason_code, row.policy_version, row.cutoff_at, JSON.stringify(row.snapshot), row.result_rank, row.result_score, row.judge_revision, row.trace_sha256, row.trace_scan_revision, row.payout_address, row.payout_chain_id, row.payout_profile_verified_at];
-    const write = async (tx: SqlExecutor) => {
-      await tx.query(insert, values);
-      const found = await tx.query<Record<string, unknown>>(
-        `SELECT id, competition_id, submission_id, entrant_id, status, reason_code, cutoff_at, result_rank, result_score,
-         policy_version, judge_revision, trace_sha256, trace_scan_revision, payout_address, payout_chain_id, payout_profile_verified_at
-         FROM payout_eligibility_freezes WHERE competition_id = $1 AND submission_id = $2`, [row.competition_id, row.submission_id],
-      );
-      if (!found.rows[0]) throw new Error("payout eligibility freeze insert was not readable");
-      return safe(found.rows[0]);
-    };
-    return db.transaction ? db.transaction(write) : write(db);
+    if (!tx) throw new Error("payout eligibility freeze requires a transaction");
+    await tx.query(insert, values);
+    const found = await tx.query<Record<string, unknown>>(
+      `SELECT id, competition_id, submission_id, entrant_id, status, reason_code, cutoff_at, result_rank, result_score,
+       policy_version, judge_revision, trace_sha256, trace_scan_revision, payout_address, payout_chain_id, payout_profile_verified_at
+       FROM payout_eligibility_freezes WHERE competition_id = $1 AND submission_id = $2`, [row.competition_id, row.submission_id],
+    );
+    if (!found.rows[0]) throw new Error("payout eligibility freeze insert was not readable");
+    return safe(found.rows[0]);
   }
 
   return {
@@ -160,7 +158,10 @@ export function createPayoutEligibilityService(db: SqlClient, options: {
       if (!Array.isArray(source)) return frozen({ ok: false as const, error: { code: "snapshot_unavailable" } });
       if (source.some((item) => item.competition_id !== input.competition_id)) return frozen({ ok: false as const, error: { code: "snapshot_unavailable" } });
       const cutoff = now();
-      const freezes = await Promise.all(source.map((item) => persist(freezeFrom(item, input.actor, cutoff, id(), policyVersion))));
+      if (isSql(db) && !db.transaction) return frozen({ ok: false as const, error: { code: "snapshot_unavailable" } });
+      const freezes = isSql(db)
+        ? await db.transaction!(async (tx) => Promise.all(source.map((item) => persist(freezeFrom(item, input.actor, cutoff, id(), policyVersion), tx))))
+        : await Promise.all(source.map((item) => persist(freezeFrom(item, input.actor, cutoff, id(), policyVersion))));
       return frozen({ ok: true as const, freezes: freezes.sort((a, b) => a.submission_id.localeCompare(b.submission_id)) });
     },
 
