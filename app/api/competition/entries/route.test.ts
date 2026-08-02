@@ -66,6 +66,25 @@ describe("POST /api/competition/entries", () => {
     expect(runtime.submitCompetitionEntry).not.toHaveBeenCalled();
   });
 
+  it("rejects non-JSON and oversized bodies before invoking the saga", async () => {
+    const wrongType = await POST(new NextRequest("http://localhost/api/competition/entries", {
+      method: "POST",
+      headers: { authorization: "Bearer scoped-session", "content-type": "text/plain" },
+      body: JSON.stringify(body),
+    }));
+    expect(wrongType.status).toBe(415);
+    await expect(wrongType.json()).resolves.toEqual({ error: { code: "unsupported_media_type" } });
+
+    const oversized = await POST(new NextRequest("http://localhost/api/competition/entries", {
+      method: "POST",
+      headers: { authorization: "Bearer scoped-session", "content-type": "application/json", "content-length": "262145" },
+      body: "{}",
+    }));
+    expect(oversized.status).toBe(413);
+    await expect(oversized.json()).resolves.toEqual({ error: { code: "body_too_large" } });
+    expect(runtime.submitCompetitionEntry).not.toHaveBeenCalled();
+  });
+
   it("replays the same idempotency key without creating another durable operation", async () => {
     const replay = { submission_id: "submission-1", run_id: "run-1", status: "queued" };
     runtime.submitCompetitionEntry.mockResolvedValue({ ok: true, entry: replay });
