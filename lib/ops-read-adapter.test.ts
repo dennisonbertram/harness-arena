@@ -18,4 +18,14 @@ describe("Blob ops read adapter", () => {
     await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toEqual({ status: "transient", error: "read_failed" });
     expect(blob.get).toHaveBeenCalledTimes(2);
   });
+  it("passes abort signals and retries metadata-present null gets before declaring transient", async () => {
+    blob.list.mockResolvedValue({ blobs: [metadata(2)], hasMore: false });
+    blob.get.mockResolvedValueOnce(null).mockResolvedValueOnce({ statusCode: 200, stream: new Response("ok").body });
+    await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toMatchObject({ status: "ok", bytes: Buffer.from("ok") });
+    expect(blob.list).toHaveBeenCalledWith(expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
+    expect(blob.get).toHaveBeenCalledWith("traces/r/t/log.txt", expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
+    blob.get.mockReset().mockResolvedValue(null);
+    await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toMatchObject({ status: "transient" });
+    expect(blob.get).toHaveBeenCalledTimes(2);
+  });
 });
