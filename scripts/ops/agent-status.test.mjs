@@ -183,7 +183,7 @@ describe("redaction, platform wiring, and process bounds", () => {
       headers: ["Cookie: alpha=one; beta=two; csrf=three", "Set-Cookie: alpha=one; beta=two; csrf=three; Secure"],
     };
     const output = JSON.stringify(redactSensitive(value, ["alpha", "beta", "csrf"]));
-    for (const leaked of ["alpha", "beta", "csrf", "one", "two", "three", "access_token=", "client_secret="]) expect(output).not.toContain(leaked);
+    for (const leaked of ["alpha", "beta", "csrf", "one", "two", "three", "access_token=beta", "client_secret=alpha"]) expect(output).not.toContain(leaked);
     expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(6);
   });
 

@@ -5,7 +5,6 @@ export const STATUS_SCHEMA_VERSION = "agent_ops_status.v1";
 export const EXIT_CODES = Object.freeze({ healthy: 0, degraded: 1, failed: 2, access_blocked: 3, usage_error: 64 });
 
 const OPS_PATHS = new Set(["/api/health", "/api/ops/v1", "/api/ops/v1/summary", "/api/ops/v1/inventory", "/api/ops/v1/read"]);
-const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|password|secret|token|api[_-]?key|credential)$/i;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1_000_000;
 const MAX_INVENTORY_PAGES = 10;
@@ -24,8 +23,9 @@ const ENVIRONMENTS = Object.freeze({
 function redactText(value, knownSecrets) {
   let output = String(value)
     .replace(/\b(?:Bearer|Basic)\s+[^\s,"'<>]+/gi, (match) => `${match.split(/\s/, 1)[0]} [REDACTED]`)
-    .replace(/\b(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|x-api-key)\s*[:=]\s*[^\r\n,;]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}: [REDACTED]`)
-    .replace(/\b(?:password|secret|token|api[_-]?key|credential)\s*[:=]\s*[^\s,"'<>]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`)
+    .replace(/\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, (match) => `${match.split(":", 1)[0]}: [REDACTED]`)
+    .replace(/\b(?:Authorization|Proxy-Authorization|x-api-key)\s*[:=]\s*[^\r\n,;]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}: [REDACTED]`)
+    .replace(/\b(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|password|secret|token|api[_-]?key|apiKey|credential)\s*[:=]\s*[^\s,"'<>]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`)
     .replace(/https?:\/\/[^\s,"'<>]+/g, (candidate) => {
       try { const url = new URL(candidate); url.search = ""; url.hash = ""; return url.toString(); } catch { return candidate; }
     });
@@ -35,7 +35,12 @@ function redactText(value, knownSecrets) {
 
 export function redactSensitive(value, knownSecrets = []) {
   if (Array.isArray(value)) return value.map((item) => redactSensitive(item, knownSecrets));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactSensitive(item, knownSecrets)]));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
+    const sensitive = /(?:^|_)(?:authorization|proxy_authorization|cookie|set_cookie|x_api_key|password|secret|token|api_key|credential)(?:$|_)/.test(normalized);
+    const presenceFlag = normalized.endsWith("_present") && typeof item === "boolean";
+    return [key, sensitive && !presenceFlag ? "[REDACTED]" : redactSensitive(item, knownSecrets)];
+  }));
   return typeof value === "string" ? redactText(value, knownSecrets) : value;
 }
 
@@ -276,7 +281,10 @@ async function inventoryKind({ kind, ...options }) {
     if (cursor) query.set("cursor", cursor);
     const response = await requestOpsJson({ ...options, path: `/api/ops/v1/inventory?${query}` });
     if (!response.ok) { complete = false; error = response.kind === "access" ? "access_blocked" : response.error ?? `http_${response.status}`; break; }
-    const body = response.body ?? {}, pageItems = Array.isArray(body.items) ? body.items : [];
+    const body = response.body ?? {};
+    if (body.schema_version !== "ops.v1" || body.kind !== kind || !Array.isArray(body.items)) { complete = false; error = "malformed_contract"; break; }
+    if (typeof body.has_more !== "boolean" || (body.next_cursor !== null && body.next_cursor !== undefined && typeof body.next_cursor !== "string")) { complete = false; error = "malformed_pagination"; break; }
+    const pageItems = body.items;
     items.push(...pageItems); records += pageItems.length; pages += 1;
     if (body.partial === true) { complete = false; error = "partial_read"; break; }
     if (body.has_more === true && !body.next_cursor) { complete = false; error = "missing_cursor"; break; }
@@ -297,7 +305,8 @@ async function correlateRuns(inventory, options) {
     const previous = eventByRun.get(event.run_id); if (!previous || event.seq > previous.seq) eventByRun.set(event.run_id, event);
   }
   const runs = [];
-  for (const record of (inventory.runs?.items ?? []).slice(0, MAX_RUN_READS)) {
+  const selectedRuns = [...(inventory.runs?.items ?? [])].sort((left, right) => String(right.uploaded_at ?? "").localeCompare(String(left.uploaded_at ?? ""))).slice(0, MAX_RUN_READS);
+  for (const record of selectedRuns) {
     const run_id = runIdFromPath(record.pathname); if (!run_id) continue;
     const runResponse = await requestOpsJson({ ...options, path: `/api/ops/v1/read?kind=runs&id=${encodeURIComponent(run_id)}` });
     if (!runResponse.ok) { runs.push({ run_id, evidence: "unavailable", error: runResponse.kind }); continue; }
@@ -362,7 +371,10 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
     return redactSensitive({ schema_version: STATUS_SCHEMA_VERSION, checked_at: now, environment, ...status, health: health.body, platform, ops: null, freshness: { state: "unknown" }, findings, blockers }, token ? [token] : []);
   }
   if (root.body?.schema_version !== "ops.v1") findings.push(issue("ops_schema_drift", "failed", `expected ops.v1, received ${root.body?.schema_version ?? "missing"}`));
-  const kinds = [...new Set((root.body?.kinds ?? []).map((entry) => typeof entry === "string" ? entry : entry?.kind).filter((kind) => typeof kind === "string" && /^[a-z_]+$/.test(kind)))].slice(0, MAX_INVENTORY_KINDS);
+  const advertisedKinds = [...new Set((root.body?.kinds ?? []).map((entry) => typeof entry === "string" ? entry : entry?.kind).filter((kind) => typeof kind === "string" && /^[a-z_]+$/.test(kind)))];
+  const kinds = advertisedKinds.slice(0, MAX_INVENTORY_KINDS);
+  const inventoryScope = { advertised: advertisedKinds.length, selected: kinds.length, truncated: advertisedKinds.length > kinds.length };
+  if (inventoryScope.truncated) findings.push(issue("inventory_kind_limit", "degraded", `inventory limited to ${kinds.length} of ${advertisedKinds.length} advertised kinds`));
   if (!kinds.length) findings.push(issue("ops_inventory_unavailable", "failed", "ops API advertised no readable kinds"));
 
   const summary = await requestOpsJson({ ...requestOptions, path: "/api/ops/v1/summary" });
@@ -377,19 +389,23 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
     }
   }
   const runs = await correlateRuns(inventory, requestOptions);
+  const availableRuns = inventory.runs?.items?.length ?? 0;
+  const runCorrelationScope = { available: availableRuns, selected: Math.min(availableRuns, MAX_RUN_READS), truncated: availableRuns > MAX_RUN_READS };
+  if (runCorrelationScope.truncated) findings.push(issue("run_correlation_limit", "degraded", `run correlation limited to ${runCorrelationScope.selected} of ${runCorrelationScope.available} inventoried runs`));
   if (runs.some((run) => run.evidence === "unavailable" || (run.unavailable ?? []).length)) findings.push(issue("run_correlation_partial", "degraded", "one or more run correlations have unavailable fields"));
   const publicInventory = Object.fromEntries(Object.entries(inventory).map(([kind, snapshot]) => [kind, { records: snapshot.records, pages: snapshot.pages, complete: snapshot.complete, ...(snapshot.error ? { error: snapshot.error } : {}) }]));
   const summaryBody = summary.ok ? summary.body : {};
   if (summary.ok && summaryBody.scan?.complete !== true) findings.push(issue("summary_incomplete", "degraded", "ops summary scan is incomplete"));
   if ((summaryBody.run_states?.stale ?? 0) > 0) findings.push(issue("stale_runs", "failed", `${summaryBody.run_states.stale} stale runs`));
   const integrity = summaryBody.integrity ?? {};
-  if ((integrity.unreadable ?? 0) > 0 || (integrity.corrupt ?? 0) > 0 || (integrity.event_holes ?? 0) > 0) findings.push(issue("ops_integrity", "degraded", "ops summary reports unreadable, corrupt, or missing records"));
+  if ((integrity.unreadable ?? 0) > 0 || (integrity.corrupt ?? 0) > 0 || (integrity.event_holes ?? 0) > 0) findings.push(issue("ops_integrity", "failed", "ops summary reports unreadable, corrupt, or missing records"));
   const latestRun = summaryBody.latest?.runs, latestTime = Date.parse(latestRun ?? ""), checkedTime = Date.parse(now);
   const freshness = Number.isFinite(latestTime) && Number.isFinite(checkedTime) ? { state: checkedTime - latestTime > 60 * 60 * 1000 ? "stale" : "fresh", age_ms: Math.max(0, checkedTime - latestTime), latest_at: latestRun } : { state: "unknown" };
   if (freshness.state === "unknown") findings.push(issue("freshness_unknown", "degraded", "latest run timestamp is unavailable"));
   else if (freshness.state === "stale") findings.push(issue("freshness_stale", "failed", `latest run is ${freshness.age_ms}ms old`));
 
   const deployment = platform.deployment;
+  if (ENVIRONMENTS[environment]?.collect_platform && (deployment?.state !== "READY" || !deployment?.id || !SAFE_TARGET.test(deployment.id) || !deployment?.hostname || !SAFE_TARGET.test(deployment.hostname))) findings.push(issue("deployment_not_ready", "failed", "serving deployment must have a valid identity and READY state"));
   if (deployment?.sha && health.body?.sha && deployment.sha !== health.body.sha) findings.push(issue("deployment_sha_drift", "failed", "serving deployment SHA differs from health SHA"));
   if (platform.expected_sha && deployment?.sha && platform.expected_sha !== deployment.sha) findings.push(issue("expected_sha_drift", "failed", "serving deployment SHA differs from expected GitHub SHA"));
   const expectedRef = ENVIRONMENTS[environment]?.expected_ref;
@@ -417,7 +433,9 @@ export async function collectAgentOpsStatus({ baseUrl, token, fetchImpl = fetch,
       capabilities: { gateway: health.body?.gateway_key_present === true ? "present" : health.body?.gateway_key_present === false ? "missing" : "unknown", callback: health.body?.runner_secret_present === true ? "present" : health.body?.runner_secret_present === false ? "missing" : "unknown", cron: platform.cron?.state ?? "unknown" },
       summary: summary.ok ? summaryBody : { evidence: summary.kind, http_status: summary.status },
       inventory: publicInventory,
+      inventory_scope: inventoryScope,
       runs,
+      run_correlation_scope: runCorrelationScope,
     },
     findings,
     blockers,
