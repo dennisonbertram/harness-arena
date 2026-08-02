@@ -90,6 +90,7 @@ describe("0001 agent-network PostgreSQL foundation", () => {
         expect.objectContaining({ column_name: "id" }),
         expect.objectContaining({ column_name: "github_id", data_type: "bigint" }),
         expect.objectContaining({ column_name: "github_login" }),
+        expect.objectContaining({ column_name: "updated_at" }),
       ]),
     );
 
@@ -105,8 +106,19 @@ describe("0001 agent-network PostgreSQL foundation", () => {
       "expires_at",
       "revoked_at",
       "last_used_at",
+      "authenticated_at",
       "created_at",
     ]));
+
+    expect((await columnsFor("competition_memberships")).map((column) => column.column_name)).toEqual(
+      expect.arrayContaining(["role", "state", "joined_at", "left_at", "banned_at", "updated_at"]),
+    );
+    expect((await columnsFor("submission_bindings")).map((column) => column.column_name)).toEqual(
+      expect.arrayContaining(["entry_kind", "entry_schema_version", "created_at"]),
+    );
+    expect((await columnsFor("idempotency_operations")).map((column) => column.column_name)).toEqual(
+      expect.arrayContaining(["entity_id", "response_json", "updated_at"]),
+    );
 
     for (const table of await publicTableNames()) {
       for (const column of await columnsFor(table)) {
@@ -199,6 +211,13 @@ describe("0001 agent-network PostgreSQL foundation", () => {
 
     await expect(
       db.exec(`
+        INSERT INTO entrants (id, github_id, github_login)
+        VALUES ('00000000-0000-0000-0000-000000000005', 424243, 'octo-agent');
+      `),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      db.exec(`
         INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash)
         VALUES ('00000000-0000-0000-0000-000000000012', '${entrantId}', NULL, 'session.revoke', 'global-1', repeat('c', 64));
         INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash)
@@ -223,6 +242,11 @@ describe("0001 agent-network PostgreSQL foundation", () => {
         '00000000-0000-0000-0000-000000000030', '${entrantId}', 'entry.created', 'entrant', '${entrantId}',
         'correlation-1', '{}'::jsonb
       );
+      INSERT INTO domain_audit_events (id, actor_id, action, entity_type, entity_id, correlation_id, safe_metadata)
+      VALUES (
+        '00000000-0000-0000-0000-000000000031', NULL, 'reconciler.checked', 'outbox',
+        '00000000-0000-0000-0000-000000000020', 'correlation-system-1', '{}'::jsonb
+      );
     `);
 
     expect((await constraintDefinitions("domain_outbox")).join(" ")).toMatch(
@@ -236,6 +260,15 @@ describe("0001 agent-network PostgreSQL foundation", () => {
     ).rejects.toThrow();
     await expect(
       db.exec(`DELETE FROM domain_audit_events WHERE id = '00000000-0000-0000-0000-000000000030'`),
+    ).rejects.toThrow();
+    await expect(
+      db.exec(`
+        INSERT INTO domain_audit_events (id, actor_id, action, entity_type, entity_id, safe_metadata)
+        VALUES (
+          '00000000-0000-0000-0000-000000000032', NULL, 'missing.correlation', 'outbox',
+          '00000000-0000-0000-0000-000000000020', '{}'::jsonb
+        );
+      `),
     ).rejects.toThrow();
   });
 
