@@ -5,10 +5,28 @@ Next.js (App Router, TypeScript strict) scaffold for Harness Arena.
 ## Getting started
 
 ```bash
-cp .env.example .env.local   # fill in real values locally, never commit
-pnpm install
-pnpm dev
+./scripts/init.sh
 ```
+
+This is the supported safe local startup path. It installs the pinned lockfile,
+creates a mode-`0600` `.env.local` containing only `STORAGE=file` and a
+worktree-local `.harness-arena/local-data` path, seeds a local development
+competition idempotently, starts one dev server on a deterministic free port,
+waits for `/api/ready`, and prints one secret-free JSON record. It never runs
+Vercel commands, reads a production env file, accepts a Blob token, or writes
+to Vercel Blob. Data, PID metadata, and logs are gitignored and isolated by
+worktree.
+
+- `./scripts/init.sh --check` validates Node, pnpm, port ownership, and stale
+  PID metadata without installing or starting anything.
+- `./scripts/init.sh --no-install` is for a warm worktree.
+- Stop the printed PID, remove `.harness-arena/init.pid`, then use
+  `./scripts/init.sh --reset` to explicitly remove only that worktree's local
+  data. The script refuses to overwrite an existing operator-owned `.env.local`.
+
+For a manually-managed environment, copy `.env.example`, populate only the
+credentials needed for that environment, then use `pnpm dev`; this is not the
+safe default path.
 
 ## GitHub login setup
 

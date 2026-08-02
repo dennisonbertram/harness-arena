@@ -1,4 +1,5 @@
 import { get, list, put } from "@vercel/blob";
+import { FileStorage } from "./file-storage";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
@@ -505,6 +506,7 @@ const MEMORY_STORAGE_KEY = Symbol.for("harness-arena.memory-storage");
 type MemoryStorageGlobal = typeof globalThis & { [MEMORY_STORAGE_KEY]?: MemoryStorage };
 
 export function getStorage(): Storage {
+  if (process.env.STORAGE === "file") return new FileStorage(process.env.LOCAL_STORAGE_DIR ?? "");
   if (process.env.STORAGE === "memory") {
     const g = globalThis as MemoryStorageGlobal;
     g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();

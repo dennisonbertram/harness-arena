@@ -1,4 +1,6 @@
 import { list, put } from "@vercel/blob";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fetchJson, withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
@@ -60,6 +62,35 @@ export class MemoryVoiceStorage implements VoiceStorage {
 
   async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
     return { judgments: [...this.judgments.values()], unreadable: 0 };
+  }
+}
+
+/** Local-only durable implementation used exclusively with STORAGE=file. */
+export class FileVoiceStorage implements VoiceStorage {
+  private readonly root: string;
+  constructor(root: string) { if (!root) throw new Error("LOCAL_STORAGE_DIR is required when STORAGE=file"); this.root = resolve(root, "voice"); }
+  private path(...parts: string[]) { return join(this.root, ...parts); }
+  async getManifest(): Promise<VoiceManifest | undefined> {
+    try { return JSON.parse(await readFile(this.path("manifest.json"), "utf8")) as VoiceManifest; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  }
+  async putManifest(manifest: VoiceManifest): Promise<void> { await mkdir(this.root, { recursive: true }); await writeFile(this.path("manifest.json"), JSON.stringify(manifest), { mode: 0o600 }); }
+  async putJudgment(judgment: VoiceJudgment): Promise<{ created: boolean }> {
+    const path = this.path("judgments", judgment.evaluator_id, `${judgment.comparison_id}.json`);
+    await mkdir(resolve(path, ".."), { recursive: true });
+    try { await writeFile(path, JSON.stringify(judgment), { flag: "wx", mode: 0o600 }); return { created: true }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return { created: false }; throw error; }
+  }
+  async listJudgmentKeys(evaluatorId: string): Promise<string[]> {
+    try { const { readdir } = await import("node:fs/promises"); return (await readdir(this.path("judgments", evaluatorId))).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  }
+  async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
+    const { readdir } = await import("node:fs/promises");
+    let evaluators: string[] = []; try { evaluators = await readdir(this.path("judgments")); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const judgments: VoiceJudgment[] = []; let unreadable = 0;
+    for (const evaluator of evaluators) for (const key of await this.listJudgmentKeys(evaluator)) try { const raw = await readFile(this.path("judgments", evaluator, `${key}.json`), "utf8"); const parsed = VoiceJudgmentSchema.safeParse(JSON.parse(raw)); if (parsed.success) judgments.push(parsed.data); else unreadable++; } catch { unreadable++; }
+    return { judgments, unreadable };
   }
 }
 
@@ -158,6 +189,7 @@ export class BlobVoiceStorage implements VoiceStorage {
 }
 
 export function getVoiceStorage(): VoiceStorage {
+  if (process.env.STORAGE === "file") return new FileVoiceStorage(process.env.LOCAL_STORAGE_DIR ?? "");
   if (process.env.STORAGE === "memory") return new MemoryVoiceStorage();
   if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobVoiceStorage();
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
