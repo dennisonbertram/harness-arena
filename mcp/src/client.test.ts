@@ -110,6 +110,19 @@ describe("HarnessArenaClient", () => {
     expect(fetcher).toHaveBeenCalledWith(new URL("/api/competition/submissions?mine=true", client.baseUrl), expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }));
   });
 
+  it("forwards chat subscription cancellation to the underlying HTTP request", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(200, { messages: [], next_cursor: "cursor-1" }));
+    const controller = new AbortController();
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+
+    await client.readCompetitionChat({ competition_id: "live-cup", wait_seconds: 25, signal: controller.signal } as any);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competitions/live-cup/chat?wait_seconds=25", client.baseUrl),
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
   it.each([
     [401, { error: "ignored" }, "Not authenticated; run the login tool first."],
     [404, { error: "ignored" }, "The requested Harness Arena resource was not found."],
