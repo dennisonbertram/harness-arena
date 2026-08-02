@@ -49,6 +49,13 @@ describe("agent ops status", () => {
     expect(JSON.stringify(result)).not.toContain("not-for-output");
   });
 
+  it("turns a timed-out or unreachable GET into an actionable result, not an access verdict", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error("connection refused"));
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl });
+
+    expect(result).toMatchObject({ verdict: "action_required", exit_code: EXIT_CODES.action_required, findings: [expect.objectContaining({ code: "health_unavailable" })] });
+  });
+
   it("flags stale, incomplete, and deployment SHA drift as actionable", async () => {
     const fetchImpl = fetchSequence([
       { body: { ok: true, sha: "app-sha", storage: "degraded" } },
