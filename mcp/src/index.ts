@@ -3,6 +3,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SubscribeRequestSchema, UnsubscribeRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { HarnessArenaClient } from "./client.js";
+import { ChatSubscriptions } from "./chat-subscriptions.js";
 import { FileCredentialStore } from "./credentials.js";
 import { toToolError, toToolResult, toolDefinitions } from "./server.js";
 
@@ -15,7 +16,10 @@ const client = new HarnessArenaClient({
   },
 });
 const server = new McpServer({ name: "harness-arena-mcp", version: "0.1.0" });
-const chatSubscriptions = new Set<string>();
+const chatSubscriptions = new ChatSubscriptions({
+  client,
+  notify: (uri) => server.server.sendResourceUpdated({ uri }),
+});
 
 server.server.registerCapabilities({ resources: { subscribe: true } });
 const chatResource = new ResourceTemplate("harness-arena://competitions/{competition_id}/chat", { list: undefined });
@@ -38,13 +42,14 @@ server.registerResource(
 );
 
 server.server.setRequestHandler(SubscribeRequestSchema, async (request) => {
-  chatSubscriptions.add(request.params.uri);
+  if (!chatSubscriptions.subscribe(request.params.uri)) throw new Error("Unsupported resource subscription URI.");
   return {};
 });
 server.server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
-  chatSubscriptions.delete(request.params.uri);
+  if (!chatSubscriptions.unsubscribe(request.params.uri)) throw new Error("Unsupported resource subscription URI.");
   return {};
 });
+server.server.onclose = () => { void chatSubscriptions.close(); };
 
 for (const [name, definition] of Object.entries(toolDefinitions(client))) {
   server.registerTool(name, { description: definition.description, inputSchema: definition.inputSchema }, async (input: unknown) => {
