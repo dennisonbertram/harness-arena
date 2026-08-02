@@ -27,7 +27,9 @@ also refuses to start under `NODE_ENV=production` or Vercel.
   PID metadata without installing or starting anything.
 - `./scripts/init.sh --no-install` is for a warm worktree.
 - A repeat start or `--check` reports the same healthy PID/nonce/port. Starts
-  serialize through an atomic per-worktree lock; stale lock/PID metadata is
+  serialize through a per-worktree immutable claim queue: owner metadata is
+  fsynced before atomic publication, unpublished temp files never own, and a
+  dead claim is removed only by its unique path. Stale PID metadata is
   recovered within a bounded wait.
 - Stop the printed PID/process group, then use `./scripts/init.sh --reset` to
   explicitly remove only that worktree's local data. Reset refuses symlinked
