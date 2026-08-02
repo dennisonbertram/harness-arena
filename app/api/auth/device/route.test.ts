@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.stubEnv("AUTH_SECRET", "device-test-secret");
 vi.stubEnv("AUTH_GITHUB_ID", "github-client-id");
 vi.stubEnv("AUTH_GITHUB_SECRET", "github-client-secret");
+vi.mock("@/lib/agent-network-runtime", () => ({ issueScopedAgentSession: vi.fn() }));
 
 import { verifyAgentToken } from "@/lib/agent-token";
+import { issueScopedAgentSession } from "@/lib/agent-network-runtime";
 import { POST as poll } from "./poll/route";
 import { POST as start } from "./start/route";
 
 const fetchMock = vi.fn();
+const issueScopedAgentSessionMock = vi.mocked(issueScopedAgentSession);
 vi.stubGlobal("fetch", fetchMock);
 
 function jsonResponse(body: unknown, status = 200) {
@@ -30,6 +33,8 @@ describe("GitHub device flow", () => {
     vi.stubEnv("AUTH_SECRET", "device-test-secret");
     vi.stubEnv("AUTH_GITHUB_ID", "github-client-id");
     vi.stubEnv("AUTH_GITHUB_SECRET", "github-client-secret");
+    vi.stubEnv("AGENT_NETWORK_ENABLED", "false");
+    issueScopedAgentSessionMock.mockReset();
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -71,6 +76,43 @@ describe("GitHub device flow", () => {
     expect(text).not.toContain(githubAccessToken);
     expect(consoleSpy.mock.calls.flat().join(" ")).not.toContain(githubAccessToken);
     consoleSpy.mockRestore();
+  });
+
+  it("issues a durable scoped session when the agent network flag is enabled without forwarding the GitHub token", async () => {
+    vi.stubEnv("AGENT_NETWORK_ENABLED", "true");
+    const githubAccessToken = "github-access-token-must-stay-in-route";
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ access_token: githubAccessToken, token_type: "bearer", scope: "read:user" }))
+      .mockResolvedValueOnce(jsonResponse({ id: 199, login: "scoped-octocat" }));
+    issueScopedAgentSessionMock.mockResolvedValue({
+      token: "scoped-arena-token",
+      github_login: "scoped-octocat",
+      expires_at: "2026-09-01T12:00:00.000Z",
+    });
+
+    const response = await poll(pollRequest("scoped-code", "10.0.2.2"));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      token: "scoped-arena-token",
+      github_login: "scoped-octocat",
+      expires_at: "2026-09-01T12:00:00.000Z",
+    });
+    expect(issueScopedAgentSessionMock).toHaveBeenCalledWith({ githubId: 199, githubLogin: "scoped-octocat" });
+    expect(JSON.stringify(issueScopedAgentSessionMock.mock.calls)).not.toContain(githubAccessToken);
+  });
+
+  it("fails scoped-session issuance closed with a fixed unavailable response", async () => {
+    vi.stubEnv("AGENT_NETWORK_ENABLED", "true");
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ access_token: "github-token", token_type: "bearer", scope: "read:user" }))
+      .mockResolvedValueOnce(jsonResponse({ id: 200, login: "db-down" }));
+    issueScopedAgentSessionMock.mockRejectedValue(new Error("database down at postgres://user:secret@host/db"));
+
+    const response = await poll(pollRequest("db-down-code", "10.0.2.3"));
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(JSON.parse(text)).toEqual({ error: "agent session service unavailable" });
+    expect(text).not.toContain("postgres://");
   });
 
   it("explains missing GitHub Device Flow configuration", async () => {
