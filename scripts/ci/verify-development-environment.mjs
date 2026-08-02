@@ -2,6 +2,26 @@ import { readFile } from "node:fs/promises";
 import { domainToASCII, pathToFileURL } from "node:url";
 
 const CREDENTIAL_KEY = /(?:token|secret|password|credential|api[_-]?key)/i;
+const DEVELOPMENT_KEYS = new Set([
+  "environment",
+  "branch",
+  "vercelProject",
+  "host",
+  "store",
+  "callbackOrigin",
+  "live",
+]);
+const VERCEL_PROJECT_KEYS = new Set(["id", "name"]);
+const STORE_KEYS = new Set(["id"]);
+const LIVE_KEYS = new Set(["projectId", "aliases", "storeIds"]);
+
+const KNOWN_LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
+const KNOWN_LIVE_ALIASES = [
+  "harness-arena-psi.vercel.app",
+  "harness-arena-dennisons-projects.vercel.app",
+  "harness-arena-git-main-dennisons-projects.vercel.app",
+];
+const KNOWN_LIVE_STORE_IDS = ["store_SgaF1fm7nkPQPCKq"];
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -27,6 +47,13 @@ function credentialKeyPaths(value, prefix = "", seen = new WeakSet()) {
     paths.push(...credentialKeyPaths(child, path, seen));
   }
   return paths;
+}
+
+function unknownKeyPaths(value, allowedKeys, prefix = "") {
+  if (!isObject(value)) return [];
+  return Object.keys(value)
+    .filter((key) => !allowedKeys.has(key))
+    .map((key) => (prefix ? `${prefix}.${key}` : key));
 }
 
 function requiredString(value, path, missing, violations) {
@@ -145,6 +172,17 @@ export function verifyDevelopmentEnvironment({ development, live }) {
     return { ok: false, missing, violations };
   }
 
+  for (const path of unknownKeyPaths(development, DEVELOPMENT_KEYS)) addOnce(violations, path);
+  for (const path of unknownKeyPaths(development.vercelProject, VERCEL_PROJECT_KEYS, "vercelProject")) {
+    addOnce(violations, path);
+  }
+  for (const path of unknownKeyPaths(development.store, STORE_KEYS, "store")) addOnce(violations, path);
+  for (const path of unknownKeyPaths(live, LIVE_KEYS, "live")) addOnce(violations, path);
+  if (Object.hasOwn(development, "live")) {
+    if (!isObject(development.live)) addOnce(violations, "live");
+    for (const path of unknownKeyPaths(development.live, LIVE_KEYS, "live")) addOnce(violations, path);
+  }
+
   const environment = requiredString(development.environment, "environment", missing, violations);
   if (environment !== null && environment !== "development") addOnce(violations, "environment");
   const branch = requiredString(development.branch, "branch", missing, violations);
@@ -180,12 +218,22 @@ export function verifyDevelopmentEnvironment({ development, live }) {
   const liveAliases = normalizedArray(live.aliases, "live.aliases", normalizeHostname, missing, violations);
   const liveStoreIds = normalizedArray(live.storeIds, "live.storeIds", normalizeIdentity, missing, violations);
 
-  if (developmentProjectId && liveProjectId && developmentProjectId === liveProjectId) {
+  const knownProjectId = normalizeIdentity(KNOWN_LIVE_PROJECT_ID);
+  const knownAliases = KNOWN_LIVE_ALIASES.map(normalizeHostname);
+  const knownStoreIds = KNOWN_LIVE_STORE_IDS.map(normalizeIdentity);
+  if (liveProjectId && liveProjectId !== knownProjectId) addOnce(violations, "live.projectId");
+  if (knownAliases.some((alias) => !liveAliases.includes(alias))) addOnce(violations, "live.aliases");
+  if (knownStoreIds.some((storeId) => !liveStoreIds.includes(storeId))) addOnce(violations, "live.storeIds");
+
+  const protectedAliases = new Set([...liveAliases, ...knownAliases]);
+  const protectedStoreIds = new Set([...liveStoreIds, ...knownStoreIds]);
+
+  if (developmentProjectId && (developmentProjectId === liveProjectId || developmentProjectId === knownProjectId)) {
     addOnce(violations, "vercelProject.id");
   }
-  if (developmentHost && liveAliases.includes(developmentHost)) addOnce(violations, "host");
-  if (developmentStoreId && liveStoreIds.includes(developmentStoreId)) addOnce(violations, "store.id");
-  if (callbackHost && liveAliases.includes(callbackHost)) addOnce(violations, "callbackOrigin");
+  if (developmentHost && protectedAliases.has(developmentHost)) addOnce(violations, "host");
+  if (developmentStoreId && protectedStoreIds.has(developmentStoreId)) addOnce(violations, "store.id");
+  if (callbackHost && protectedAliases.has(callbackHost)) addOnce(violations, "callbackOrigin");
 
   return { ok: missing.length === 0 && violations.length === 0, missing, violations };
 }

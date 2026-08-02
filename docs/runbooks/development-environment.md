@@ -7,10 +7,20 @@ production data.
 
 ## PR #174 preview-routing disclosure source
 
-At commit `f15ba57`, Git integration created an automatic non-production preview
-in the existing live Vercel project before the separate development project was
-configured. It had no alias, no data mutation, and no request traffic. It did
-not change the production deployment or live aliases.
+At commit `f15ba57`, Git integration created automatic non-production preview
+`dpl_6MxLwsV4wFWDysCEoNGWYyqCyYrg` in the existing live Vercel project before
+the separate development project was configured. It reached READY and did
+receive branch alias
+`harness-arena-git-codex-dev-environme-19f8e1-dennisons-projects.vercel.app`.
+It had no data mutation and no request traffic.
+
+A separate production incident must not be conflated with that preview:
+`dpl_26QP6baT4WeaZxz68nehTFGSCJwz` was a Codex CLI `target=production`
+dirty-worktree deployment that moved the `harness-arena-psi.vercel.app` and
+`harness-arena-dennisons-projects.vercel.app` generic aliases. The Git-main
+alias remained on `dpl_2ToduY94C37uH3PxELU11q59LGDd` at source SHA `330b484`.
+The dirty deployment is not a valid unchanged production baseline. This work
+does not authorize or perform any production correction.
 
 Before any further push or deploy, the infrastructure owner must verify
 live-project branch-ignore routing that allows only production-bound Git work
@@ -26,11 +36,16 @@ review are complete.
    and have native parent Epic `#139`.
 2. Inspect `config/development-environment.json`. It identifies the reserved
    project `harness-arena-development` / `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`.
-3. Keep the missing `host`, `store.id`, `callbackOrigin`, and live store ID
+3. Keep the missing development `host`, `store.id`, and `callbackOrigin`
    entries missing until the infrastructure owner provisions and independently
-   confirms each value. The manifest intentionally contains no secrets.
-4. Run the verifier with an in-memory manifest only; it reports missing
-   infrastructure and policy violations without printing secret values.
+   confirms each value. The known live Blob store identifier is recorded only
+   as an identifier; the manifest contains no token or other secret.
+4. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
+   with read-only Vercel inventory access. Compare it with the manifest and stop
+   on any omitted or changed identifier. Never retrieve or print Blob
+   credentials during this preflight.
+5. Run the verifier; it reports missing infrastructure and policy violations
+   without printing secret values.
 
 ## Development-only integration and deploy
 

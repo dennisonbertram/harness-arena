@@ -48,10 +48,10 @@ export function parseDevelopmentClosingIssue(body) {
     );
   }
 
-  const candidates = body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/i.test(line));
+  const lines = body.split(/\r?\n/);
+  const candidates = lines.flatMap((line) =>
+    [...line.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/gi)].map(() => line),
+  );
   const match = candidates.length === 1 ? /^Closes #([1-9]\d*)$/.exec(candidates[0]) : null;
   if (!match) {
     fail(

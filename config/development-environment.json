@@ -10,7 +10,11 @@
   "callbackOrigin": null,
   "live": {
     "projectId": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
-    "aliases": ["harness-arena-psi.vercel.app"],
-    "storeIds": []
+    "aliases": [
+      "harness-arena-psi.vercel.app",
+      "harness-arena-dennisons-projects.vercel.app",
+      "harness-arena-git-main-dennisons-projects.vercel.app"
+    ],
+    "storeIds": ["store_SgaF1fm7nkPQPCKq"]
   }
 }
