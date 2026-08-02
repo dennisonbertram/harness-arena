@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -55,6 +55,39 @@ describe("HarnessArenaClient", () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     await expect(store.get("https://local.example.test")).resolves.toMatchObject({ github_login: "octo" });
     await expect(store.get("https://harness-arena-psi.vercel.app")).resolves.toBeUndefined();
+  });
+
+  it("rejects a symlinked credential path without reading or overwriting its target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-link-"));
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const target = join(directory, "attacker-target.json");
+    const path = join(nested, "credentials.json");
+    const targetContents = `${JSON.stringify({
+      version: 1,
+      credentials: { "https://arena.example.test": { token: "attacker-token", github_login: "attacker", expires_at: "2099-01-01T00:00:00Z" } },
+    })}\n`;
+    await writeFile(target, targetContents);
+    await symlink(target, path);
+    const store = new FileCredentialStore(path);
+
+    await expect(store.get("https://arena.example.test")).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(store.set("https://arena.example.test", {
+      token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z",
+    })).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(readFile(target, "utf8")).resolves.toBe(targetContents);
+  });
+
+  it("rejects malformed stored credential values instead of returning them as authenticated", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-schema-"));
+    const path = join(directory, "credentials.json");
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      credentials: { "https://arena.example.test": { token: "", github_login: 42, expires_at: "never" } },
+    }));
+
+    await expect(new FileCredentialStore(path).get("https://arena.example.test"))
+      .rejects.toThrow("Unable to read Harness Arena credentials");
   });
 
   it("fails auth-required tools helpfully when no token exists", async () => {
