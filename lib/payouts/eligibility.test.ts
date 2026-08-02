@@ -3,12 +3,22 @@ import { createPayoutEligibilityService } from "./eligibility";
 
 const OWNER = { id: "00000000-0000-0000-0000-000000000101", role: "operator" as const };
 const ENTRANT = { id: "00000000-0000-0000-0000-000000000202", role: "entrant" as const };
+const CLOSE_GENERATION = "00000000-0000-0000-0000-000000000901";
+const CLOSED_AT = "2026-08-03T12:00:00.000Z";
 type SqlFake = {
   query<Row>(statement: string, params?: unknown[]): Promise<{ rows: Row[] }>;
   transaction<Value>(work: (tx: SqlFake) => Promise<Value>): Promise<Value>;
 };
+type EligibilitySnapshot = {
+  competition_id: string;
+  submission_id: string;
+  ownership: { reconciled: boolean; entrant_id: string };
+  final_result: { final: boolean; rank: number | null; score: number | null; judge_revision: string | null };
+  trace_artifact: { state: string; sha256: string | null; scan_revision: string | null; policy_compliant: boolean };
+  payout_profile: { provider: string; verification_method: string; chain_id: number; address: string | null; verified_at: string | null; effective: boolean };
+};
 
-const completeReconciledSnapshot = () => ({
+const completeReconciledSnapshot = (): EligibilitySnapshot => ({
   competition_id: "competition-1",
   submission_id: "submission-1",
   ownership: { reconciled: true, entrant_id: ENTRANT.id },
@@ -22,15 +32,22 @@ const completeReconciledSnapshot = () => ({
     effective: true,
   },
 });
+const ready = (snapshots: EligibilitySnapshot[] = [completeReconciledSnapshot()]) => ({
+  state: "ready" as const,
+  competition_id: "competition-1",
+  close_generation: CLOSE_GENERATION,
+  closed_at: CLOSED_AT,
+  snapshots,
+});
 
 describe("payout eligibility freeze service", () => {
   it("locks and pins the exact durable close generation before writing any eligibility row", async () => {
     const calls: string[] = [];
-    const closeGeneration = "00000000-0000-0000-0000-000000000901";
+    const closeGeneration = CLOSE_GENERATION;
     const sql: SqlFake = {
       transaction: async <Value>(work: (tx: SqlFake) => Promise<Value>) => work(sql),
       async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
-        calls.push(statement.trim().split(/\s+/).slice(0, 4).join(" "));
+        calls.push(statement.trim().replace(/\s+/g, " "));
         if (statement.includes("FROM competition_lifecycle_gates")) {
           return { rows: [{
             competition_id: "competition-1", state: "closed", close_generation: closeGeneration,
@@ -38,6 +55,10 @@ describe("payout eligibility freeze service", () => {
           }] as Row[] };
         }
         if (statement.startsWith("INSERT INTO payout_freeze_batches")) return { rows: [] };
+        if (statement.includes("FROM payout_freeze_batches")) return { rows: [{
+          close_generation: closeGeneration, cutoff_at: CLOSED_AT,
+          policy_version: "payout-eligibility-policy.v1", expected_submission_count: 1,
+        }] as Row[] };
         if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) return { rows: [] };
         return { rows: [{
           id: String(params[0] ?? "00000000-0000-0000-0000-000000000701"),
@@ -67,7 +88,7 @@ describe("payout eligibility freeze service", () => {
   it("allows only an operator to close a competition and freezes one deterministic, complete cutoff row", async () => {
     const service = createPayoutEligibilityService({} as never, {
       now: () => new Date("2026-08-03T12:00:00.000Z"),
-      loadCompetitionSnapshot: async () => [completeReconciledSnapshot()],
+      loadCompetitionSnapshot: async () => ready(),
     });
     await expect(service.freezeCompetition({ actor: ENTRANT, competition_id: "competition-1" }))
       .resolves.toEqual({ ok: false, error: { code: "operator_required" } });
@@ -93,7 +114,7 @@ describe("payout eligibility freeze service", () => {
     ["payout_profile_not_effective", { payout_profile: { ...completeReconciledSnapshot().payout_profile, effective: false } }],
   ])("fails closed with %s for an incomplete or unsafe cutoff snapshot", async (reason_code, patch) => {
     const service = createPayoutEligibilityService({} as never, {
-      loadCompetitionSnapshot: async () => [{ ...completeReconciledSnapshot(), ...patch }],
+      loadCompetitionSnapshot: async () => ready([{ ...completeReconciledSnapshot(), ...patch }]),
     });
     await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
       .resolves.toEqual({ ok: true, freezes: [expect.objectContaining({ status: "ineligible", reason_code })] });
@@ -116,7 +137,7 @@ describe("payout eligibility freeze service", () => {
       return { rows: [] };
     } };
     const service = createPayoutEligibilityService(sql, {
-      loadCompetitionSnapshot: async () => [completeReconciledSnapshot()],
+      loadCompetitionSnapshot: async () => ready(),
     });
 
     await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
@@ -142,7 +163,10 @@ describe("payout eligibility freeze service", () => {
     const sql: SqlFake = {
       transaction: async <Value>(work: (tx: SqlFake) => Promise<Value>) => work(sql),
       async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
-        if (statement.startsWith("INSERT")) {
+        if (statement.includes("FROM competition_lifecycle_gates")) return { rows: [{ state: "closed", close_generation: CLOSE_GENERATION, closed_at: CLOSED_AT }] as Row[] };
+        if (statement.startsWith("INSERT INTO payout_freeze_batches")) return { rows: [] };
+        if (statement.includes("FROM payout_freeze_batches")) return { rows: [{ close_generation: CLOSE_GENERATION, cutoff_at: CLOSED_AT, policy_version: "policy-2026-08", expected_submission_count: 1 }] as Row[] };
+        if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) {
           persistedSnapshot = JSON.parse(String(params[9]));
           return { rows: [] };
         }
@@ -151,14 +175,14 @@ describe("payout eligibility freeze service", () => {
           entrant_id: ENTRANT.id, status: "eligible", reason_code: "eligible", policy_version: "policy-2026-08",
           cutoff_at: "2026-08-03T12:00:00.000Z", result_rank: 1, result_score: 99.5, judge_revision: "judge-r7",
           trace_sha256: "a".repeat(64), trace_scan_revision: "scan-r3", payout_address: completeReconciledSnapshot().payout_profile.address,
-          payout_chain_id: 1, payout_profile_verified_at: "2026-08-02T12:00:00.000Z",
+          payout_chain_id: 1, payout_profile_verified_at: "2026-08-02T12:00:00.000Z", close_generation: CLOSE_GENERATION,
         }] as Row[] };
       },
     };
     const service = createPayoutEligibilityService(sql, {
       now: () => new Date("2026-08-03T12:00:00.000Z"),
       policyVersion: "policy-2026-08",
-      loadCompetitionSnapshot: async () => [completeReconciledSnapshot()],
+      loadCompetitionSnapshot: async () => ready(),
     });
 
     await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" })).resolves.toMatchObject({ ok: true });
@@ -178,6 +202,9 @@ describe("payout eligibility freeze service", () => {
     let firstWriteComplete!: () => void;
     const firstWritten = new Promise<void>((resolve) => { firstWriteComplete = resolve; });
     const queryFor = (target: Map<string, Record<string, unknown>>) => async <Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> => {
+        if (statement.includes("FROM competition_lifecycle_gates")) return { rows: [{ state: "closed", close_generation: CLOSE_GENERATION, closed_at: CLOSED_AT }] as Row[] };
+        if (statement.startsWith("INSERT INTO payout_freeze_batches")) return { rows: [] as Row[] };
+        if (statement.includes("FROM payout_freeze_batches")) return { rows: [{ close_generation: CLOSE_GENERATION, cutoff_at: CLOSED_AT, policy_version: "payout-eligibility-policy.v1", expected_submission_count: 2 }] as Row[] };
         if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) {
           const submissionId = String(params[2]);
           if (submissionId === "submission-2" && failSecondWrite) {
@@ -189,6 +216,7 @@ describe("payout eligibility freeze service", () => {
             status: params[5], reason_code: params[6], policy_version: params[7], cutoff_at: params[8],
             result_rank: params[10], result_score: params[11], judge_revision: params[12], trace_sha256: params[13],
             trace_scan_revision: params[14], payout_address: params[15], payout_chain_id: params[16], payout_profile_verified_at: params[17],
+            close_generation: params[18],
           });
           if (submissionId === "submission-1") firstWriteComplete();
           return { rows: [] as Row[] };
@@ -212,7 +240,7 @@ describe("payout eligibility freeze service", () => {
     ];
     const service = createPayoutEligibilityService(sql, {
       now: () => new Date("2026-08-03T12:00:00.000Z"),
-      loadCompetitionSnapshot: async () => snapshot,
+      loadCompetitionSnapshot: async () => ready(snapshot),
     });
 
     await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
