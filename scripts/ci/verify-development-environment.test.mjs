@@ -5,8 +5,12 @@ import { verifyDevelopmentEnvironment } from "./verify-development-environment.m
 
 const live = {
   projectId: "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
-  aliases: ["harness-arena-psi.vercel.app"],
-  storeIds: ["live-blob-store"],
+  aliases: [
+    "harness-arena-psi.vercel.app",
+    "harness-arena-dennisons-projects.vercel.app",
+    "harness-arena-git-main-dennisons-projects.vercel.app",
+  ],
+  storeIds: ["store_SgaF1fm7nkPQPCKq"],
 };
 
 function development(overrides = {}) {
@@ -32,9 +36,10 @@ describe("verifyDevelopmentEnvironment", () => {
 
     expect(verifyDevelopmentEnvironment({ development: manifest, live: manifest.live })).toEqual({
       ok: false,
-      missing: ["host", "store.id", "callbackOrigin", "live.storeIds"],
+      missing: ["host", "store.id", "callbackOrigin"],
       violations: [],
     });
+    expect(manifest.live).toEqual(live);
   });
 
   it("reports missing host, store, and callback infrastructure without exposing secrets", () => {
@@ -148,7 +153,7 @@ describe("verifyDevelopmentEnvironment", () => {
       development: development({
         vercelProject: { id: ` ${live.projectId.toUpperCase()} `, name: "harness-arena-development" },
         host: "HARNESS-ARENA-PSI.VERCEL.APP.",
-        store: { id: " LIVE-BLOB-STORE " },
+        store: { id: ` ${live.storeIds[0].toUpperCase()} ` },
         callbackOrigin: "https://harness-arena-psi.vercel.app",
       }),
       live,
@@ -157,6 +162,70 @@ describe("verifyDevelopmentEnvironment", () => {
     expect(result.violations).toEqual(
       expect.arrayContaining(["vercelProject.id", "host", "store.id", "callbackOrigin"]),
     );
+  });
+
+  it.each(live.aliases.slice(1))("rejects alternate active live alias %s", (alias) => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        host: alias.toUpperCase(),
+        store: { id: "development-blob-store" },
+        callbackOrigin: `https://${alias}`,
+      }),
+      live,
+    });
+
+    expect(result.violations).toEqual(expect.arrayContaining(["host", "callbackOrigin"]));
+  });
+
+  it.each(live.aliases.slice(1))("fails closed when live inventory omits active alias %s", (alias) => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        host: alias,
+        store: { id: "development-blob-store" },
+        callbackOrigin: `https://${alias}`,
+      }),
+      live: { ...live, aliases: [live.aliases[0]] },
+    });
+
+    expect(result.violations).toEqual(expect.arrayContaining(["live.aliases", "host", "callbackOrigin"]));
+  });
+
+  it("rejects the known active live Blob store identifier", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({ store: { id: ` ${live.storeIds[0].toUpperCase()} ` } }),
+      live,
+    });
+
+    expect(result.violations).toContain("store.id");
+  });
+
+  it("fails closed when live inventory omits the active Blob store identifier", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({ store: { id: live.storeIds[0] } }),
+      live: { ...live, storeIds: [] },
+    });
+
+    expect(result.violations).toEqual(expect.arrayContaining(["live.storeIds", "store.id"]));
+  });
+
+  it.each([
+    ["productionStoreId", development({ productionStoreId: "alternate-production-store" }), live],
+    [
+      "vercelProject.authorization",
+      development({
+        vercelProject: {
+          id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+          name: "harness-arena-development",
+          authorization: "not-allowed",
+        },
+      }),
+      live,
+    ],
+    ["store.productionStoreId", development({ store: { id: null, productionStoreId: "live" } }), live],
+    ["live.authorization", development(), { ...live, authorization: "not-allowed" }],
+  ])("fails closed on unknown schema key %s", (path, developmentValue, liveValue) => {
+    const result = verifyDevelopmentEnvironment({ development: developmentValue, live: liveValue });
+    expect(result.violations).toContain(path);
   });
 
   it("refuses live projects, aliases, stores, callback origins, and token-shaped fields", () => {
@@ -185,11 +254,18 @@ describe("verifyDevelopmentEnvironment", () => {
     );
 
     expect(runbook).toContain("f15ba57");
+    expect(runbook).toContain("dpl_6MxLwsV4wFWDysCEoNGWYyqCyYrg");
+    expect(runbook).toContain("harness-arena-git-codex-dev-environme-19f8e1-dennisons-projects.vercel.app");
     expect(runbook).toMatch(/automatic non-production preview/i);
-    expect(runbook).toMatch(/no alias/i);
     expect(runbook).toMatch(/no data/i);
     expect(runbook).toMatch(/no request/i);
+    expect(runbook).toContain("dpl_26QP6baT4WeaZxz68nehTFGSCJwz");
+    expect(runbook).toMatch(/dirty-worktree deployment/i);
+    expect(runbook).toContain("dpl_2ToduY94C37uH3PxELU11q59LGDd");
+    expect(runbook).toContain("330b484");
     expect(runbook).toMatch(/branch-ignore routing/i);
     expect(runbook).toMatch(/before any further push or deploy/i);
+    expect(runbook).toMatch(/refresh the complete live alias and Blob store identifier inventory/i);
+    expect(runbook).toMatch(/read-only/i);
   });
 });

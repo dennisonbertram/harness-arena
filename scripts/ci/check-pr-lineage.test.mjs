@@ -193,6 +193,9 @@ describe("checkPullRequestLineage", () => {
     ["cross-repository", "Closes #173\nCloses attacker/foreign-repo#174"],
     ["extra-token", "Closes #173\nCloses #174 because this also changed"],
     ["second closing keyword", "Closes #173\nFixes #174"],
+    ["inline closing keyword", "Closes #173\nThis also fixes #174"],
+    ["list-item closing keyword", "Closes #173\n- Fixes #174"],
+    ["blockquote closing keyword", "Closes #173\n> Resolves #174"],
   ])("rejects a valid dev reference plus a %s closing-directive candidate", async (_name, body) => {
     const devEvent = structuredClone(event);
     devEvent.pull_request.base.ref = "dev";
