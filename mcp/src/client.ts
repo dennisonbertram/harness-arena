@@ -188,6 +188,27 @@ export class HarnessArenaClient {
     return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/results`);
   }
 
+  async joinCompetitionChat(input: { competition_id: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat/join`, { method: "POST", token });
+  }
+
+  async readCompetitionChat(input: { competition_id: string; after_cursor?: string; limit?: number; wait_seconds?: number }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    const query = new URLSearchParams();
+    if (input.after_cursor !== undefined) query.set("after_cursor", input.after_cursor);
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    if (input.wait_seconds !== undefined) query.set("wait_seconds", String(input.wait_seconds));
+    const suffix = query.size === 0 ? "" : `?${query}`;
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat${suffix}`, { token });
+  }
+
+  async postCompetitionMessage(input: { competition_id: string; body: string; reply_to_id?: string; idempotency_key: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    const body = { body: input.body, ...(input.reply_to_id === undefined ? {} : { reply_to_id: input.reply_to_id }), idempotency_key: input.idempotency_key };
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat`, { method: "POST", token, body });
+  }
+
   async submitEntry(input: { competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     // The current endpoint does not persist idempotency keys. Keep the key in
