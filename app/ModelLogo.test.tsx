@@ -8,13 +8,21 @@ describe("ModelLogo", () => {
     // Keyed by provider prefix, so this must cover every id in MODEL_LABELS
     // -- a model with no logo silently falls back to the "?" placeholder.
     for (const model of Object.keys(MODEL_LABELS)) {
-      expect(renderToStaticMarkup(<ModelLogo model={model} />), `no logo for ${model}`).toContain("<svg");
+      expect(
+        renderToStaticMarkup(<ModelLogo model={model} />),
+        `no logo for ${model}`,
+      ).toMatch(/<(?:svg|img)\b/);
     }
   });
 
   it("covers both Google families from the single google prefix", () => {
     expect(renderToStaticMarkup(<ModelLogo model="google/gemma-4-31b-it" />)).toContain("<svg");
     expect(renderToStaticMarkup(<ModelLogo model="google/gemini-3-flash" />)).toContain("<svg");
+  });
+
+  it("uses Thinking Machines' fetched first-party logo asset for Inkling", () => {
+    const html = renderToStaticMarkup(<ModelLogo model="thinkingmachines/inkling-small" />);
+    expect(html).toContain('src="/logos/thinking-machines.png"');
   });
 
   it("falls back to a placeholder glyph for an unrecognized provider", () => {

@@ -41,6 +41,32 @@ describe("RUN_EVENT_TYPES: task.cost_tamper_signal (runner-emitted, issue #24)",
   });
 });
 
+describe("RUN_EVENT_TYPES: task.gateway_correlation", () => {
+  it("accepts the runner's provider-routing correlation as a valid RunEvent", () => {
+    const result = RunEventSchema.safeParse({
+      run_id: "run-1",
+      seq: 2,
+      ts: "2026-07-31T00:00:00.000Z",
+      type: "task.gateway_correlation",
+      payload: {
+        task_id: "t1",
+        proxy_requests: [
+          {
+            request_id: "gw-1",
+            pinned_provider: "fireworks",
+            status: 200,
+            response_id: "gen-1",
+          },
+        ],
+        pi_response_ids: ["gen-1"],
+        pi_retry_events: [],
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
 describe("CompetitionSchema (issue #75)", () => {
   it("preserves the gateway provider that versions otherwise-identical competitions", () => {
     const result = CompetitionSchema.safeParse({

@@ -93,6 +93,129 @@ describe("ensureBaseline", () => {
     expect(await baselinesFor(storage, "comp-1")).toHaveLength(2);
   });
 
+  it("retries when a completed baseline contains only provider transport failures", async () => {
+    approve();
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+    await ensureBaseline(storage, comp);
+
+    // The runner deliberately continues after task-level failures, so broken
+    // model plumbing can still produce a formally "completed" 0/16 run. That
+    // is infrastructure evidence, not a legitimate reference score.
+    const [existing] = await baselinesFor(storage, "comp-1");
+    const run = (await storage.getRun(existing.run_id!)) as Run;
+    await storage.putRun({
+      ...run,
+      status: "completed",
+      tasks_passed: 0,
+      task_results: [
+        {
+          task_id: "task-a",
+          attempted: true,
+          passed: false,
+          turns: 1,
+          failure_stage: "provider_error",
+          error: "404 /v1/v1/messages",
+        },
+        {
+          task_id: "task-b",
+          attempted: true,
+          passed: false,
+          turns: 1,
+          failure_stage: "provider_timeout",
+          error: "upstream timed out",
+        },
+      ],
+    });
+
+    const result = await ensureBaseline(storage, comp);
+
+    expect(result.kind).toBe("created");
+    expect(await baselinesFor(storage, "comp-1")).toHaveLength(2);
+  });
+
+  it("retries when every task times out before the agent produces output", async () => {
+    approve();
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+    await ensureBaseline(storage, comp);
+
+    // A uniform no-output timeout is a broken measurement path, not evidence
+    // that the model attempted and failed every benchmark task.
+    const [existing] = await baselinesFor(storage, "comp-1");
+    const run = (await storage.getRun(existing.run_id!)) as Run;
+    await storage.putRun({
+      ...run,
+      status: "completed",
+      tasks_passed: 0,
+      task_results: [
+        {
+          task_id: "task-a",
+          attempted: true,
+          passed: false,
+          turns: 0,
+          output_tokens: 0,
+          failure_stage: "agent_timeout",
+        },
+        {
+          task_id: "task-b",
+          attempted: true,
+          passed: false,
+          turns: 0,
+          output_tokens: 0,
+          failure_stage: "agent_timeout",
+        },
+      ],
+    });
+
+    const result = await ensureBaseline(storage, comp);
+
+    expect(result.kind).toBe("created");
+    expect(await baselinesFor(storage, "comp-1")).toHaveLength(2);
+  });
+
+  it("retries when Pi exited before any turn and the verifier ran on an untouched workspace", async () => {
+    approve();
+    const storage = new MemoryStorage();
+    const comp = competition("comp-1");
+    await storage.putCompetition(comp);
+    await ensureBaseline(storage, comp);
+
+    // Production Inkling evidence: the Gateway returned a real response, but
+    // Pi's verbose JSON exceeded execFile's buffer before message_end. The old
+    // runner recorded zero turns/unmeasured cost and ran the verifier anyway.
+    const [existing] = await baselinesFor(storage, "comp-1");
+    const run = (await storage.getRun(existing.run_id!)) as Run;
+    await storage.putRun({
+      ...run,
+      status: "completed",
+      tasks_passed: 0,
+      task_results: [
+        {
+          task_id: "task-a",
+          attempted: true,
+          passed: false,
+          turns: 0,
+          cost_source: "unmeasured",
+        },
+        {
+          task_id: "task-b",
+          attempted: true,
+          passed: false,
+          turns: 0,
+          cost_source: "unmeasured",
+        },
+      ],
+    });
+
+    const result = await ensureBaseline(storage, comp);
+
+    expect(result.kind).toBe("created");
+    expect(await baselinesFor(storage, "comp-1")).toHaveLength(2);
+  });
+
   it("does not create a second baseline for a competition whose baseline is healthy", async () => {
     approve();
     const storage = new MemoryStorage();

@@ -16,6 +16,8 @@ import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
 import { LiveDuration } from "./LiveDuration";
 import { cellStyle } from "../../tableStyles";
+import { ARENA_ENDPOINT } from "@/lib/arena-params";
+import { redactRunError, redactRunEventPayload } from "@/lib/run-error";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
 
@@ -82,7 +84,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         .map((task) => ({
           taskId: task.taskId,
           stage: task.failureStage!,
-          error: task.error,
+          error: task.error ? redactRunError(task.error, task.failureStage) : task.error,
           durationS: task.durationS,
         }))
     : run.task_results
@@ -90,7 +92,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         .map((task) => ({
           taskId: task.task_id,
           stage: task.failure_stage!,
-          error: task.error,
+          error: task.error ? redactRunError(task.error, task.failure_stage) : task.error,
           durationS: task.duration_s,
         }));
   const failureEvent = [...events]
@@ -98,7 +100,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
     .find((event) => event.type === "run.failed" || event.type === "run.reaped");
   const failureMessage =
     typeof failureEvent?.payload.error === "string"
-      ? failureEvent.payload.error
+      ? redactRunError(
+          failureEvent.payload.error,
+          typeof failureEvent.payload.stage === "string" ? failureEvent.payload.stage : undefined,
+        )
       : typeof failureEvent?.payload.reason === "string"
         ? failureEvent.payload.reason
         : "The run stopped unexpectedly.";
@@ -137,9 +142,16 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <a href={BENCHMARK_REPO} target="_blank" rel="noopener noreferrer">
             Terminal-Bench 2
           </a>{" "}
-          · {benchmarkTaskCount}-task subset · model{" "}
-          <span className="mono">{modelLabel(run.model)}</span> via AI Gateway
+          · {benchmarkTaskCount}-task subset
         </p>
+        <dl style={{ display: "flex", flexWrap: "wrap", gap: "12px 28px", margin: "16px 0 0" }}>
+          <RoutingMeta label="Model" value={modelLabel(run.model)} />
+          <RoutingMeta label="Provider" value={run.provider_pinned ?? "not recorded"} />
+          {run.provider_requested && run.provider_requested !== run.provider_pinned ? (
+            <RoutingMeta label="Requested provider" value={run.provider_requested} />
+          ) : null}
+          <RoutingMeta label="Intermediary" value={ARENA_ENDPOINT} />
+        </dl>
       </section>
 
       {failureEvent || run.status === "failed" || run.status === "reaped" ? (
@@ -186,7 +198,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                 <span className="mono">{task.stage}</span>
                 {" · "}
                 {task.durationS !== undefined ? formatDuration(task.durationS) : "duration unavailable"}
-                {task.error ? ` · ${task.error}` : null}
+                {task.error ? ` · ${redactRunError(task.error, task.stage)}` : null}
               </li>
             ))}
           </ul>
@@ -414,7 +426,12 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <p style={{ fontSize: 14, color: "var(--gray-900)" }}>No events yet.</p>
         ) : (
           <EventTimeline
-            events={events.map((e) => ({ seq: e.seq, ts: e.ts, type: e.type, payload: e.payload }))}
+            events={events.map((e) => ({
+              seq: e.seq,
+              ts: e.ts,
+              type: e.type,
+              payload: redactRunEventPayload(e.type, e.payload),
+            }))}
           />
         )}
         {run.status === "running" || run.status === "queued" ? (
@@ -423,6 +440,19 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           </p>
         ) : null}
       </section>
+    </div>
+  );
+}
+
+function RoutingMeta({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="label" style={{ marginBottom: 4 }}>
+        {label}
+      </dt>
+      <dd className="mono" style={{ fontSize: 13, margin: 0 }}>
+        {value}
+      </dd>
     </div>
   );
 }
@@ -467,6 +497,9 @@ function TaskStateBadge({ state }: { state: TaskState }) {
 }
 
 function TaskFailure({ stage, error }: { stage?: string; error: string }) {
+  const displayError = redactRunError(error, stage);
+  const displayStage = displayError.startsWith("provider_error") ? undefined : stage;
+
   return (
     <div
       style={{
@@ -478,8 +511,8 @@ function TaskFailure({ stage, error }: { stage?: string; error: string }) {
         whiteSpace: "normal",
       }}
     >
-      {stage ? <span className="mono">{stage}: </span> : null}
-      {error}
+      {displayStage ? <span className="mono">{displayStage}: </span> : null}
+      {displayError}
     </div>
   );
 }

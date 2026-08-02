@@ -30,6 +30,44 @@ describe("CompetitionLeaderboardTable", () => {
     expect(html).toContain('alt="octocat"');
   });
 
+  it("separates total run cost from cost per solved task", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[row({ tasksPassed: 12, totalCostUsd: 1.0912 })]}
+        belowBaseline={[row({ submissionId: "zero", tasksPassed: 0, totalCostUsd: 0 })]}
+        baselineRow={row({ submissionId: "baseline", tasksPassed: 9, totalCostUsd: 2.2982 })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toMatch(/<th[^>]*>Total run cost<\/th>/);
+    expect(html).toMatch(/<th[^>]*>Cost \/ solved task<\/th>/);
+    expect(html).toContain("$1.0912");
+    expect(html).toContain("$0.0909");
+    expect(html).toContain("$2.2982");
+    expect(html).toContain("$0.2554");
+    expect(html).toMatch(/data-cost-per-solved-task="true"[^>]*>[\s\S]*>—<\/span><\/td>/);
+  });
+
+  it("shows cost efficiency direction and percentage against the baseline", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[
+          row({ submissionId: "cheaper", tasksPassed: 12, totalCostUsd: 1.0912 }),
+          row({ submissionId: "pricier", rank: 2, tasksPassed: 6, totalCostUsd: 3 }),
+        ]}
+        baselineRow={row({ submissionId: "baseline", tasksPassed: 9, totalCostUsd: 2.2982 })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toContain('aria-label="Cost per solved task is 64% lower than baseline"');
+    expect(html).toContain(">↓ 64%</span>");
+    expect(html).toContain('aria-label="Cost per solved task is 96% higher than baseline"');
+    expect(html).toContain(">↑ 96%</span>");
+    expect(html).not.toContain('aria-label="Cost per solved task is 0%');
+  });
+
   it("renders a placeholder glyph, not a real avatar request, for the 'unknown' fallback login", () => {
     const html = renderToStaticMarkup(
       <CompetitionLeaderboardTable ranked={[row({ githubLogin: "unknown" })]} currentGithubLogin={undefined} />,
@@ -54,7 +92,7 @@ describe("CompetitionLeaderboardTable", () => {
     expect(html.match(/👑/g) ?? []).toHaveLength(2);
   });
 
-  it("renders tasks-solved as the bold primary metric with cost as a secondary line underneath", () => {
+  it("renders tasks solved and total cost as separate metrics", () => {
     const html = renderToStaticMarkup(
       <CompetitionLeaderboardTable
         ranked={[row({ tasksPassed: 12, totalTasks: 16, totalCostUsd: 3.5 })]}
@@ -64,23 +102,97 @@ describe("CompetitionLeaderboardTable", () => {
 
     expect(html).toContain("12/16");
     expect(html).toContain("$3.5000");
-    // The primary metric's cell appears before the secondary cost line in source order.
+    expect(html).toContain("Total run cost");
+    expect(html).toContain("Cost / solved task");
+    // The task count appears before the total cost column in source order.
     expect(html.indexOf("12/16")).toBeLessThan(html.indexOf("$3.5000"));
   });
 
-  it("highlights the row matching currentGithubLogin and no others", () => {
+  it("shows ranked task-score gains versus the baseline and the next row", () => {
     const html = renderToStaticMarkup(
       <CompetitionLeaderboardTable
-        ranked={[row({ submissionId: "mine", githubLogin: "octocat" }), row({ submissionId: "theirs", githubLogin: "hubot" })]}
+        ranked={[
+          row({ submissionId: "winner", rank: 1, tasksPassed: 12 }),
+          row({ submissionId: "runner-up", rank: 2, tasksPassed: 9 }),
+        ]}
+        baselineRow={row({ submissionId: "baseline", tasksPassed: 9 })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toContain(">+33%</span>");
+    expect(html).not.toContain("+33% vs #2");
+    expect(html).not.toContain("+33% vs baseline");
+    expect(html).toContain(">0%</span>");
+  });
+
+  it("renders baseline and next comparisons as dedicated table columns", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[row({ tasksPassed: 12 }), row({ submissionId: "runner-up", rank: 2, tasksPassed: 9 })]}
+        baselineRow={row({ submissionId: "baseline", tasksPassed: 9 })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toMatch(/<th[^>]*>vs baseline<\/th>/);
+    expect(html).toMatch(/<th[^>]*>vs next<\/th>/);
+    expect(html).toContain(">Baseline</span>");
+    expect(html).not.toContain("bar to beat");
+    expect(html).not.toMatch(/<td[^>]*>[^<]*12\/16[\s\S]*data-comparison=/);
+  });
+
+  it("uses the baseline background without an extra top border", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[]}
+        baselineRow={row({ submissionId: "baseline" })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toMatch(/data-row-kind="baseline"[^>]*background:var\(--blue-100\)/);
+    expect(html).not.toContain("border-top:2px solid var(--blue-700)");
+  });
+
+  it("shows below-baseline task-score losses and handles zero-task references without infinity", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[]}
+        belowBaseline={[
+          row({ submissionId: "close", tasksPassed: 8 }),
+          row({ submissionId: "zero-a", tasksPassed: 0 }),
+          row({ submissionId: "zero-b", tasksPassed: 0 }),
+        ]}
+        baselineRow={row({ submissionId: "baseline", tasksPassed: 9 })}
+        currentGithubLogin={undefined}
+      />,
+    );
+
+    expect(html).toContain(">-11%</span>");
+    expect(html).toContain(">8 tasks more</span>");
+    expect(html).not.toContain("Infinity");
+    expect(html).toContain(">0%</span>");
+  });
+
+  it("reserves the blue background for the baseline even when every entry belongs to the current user", () => {
+    const html = renderToStaticMarkup(
+      <CompetitionLeaderboardTable
+        ranked={[
+          row({ submissionId: "mine-one", githubLogin: "octocat" }),
+          row({ submissionId: "mine-two", githubLogin: "octocat" }),
+        ]}
+        belowBaseline={[row({ submissionId: "mine-three", githubLogin: "octocat" })]}
+        baselineRow={row({ submissionId: "baseline" })}
         currentGithubLogin="octocat"
       />,
     );
 
-    // Exactly one row (of the two rendered) carries the highlight -- not zero, not both.
+    expect(html).toMatch(/data-row-kind="baseline"[^>]*background:var\(--blue-100\)/);
     expect(html.match(/var\(--blue-100\)/g) ?? []).toHaveLength(1);
   });
 
-  it("applies no highlight when currentGithubLogin is undefined or matches no row", () => {
+  it("does not apply a background when currentGithubLogin is undefined or matches no row", () => {
     const signedOut = renderToStaticMarkup(
       <CompetitionLeaderboardTable ranked={[row({ githubLogin: "octocat" })]} currentGithubLogin={undefined} />,
     );

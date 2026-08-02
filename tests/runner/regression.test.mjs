@@ -521,6 +521,15 @@ describe.skipIf(!RUNNER_IT)(
         expect(tamperEvent).toBeDefined();
         expect(tamperEvent.payload.reason).toBe("cost_unmeasured");
 
+        const gatewayCorrelation = state.events.find((e) => e.type === "task.gateway_correlation");
+        expect(gatewayCorrelation).toBeDefined();
+        expect(gatewayCorrelation.payload).toMatchObject({
+          task_id: TASK_ID,
+          proxy_requests: expect.any(Array),
+          pi_response_ids: expect.any(Array),
+          pi_retry_events: expect.any(Array),
+        });
+
         const finalStatus = state.statusUpdates.at(-1);
         // Unmeasured tasks contribute nothing to the total (no invented spend).
         expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0, 10);

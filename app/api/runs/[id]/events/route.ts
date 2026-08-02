@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { redactRunEventPayload } from "@/lib/run-error";
 import { getStorage } from "@/lib/storage";
 
 /**
@@ -22,5 +23,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const since = Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 
   const events = since === null ? await storage.listRunEvents(id) : await storage.listRunEventsSince(id, since);
-  return NextResponse.json(events);
+  return NextResponse.json(events.map((event) => ({
+    ...event,
+    payload: redactRunEventPayload(event.type, event.payload),
+  })));
 }

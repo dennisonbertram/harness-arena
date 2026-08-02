@@ -1,7 +1,7 @@
 // Pure, import-testable helpers used by scripts/runner/runner.mjs. No
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
@@ -89,6 +89,235 @@ export function parseSessionAgentError(jsonlText) {
     stage: /timed?\s*out|timeout/i.test(error) ? "provider_timeout" : "provider_error",
     error,
   };
+}
+
+/**
+ * Correlates sidecar request logs with the identifiers Pi writes to its own
+ * session/stdout traces. The sidecar cannot know Pi's final response id while
+ * a request is being opened, so the runner emits this compact join record
+ * after the task finishes.
+ */
+export function parsePiCorrelation(sessionText, stdoutText) {
+  const responseIds = [];
+  const seenResponseIds = new Set();
+  for (const line of String(sessionText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const responseId = obj?.type === "message" && obj?.message?.role === "assistant" ? obj.message.responseId : undefined;
+    if (typeof responseId === "string" && responseId && !seenResponseIds.has(responseId)) {
+      seenResponseIds.add(responseId);
+      responseIds.push(responseId);
+    }
+  }
+
+  const retryEvents = [];
+  for (const line of String(stdoutText ?? "").split("\n")) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (obj?.type !== "auto_retry_start") continue;
+    retryEvents.push({
+      type: obj.type,
+      ...(obj.attempt !== undefined ? { attempt: obj.attempt } : {}),
+      ...(obj.maxAttempts !== undefined ? { max_attempts: obj.maxAttempts } : {}),
+      ...(obj.delayMs !== undefined ? { delay_ms: obj.delayMs } : {}),
+      ...(typeof obj.error === "string" ? { error: obj.error } : {}),
+      ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
+      ...(typeof obj.timestamp === "string" ? { timestamp: obj.timestamp } : {}),
+    });
+  }
+  return { response_ids: responseIds, retry_events: retryEvents };
+}
+
+/**
+ * Joins each proxy request to its terminal response diagnostic and keeps the
+ * compact timing/error fields needed to distinguish an upstream rejection,
+ * a first-byte stall, and a mid-stream interruption in persisted run events.
+ */
+export function summarizeGatewayRequests(events) {
+  const requests = events.filter((event) => event.type === "gateway_proxy.request").slice(-128);
+  return requests
+    .map((request) => {
+      const response = events.find(
+        (event) => event.type === "gateway_proxy.response_headers" && event.request_id === request.request_id,
+      );
+      const complete = events.find(
+        (event) => event.type === "gateway_proxy.response_complete" && event.request_id === request.request_id,
+      );
+      const streamError = events.find(
+        (event) => event.type === "gateway_proxy.stream_error" && event.request_id === request.request_id,
+      );
+      const terminal = complete ?? streamError;
+      return {
+        request_id: request.request_id,
+        model: request.model,
+        pinned_provider: request.pinned_provider,
+        request_bytes: request.request_bytes,
+        message_count: request.message_count,
+        tool_count: request.tool_count,
+        status: response?.status,
+        response_id: terminal?.response_id,
+        first_byte_at: terminal?.first_byte_at,
+        last_byte_at: terminal?.last_byte_at,
+        total_bytes: terminal?.total_bytes,
+        chunk_count: terminal?.chunk_count,
+        max_idle_ms: terminal?.max_idle_ms,
+        duration_ms: terminal?.duration_ms,
+        stream_error: boundedGatewayError(streamError?.error),
+      };
+    });
+}
+
+function boundedGatewayError(error) {
+  if (!error || typeof error !== "object") return undefined;
+  return {
+    name: String(error.name ?? "Error").slice(0, 64),
+    message: String(error.message ?? "").slice(0, 256),
+    ...(error.code === undefined ? {} : { code: String(error.code).slice(0, 64) }),
+  };
+}
+
+const TRUNCATION_MARKER = "[TRUNCATED]";
+
+function truncateUtf8(value, maxBytes) {
+  const text = String(value);
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+  const contentBudget = Math.max(0, maxBytes - markerBytes);
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${TRUNCATION_MARKER}`;
+}
+
+/**
+ * Retains a byte- and entry-bounded tail of proxy diagnostics. Request count
+ * is aggregated separately so correlation remains exact even when raw detail
+ * is evicted. The newest terminal records win over old chunk/request detail.
+ */
+export function createBoundedGatewayDiagnosticCollector({
+  maxEntries = 1_024,
+  maxBytes = 512 * 1024,
+} = {}) {
+  const events = [];
+  let retainedBytes = 0;
+  let requestCount = 0;
+  let droppedEvents = 0;
+
+  function reset() {
+    events.length = 0;
+    retainedBytes = 0;
+    requestCount = 0;
+    droppedEvents = 0;
+  }
+
+  return {
+    push(event) {
+      if (event?.type === "gateway_proxy.request") requestCount += 1;
+      const eventBytes = Buffer.byteLength(JSON.stringify(event)) + 1;
+      if (eventBytes > maxBytes) {
+        droppedEvents += 1;
+        return;
+      }
+      while (events.length > 0 && (events.length >= maxEntries || retainedBytes + eventBytes > maxBytes)) {
+        const removed = events.shift();
+        retainedBytes -= removed.bytes;
+        droppedEvents += 1;
+      }
+      events.push({ event, bytes: eventBytes });
+      retainedBytes += eventBytes;
+    },
+    beginScope() {
+      reset();
+    },
+    drain() {
+      const snapshot = {
+        events: events.map((entry) => entry.event),
+        requestCount,
+        droppedEvents,
+      };
+      reset();
+      return snapshot;
+    },
+  };
+}
+
+/**
+ * Ring buffer for the run-level uploaded log. Every line is bounded before it
+ * is returned to the console caller or retained; the upload string adds one
+ * deterministic marker when earlier lines were evicted.
+ */
+export function createBoundedLogBuffer({
+  maxEntries = 2_000,
+  maxBytes = 1024 * 1024,
+  maxLineBytes = 8 * 1024,
+} = {}) {
+  const lines = [];
+  let droppedLines = 0;
+
+  function marker() {
+    return `${TRUNCATION_MARKER} ${droppedLines} earlier log line(s) omitted`;
+  }
+
+  function rendered() {
+    return (droppedLines > 0 ? [marker(), ...lines] : lines).join("\n");
+  }
+
+  function rebalance() {
+    const retainedLimit = Math.max(0, maxEntries - (droppedLines > 0 ? 1 : 0));
+    while (lines.length > retainedLimit) {
+      lines.shift();
+      droppedLines += 1;
+    }
+    while (lines.length > 0 && Buffer.byteLength(rendered()) > maxBytes) {
+      lines.shift();
+      droppedLines += 1;
+    }
+  }
+
+  return {
+    append(line) {
+      const bounded = truncateUtf8(line, Math.min(maxLineBytes, maxBytes));
+      lines.push(bounded);
+      if (lines.length > maxEntries) {
+        lines.shift();
+        droppedLines += 1;
+      }
+      rebalance();
+      return bounded;
+    },
+    toString() {
+      rebalance();
+      return rendered();
+    },
+    get length() {
+      return lines.length + (droppedLines > 0 ? 1 : 0);
+    },
+    get byteLength() {
+      return Buffer.byteLength(rendered());
+    },
+  };
+}
+
+/** Return one task's diagnostics and release all run-global retained detail. */
+export function drainGatewayDiagnostics(events, start = 0) {
+  const taskEvents = events.slice(start);
+  events.length = 0;
+  return taskEvents;
 }
 
 // Distinguishes "session unusable for cost accounting" (no assistant
@@ -242,30 +471,75 @@ export function sh(cmd, args, opts = {}) {
 // model turn itself must not.
 export function shAsync(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(
-      cmd,
-      args,
-      {
-        encoding: "buffer",
-        maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
-        timeout: opts.timeout,
-      },
-      (err, stdout, stderr) => {
-        const result = {
-          code: 0,
-          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
-          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
-          timedOut: false,
-        };
-        if (err) {
-          result.code = typeof err.code === "number" ? err.code : 1;
-          result.timedOut = err.signal === "SIGTERM";
-          result.error = err;
-        }
-        resolve(result);
-      },
-    );
+    const captureLimit = opts.maxBuffer ?? 20 * 1024 * 1024;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let capturedBytes = 0;
+    let outputTruncated = false;
+    let timedOut = false;
+    let spawnError;
+
+    const capture = (chunks, chunk) => {
+      const remaining = Math.max(0, captureLimit - capturedBytes);
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      if (chunk.length > remaining) outputTruncated = true;
+      const accepted = Math.min(chunk.length, remaining);
+      capturedBytes += accepted;
+      return accepted;
+    };
+
+    // spawn drains stdout/stderr incrementally. execFile buffered both streams
+    // internally and killed Pi with ERR_CHILD_PROCESS_STDIO_MAXBUFFER when a
+    // reasoning-heavy JSON event stream crossed the capture bound.
+    const child = spawn(cmd, args);
+    child.stdout.on("data", (chunk) => {
+      stdoutBytes += capture(stdoutChunks, chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBytes += capture(stderrChunks, chunk);
+    });
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+
+    const timer =
+      opts.timeout === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGTERM");
+          }, opts.timeout);
+
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        code: typeof code === "number" ? code : 1,
+        stdout: Buffer.concat(stdoutChunks, stdoutBytes),
+        stderr: Buffer.concat(stderrChunks, stderrBytes),
+        timedOut,
+        outputTruncated,
+        ...(spawnError ? { error: spawnError } : {}),
+      });
+    });
   });
+}
+
+/**
+ * Unexpected Pi exits are runner/client failures, not verifier evidence.
+ * GNU timeout's 124/137 exits have their own explicit agent-timeout path.
+ */
+export function agentProcessFailure(result) {
+  if (result?.code === 0 || result?.code === 124 || result?.code === 137) return undefined;
+  const detail = result?.error?.code ?? result?.error?.message;
+  return [
+    `Pi process exited with code ${result?.code ?? "unknown"}`,
+    detail ? `(${detail})` : undefined,
+    result?.outputTruncated ? "after captured output was truncated" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 // Wrap a fetch call with a request-scoped abort deadline so a hung
@@ -411,6 +685,13 @@ export function gatewayProxyBaseUrl({ host, port }) {
   return `http://${host}:${port}/v1`;
 }
 
+// Anthropic-compatible clients append /v1/messages themselves. Vercel
+// documents the Gateway origin (without /v1) as their base URL; supplying the
+// OpenAI-style base instead produces /v1/v1/messages.
+export function gatewayProxyRootUrl({ host, port }) {
+  return `http://${host}:${port}`;
+}
+
 // `models.json` cannot change the transport of a built-in Pi model with a
 // provider-level `api` alone. The model must be explicitly upserted through
 // `models`, and Pi's upsert does not inherit the built-in model's accounting
@@ -532,10 +813,13 @@ export function resolvePinnedProvider({ configured, applied }) {
  *
  * pi cannot add arbitrary body fields, so it cannot send the gateway's
  * `providerOptions.gateway.only` itself. It CAN point a provider at a
- * different baseUrl, so we send it to the local proxy's `/v1` endpoint, which
- * injects the pin and forwards. GLM is forced onto Pi's OpenAI-compatible
- * transport because the Anthropic Messages stream repeatedly produced zero
- * agent turns across providers in production. See gateway-proxy.mjs.
+ * different baseUrl, so we send it to the local proxy, which injects the pin
+ * and forwards. GLM is forced onto Pi's OpenAI-compatible `/v1` transport
+ * because the Anthropic Messages stream repeatedly produced zero agent turns
+ * across providers in production. Other catalog models keep Pi's own
+ * transport and receive the proxy origin, allowing an Anthropic-compatible
+ * model such as Inkling to append `/v1/messages` exactly once. See
+ * gateway-proxy.mjs.
  *
  * `host.docker.internal` resolves via the --add-host=host-gateway mapping the
  * runner adds to `docker run`: pi executes inside the task container, and the
@@ -568,10 +852,15 @@ export function buildPinnedModelsConfig({ proxyPort, model }) {
     providers: {
       "vercel-ai-gateway": {
         api: "openai-completions",
-        baseUrl: gatewayProxyBaseUrl({
-          host: "host.docker.internal",
-          port: proxyPort,
-        }),
+        baseUrl: zaiMetadata
+          ? gatewayProxyBaseUrl({
+              host: "host.docker.internal",
+              port: proxyPort,
+            })
+          : gatewayProxyRootUrl({
+              host: "host.docker.internal",
+              port: proxyPort,
+            }),
         ...(models ? { models } : {}),
         modelOverrides: { [model]: modelOverride },
       },

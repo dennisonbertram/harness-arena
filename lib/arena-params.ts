@@ -33,6 +33,10 @@ export const PINNED_PROVIDERS: Record<string, string> = {
   "anthropic/claude-sonnet-5": "anthropic",
   "anthropic/claude-opus-5": "anthropic",
   "anthropic/claude-opus-4-8": "anthropic",
+  // Vercel's live endpoint catalog reports Baseten as Inkling Small's sole
+  // upstream, so this is both a deliberate pin and an explicit no-fallback
+  // assertion.
+  "thinkingmachines/inkling-small": "baseten",
 };
 
 /**

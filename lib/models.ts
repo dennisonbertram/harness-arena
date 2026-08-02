@@ -20,6 +20,8 @@ export const MODEL_LABELS: Record<string, string> = {
   "nvidia/nemotron-3-super-120b-a12b": "Nemotron 3 Super",
   "google/gemma-4-31b-it": "Gemma 4",
   "google/gemini-3-flash": "Gemini 3 Flash",
+  // Live Vercel AI Gateway catalog verified 2026-07-31.
+  "thinkingmachines/inkling-small": "Inkling Small",
 };
 
 // One shared model->color map so the chart, per-task bars, and any per-model
@@ -36,6 +38,7 @@ export const MODEL_COLORS: Record<string, string> = {
   "nvidia/nemotron-3-super-120b-a12b": "#76b900", // nvidia green
   "google/gemma-4-31b-it": "#f2c94c", // gold
   "google/gemini-3-flash": "#00acc1", // cyan
+  "thinkingmachines/inkling-small": "#ff7a59", // coral
 };
 const FALLBACK_MODEL_COLOR = "#9aa0a6"; // gray for any unknown/legacy id
 

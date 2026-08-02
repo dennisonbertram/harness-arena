@@ -5,8 +5,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { EventTimeline, type TimelineEvent } from "./EventTimeline";
 
+const ORIGINAL_TZ = process.env.TZ;
+
 afterEach(() => {
   cleanup();
+  process.env.TZ = ORIGINAL_TZ;
 });
 
 const EVENTS: TimelineEvent[] = [
@@ -22,6 +25,14 @@ describe("EventTimeline", () => {
     expect(screen.getByText("task.started")).toBeInTheDocument();
     expect(screen.getByText("1")).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
+  });
+
+  it("renders event times in UTC so server and client timezones cannot disagree during hydration", () => {
+    process.env.TZ = "America/Los_Angeles";
+    render(<EventTimeline events={[EVENTS[0]]} />);
+
+    expect(screen.getByText("12:00:00 AM")).toBeInTheDocument();
+    expect(screen.queryByText("5:00:00 PM")).not.toBeInTheDocument();
   });
 
   it("renders an empty table body for an empty event list, without crashing", () => {
