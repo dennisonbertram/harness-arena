@@ -41,6 +41,7 @@ const board = {
   belowBaseline: [],
   pending: 0,
   pendingRunIds: [],
+  pendingRows: [],
 };
 
 const request = {
