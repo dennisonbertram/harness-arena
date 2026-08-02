@@ -1,7 +1,7 @@
 ---
 title: "feat: Voice Arena clip-generation pipeline — real prompts and model responses"
 type: feat
-status: active
+status: completed
 date: 2026-07-24
 ---
 

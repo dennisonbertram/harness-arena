@@ -9,10 +9,16 @@ import {
   buildModelsConfig,
   buildPiCommand,
   computeTotals,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
+  drainGatewayDiagnostics,
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
+  parseSessionAgentError,
+  summarizeGatewayRequests,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -21,7 +27,6 @@ import {
   safeCleanup,
   sh,
   shQuote,
-  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,8 +47,10 @@ describe("parseSessionCost", () => {
     expect(parseSessionCost("")).toEqual({
       totalCost: 0,
       turns: 0,
+      totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
+      validOutputTokenCount: 0,
     });
   });
 
@@ -52,8 +59,10 @@ describe("parseSessionCost", () => {
     expect(result).toEqual({
       totalCost: 0,
       turns: 0,
+      totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
+      validOutputTokenCount: 0,
     });
   });
 
@@ -79,6 +88,233 @@ describe("parseSessionCost", () => {
     expect(result.negativeCostCount).toBe(1);
     // Only the two nonnegative assistant cost.total values count as "valid".
     expect(result.validCostCount).toBe(2);
+  });
+
+  it("sums finite assistant output tokens separately for throughput measurement", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: 120 } } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: 80 } } }),
+      // Missing or malformed usage is not silently turned into a token count.
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { output: "unknown" } } }),
+    ].join("\n");
+
+    expect(parseSessionCost(jsonl)).toMatchObject({ totalOutputTokens: 200, validOutputTokenCount: 2 });
+  });
+});
+
+describe("parseSessionAgentError", () => {
+  it("recognizes Pi's zero-token timeout message as a provider timeout", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "user", content: "do the task" } }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "Request timed out.",
+          usage: { input: 0, output: 0, cost: { total: 0 } },
+        },
+      }),
+    ].join("\n");
+
+    expect(parseSessionAgentError(jsonl)).toEqual({
+      stage: "provider_timeout",
+      error: "Request timed out.",
+    });
+  });
+
+  it("surfaces other terminal provider errors without misclassifying normal assistant turns", () => {
+    expect(
+      parseSessionAgentError(
+        JSON.stringify({
+          type: "message",
+          message: { role: "assistant", stopReason: "error", errorMessage: "upstream overloaded" },
+        }),
+      ),
+    ).toEqual({ stage: "provider_error", error: "upstream overloaded" });
+    expect(
+      parseSessionAgentError(
+        JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop" } }),
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("parsePiCorrelation", () => {
+  it("extracts Pi response ids from session messages and retry events from stdout", () => {
+    const session = [
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_2" } }),
+    ].join("\n");
+    const stdout = [
+      JSON.stringify({ type: "message_end", message: { role: "assistant" } }),
+      JSON.stringify({ type: "auto_retry_start", attempt: 1, error: "terminated" }),
+      JSON.stringify({ type: "turn_end", usage: {} }),
+    ].join("\n");
+
+    expect(parsePiCorrelation(session, stdout)).toEqual({
+      response_ids: ["gen_1", "gen_2"],
+      retry_events: [{ type: "auto_retry_start", attempt: 1, error: "terminated" }],
+    });
+  });
+});
+
+describe("summarizeGatewayRequests", () => {
+  it("retains the compact timing fields needed to distinguish stalls from provider errors", () => {
+    const events = [
+      {
+        type: "gateway_proxy.request",
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+      },
+      {
+        type: "gateway_proxy.response_headers",
+        request_id: "gw-1",
+        status: 200,
+      },
+      {
+        type: "gateway_proxy.response_complete",
+        request_id: "gw-1",
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+      },
+    ];
+
+    expect(summarizeGatewayRequests(events)).toEqual([
+      {
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+        status: 200,
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+        stream_error: undefined,
+      },
+    ]);
+  });
+
+  it("caps persisted request summaries and oversized stream error messages", () => {
+    const events = Array.from({ length: 300 }, (_, index) => [
+      {
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "wafer",
+      },
+      {
+        type: "gateway_proxy.stream_error",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        stream_error: "ignored",
+        error: { name: "Error", message: "x".repeat(4_096) },
+      },
+    ]).flat();
+
+    const summaries = summarizeGatewayRequests(events);
+    expect(summaries).toHaveLength(128);
+    expect(summaries.at(-1)?.request_id).toBe("gw-299");
+    expect(summaries.every((summary) => JSON.stringify(summary.stream_error).length <= 600)).toBe(true);
+  });
+});
+
+describe("drainGatewayDiagnostics", () => {
+  it("returns one task slice without retaining diagnostics across the run", () => {
+    const log = [
+      { type: "gateway_proxy.started" },
+      { type: "gateway_proxy.request", request_id: "gw-1" },
+      { type: "gateway_proxy.response_complete", request_id: "gw-1" },
+    ];
+    const taskSlice = log.slice(1);
+
+    expect(drainGatewayDiagnostics(log, 1)).toEqual(taskSlice);
+    expect(log).toEqual([]);
+  });
+});
+
+describe("bounded runner diagnostics", () => {
+  it("starts task 1 with a fresh scope after gateway preflight diagnostics", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "preflight-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "preflight-1", status: 503 });
+    diagnostics.push({ type: "gateway_proxy.retry", request_id: "preflight-1", attempt: 1 });
+
+    diagnostics.beginScope();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "task-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "task-1", status: 200 });
+    diagnostics.push({ type: "gateway_proxy.response_complete", request_id: "task-1", response_id: "gen-1" });
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(1);
+    expect(snapshot.droppedEvents).toBe(0);
+    expect(snapshot.events.map((event) => event.request_id)).not.toContain("preflight-1");
+    expect(summarizeGatewayRequests(snapshot.events)).toEqual([
+      expect.objectContaining({ request_id: "task-1", status: 200, response_id: "gen-1" }),
+    ]);
+  });
+
+  it("caps high-cardinality diagnostics while preserving request counts and terminal evidence", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector({ maxEntries: 12, maxBytes: 4_096 });
+    for (let index = 0; index < 500; index += 1) {
+      diagnostics.push({
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "x".repeat(2_048),
+      });
+      diagnostics.push({
+        type: "gateway_proxy.response_complete",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        total_bytes: index,
+      });
+    }
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(500);
+    expect(snapshot.droppedEvents).toBeGreaterThan(0);
+    expect(snapshot.events.length).toBeLessThanOrEqual(12);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.events))).toBeLessThanOrEqual(4_096);
+    expect(snapshot.events).toContainEqual(expect.objectContaining({
+      type: "gateway_proxy.response_complete",
+      request_id: "gw-499",
+      response_id: "gen-499",
+    }));
+    expect(diagnostics.drain()).toEqual({ events: [], requestCount: 0, droppedEvents: 0 });
+  });
+
+  it("bounds retained and uploaded runner logs with a deterministic truncation marker", () => {
+    const logs = createBoundedLogBuffer({ maxEntries: 6, maxBytes: 512, maxLineBytes: 96 });
+    for (let index = 0; index < 200; index += 1) {
+      logs.append(`gateway diagnostic ${index} ${"x".repeat(2_048)}`);
+    }
+    logs.append("gateway-proxy correlation task-500 response_complete");
+    logs.append("terminal run.failed provider_timeout");
+
+    const upload = logs.toString();
+    expect(logs.length).toBeLessThanOrEqual(6);
+    expect(logs.byteLength).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(upload)).toBeLessThanOrEqual(512);
+    expect(upload).toContain("[TRUNCATED]");
+    expect(upload).toContain("gateway-proxy correlation task-500 response_complete");
+    expect(upload).toContain("terminal run.failed provider_timeout");
   });
 });
 
@@ -146,66 +382,23 @@ describe("parseStdoutCost", () => {
   });
 });
 
-describe("resolveTaskCost (cost-source priority: session > stdout > floor)", () => {
+describe("resolveTaskCost (cost-source priority: session > stdout > unmeasured)", () => {
   it("uses the session cost when the session is usable, ignoring stdout entirely", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: false,
-      sessionCost: 0.02,
-      stdoutCost: 999,
-      floorUsd: 0.05,
-    });
+    const result = resolveTaskCost({ sessionUnreadable: false, sessionCost: 0.02, stdoutCost: 999 });
     expect(result).toEqual({ totalCost: 0.02, costSource: "session" });
   });
 
   // Regression for the exact live-run bug (9f4a1b3e): session unreadable
   // (agent-timeout SIGTERM before flush) but stdout has a real recovered
-  // cost -- must use the real stdout cost, not the floor.
-  it("falls back to the real stdout cost (not the floor) when the session is unreadable but stdout has a positive cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0.018,
-      floorUsd: 0.05,
-    });
+  // cost -- must use the real stdout cost.
+  it("falls back to the real stdout cost when the session is unreadable but stdout has a positive cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0.018 });
     expect(result).toEqual({ totalCost: 0.018, costSource: "stdout" });
   });
 
-  it("falls back to the floor when the session is unreadable and stdout has no usable cost", () => {
-    const result = resolveTaskCost({
-      sessionUnreadable: true,
-      sessionCost: 0,
-      stdoutCost: 0,
-      floorUsd: 0.05,
-    });
-    expect(result).toEqual({ totalCost: 0.05, costSource: "floor (session unreadable)" });
-  });
-});
-
-describe("truncateForUpload (trace-upload byte cap, HTTP 413 fix)", () => {
-  it("returns the buffer unchanged when it is already under the max", () => {
-    const buf = Buffer.from("small trace body", "utf8");
-    const result = truncateForUpload(buf, 262144);
-    expect(result.equals(buf)).toBe(true);
-  });
-
-  it("caps oversized input to exactly maxBytes, keeping the END (tail) prefixed with a truncation marker", () => {
-    const maxBytes = 1000;
-    const big = Buffer.from("A".repeat(500) + "END-MARKER-CONTENT" + "B".repeat(5000), "utf8");
-    const result = truncateForUpload(big, maxBytes);
-
-    expect(result.length).toBeLessThanOrEqual(maxBytes);
-    expect(result.length).toBe(maxBytes);
-    const text = result.toString("utf8");
-    expect(text).toMatch(/^\[trace truncated: showing last \d+ bytes of \d+ bytes\]\n/);
-    // Keeps the tail, not the head -- the truncation marker text itself
-    // must not swallow the real end-of-output content.
-    expect(text.endsWith("B".repeat(50))).toBe(true);
-    expect(text).not.toContain("END-MARKER-CONTENT");
-  });
-
-  it("accepts a plain string the same as a Buffer", () => {
-    const result = truncateForUpload("hello world", 262144);
-    expect(result.toString("utf8")).toBe("hello world");
+  it("reports UNMEASURED (null, never a fabricated floor) when neither session nor stdout has a cost", () => {
+    const result = resolveTaskCost({ sessionUnreadable: true, sessionCost: 0, stdoutCost: 0 });
+    expect(result).toEqual({ totalCost: null, costSource: "unmeasured" });
   });
 });
 
@@ -376,7 +569,7 @@ describe("buildPiCommand", () => {
       instruction: "Solve it and save to /app/regex.txt. Don't break \"quotes\".",
       hasSystemPrompt: true,
     });
-    expect(cmd).toContain("timeout 900 /usr/local/bin/pi");
+    expect(cmd).toContain("timeout --signal=TERM --kill-after=10 900 /usr/local/bin/pi");
     expect(cmd).toContain("--print --mode json");
     expect(cmd).toContain("--session-dir " + shQuote("/logs/agent/sessions"));
     // Matches harnessarena.xyz: no -nc/-ns/--no-extensions.
@@ -400,6 +593,21 @@ describe("buildPiCommand", () => {
     expect(cmd).toContain(shQuote("Recover the lost commits."));
   });
 
+  it("can disable Pi's default medium reasoning for the dedicated fast-tier model", () => {
+    const cmd = buildPiCommand({
+      agentTimeoutSec: 300,
+      sessionDir: "/logs/agent/sessions",
+      promptFile: "/tmp/system-prompt.txt",
+      instruction: "Solve it.",
+      hasSystemPrompt: true,
+      model: "zai/glm-5.2-fast",
+      thinking: "off",
+    });
+
+    expect(cmd).toContain("--model " + shQuote("zai/glm-5.2-fast"));
+    expect(cmd).toContain("--thinking " + shQuote("off"));
+  });
+
   it("uses the override command instead of the default pi invocation when given", () => {
     const cmd = buildPiCommand({
       agentTimeoutSec: 60,
@@ -408,7 +616,7 @@ describe("buildPiCommand", () => {
       instruction: "irrelevant",
       override: "/usr/local/bin/fake-pi.sh",
     });
-    expect(cmd).toBe("timeout 60 /usr/local/bin/fake-pi.sh");
+    expect(cmd).toBe("timeout --signal=TERM --kill-after=10 60 /usr/local/bin/fake-pi.sh");
   });
 });
 

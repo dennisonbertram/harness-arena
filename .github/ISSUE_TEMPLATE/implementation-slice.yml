@@ -1,0 +1,55 @@
+name: Implementation slice
+description: Create one PR-sized native child issue under an Epic.
+title: "type: "
+body:
+  - type: markdown
+    attributes:
+      value: "After creating this issue, attach it to its Epic with GitHub's native subissue relationship before implementation."
+  - type: input
+    id: parent-epic
+    attributes: { label: "Parent Epic", placeholder: "#123" }
+    validations: { required: true }
+  - type: textarea
+    id: why-observed
+    attributes: { label: "Why / observed behavior" }
+    validations: { required: true }
+  - type: textarea
+    id: operator-path
+    attributes: { label: "Operator path" }
+  - type: textarea
+    id: behavior-contract
+    attributes: { label: "Behavior / integration contract" }
+    validations: { required: true }
+  - type: textarea
+    id: scope
+    attributes: { label: Scope, description: "One PR only; state out-of-scope work." }
+    validations: { required: true }
+  - type: textarea
+    id: research-context
+    attributes: { label: "Research / context" }
+  - type: textarea
+    id: coordination
+    attributes: { label: Coordination }
+  - type: textarea
+    id: tests-first
+    attributes: { label: "Tests first", description: "Test and expected red failure before production code." }
+    validations: { required: true }
+  - type: textarea
+    id: tdd-trail
+    attributes: { label: "TDD trail", description: "Red and green commit/command evidence." }
+  - type: textarea
+    id: risk
+    attributes: { label: Risk }
+  - type: textarea
+    id: deploy-rollback
+    attributes: { label: "Deploy / rollback" }
+  - type: textarea
+    id: docs-handoff
+    attributes: { label: "Docs / handoff" }
+  - type: checkboxes
+    id: dod
+    attributes:
+      label: Definition of done
+      options:
+        - label: This issue is a native child of the stated Epic.
+        - label: The implementation PR will include exactly one `Closes #N` reference.

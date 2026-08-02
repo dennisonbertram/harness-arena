@@ -110,6 +110,7 @@ describe("recentActivity", () => {
       {
         runId: "r1",
         agentName: "agent-x",
+        githubLogin: "unknown",
         status: "completed",
         tasksPassed: 8,
         totalTasks: 0,
@@ -118,6 +119,15 @@ describe("recentActivity", () => {
         lastEventAt: "2026-07-20T00:05:00.000Z",
       },
     ]);
+  });
+
+  it("carries the submitting agent's github_login, falling back to 'unknown' when unset", () => {
+    const runs = [run("r1", "s1", "completed")];
+    const submissions = [submission("s1", "agent-x", { github_login: "octocat" })];
+
+    const rows = recentActivity(runs, submissions, new Map());
+
+    expect(rows[0].githubLogin).toBe("octocat");
   });
 
   it("preserves the given run order (assumed newest-first) and limits to the given limit", () => {

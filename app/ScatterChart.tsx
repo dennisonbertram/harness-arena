@@ -1,18 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { formatUsd, scatterDotColor } from "@/lib/format";
+import { formatUsd } from "@/lib/format";
+import { modelColor, modelLabel } from "@/lib/models";
+import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
 
 export interface ScatterItem {
   runId: string;
   cx: number;
   cy: number;
-  agentName: string;
+  // The submitter's GitHub login -- ignored for a baseline item, which
+  // labels by model instead (matches the leaderboard table's convention).
+  githubLogin: string;
+  model: string;
   tasksPassed: number;
   totalTasks: number;
   totalCostUsd: number;
   isBaseline: boolean;
-  isLeader: boolean;
 }
 
 interface Props {
@@ -22,17 +26,23 @@ interface Props {
   padding: number;
   xMax: number;
   yMax: number;
+  /** Optional controlled hover state for linked views such as a leaderboard. */
+  hoveredRunId?: string | null;
+  onHoveredRunIdChange?: (runId: string | null) => void;
 }
 
 // Full-width cost-vs-tasks chart. Detail is revealed on hover (the dots
 // cluster tightly, so static labels overlapped) via an SVG-native tooltip
 // that scales with the chart.
-export function ScatterChart({ items, width, height, padding, xMax, yMax }: Props) {
-  const [hovered, setHovered] = useState<string | null>(null);
+export function ScatterChart({ items, width, height, padding, xMax, yMax, hoveredRunId, onHoveredRunIdChange }: Props) {
+  const [uncontrolledHoveredRunId, setUncontrolledHoveredRunId] = useState<string | null>(null);
+  const hovered = hoveredRunId === undefined ? uncontrolledHoveredRunId : hoveredRunId;
+  const setHovered = onHoveredRunIdChange ?? setUncontrolledHoveredRunId;
   const plotRight = width - padding;
   const plotTop = padding;
   const plotBottom = height - padding;
-  const yTicks = [0, 2, 4, 6, 8, 10];
+  const yStep = yMax > 10 ? 4 : 2;
+  const yTicks = Array.from({ length: Math.floor(yMax / yStep) + 1 }, (_, i) => i * yStep);
   const xTicks = [0, 0.25, 0.5, 0.75, 1];
   const hoveredItem = items.find((i) => i.runId === hovered) ?? null;
 
@@ -94,37 +104,49 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
         className="label"
         transform={`rotate(-90 18 ${plotTop + (plotBottom - plotTop) / 2})`}
       >
-        Tasks passed (of 10)
+        Tasks passed (of {yMax})
       </text>
 
       {/* Dots */}
       {items.map((item) => {
         const active = item.runId === hovered;
-        const color = item.isBaseline ? "var(--gray-1000)" : scatterDotColor(item.isLeader);
+        const color = modelColor(item.model);
         return (
           <a key={item.runId} href={`/runs/${item.runId}`}>
             {/* Invisible larger hit area so hover/click is easy on small dots */}
             <circle
+              data-chart-hit-area={item.runId}
               cx={item.cx}
               cy={item.cy}
               r={14}
               fill="transparent"
               onMouseEnter={() => setHovered(item.runId)}
-              onMouseLeave={() => setHovered((h) => (h === item.runId ? null : h))}
+              onMouseLeave={() => setHovered(null)}
             />
+            {/* Fill = model color (per-model comparison); baseline = dashed ring. */}
             {item.isBaseline ? (
               <circle
+                data-chart-point-run-id={item.runId}
+                data-linked-hover={active || undefined}
                 cx={item.cx}
                 cy={item.cy}
                 r={active ? 8 : 6}
                 fill="var(--background-100)"
-                stroke="var(--gray-1000)"
+                stroke={color}
                 strokeWidth={2}
                 strokeDasharray="2 2"
                 pointerEvents="none"
               />
             ) : (
-              <circle cx={item.cx} cy={item.cy} r={active ? 7.5 : 5.5} fill={color} pointerEvents="none" />
+              <circle
+                data-chart-point-run-id={item.runId}
+                data-linked-hover={active || undefined}
+                cx={item.cx}
+                cy={item.cy}
+                r={active ? 7.5 : 5.5}
+                fill={color}
+                pointerEvents="none"
+              />
             )}
           </a>
         );
@@ -136,10 +158,14 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax }: Prop
   );
 }
 
+const AVATAR_SIZE = 16;
+
 function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; plotTop: number }) {
-  const line1 = item.agentName + (item.isBaseline ? "  (baseline)" : "");
-  const line2 = `${item.tasksPassed}/${item.totalTasks} tasks · ${formatUsd(item.totalCostUsd)}`;
-  const boxW = Math.max(line1.length, line2.length) * 7.2 + 24;
+  const showAvatar = !item.isBaseline && item.githubLogin !== UNKNOWN_GITHUB_LOGIN;
+  const line1 = item.isBaseline ? `${modelLabel(item.model)} Baseline` : item.githubLogin;
+  const line2 = `${modelLabel(item.model)} · ${item.tasksPassed}/${item.totalTasks} · ${formatUsd(item.totalCostUsd)}`;
+  const avatarGap = showAvatar ? AVATAR_SIZE + 6 : 0;
+  const boxW = Math.max(line1.length * 7.2 + avatarGap, line2.length * 7.2) + 24;
   const boxH = 44;
   // Prefer above-right of the dot; flip left if it would overflow the right edge.
   const flipLeft = item.cx + 12 + boxW > width;
@@ -156,7 +182,24 @@ function Tooltip({ item, width, plotTop }: { item: ScatterItem; width: number; p
         fill="var(--background-100)"
         stroke="var(--gray-alpha-500)"
       />
-      <text x={bx + 12} y={by + 18} fontSize={13} fontWeight={600} fill="var(--gray-1000)">
+      {showAvatar && (
+        <>
+          <clipPath id={`avatar-clip-${item.runId}`}>
+            <circle cx={bx + 12 + AVATAR_SIZE / 2} cy={by + 14} r={AVATAR_SIZE / 2} />
+          </clipPath>
+          <image
+            // Size-capped for the same reason as GithubAvatar: the uncapped
+            // URL serves a 460x460 image into this tooltip's small circle.
+            href={`https://github.com/${item.githubLogin}.png?size=${AVATAR_SIZE * 2}`}
+            x={bx + 12}
+            y={by + 6}
+            width={AVATAR_SIZE}
+            height={AVATAR_SIZE}
+            clipPath={`url(#avatar-clip-${item.runId})`}
+          />
+        </>
+      )}
+      <text x={bx + 12 + avatarGap} y={by + 18} fontSize={13} fontWeight={600} fill="var(--gray-1000)">
         {line1}
       </text>
       <text x={bx + 12} y={by + 34} fontSize={12} fill="var(--gray-900)" className="tabular-nums">

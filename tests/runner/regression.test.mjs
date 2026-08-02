@@ -29,18 +29,14 @@
 //
 // Regression coverage for the live-run 9f4a1b3e fixes, added after the
 // green implementation in 6863ebb:
-//  8. truncateForUpload must never exceed maxBytes even in the extreme
-//     edge case where maxBytes is smaller than the truncation marker
-//     itself -- a naive implementation could invert the cap and upload
-//     something LARGER than the limit it's meant to enforce.
 //  9. parseStdoutCost must prefer the message_end sum over the turn_end
 //     cumulative fallback even when both appear in the same noisy stream
 //     (realistic pi output has turn_end lines throughout, not just at the
 //     very end) -- falling back to turn_end whenever it's merely present
 //     would silently under/over-count real per-task cost.
-//  10. The actual default RUNNER_MISSING_COST_FLOOR (no env override) must
-//      be 0.05, not the old 0.50 -- real Docker, both session and stdout
-//      unusable.
+//  10. When both session and stdout are unusable, cost is reported as
+//      UNMEASURED (cost_usd absent, cost_source "unmeasured") -- never a
+//      fabricated floor value.
 import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
@@ -54,6 +50,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildContainerName,
@@ -62,7 +59,6 @@ import {
   parseSessionCost,
   parseStdoutCost,
   redactSecrets,
-  truncateForUpload,
 } from "../../scripts/runner/lib.mjs";
 import { startCallbackServer } from "./fixtures/callback-server.mjs";
 import { buildTaskBundleDir } from "./fixtures/task-bundle.mjs";
@@ -71,6 +67,9 @@ const RUNNER_IT = process.env.RUNNER_IT === "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
+const TEST_GATEWAY_PROXY_PORT = "14599";
+const LEGACY_REGEX_INSTRUCTION =
+  "Write a deterministic regex result to /app/regex.txt for the synthetic runner fixture.";
 
 describe("buildPiCommand regression: shell-injection safety", () => {
   it("does not execute a semicolon/command-substitution injection attempt embedded in the instruction", () => {
@@ -150,15 +149,6 @@ describe("redactSecrets regression: realistic noisy blob with a substring-collid
     expect(result).toContain("[2026-01-01T00:00:00.000Z] starting task");
     expect(result).toContain("[2026-01-01T00:00:05.000Z] task finished");
     expect(result.match(/\[REDACTED\]/g)).toHaveLength(3);
-  });
-});
-
-describe("truncateForUpload regression: cap holds even when maxBytes is smaller than the marker itself", () => {
-  it("never returns a buffer larger than maxBytes, even at an absurdly tiny cap", () => {
-    const big = Buffer.from("X".repeat(10000), "utf8");
-    const tinyMax = 10; // shorter than "[trace truncated: showing last 10 bytes of 10000 bytes]\n"
-    const result = truncateForUpload(big, tinyMax);
-    expect(result.length).toBeLessThanOrEqual(tinyMax);
   });
 });
 
@@ -253,10 +243,7 @@ describe.skipIf(!RUNNER_IT)(
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-2" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID_1);
 
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID_1,
@@ -281,6 +268,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID: BUDGET_RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-2",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString(
@@ -363,42 +352,43 @@ function buildAgentkitTgz(fixtureName) {
 describe.skipIf(!RUNNER_IT)(
   "runner regression (RUNNER_IT=1, real local docker): container cleanup on mid-task error",
   () => {
-    const TASK_ID = "regex-log-force-error";
+    const TASK_IDS = ["regex-log-before-force-error", "regex-log-force-error"];
     const RUN_ID = "it-run-force-error";
-    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+    const CONTAINER_NAMES = TASK_IDS.map((taskId, index) =>
+      buildContainerName(RUN_ID, index, taskId),
+    );
 
     afterEach(() => {
-      try {
-        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
-      } catch {
-        // fine
+      for (const containerName of CONTAINER_NAMES) {
+        try {
+          execFileSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        } catch {
+          // fine
+        }
       }
     });
 
     it(
-      "removes the container in the finally block even when the task throws mid-run (issue #19 finding 5)",
+      "preserves completed task results and removes the container when a later task throws",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-force-error" });
-        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
-        const tasks = [
-          {
-            id: TASK_ID,
-            image: "alexgshaw/regex-log:20251031",
-            instruction,
-            agent_timeout_sec: 60,
-            verifier_timeout_sec: 300,
-          },
-        ];
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_IDS[0]);
+        const instruction = LEGACY_REGEX_INSTRUCTION;
+        const tasks = TASK_IDS.map((id) => ({
+          id,
+          image: "alexgshaw/regex-log:20251031",
+          instruction,
+          agent_timeout_sec: 60,
+          verifier_timeout_sec: 300,
+        }));
 
         const env = {
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-force-error",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -409,7 +399,7 @@ describe.skipIf(!RUNNER_IT)(
           PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
           // Test-only hook: forces runOneTask to throw right after the
           // container is created, before pi ever runs.
-          RUNNER_FORCE_TASK_ERROR: TASK_ID,
+          RUNNER_FORCE_TASK_ERROR: TASK_IDS[1],
         };
         delete env.PI_INSTALL_MODE;
 
@@ -435,14 +425,26 @@ describe.skipIf(!RUNNER_IT)(
 
         const finalStatus = state.statusUpdates.at(-1);
         expect(finalStatus.status).toBe("failed");
+        expect(finalStatus.task_results).toHaveLength(1);
+        expect(finalStatus.task_results[0]).toMatchObject({
+          task_id: TASK_IDS[0],
+          attempted: true,
+          passed: false,
+        });
+        expect(finalStatus.totals).toMatchObject({
+          tasks_passed: 0,
+          over_budget: false,
+        });
 
-        let containerStillExists = true;
-        try {
-          execFileSync("docker", ["inspect", CONTAINER_NAME], { stdio: "ignore" });
-        } catch {
-          containerStillExists = false;
+        for (const containerName of CONTAINER_NAMES) {
+          let containerStillExists = true;
+          try {
+            execFileSync("docker", ["inspect", containerName], { stdio: "ignore" });
+          } catch {
+            containerStillExists = false;
+          }
+          expect(containerStillExists).toBe(false);
         }
-        expect(containerStillExists).toBe(false);
       },
       600000,
     );
@@ -465,15 +467,12 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "floors cost_usd to RUNNER_MISSING_COST_FLOOR and marks cost_source when no session.jsonl is written (issue #19 finding 2)",
+      "reports cost as UNMEASURED (no fabricated floor, cost_usd absent) when no session.jsonl is written",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-nosession" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -488,11 +487,12 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-nosession",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
           BUDGET_CAP_USD: "2",
-          RUNNER_MISSING_COST_FLOOR: "0.37",
           TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
           RUNNER_TASKS_DIR: bundle.root,
           AGENTKIT_TGZ: agentkitTgz,
@@ -513,15 +513,26 @@ describe.skipIf(!RUNNER_IT)(
         expect(exitCode).toBe(0);
 
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("floor (session unreadable)");
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.37, 10);
+        expect(agentFinished.payload.cost_source).toBe("unmeasured");
+        // No fabricated number — cost_usd is absent, not a floor.
+        expect(agentFinished.payload.cost_usd).toBeUndefined();
 
         const tamperEvent = state.events.find((e) => e.type === "task.cost_tamper_signal");
         expect(tamperEvent).toBeDefined();
-        expect(tamperEvent.payload.reason).toBe("session_unreadable");
+        expect(tamperEvent.payload.reason).toBe("cost_unmeasured");
+
+        const gatewayCorrelation = state.events.find((e) => e.type === "task.gateway_correlation");
+        expect(gatewayCorrelation).toBeDefined();
+        expect(gatewayCorrelation.payload).toMatchObject({
+          task_id: TASK_ID,
+          proxy_requests: expect.any(Array),
+          pi_response_ids: expect.any(Array),
+          pi_retry_events: expect.any(Array),
+        });
 
         const finalStatus = state.statusUpdates.at(-1);
-        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.37, 10);
+        // Unmeasured tasks contribute nothing to the total (no invented spend).
+        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0, 10);
       },
       600000,
     );
@@ -529,7 +540,7 @@ describe.skipIf(!RUNNER_IT)(
 );
 
 describe.skipIf(!RUNNER_IT)(
-  "runner regression (RUNNER_IT=1, real local docker): default missing-cost floor is 0.05, not the old 0.50",
+  "runner regression (RUNNER_IT=1, real local docker): no fabricated cost floor",
   () => {
     const TASK_ID = "regex-log-default-floor";
     const RUN_ID = "it-run-default-floor";
@@ -544,17 +555,14 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "floors cost_usd to 0.05 (the lowered default), not the old 0.50, when RUNNER_MISSING_COST_FLOOR is unset and stdout has no usable cost",
+      "does NOT invent a cost floor — cost_usd is absent and cost_source is 'unmeasured' when no session and no stdout cost",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-nosession.sh");
         const { state, baseUrl, stop } = await startCallbackServer({
           secret: "test-secret-default-floor",
         });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -569,6 +577,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-default-floor",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -579,10 +589,6 @@ describe.skipIf(!RUNNER_IT)(
           PI_INVOKE_OVERRIDE: "/usr/local/bin/fake-pi.sh",
         };
         delete env.PI_INSTALL_MODE;
-        // Deliberately NOT setting RUNNER_MISSING_COST_FLOOR -- this test
-        // exists specifically to catch an accidental revert of the
-        // lowered default back to 0.50.
-        delete env.RUNNER_MISSING_COST_FLOOR;
 
         const exitCode = await new Promise((resolve, reject) => {
           const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
@@ -597,8 +603,8 @@ describe.skipIf(!RUNNER_IT)(
         expect(exitCode).toBe(0);
 
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("floor (session unreadable)");
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.05, 10);
+        expect(agentFinished.payload.cost_source).toBe("unmeasured");
+        expect(agentFinished.payload.cost_usd).toBeUndefined();
       },
       600000,
     );
@@ -608,51 +614,49 @@ describe.skipIf(!RUNNER_IT)(
 describe.skipIf(!RUNNER_IT)(
   "runner regression (RUNNER_IT=1, real local docker): cost recovery from stdout on agent-timeout SIGTERM",
   () => {
-    const TASK_ID = "regex-log-timeout";
+    const TASK_IDS = ["regex-log-timeout-1", "regex-log-timeout-2"];
     const RUN_ID = "it-run-timeout";
-    const CONTAINER_NAME = buildContainerName(RUN_ID, 0, TASK_ID);
+    const CONTAINER_NAMES = TASK_IDS.map((taskId, index) =>
+      buildContainerName(RUN_ID, index, taskId),
+    );
 
     afterEach(() => {
-      try {
-        execFileSync("docker", ["rm", "-f", CONTAINER_NAME], { stdio: "ignore" });
-      } catch {
-        // fine
+      for (const containerName of CONTAINER_NAMES) {
+        try {
+          execFileSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        } catch {
+          // fine
+        }
       }
     });
 
     it(
-      "uses the real cost recovered from pi's captured stdout, not the missing-cost floor, when the agent-timeout SIGTERM kills pi before it flushes session.jsonl (live-run evidence: run 9f4a1b3e)",
+      "records an agent timeout as a failed task, preserves its real stdout cost, and continues the benchmark",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-timeout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-timeout" });
-        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
-        const tasks = [
-          {
-            id: TASK_ID,
-            image: "alexgshaw/regex-log:20251031",
-            instruction,
-            // Short enough that `timeout` SIGTERMs fake-pi-timeout.sh's
-            // `sleep 120` well before it ever writes a session.jsonl.
-            agent_timeout_sec: 3,
-            verifier_timeout_sec: 300,
-          },
-        ];
+        const bundle = buildTaskBundleDir(REPO_ROOT, TASK_IDS[0]);
+        const instruction = LEGACY_REGEX_INSTRUCTION;
+        const tasks = TASK_IDS.map((id) => ({
+          id,
+          image: "alexgshaw/regex-log:20251031",
+          instruction,
+          // Short enough that `timeout` SIGTERMs fake-pi-timeout.sh's
+          // `sleep 120` well before it ever writes a session.jsonl.
+          agent_timeout_sec: 3,
+          verifier_timeout_sec: 300,
+        }));
 
         const env = {
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-timeout",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
           BUDGET_CAP_USD: "2",
-          // A distinctly different value from the real recoverable stdout
-          // cost (0.015) so the assertion can tell floor vs. stdout apart.
-          RUNNER_MISSING_COST_FLOOR: "0.5",
           TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
           RUNNER_TASKS_DIR: bundle.root,
           AGENTKIT_TGZ: agentkitTgz,
@@ -672,13 +676,38 @@ describe.skipIf(!RUNNER_IT)(
 
         expect(exitCode).toBe(0);
 
-        const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
-        expect(agentFinished.payload.cost_source).toBe("stdout");
-        // 0.006 + 0.009 from the two message_end events, never the 0.5 floor.
-        expect(agentFinished.payload.cost_usd).toBeCloseTo(0.015, 10);
+        const agentFinished = state.events.filter((e) => e.type === "task.agent_finished");
+        expect(agentFinished).toHaveLength(2);
+        expect(agentFinished[0].payload.cost_source).toBe("stdout");
+        // 0.006 + 0.009 from the two message_end events — a real recovered
+        // cost, never a fabricated value.
+        expect(agentFinished[0].payload.cost_usd).toBeCloseTo(0.015, 10);
 
         const finalStatus = state.statusUpdates.at(-1);
-        expect(finalStatus.totals.total_cost_usd).toBeCloseTo(0.015, 10);
+        expect(finalStatus.status).toBe("completed");
+        expect(finalStatus.totals).toMatchObject({
+          tasks_passed: 0,
+          total_cost_usd: 0.03,
+          over_budget: false,
+        });
+        expect(finalStatus.task_results).toHaveLength(2);
+        expect(finalStatus.task_results).toEqual(
+          TASK_IDS.map((taskId) =>
+            expect.objectContaining({
+              task_id: taskId,
+              attempted: true,
+              passed: false,
+              failure_stage: "agent_timeout",
+              cost_usd: 0.015,
+            }),
+          ),
+        );
+        expect(
+          state.events
+            .filter((event) => event.type === "task.failed")
+            .map((event) => event.payload.task_id),
+        ).toEqual(TASK_IDS);
+        expect(state.events.some((event) => event.type === "run.failed")).toBe(false);
       },
       600000,
     );
@@ -686,7 +715,7 @@ describe.skipIf(!RUNNER_IT)(
 );
 
 describe.skipIf(!RUNNER_IT)(
-  "runner regression (RUNNER_IT=1, real local docker): trace upload byte cap (HTTP 413 fix)",
+  "runner regression (RUNNER_IT=1, real local docker): full trace stored gzipped, never truncated",
   () => {
     const TASK_ID = "regex-log-bigstdout";
     const RUN_ID = "it-run-bigstdout";
@@ -701,15 +730,12 @@ describe.skipIf(!RUNNER_IT)(
     });
 
     it(
-      "uploads pi-stdout.txt truncated to RUNNER_TRACE_UPLOAD_MAX_BYTES even though the real stdout is much larger (live-run evidence: 413 on pi-stdout.txt)",
+      "uploads the FULL ~600KB pi-stdout.txt gzip-compressed (no truncation)",
       async () => {
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-bigstdout.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-bigstdout" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -724,6 +750,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-bigstdout",
           AI_GATEWAY_API_KEY: "test-gateway-key",
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -749,13 +777,13 @@ describe.skipIf(!RUNNER_IT)(
 
         const stdoutTrace = state.traces.find((t) => t.name === "pi-stdout.txt");
         expect(stdoutTrace).toBeDefined();
-        // The real fixture emits ~600KB of stdout -- proves the cap is
-        // actually being applied, not just coincidentally under it.
-        expect(stdoutTrace.body.length).toBeLessThanOrEqual(262144);
+        // Stored gzip-compressed; the FULL ~600KB stdout must gunzip back with
+        // no truncation (well over the old 262144 cap).
+        const full = gunzipSync(stdoutTrace.body);
+        expect(full.length).toBeGreaterThan(262144);
 
         // Cost must still be parsed from the FULL local stdout (the real
-        // session.jsonl cost, 0.004), unaffected by the upload-side
-        // truncation applied after cost parsing.
+        // session.jsonl cost, 0.004).
         const agentFinished = state.events.find((e) => e.type === "task.agent_finished");
         expect(agentFinished.payload.cost_source).toBe("session");
         expect(agentFinished.payload.cost_usd).toBeCloseTo(0.004, 10);
@@ -787,10 +815,7 @@ describe.skipIf(!RUNNER_IT)(
         const { tgzRoot, agentkitTgz } = buildAgentkitTgz("fake-pi-leaky.sh");
         const { state, baseUrl, stop } = await startCallbackServer({ secret: "test-secret-leaky" });
         const bundle = buildTaskBundleDir(REPO_ROOT, TASK_ID);
-        const instruction = readFileSync(
-          path.join(REPO_ROOT, "tasks", "regex-log", "instruction.md"),
-          "utf8",
-        );
+        const instruction = LEGACY_REGEX_INSTRUCTION;
         const tasks = [
           {
             id: TASK_ID,
@@ -805,6 +830,8 @@ describe.skipIf(!RUNNER_IT)(
           ...process.env,
           RUN_ID,
           CALLBACK_BASE: baseUrl,
+          GATEWAY_PROXY_PORT: TEST_GATEWAY_PROXY_PORT,
+          GATEWAY_UPSTREAM: baseUrl,
           RUNNER_CALLBACK_SECRET: "test-secret-leaky",
           AI_GATEWAY_API_KEY: SECRET,
           SYSTEM_PROMPT_B64: Buffer.from("You are a helpful coding agent.", "utf8").toString("base64"),
@@ -833,8 +860,8 @@ describe.skipIf(!RUNNER_IT)(
         expect(sessionTrace).toBeDefined();
         expect(stdoutTrace).toBeDefined();
 
-        const sessionBody = sessionTrace.body.toString("utf8");
-        const stdoutBody = stdoutTrace.body.toString("utf8");
+        const sessionBody = gunzipSync(sessionTrace.body).toString("utf8");
+        const stdoutBody = gunzipSync(stdoutTrace.body).toString("utf8");
 
         expect(sessionBody).not.toContain(SECRET);
         expect(sessionBody).not.toContain("vck_leakedtoken999");

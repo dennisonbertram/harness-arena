@@ -47,6 +47,9 @@ const ENV_KEYS = [
   "VERCEL_PROJECT_ID",
   "RUNNER_NETWORK_MODE",
   "RUNNER_SANDBOX_TIMEOUT_MIN",
+  "RUNNER_AGENT_TIMEOUT_CAP",
+  "RUNNER_VERIFY_TIMEOUT_CAP",
+  "VERCEL_GIT_COMMIT_SHA",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -95,6 +98,9 @@ describe("createRunSandbox", () => {
     delete process.env.VERCEL_PROJECT_ID;
     delete process.env.RUNNER_NETWORK_MODE;
     delete process.env.RUNNER_SANDBOX_TIMEOUT_MIN;
+    delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
+    delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
+    delete process.env.VERCEL_GIT_COMMIT_SHA;
   });
 
   afterEach(() => {
@@ -104,26 +110,54 @@ describe("createRunSandbox", () => {
     }
   });
 
-  it("creates the sandbox from the golden snapshot id with a 120-minute timeout by default", async () => {
+  it("creates the sandbox from the golden snapshot id with a task-derived safe timeout by default", async () => {
     mockCreate.mockResolvedValue(makeSandbox());
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
+    const tasks = buildRunnerTasks();
+    const fullTaskBudgetMinutes = tasks.reduce(
+      (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) / 60,
+      0,
+    );
+    const expectedMinutes = Math.ceil((fullTaskBudgetMinutes + 30) / 60) * 60;
     expect(mockCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         source: { type: "snapshot", snapshotId: GOLDEN_SNAPSHOT_ID },
-        timeout: 120 * 60 * 1000,
+        timeout: expectedMinutes * 60 * 1000,
       }),
     );
   });
 
-  it("uses RUNNER_SANDBOX_TIMEOUT_MIN to override the default 120-minute timeout", async () => {
-    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "45";
+  it("uses RUNNER_SANDBOX_TIMEOUT_MIN when it is longer than the task-derived floor", async () => {
+    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "720";
     mockCreate.mockResolvedValue(makeSandbox());
 
     await createRunSandbox(makeRun(), { prompt: "be careful" });
 
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 45 * 60 * 1000 }));
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ timeout: 720 * 60 * 1000 }));
+  });
+
+  it("never accepts a sandbox timeout shorter than the full task timeout budget", async () => {
+    // Production allowed each of the 16 agents to run for 15 minutes while
+    // keeping the sandbox at four hours. The first 15 consumed nearly the
+    // whole lifetime and the VM died during task 16 without a terminal
+    // callback. Derive this assertion from the runner payload so adding tasks
+    // or changing either cap cannot recreate that class of failure.
+    process.env.RUNNER_AGENT_TIMEOUT_CAP = "900";
+    process.env.RUNNER_VERIFY_TIMEOUT_CAP = "240";
+    process.env.RUNNER_SANDBOX_TIMEOUT_MIN = "240";
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await createRunSandbox(makeRun(), { prompt: "be careful" });
+
+    const tasks = buildRunnerTasks();
+    const fullTaskBudgetMs = tasks.reduce(
+      (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) * 1000,
+      0,
+    );
+    const createOptions = mockCreate.mock.calls[0][0] as { timeout: number };
+    expect(createOptions.timeout).toBeGreaterThan(fullTaskBudgetMs);
   });
 
   it("uses RUNNER_SNAPSHOT_ID to override the default snapshot id when set", async () => {
@@ -178,6 +212,19 @@ describe("createRunSandbox", () => {
     expect(bootstrapScript).toContain("tar -xzf /tmp/rb.tgz -C /opt/runner");
   });
 
+  it("versions the runner bundle URL by deployment SHA so a new deploy cannot launch a cached old runner", async () => {
+    process.env.VERCEL_GIT_COMMIT_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    const sandbox = makeSandbox();
+    mockCreate.mockResolvedValue(sandbox);
+
+    await createRunSandbox(makeRun(), { prompt: "be careful" });
+
+    const bootstrap = sandbox.runCommand.mock.calls[0][0] as { args: string[] };
+    expect(bootstrap.args[1]).toContain(
+      "https://cb.example.test/runner-bundle.tgz?v=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    );
+  });
+
   it("falls back to the production callback base URL when CALLBACK_BASE is unset", async () => {
     delete process.env.CALLBACK_BASE;
     const sandbox = makeSandbox();
@@ -190,6 +237,36 @@ describe("createRunSandbox", () => {
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {
+    it("pins legacy GLM runs to Together AI when the competition does not request a provider", async () => {
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun({ model: "zai/glm-5.2" }), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.PINNED_PROVIDER).toBe("togetherai");
+    });
+
+    it("pins the dedicated GLM fast tier to Fireworks when the competition does not request a provider", async () => {
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun({ model: "zai/glm-5.2-fast" }), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.PINNED_PROVIDER).toBe("fireworks");
+    });
+
+    it("uses the run's requested provider instead of the model's legacy default pin", async () => {
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun({ model: "zai/glm-5.2", provider_requested: "morph" }), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.PINNED_PROVIDER).toBe("morph");
+    });
+
     it("launches runner.mjs via a structured runCommand call with detached:true and secrets ONLY in the env map", async () => {
       const sandbox = makeSandbox();
       mockCreate.mockResolvedValue(sandbox);
@@ -215,7 +292,7 @@ describe("createRunSandbox", () => {
       expect(launchCall.env.CALLBACK_BASE).toBe("https://cb.example.test");
       expect(launchCall.env.RUNNER_CALLBACK_SECRET).toBe("test-secret");
       expect(launchCall.env.AI_GATEWAY_API_KEY).toBe("test-gw-key");
-      expect(launchCall.env.BUDGET_CAP_USD).toBe("2");
+      expect(launchCall.env.BUDGET_CAP_USD).toBe("15");
 
       const decodedPrompt = Buffer.from(launchCall.env.SYSTEM_PROMPT_B64, "base64").toString("utf8");
       expect(decodedPrompt).toBe("be extremely careful");
@@ -290,11 +367,20 @@ describe("createRunSandbox", () => {
     mockCreate.mockRejectedValue(new Error("sandbox quota exceeded"));
     const run = makeRun();
     await storageRef.current.putRun(run);
+    await storageRef.current.putSubmission({
+      id: run.submission_id,
+      agent_name: "agent",
+      prompt: "hi",
+      status: "queued",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
 
     await expect(createRunSandbox(run, { prompt: "hi" })).rejects.toThrow("sandbox quota exceeded");
 
     const stored = await storageRef.current.getRun(run.id);
     expect(stored?.status).toBe("failed");
+    expect((await storageRef.current.getSubmission(run.submission_id))?.status).toBe("failed");
 
     const events = await storageRef.current.listRunEvents(run.id);
     expect(events.some((e) => e.type === "run.failed")).toBe(true);

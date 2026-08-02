@@ -1,0 +1,16 @@
+[
+  {
+    "id": "F-005-1",
+    "story_id": "STORY-005",
+    "severity": "medium",
+    "category": "layout",
+    "criterion": "Scroll necessity (rubric 3, Layout Quality)",
+    "score": "fail",
+    "description": "At a 1280x800 viewport (a common laptop screen size), once a vote is cast the diagnostic panel expands the card (8 reason buttons + optional textarea + Submit). The Submit button — the primary CTA to complete the comparison — falls below the fold and is not visible without scrolling. Confirmed by comparing two screenshots at different viewport sizes: at 1440x913 (the default agent-browser window) Submit fits on screen; at the standard 1280x800 test viewport it does not.",
+    "expected": "Per rubric 'Layout Quality > Scroll necessity': no unnecessary scrolling for the primary task, i.e. Submit should stay reachable within a standard viewport once the diagnostic panel is open.",
+    "actual": "Submit is pushed off-screen at 1280x800 after selecting a vote and opening the diagnostic panel; user must scroll down to find and click it.",
+    "screenshot": "docs/ux-walker/stories/STORY-005/screenshots/debug-state-2.png",
+    "suggested_fix": "Tighten vertical spacing in the diagnostic panel, or make the reason-button grid more compact (e.g. smaller row gap, or a sticky/always-visible Submit) so the full flow fits without scrolling on ~800px-tall viewports.",
+    "files_likely_involved": []
+  }
+]

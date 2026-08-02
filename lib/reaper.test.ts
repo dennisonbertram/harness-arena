@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MemoryStorage } from "./storage";
+import { getTasks } from "./tasks";
 import { reapIfStale, reapStaleRuns, shouldReap } from "./reaper";
 import type { Run } from "./types";
 
-const TWENTY_MIN_MS = 20 * 60 * 1000;
+const MAX_TASK_QUIET_MINUTES = Math.ceil(
+  Math.max(...getTasks().map((task) => task.agentTimeoutSec + task.verifierTimeoutSec)) / 60,
+);
+const DEFAULT_REAP_STALE_MINUTES =
+  Math.ceil((MAX_TASK_QUIET_MINUTES + 10) / 10) * 10;
+const DEFAULT_REAP_STALE_MS = DEFAULT_REAP_STALE_MINUTES * 60 * 1000;
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   return {
@@ -17,24 +23,37 @@ function makeRun(overrides: Partial<Run> = {}): Run {
 }
 
 describe("shouldReap (pure)", () => {
-  it("is true for a queued run whose last event is over 20 minutes old", () => {
-    const run = makeRun({ status: "queued" });
+  it("is true for a dispatched queued run silent beyond the task-derived stale window", () => {
+    const run = makeRun({ status: "queued", dispatched_at: "2026-07-21T00:00:00.000Z" });
     const lastEventTs = "2026-07-21T00:00:00.000Z";
-    const now = new Date(lastEventTs).getTime() + TWENTY_MIN_MS + 1000;
+    const now = new Date(lastEventTs).getTime() + DEFAULT_REAP_STALE_MS + 1000;
     expect(shouldReap(run, lastEventTs, now)).toBe(true);
   });
 
-  it("is true for a running run whose last event is over 20 minutes old", () => {
+  it("is false for an UNDISPATCHED queued run no matter how old (waiting for a slot, not stuck)", () => {
+    const run = makeRun({ status: "queued" }); // no dispatched_at
+    expect(shouldReap(run, "2020-01-01T00:00:00.000Z", Date.now())).toBe(false);
+  });
+
+  it("is false for a just-dispatched queued run whose last EVENT is old (dispatch resets the clock)", () => {
+    const lastEventTs = "2026-07-21T00:00:00.000Z"; // old: the run waited in the queue
+    const now = new Date(lastEventTs).getTime() + DEFAULT_REAP_STALE_MS + 5000;
+    // Claimed a second ago -> its sandbox is spinning up; must not be reaped yet.
+    const run = makeRun({ status: "queued", dispatched_at: new Date(now - 1000).toISOString() });
+    expect(shouldReap(run, lastEventTs, now)).toBe(false);
+  });
+
+  it("is true for a running run whose last event is beyond the task-derived stale window", () => {
     const run = makeRun({ status: "running" });
     const lastEventTs = "2026-07-21T00:00:00.000Z";
-    const now = new Date(lastEventTs).getTime() + TWENTY_MIN_MS + 1;
+    const now = new Date(lastEventTs).getTime() + DEFAULT_REAP_STALE_MS + 1;
     expect(shouldReap(run, lastEventTs, now)).toBe(true);
   });
 
-  it("is false when the last event is under 20 minutes old", () => {
+  it("is false throughout the maximum task quiet window plus safety margin", () => {
     const run = makeRun({ status: "running" });
     const lastEventTs = "2026-07-21T00:00:00.000Z";
-    const now = new Date(lastEventTs).getTime() + TWENTY_MIN_MS - 1000;
+    const now = new Date(lastEventTs).getTime() + DEFAULT_REAP_STALE_MS - 1000;
     expect(shouldReap(run, lastEventTs, now)).toBe(false);
   });
 
@@ -55,12 +74,17 @@ describe("shouldReap (pure)", () => {
 });
 
 describe("reapIfStale (integration against MemoryStorage)", () => {
-  it("marks a stale queued run reaped and appends a run.reaped event", async () => {
+  it("marks a stale dispatched-queued run reaped and appends a run.reaped event", async () => {
     const storage = new MemoryStorage();
-    const run = makeRun({ status: "queued", created_at: "2026-07-21T00:00:00.000Z" });
+    // Dispatched (claimed) but its sandbox stalled -> a real stuck run to reap.
+    const run = makeRun({
+      status: "queued",
+      dispatched_at: "2026-07-21T00:00:00.000Z",
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
     await storage.putRun(run);
 
-    const now = new Date("2026-07-21T00:21:00.000Z").getTime();
+    const now = new Date(run.created_at).getTime() + DEFAULT_REAP_STALE_MS + 60 * 1000;
     const result = await reapIfStale(storage, run, now);
 
     expect(result.status).toBe("reaped");
@@ -71,6 +95,64 @@ describe("reapIfStale (integration against MemoryStorage)", () => {
     expect(events.some((e) => e.type === "run.reaped")).toBe(true);
   });
 
+  it("marks the parent submission failed when its stale run is reaped", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "running" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "stalled agent",
+      prompt: "p",
+      status: "running",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(
+      storage,
+      run,
+      new Date(run.created_at).getTime() + DEFAULT_REAP_STALE_MS + 60 * 1000,
+    );
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
+  it("repairs a stale parent status when the run was already reaped", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "reaped", finished_at: "2026-07-21T00:21:00.000Z" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "stalled agent",
+      prompt: "p",
+      status: "running",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(storage, run);
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
+  it("repairs a stale parent status when sandbox creation already marked the run failed", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "failed", finished_at: "2026-07-21T00:01:00.000Z" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "never started",
+      prompt: "p",
+      status: "queued",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(storage, run);
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+
   it("uses the timestamp of the most recent event, not created_at, once events exist", async () => {
     const storage = new MemoryStorage();
     const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });
@@ -79,10 +161,9 @@ describe("reapIfStale (integration against MemoryStorage)", () => {
       { ts: "2026-07-21T00:10:00.000Z", type: "task.started", payload: {} },
     ]);
 
-    // 11 minutes after the last event (21 after created_at) -- still under
-    // the 20-minute threshold measured from the last event, so this must
+    // Still under the task-derived threshold measured from the last event, so this must
     // NOT be reaped even though created_at alone would look stale.
-    const now = new Date("2026-07-21T00:21:00.000Z").getTime();
+    const now = new Date("2026-07-21T00:10:00.000Z").getTime() + DEFAULT_REAP_STALE_MS - 1000;
     const result = await reapIfStale(storage, run, now);
 
     expect(result.status).toBe("running");
@@ -104,14 +185,16 @@ describe("reapIfStale (integration against MemoryStorage)", () => {
 describe("reapStaleRuns (sweep all runs)", () => {
   it("reaps every stale queued/running run and leaves fresh/terminal runs alone", async () => {
     const storage = new MemoryStorage();
-    const stale = makeRun({ id: "stale-1", status: "running", created_at: "2026-07-21T00:00:00.000Z" });
-    const fresh = makeRun({ id: "fresh-1", status: "running", created_at: "2026-07-21T00:19:00.000Z" });
+    const now = new Date("2026-07-21T01:00:00.000Z").getTime();
+    const staleCreatedAt = new Date(now - DEFAULT_REAP_STALE_MS - 1000).toISOString();
+    const freshCreatedAt = new Date(now - DEFAULT_REAP_STALE_MS + 1000).toISOString();
+    const stale = makeRun({ id: "stale-1", status: "running", created_at: staleCreatedAt });
+    const fresh = makeRun({ id: "fresh-1", status: "running", created_at: freshCreatedAt });
     const done = makeRun({ id: "done-1", status: "completed", created_at: "2020-01-01T00:00:00.000Z" });
     await storage.putRun(stale);
     await storage.putRun(fresh);
     await storage.putRun(done);
 
-    const now = new Date("2026-07-21T00:21:00.000Z").getTime();
     const reaped = await reapStaleRuns(storage, now);
 
     expect(reaped.map((r) => r.id)).toEqual(["stale-1"]);
@@ -126,7 +209,7 @@ describe("regression: reaping is idempotent", () => {
     const storage = new MemoryStorage();
     const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });
     await storage.putRun(run);
-    const now = new Date("2026-07-21T00:21:00.000Z").getTime();
+    const now = new Date(run.created_at).getTime() + DEFAULT_REAP_STALE_MS + 1000;
 
     await reapIfStale(storage, run, now);
     const reapedRun = (await storage.getRun(run.id))!;
@@ -149,7 +232,7 @@ describe("regression: REAP_STALE_MINUTES env override (issue #23 finding F)", ()
     delete process.env.REAP_STALE_MINUTES;
   });
 
-  it("honors REAP_STALE_MINUTES=1 instead of the 20-minute default (read per-call, not cached at import)", () => {
+  it("honors REAP_STALE_MINUTES=1 instead of the task-derived default (read per-call, not cached at import)", () => {
     process.env.REAP_STALE_MINUTES = "1";
 
     const run = makeRun({ status: "running" });

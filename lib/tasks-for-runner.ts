@@ -11,20 +11,26 @@ export interface RunnerTask {
   verifier_timeout_sec: number;
 }
 
-// Real task.toml agent/verifier timeouts (900s each) were built for a
-// long-running human-facing harness, not this sandbox's budget. Capping
-// both per task (issue #23 finding E) bounds worst-case run duration to
-// ~10 tasks x (300+240)s =~ 90 minutes, safely under the 120-minute
-// sandbox timeout -- the $2 budget cap aborts most runs far earlier anyway.
-const DEFAULT_AGENT_TIMEOUT_CAP_SEC = 300;
-const DEFAULT_VERIFY_TIMEOUT_CAP_SEC = 240;
+// task.toml is the benchmark contract. Do not silently shorten its stage
+// windows: live evidence showed valid QEMU/PyTorch solutions completing close
+// to the old five-minute arena cap, while other tasks explicitly allow up to
+// 30 minutes. Operators may tighten a window for a controlled experiment via
+// env, but the default preserves each task's own limit.
+const DEFAULT_TIMEOUT_CAP_SEC = Number.POSITIVE_INFINITY;
+
+function timeoutCap(envValue: string | undefined, hardCeiling: number): number {
+  if (envValue === undefined) return hardCeiling;
+  const configured = Number(envValue);
+  if (!Number.isFinite(configured) || configured <= 0) return hardCeiling;
+  return Math.min(configured, hardCeiling);
+}
 
 function agentTimeoutCap(): number {
-  return Number(process.env.RUNNER_AGENT_TIMEOUT_CAP ?? DEFAULT_AGENT_TIMEOUT_CAP_SEC);
+  return timeoutCap(process.env.RUNNER_AGENT_TIMEOUT_CAP, DEFAULT_TIMEOUT_CAP_SEC);
 }
 
 function verifyTimeoutCap(): number {
-  return Number(process.env.RUNNER_VERIFY_TIMEOUT_CAP ?? DEFAULT_VERIFY_TIMEOUT_CAP_SEC);
+  return timeoutCap(process.env.RUNNER_VERIFY_TIMEOUT_CAP, DEFAULT_TIMEOUT_CAP_SEC);
 }
 
 export function buildRunnerTasks(): RunnerTask[] {

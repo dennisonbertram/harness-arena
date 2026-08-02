@@ -1,28 +1,38 @@
 import { NextResponse } from "next/server";
-import { sortLeaderboard } from "@/lib/leaderboard";
+import { getStandings } from "@/lib/leaderboard-view";
 import { getStorage } from "@/lib/storage";
 
-const PROMPT_EXCERPT_CHARS = 200;
-
+// The leaderboard ranks PROMPTS by mean pass rate across their runs (cost is
+// secondary). Prompt text itself isn't exposed here — only whether it's the
+// vanilla baseline (empty prompt) — so the endpoint stays a scoreboard, not a
+// prompt dump; use /api/submissions to study prompts.
 export async function GET() {
-  const storage = getStorage();
-  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
-  const submissionById = new Map(submissions.map((s) => [s.id, s]));
+  const standings = await getStandings(getStorage());
 
-  const entries = sortLeaderboard(runs).map((run, index) => {
-    const submission = submissionById.get(run.submission_id);
-    return {
-      rank: index + 1,
-      run_id: run.id,
-      submission_id: run.submission_id,
-      agent_name: submission?.agent_name ?? "unknown",
-      prompt_excerpt: submission ? submission.prompt.slice(0, PROMPT_EXCERPT_CHARS) : "",
-      tasks_passed: run.tasks_passed,
-      total_cost_usd: run.total_cost_usd,
-      cost_per_task: (run.total_cost_usd ?? 0) / 10,
-      created_at: run.created_at,
-    };
-  });
+  const entries = standings.map((s, index) => ({
+    rank: index + 1,
+    agent_name: s.agentName,
+    github_login: s.githubLogin,
+    model: s.model,
+    is_baseline: s.promptKey === "",
+    runs: s.runs,
+    pass_rate: s.passRate,
+    mean_tasks_passed: s.meanTasksPassed,
+    total_tasks: s.totalTaskCount,
+    completes_test: s.completesTest,
+    median_cost_usd: s.medianCostUsd,
+    per_task: s.perTask.map((t) => ({
+      task_id: t.taskId,
+      passed: t.passed,
+      of: t.of,
+      pass_rate: t.of > 0 ? t.passed / t.of : 0,
+      mean_turns: t.meanTurns,
+      // null = unmeasured (no real cost record); never a fabricated placeholder.
+      mean_cost_usd: t.meanCostUsd,
+    })),
+    run_ids: s.runIds,
+    last_submitted_at: s.lastSubmittedAt,
+  }));
 
   return NextResponse.json(entries);
 }

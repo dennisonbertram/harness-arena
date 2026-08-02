@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { reapIfStale } from "@/lib/reaper";
+import { reapIfStale, reapThresholdMs } from "@/lib/reaper";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -121,7 +121,7 @@ describe("POST /api/runs/[id]/callback", () => {
             {
               ts: "2026-07-21T00:01:00.000Z",
               type: "task.cost_tamper_signal",
-              payload: { task_id: "t1", reason: "session_unreadable" },
+              payload: { task_id: "t1", reason: "cost_unmeasured" },
             },
           ],
         }),
@@ -131,6 +131,50 @@ describe("POST /api/runs/[id]/callback", () => {
       expect(response.status).toBe(200);
       const events = await storageRef.current.listRunEvents("run-tamper");
       expect(events.some((e) => e.type === "task.cost_tamper_signal")).toBe(true);
+    });
+  });
+
+  describe("gateway correlation event", () => {
+    it("accepts and persists the runner's provider-routing evidence", async () => {
+      await storageRef.current.putRun({
+        id: "run-gateway-correlation",
+        submission_id: "sub-gateway-correlation",
+        status: "running",
+        task_results: [],
+        created_at: "2026-07-31T00:00:00.000Z",
+      });
+
+      const response = await POST(
+        callbackRequest("run-gateway-correlation", {
+          events: [
+            {
+              ts: "2026-07-31T00:01:00.000Z",
+              type: "task.gateway_correlation",
+              payload: {
+                task_id: "t1",
+                proxy_requests: [
+                  {
+                    request_id: "gw-1",
+                    pinned_provider: "fireworks",
+                    status: 200,
+                    response_id: "gen-1",
+                  },
+                ],
+                pi_response_ids: ["gen-1"],
+                pi_retry_events: [],
+              },
+            },
+          ],
+        }),
+        { params: Promise.resolve({ id: "run-gateway-correlation" }) },
+      );
+
+      expect(response.status).toBe(200);
+      const events = await storageRef.current.listRunEvents("run-gateway-correlation");
+      expect(events.find((event) => event.type === "task.gateway_correlation")?.payload).toMatchObject({
+        task_id: "t1",
+        proxy_requests: [{ pinned_provider: "fireworks", status: 200 }],
+      });
     });
   });
 
@@ -342,7 +386,7 @@ describe("POST /api/runs/[id]/callback", () => {
       const reaped = await reapIfStale(
         storageRef.current,
         (await storageRef.current.getRun("run-raced"))!,
-        new Date("2026-07-21T00:21:00.000Z").getTime(),
+        new Date("2026-07-21T00:00:00.000Z").getTime() + reapThresholdMs() + 1000,
       );
       expect(reaped.status).toBe("reaped");
 
@@ -414,5 +458,60 @@ describe("POST /api/runs/[id]/callback", () => {
       );
       expect((await second.json()).seq_assigned).toEqual([2, 3]);
     });
+  });
+
+  // Absence of provider_pinned is the marker that a run predates pinning, so
+  // the field has to actually round-trip rather than being silently dropped.
+  it("records which gateway provider the run was pinned to", async () => {
+    await storageRef.current.putRun({
+      id: "run-pinned",
+      submission_id: "sub-1",
+      status: "running",
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      callbackRequest("run-pinned", {
+        events: [],
+        status: "completed",
+        totals: { tasks_passed: 3, total_cost_usd: 1, over_budget: false },
+        task_results: [],
+        provider_pinned: "zai",
+      }),
+      { params: Promise.resolve({ id: "run-pinned" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect((await storageRef.current.getRun("run-pinned"))?.provider_pinned).toBe("zai");
+  });
+
+  // A baseline runs vanilla, so its submitted prompt is empty by design. The
+  // prompt pi actually used is its own default, built inside the container --
+  // captured off the wire rather than reconstructed, so it must round-trip.
+  it("records the system prompt pi actually resolved to", async () => {
+    await storageRef.current.putRun({
+      id: "run-prompt",
+      submission_id: "sub-1",
+      status: "running",
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      callbackRequest("run-prompt", {
+        events: [],
+        status: "completed",
+        totals: { tasks_passed: 3, total_cost_usd: 1, over_budget: false },
+        task_results: [],
+        resolved_system_prompt: "You are an expert coding assistant operating inside pi",
+      }),
+      { params: Promise.resolve({ id: "run-prompt" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect((await storageRef.current.getRun("run-prompt"))?.resolved_system_prompt).toBe(
+      "You are an expert coding assistant operating inside pi",
+    );
   });
 });

@@ -9,16 +9,23 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 
 vi.mock("@/lib/judge", () => ({
   judgeSubmission: vi.fn(),
-  JUDGE_MODEL: "zai/glm-5.2",
+  JUDGE_MODEL: "anthropic/claude-sonnet-5",
 }));
 
-vi.mock("@/lib/run-trigger", () => ({
-  startRun: vi.fn().mockResolvedValue(undefined),
+vi.mock("@/lib/dispatch", () => ({
+  dispatchQueuedRuns: vi.fn().mockResolvedValue([]),
 }));
+
+vi.mock("@/auth", () => ({ auth: vi.fn() }));
 
 import { judgeSubmission } from "@/lib/judge";
-import { startRun } from "@/lib/run-trigger";
+import { dispatchQueuedRuns } from "@/lib/dispatch";
+import { auth } from "@/auth";
+import { asMockAuth, githubSession } from "@/lib/test-support/auth-mock";
 import { GET, POST } from "./route";
+import { mintAgentToken } from "@/lib/agent-token";
+
+const mockAuth = asMockAuth(auth);
 
 function postRequest(body: unknown, ip = "1.1.1.1"): NextRequest {
   return new NextRequest("http://localhost/api/submissions", {
@@ -40,11 +47,83 @@ function postRequestRaw(
   });
 }
 
+function mockSession(githubId: number, githubLogin = `user-${githubId}`) {
+  mockAuth.mockResolvedValue(githubSession(githubId, githubLogin));
+}
+
 describe("POST /api/submissions", () => {
+  // Every test gets a fresh, unique default githubId so unrelated tests never
+  // collide on the new github_id rate-limit bucket (mirrors how existing
+  // tests already use distinct IPs to avoid colliding on the IP bucket). A
+  // single strictly-increasing counter (never reset, never offset) backs
+  // every id used anywhere in this file — tests that need several distinct
+  // ids within one test call freshGithubId() repeatedly rather than adding
+  // ad-hoc offsets, which previously collided across tests.
+  let githubIdCounter = 1000;
+  function freshGithubId(): number {
+    githubIdCounter += 1;
+    return githubIdCounter;
+  }
+
   beforeEach(() => {
     resetStorage();
     vi.mocked(judgeSubmission).mockReset();
-    vi.mocked(startRun).mockClear();
+    vi.mocked(dispatchQueuedRuns).mockClear();
+    mockAuth.mockReset();
+    mockSession(freshGithubId());
+  });
+
+  describe("auth gating", () => {
+    it("returns 401 and stores nothing when there is no session", async () => {
+      mockAuth.mockResolvedValueOnce(null);
+
+      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "hi" }, "10.0.0.1"));
+
+      expect(response.status).toBe(401);
+      expect(judgeSubmission).not.toHaveBeenCalled();
+      expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+    });
+
+    it("returns 401 when the session is missing the githubId claim (stale cookie)", async () => {
+      mockAuth.mockResolvedValueOnce({ user: {}, expires: "2099-01-01T00:00:00.000Z" } as never);
+
+      const response = await POST(postRequest({ agent_name: "agent-x", prompt: "hi" }, "10.0.0.2"));
+
+      expect(response.status).toBe(401);
+      expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+    });
+
+    it("stamps the session's github_id/github_login on the stored submission, ignoring any github_login sent in the body", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+      mockSession(555, "real-login");
+
+      const response = await POST(
+        postRequest(
+          { agent_name: "agent-x", prompt: "hi", github_login: "spoofed-login" },
+          "10.0.0.3",
+        ),
+      );
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.github_id).toBe(555);
+      expect(submission?.github_login).toBe("real-login");
+    });
+
+    it("accepts a valid arena bearer token when no cookie session exists", async () => {
+      vi.stubEnv("AUTH_SECRET", "main-bearer-test-secret");
+      mockAuth.mockResolvedValueOnce(null);
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+      const token = await mintAgentToken({ githubId: 901, githubLogin: "agent-user" });
+      const response = await POST(new NextRequest("http://localhost/api/submissions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "x-forwarded-for": "10.0.0.31" },
+        body: JSON.stringify({ agent_name: "agent-x", prompt: "hi" }),
+      }));
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      await expect(storageRef.current.getSubmission(body.submission_id)).resolves.toMatchObject({ github_id: 901, github_login: "agent-user" });
+    });
   });
 
   describe("validation", () => {
@@ -128,7 +207,7 @@ describe("POST /api/submissions", () => {
   });
 
   describe("approved path", () => {
-    it("creates a queued run and returns submission_id, run_id, status=queued", async () => {
+    it("creates 5 queued runs (not started inline) and kicks the dispatcher", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "looks fair" });
 
       const response = await POST(
@@ -139,32 +218,38 @@ describe("POST /api/submissions", () => {
       expect(response.status).toBe(200);
       expect(body.status).toBe("queued");
       expect(typeof body.submission_id).toBe("string");
-      expect(typeof body.run_id).toBe("string");
+      // A submission now spawns a fixed sample of 5 runs; run_id is the first.
+      expect(Array.isArray(body.run_ids)).toBe(true);
+      expect(body.run_ids).toHaveLength(5);
+      expect(body.run_id).toBe(body.run_ids[0]);
+      // The judge's feedback is returned on approval too, so the submitter sees it.
+      expect(body.judge_reason).toBe("looks fair");
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
       expect(submission?.status).toBe("queued");
       expect(submission?.run_id).toBe(body.run_id);
+      expect(submission?.run_ids).toEqual(body.run_ids);
       expect(submission?.judge_reason).toBe("looks fair");
 
-      const run = await storageRef.current.getRun(body.run_id);
-      expect(run?.status).toBe("queued");
-      expect(run?.submission_id).toBe(body.submission_id);
+      // Each of the 5 runs is queued (NOT started inline), linked to the
+      // submission, with a run.created event.
+      for (const runId of body.run_ids) {
+        const run = await storageRef.current.getRun(runId);
+        expect(run?.status).toBe("queued");
+        expect(run?.submission_id).toBe(body.submission_id);
+        const events = await storageRef.current.listRunEvents(runId);
+        expect(events).toHaveLength(1);
+        expect(events[0].type).toBe("run.created");
+        expect(events[0].payload).toEqual({ submission_id: body.submission_id });
+      }
 
-      const events = await storageRef.current.listRunEvents(body.run_id);
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe("run.created");
-      expect(events[0].payload).toEqual({ submission_id: body.submission_id });
-
-      expect(startRun).toHaveBeenCalledTimes(1);
-      expect(startRun).toHaveBeenCalledWith(
-        expect.objectContaining({ id: body.run_id }),
-        "Plan carefully before acting.",
-      );
+      // The dispatcher is kicked to start runs under the global cap.
+      expect(dispatchQueuedRuns).toHaveBeenCalled();
     });
 
-    it("a failing run-trigger stub does not fail the submission response", async () => {
+    it("a failing dispatch does not fail the submission response", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
-      vi.mocked(startRun).mockRejectedValueOnce(new Error("not implemented"));
+      vi.mocked(dispatchQueuedRuns).mockRejectedValueOnce(new Error("dispatch boom"));
 
       const response = await POST(postRequest({ agent_name: "agent-y", prompt: "Be careful." }, "3.3.3.2"));
 
@@ -208,7 +293,8 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       expect(response.status).toBe(503);
-      expect(body.error).toBe("judge unavailable, retry later");
+      expect(body.error).toContain("temporarily unavailable");
+      expect(body.error).toContain("gateway 500");
 
       const submissions = await storageRef.current.listSubmissions();
       expect(submissions).toHaveLength(1);
@@ -217,7 +303,7 @@ describe("POST /api/submissions", () => {
   });
 
   describe("rate limiting", () => {
-    it("returns 429 on the 6th submission from the same IP within the window", async () => {
+    it("returns 429 on the 6th submission from the same IP+account within the window", async () => {
       vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
       const ip = "9.9.9.9";
 
@@ -230,7 +316,7 @@ describe("POST /api/submissions", () => {
       expect(sixth.status).toBe(429);
     });
 
-    it("does not rate-limit a different IP once one IP is exhausted", async () => {
+    it("does not rate-limit a different IP + different account once one is exhausted", async () => {
       vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
       const exhaustedIp = "9.9.9.10";
 
@@ -239,10 +325,41 @@ describe("POST /api/submissions", () => {
       }
       await POST(postRequest({ agent_name: "agent-over", prompt: "hello" }, exhaustedIp));
 
-      const otherIpResponse = await POST(
+      // A fresh IP alone isn't enough to prove bucket isolation now that both
+      // dimensions must admit — also switch to a fresh account.
+      mockSession(freshGithubId());
+      const otherResponse = await POST(
         postRequest({ agent_name: "agent-fresh", prompt: "hello" }, "9.9.9.11"),
       );
-      expect(otherIpResponse.status).toBe(200);
+      expect(otherResponse.status).toBe(200);
+    });
+
+    it("6th submission from one IP across different github_ids is still blocked (account-minting bypass closed)", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
+      const ip = "9.9.9.30";
+
+      for (let i = 0; i < 5; i++) {
+        mockSession(freshGithubId());
+        const response = await POST(postRequest({ agent_name: `agent-${i}`, prompt: "hello" }, ip));
+        expect(response.status).toBe(200);
+      }
+
+      mockSession(freshGithubId());
+      const sixth = await POST(postRequest({ agent_name: "agent-over", prompt: "hello" }, ip));
+      expect(sixth.status).toBe(429);
+    });
+
+    it("6th submission from one github_id across different IPs is still blocked", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
+      mockSession(freshGithubId());
+
+      for (let i = 0; i < 5; i++) {
+        const response = await POST(postRequest({ agent_name: `agent-${i}`, prompt: "hello" }, `10.1.1.${i}`));
+        expect(response.status).toBe(200);
+      }
+
+      const sixth = await POST(postRequest({ agent_name: "agent-over", prompt: "hello" }, "10.1.1.99"));
+      expect(sixth.status).toBe(429);
     });
 
     describe("regression: rate limit window expiry", () => {
@@ -250,7 +367,7 @@ describe("POST /api/submissions", () => {
         vi.useRealTimers();
       });
 
-      it("allows a new submission from the same IP once the 1-hour window has fully elapsed", async () => {
+      it("allows a new submission from the same IP+account once the 1-hour window has fully elapsed", async () => {
         vi.mocked(judgeSubmission).mockResolvedValue({ verdict: "approved", reason: "fine" });
         const ip = "9.9.9.20";
         const start = new Date("2026-07-21T00:00:00.000Z");
@@ -281,7 +398,7 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
-      expect(submission?.judge_model).toBe("zai/glm-5.2");
+      expect(submission?.judge_model).toBe("anthropic/claude-sonnet-5");
       expect(submission?.judged_at).toBeDefined();
     });
 
@@ -292,20 +409,20 @@ describe("POST /api/submissions", () => {
       const body = await response.json();
 
       const submission = await storageRef.current.getSubmission(body.submission_id);
-      expect(submission?.judge_model).toBe("zai/glm-5.2");
+      expect(submission?.judge_model).toBe("anthropic/claude-sonnet-5");
     });
 
-    it("never calls the sandbox run-trigger when the judge rejects the submission", async () => {
+    it("never kicks the dispatcher when the judge rejects the submission", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "rejected", reason: "cheat detected" });
 
       await POST(postRequest({ agent_name: "agent-reject-trigger", prompt: "cheat" }, "6.6.6.3"));
 
-      expect(startRun).not.toHaveBeenCalled();
+      expect(dispatchQueuedRuns).not.toHaveBeenCalled();
     });
   });
 
-  describe("regression: run trigger still fires outside a live Next.js request scope", () => {
-    it("invokes startRun via the fire-and-forget fallback when next/server's after() throws " +
+  describe("regression: dispatch still fires outside a live Next.js request scope", () => {
+    it("invokes the dispatcher via the fire-and-forget fallback when next/server's after() throws " +
       "(as it does when a route handler is invoked directly, e.g. by this test harness, " +
       "instead of through a real Next.js request lifecycle)", async () => {
       vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
@@ -315,7 +432,7 @@ describe("POST /api/submissions", () => {
       );
 
       expect(response.status).toBe(200);
-      expect(startRun).toHaveBeenCalledWith(expect.anything(), "hello there");
+      expect(dispatchQueuedRuns).toHaveBeenCalled();
     });
   });
 });

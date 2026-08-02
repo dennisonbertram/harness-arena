@@ -1,10 +1,14 @@
 import { get, list, put } from "@vercel/blob";
-import type { NewRunEvent, Run, RunEvent, Submission } from "./types";
+import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
   getSubmission(id: string): Promise<Submission | undefined>;
   putSubmission(submission: Submission): Promise<void>;
   listSubmissions(): Promise<Submission[]>;
+  getCompetition(id: string): Promise<Competition | undefined>;
+  putCompetition(competition: Competition): Promise<void>;
+  /** Same partial-read contract as listSubmissions/listRuns -- see PartialReadError. */
+  listCompetitions(): Promise<Competition[]>;
   getRun(id: string): Promise<Run | undefined>;
   putRun(run: Run): Promise<void>;
   listRuns(): Promise<Run[]>;
@@ -13,12 +17,21 @@ export interface Storage {
   /** Returns all events for a run in strict seq order. Best-effort: skips any event that can't be read. */
   listRunEvents(runId: string): Promise<RunEvent[]>;
   /**
+   * Events with `seq > sinceSeq`, in strict seq order. Same best-effort
+   * contract as listRunEvents. Exists so a poller that already holds events
+   * up to N doesn't re-read the whole log every tick -- see BlobStorage's
+   * implementation for why that matters.
+   */
+  listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]>;
+  /**
    * Cheap staleness probe for the reaper: the timestamp of the most recent
    * event, or undefined if none. Must NOT fetch every event's content (the
    * reaper runs on every run read); Blob derives it from list() metadata.
    */
   latestEventTimestamp(runId: string): Promise<string | undefined>;
   putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string>;
+  /** Raw bytes of a stored trace blob, or null if it doesn't exist. */
+  getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null>;
 }
 
 // In-memory implementation used by tests and by BlobStorage's internal
@@ -26,9 +39,10 @@ export interface Storage {
 // local/test use. Nothing here survives a process restart.
 export class MemoryStorage implements Storage {
   private submissions = new Map<string, Submission>();
+  private competitions = new Map<string, Competition>();
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
-  private traces = new Map<string, string>();
+  private traces = new Map<string, Buffer>();
 
   async getSubmission(id: string): Promise<Submission | undefined> {
     return this.submissions.get(id);
@@ -40,6 +54,18 @@ export class MemoryStorage implements Storage {
 
   async listSubmissions(): Promise<Submission[]> {
     return [...this.submissions.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async getCompetition(id: string): Promise<Competition | undefined> {
+    return this.competitions.get(id);
+  }
+
+  async putCompetition(competition: Competition): Promise<void> {
+    this.competitions.set(competition.id, competition);
+  }
+
+  async listCompetitions(): Promise<Competition[]> {
+    return [...this.competitions.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async getRun(id: string): Promise<Run | undefined> {
@@ -66,7 +92,11 @@ export class MemoryStorage implements Storage {
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
-    return [...(this.events.get(runId) ?? [])].sort((a, b) => a.seq - b.seq);
+    return this.listRunEventsSince(runId, 0);
+  }
+
+  async listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]> {
+    return [...(this.events.get(runId) ?? [])].filter((e) => e.seq > sinceSeq).sort((a, b) => a.seq - b.seq);
   }
 
   async latestEventTimestamp(runId: string): Promise<string | undefined> {
@@ -78,8 +108,12 @@ export class MemoryStorage implements Storage {
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const key = `traces/${runId}/${taskId}/${name}`;
     const url = `memory://${key}`;
-    this.traces.set(key, typeof data === "string" ? data : data.toString("utf8"));
+    this.traces.set(key, Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8"));
     return url;
+  }
+
+  async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
+    return this.traces.get(`traces/${runId}/${taskId}/${name}`) ?? null;
   }
 }
 
@@ -110,6 +144,41 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
   throw lastErr;
 }
 
+/**
+ * Thrown when a list read could not return every stored item.
+ *
+ * Blob rate-limits reads, and a partial result is NOT a smaller valid answer
+ * here: aggregatePrompts groups runs by their submission, so a submission
+ * that failed to read turns its runs into `__unknown:<runId>` singletons and
+ * the leaderboard silently publishes fabricated standings (observed live:
+ * the same endpoint returned 17, then 16, then 10 standings within seconds,
+ * every one labelled "unknown"). Callers that aggregate must fail loudly
+ * rather than compute on a subset.
+ */
+export class PartialReadError extends Error {
+  constructor(
+    readonly prefix: string,
+    readonly missing: number,
+    readonly total: number,
+  ) {
+    super(`partial read of ${prefix}: ${missing} of ${total} blobs unreadable after retries`);
+    this.name = "PartialReadError";
+  }
+}
+
+/**
+ * The seq encoded in an event blob's pathname
+ * (`events/<runId>/0000000007.json` -> 7), or null when the name isn't that
+ * shape. Null means "can't tell" and callers keep the blob rather than
+ * dropping it, so a stray/renamed file is never silently lost.
+ */
+export function seqFromEventPathname(pathname: string | undefined): number | null {
+  const match = /(?:^|\/)(\d+)\.json$/.exec(pathname ?? "");
+  if (!match) return null;
+  const seq = Number(match[1]);
+  return Number.isSafeInteger(seq) ? seq : null;
+}
+
 export async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: "no-store" });
   // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
@@ -120,14 +189,89 @@ export async function fetchJson<T>(url: string): Promise<T> {
   return JSON.parse(await res.text()) as T;
 }
 
+async function getJson<T>(identifier: string): Promise<T> {
+  const result = await get(identifier, { access: "public" });
+  // The caller derived this identifier from list(), so a null/304 here is a
+  // transiently unreadable object rather than a legitimate missing entity.
+  // Throw so withRetry can make another authenticated attempt.
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`blob get ${result?.statusCode ?? 404}`);
+  }
+  return JSON.parse(await new Response(result.stream).text()) as T;
+}
+
+function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
+  // `uploadedAt` is present on real Blob list results. Keep the helper
+  // tolerant of older/custom storage adapters that only provide a URL rather
+  // than turning a readable entity into a partial-read failure.
+  if (!blob.uploadedAt) return blob.url;
+  let url: URL;
+  try {
+    url = new URL(blob.url);
+  } catch {
+    return blob.url;
+  }
+  const uploadedAt = new Date(blob.uploadedAt).getTime();
+  url.searchParams.set("v", Number.isFinite(uploadedAt) ? String(uploadedAt) : String(blob.uploadedAt));
+  return url.toString();
+}
+
 export class BlobStorage implements Storage {
-  private async readJson<T>(pathname: string): Promise<T | undefined> {
-    return withRetry(async () => {
-      const result = await get(pathname, { access: "public" });
-      if (!result) return undefined;
-      const text = await new Response(result.stream).text();
-      return JSON.parse(text) as T;
+  private readonly readConcurrency = 8;
+  private activeReads = 0;
+  private readonly readWaiters: Array<() => void> = [];
+
+  private async withReadSlot<T>(read: () => Promise<T>): Promise<T> {
+    if (this.activeReads >= this.readConcurrency) {
+      await new Promise<void>((resolve) => this.readWaiters.push(resolve));
+    }
+    this.activeReads += 1;
+    try {
+      return await read();
+    } finally {
+      this.activeReads -= 1;
+      this.readWaiters.shift()?.();
+    }
+  }
+
+  private async readListedJson<T>(blob: {
+    url: string;
+    pathname: string;
+    uploadedAt: string | Date;
+  }): Promise<T> {
+    // listRuns/listSubmissions/listCompetitions are often requested together.
+    // Keep one instance-wide semaphore across all three so Promise.all cannot
+    // turn a 90-object page read into 90 simultaneous Blob requests.
+    return this.withReadSlot(async () => {
+      try {
+        // Prefer the authenticated read plane. The production app was
+        // receiving persistent 403s from public URLs while get(pathname)
+        // stayed healthy; trying the failing public edge first added ~300 ms
+        // per blob and pushed /status static generation past 60 seconds.
+        //
+        // Authenticate the uploadedAt-versioned URL, not the bare pathname.
+        // Production proved the bare get can return a pre-overwrite "running"
+        // document for minutes after list() already reports the completed
+        // upload. The version keeps authenticated reads on the current object
+        // while retaining the reliable SDK data plane.
+        return await withRetry(() => getJson<T>(versionedBlobUrl(blob)), 2);
+      } catch {
+        // Keep the uploadedAt-versioned public URL as a fallback: a prior Blob
+        // incident had the inverse failure shape (SDK get 403, public URL
+        // healthy), and the version avoids a stale overwritten entity.
+        return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
+      }
     });
+  }
+
+  private async readJson<T>(pathname: string): Promise<T | undefined> {
+    // Resolve the exact current blob before reading. The authenticated fallback
+    // in readListedJson covers the production failure where Vercel Functions
+    // received persistent 403s from the otherwise-public Blob URL.
+    const blobs = await withRetry(() => this.listAllBlobs(pathname));
+    const blob = blobs.find((candidate) => candidate.pathname === pathname);
+    if (!blob) return undefined;
+    return this.readListedJson<T>(blob);
   }
 
   private async writeJson(pathname: string, value: unknown): Promise<void> {
@@ -139,6 +283,7 @@ export class BlobStorage implements Storage {
         access: "public",
         addRandomSuffix: false,
         allowOverwrite: true,
+        cacheControlMaxAge: 60,
         contentType: "application/json",
       }),
     );
@@ -152,8 +297,8 @@ export class BlobStorage implements Storage {
     await this.writeJson(`submissions/${submission.id}.json`, submission);
   }
 
-  private async listAllBlobs(prefix: string): Promise<{ url: string; uploadedAt: string | Date }[]> {
-    const blobs: { url: string; uploadedAt: string | Date }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string; uploadedAt: string | Date }[]> {
+    const blobs: { url: string; pathname: string; uploadedAt: string | Date }[] = [];
     let cursor: string | undefined;
     do {
       const page = await list({ prefix, cursor });
@@ -166,11 +311,42 @@ export class BlobStorage implements Storage {
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Submission>(blob.url), 3).catch(() => undefined)),
+      blobs.map((blob) =>
+        this.readListedJson<Submission>(blob).catch(() => undefined),
+      ),
     );
-    return results
-      .filter((s): s is Submission => s !== undefined)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const found = results.filter((s): s is Submission => s !== undefined);
+    // Fail loud on an incomplete read -- see PartialReadError. Each entry
+    // already retried 3x, so reaching here means a genuine failure, not a
+    // single blip.
+    if (found.length !== results.length) {
+      throw new PartialReadError("submissions/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async getCompetition(id: string): Promise<Competition | undefined> {
+    return this.readJson<Competition>(`competitions/${id}.json`);
+  }
+
+  async putCompetition(competition: Competition): Promise<void> {
+    await this.writeJson(`competitions/${competition.id}.json`, competition);
+  }
+
+  async listCompetitions(): Promise<Competition[]> {
+    const blobs = await this.listAllBlobs("competitions/");
+    const results = await Promise.all(
+      blobs.map((blob) =>
+        this.readListedJson<Competition>(blob).catch(() => undefined),
+      ),
+    );
+    const found = results.filter((c): c is Competition => c !== undefined);
+    // Fail loud on an incomplete read -- same contract as listSubmissions:
+    // a dropped competition must not silently vanish from a switcher/listing.
+    if (found.length !== results.length) {
+      throw new PartialReadError("competitions/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async getRun(id: string): Promise<Run | undefined> {
@@ -184,11 +360,15 @@ export class BlobStorage implements Storage {
   async listRuns(): Promise<Run[]> {
     const blobs = await this.listAllBlobs("runs/");
     const results = await Promise.all(
-      blobs.map((blob) => withRetry(() => fetchJson<Run>(blob.url), 3).catch(() => undefined)),
+      blobs.map((blob) => this.readListedJson<Run>(blob).catch(() => undefined)),
     );
-    return results
-      .filter((r): r is Run => r !== undefined)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const found = results.filter((r): r is Run => r !== undefined);
+    // Fail loud on an incomplete read -- a missing run silently changes every
+    // aggregate computed from this list (pass rate, run counts, cost).
+    if (found.length !== results.length) {
+      throw new PartialReadError("runs/", results.length - found.length, results.length);
+    }
+    return found.sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   async appendRunEvents(runId: string, newEvents: NewRunEvent[]): Promise<RunEvent[]> {
@@ -227,17 +407,53 @@ export class BlobStorage implements Storage {
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
+    return this.listRunEventsSince(runId, 0);
+  }
+
+  async listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]> {
     const blobs = await this.listAllBlobs(`events/${runId}/`);
+    // The seq is encoded in the blob NAME (zero-padded, see appendRunEvents),
+    // so filtering happens on list() metadata -- before any content fetch.
+    // That's the whole point: a 16-task run emits ~90 event blobs, and a
+    // poller re-reading all of them every tick is O(events) per poll and
+    // grows as the run progresses. With a cursor it fetches only what's new.
+    // A name that doesn't parse is kept (fail-open), so an unexpected blob is
+    // never silently dropped from the full listing.
+    const fresh = blobs.filter((b) => {
+      const seq = seqFromEventPathname(b.pathname);
+      return seq === null || seq > sinceSeq;
+    });
     const results = await Promise.all(
-      blobs.map(async (blob) => {
+      fresh.map(async (blob) => {
         try {
-          return await withRetry(() => fetchJson<RunEvent>(blob.url), 3);
+          return { event: await this.readListedJson<RunEvent>(blob), unreadableSeq: null };
         } catch {
-          return undefined; // skip an event we can't read rather than 500 the route
+          // Don't 500 the route -- but remember WHICH seq we couldn't read.
+          return { event: undefined, unreadableSeq: seqFromEventPathname(blob.pathname) };
         }
       }),
     );
-    return results.filter((e): e is RunEvent => e !== undefined).sort((a, b) => a.seq - b.seq);
+
+    // Never return an event from beyond a transient hole. Callers resume from
+    // the last seq they received, so handing back N+1 while N was merely
+    // unreadable-right-now (Blob is eventually consistent and rate-limits
+    // reads) would skip N FOREVER, even once it becomes readable.
+    //
+    // Only a blob that EXISTS but failed to read blocks. A seq with no blob at
+    // all is a permanent gap -- appendRunEvents advances seq on a write
+    // collision, so those are legitimate -- and must not block, or the cursor
+    // would stall on it for good. An unreadable blob whose name doesn't parse
+    // gives us no seq to truncate at, so it can't block either.
+    const firstUnreadable = results.reduce<number | null>(
+      (min, r) => (r.unreadableSeq === null ? min : min === null || r.unreadableSeq < min ? r.unreadableSeq : min),
+      null,
+    );
+
+    return results
+      .map((r) => r.event)
+      .filter((e): e is RunEvent => e !== undefined)
+      .filter((e) => e.seq > sinceSeq && (firstUnreadable === null || e.seq < firstUnreadable))
+      .sort((a, b) => a.seq - b.seq);
   }
 
   async latestEventTimestamp(runId: string): Promise<string | undefined> {
@@ -262,10 +478,38 @@ export class BlobStorage implements Storage {
     );
     return url;
   }
+
+  async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
+    try {
+      return await withRetry(async () => {
+        const pathname = `traces/${runId}/${taskId}/${name}`;
+        const blobs = await this.listAllBlobs(pathname);
+        const blob = blobs.find((candidate) => candidate.pathname === pathname);
+        if (!blob) return null;
+        const response = await fetch(versionedBlobUrl(blob), { cache: "no-store" });
+        if (!response.ok) throw new Error(`blob fetch ${response.status}`);
+        return Buffer.from(await response.arrayBuffer());
+      });
+    } catch {
+      return null;
+    }
+  }
 }
 
+// Pinned on globalThis, not a module-level `let`. Next.js gives server
+// components and route handlers separate module graphs, so a module-scoped
+// singleton is per-graph: a competition created through a route handler is
+// invisible to the page that renders it. This is what makes STORAGE=memory
+// usable for a real request flow instead of only within one graph.
+const MEMORY_STORAGE_KEY = Symbol.for("harness-arena.memory-storage");
+type MemoryStorageGlobal = typeof globalThis & { [MEMORY_STORAGE_KEY]?: MemoryStorage };
+
 export function getStorage(): Storage {
-  if (process.env.STORAGE === "memory") return new MemoryStorage();
+  if (process.env.STORAGE === "memory") {
+    const g = globalThis as MemoryStorageGlobal;
+    g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();
+    return g[MEMORY_STORAGE_KEY];
+  }
   if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

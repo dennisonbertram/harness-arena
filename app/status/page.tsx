@@ -5,6 +5,7 @@ import { RUN_STATUS_BADGE_STYLES } from "@/lib/run-status";
 import { RUN_STATUSES, SUBMISSION_STATUSES } from "@/lib/types";
 import type { RunEvent } from "@/lib/types";
 import { countByStatus, recentActivity, totalSpendUsd, PER_RUN_BUDGET_CAP_USD, POC_BUDGET_CAP_USD } from "@/lib/status-view";
+import { cellStyle } from "../tableStyles";
 
 // The status page reads from shared storage, so a build-time-cached page
 // would never show new runs. ISR re-renders it at most every 10s.
@@ -76,6 +77,9 @@ export default async function StatusPage() {
                     <tr key={row.runId} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                       <td style={cellStyle}>
                         <Link href={`/runs/${row.runId}`}>{row.agentName}</Link>
+                        <span className="mono" style={{ marginLeft: 8, fontSize: 12, color: "var(--gray-700)" }}>
+                          {row.githubLogin}
+                        </span>
                       </td>
                       <td style={cellStyle}>
                         <span
@@ -157,4 +161,3 @@ function SpendPanel({ spendUsd }: { spendUsd: number }) {
   );
 }
 
-const cellStyle: React.CSSProperties = { padding: "10px 12px", textAlign: "left" };

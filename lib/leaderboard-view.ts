@@ -1,5 +1,18 @@
-import { sortLeaderboard } from "./leaderboard";
+import { aggregatePrompts, type PromptStanding } from "./aggregate";
+import { partitionLeaderboard } from "./leaderboard";
+import { getTasks } from "./tasks";
 import type { Storage } from "./storage";
+import type { Run, Submission } from "./types";
+
+/**
+ * v1 standings: every prompt's mean pass rate across its runs, ranked pass
+ * rate desc (cost breaks ties). This is the primary board — cost ranking
+ * waits until pass rate is saturated.
+ */
+export async function getStandings(storage: Storage): Promise<PromptStanding[]> {
+  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
+  return aggregatePrompts(runs, submissions, getTasks().length);
+}
 
 /** The reference entry: stock pi harness prompt, nothing added. Shown as the
  *  baseline to beat, above the competitive leaderboard. */
@@ -35,31 +48,43 @@ export function partitionBaseline(rows: LeaderboardRow[]): {
   return { baseline, competitors };
 }
 
-/**
- * Assembles leaderboard rows by joining completed runs (via sortLeaderboard,
- * so ranking stays identical to the API's) with their submitting agent's
- * name. A run referencing a submission that no longer exists in storage
- * falls back to "unknown" rather than throwing.
- */
-export async function getLeaderboardView(storage: Storage): Promise<LeaderboardRow[]> {
-  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
-  const submissionById = new Map(submissions.map((submission) => [submission.id, submission]));
-
-  return sortLeaderboard(runs).map((run, index) => {
+/** Joins runs to their submitting agent's name; rank is the array index+1.
+ *  A run whose submission no longer exists falls back to "unknown". */
+function rowsFor(runs: Run[], submissionById: Map<string, Submission>): LeaderboardRow[] {
+  return runs.map((run, index) => {
     const submission = submissionById.get(run.submission_id);
-    const tasksPassed = run.tasks_passed!;
-    const totalCostUsd = run.total_cost_usd!;
     const totalTasks = run.task_results.length;
-
+    const totalCostUsd = run.total_cost_usd!;
     return {
       rank: index + 1,
       runId: run.id,
       agentName: submission?.agent_name ?? "unknown",
-      tasksPassed,
+      tasksPassed: run.tasks_passed!,
       totalTasks,
       costPerTaskUsd: totalTasks > 0 ? totalCostUsd / totalTasks : totalCostUsd,
       totalCostUsd,
       submittedAt: submission?.created_at ?? run.created_at,
     };
   });
+}
+
+/**
+ * The two leaderboard sections:
+ *  - ranked: runs that completed the whole test (passed every task), ordered by
+ *    the single optimization parameter (total cost, ascending).
+ *  - incomplete: completed runs that didn't pass every task — shown for
+ *    transparency but not ranked (they didn't finish the test).
+ */
+export async function getLeaderboardSections(
+  storage: Storage,
+): Promise<{ ranked: LeaderboardRow[]; incomplete: LeaderboardRow[] }> {
+  const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
+  const submissionById = new Map(submissions.map((submission) => [submission.id, submission]));
+  const { ranked, incomplete } = partitionLeaderboard(runs, getTasks().length);
+  return { ranked: rowsFor(ranked, submissionById), incomplete: rowsFor(incomplete, submissionById) };
+}
+
+/** Backwards-compatible view: the ranked (complete-test) rows only. */
+export async function getLeaderboardView(storage: Storage): Promise<LeaderboardRow[]> {
+  return (await getLeaderboardSections(storage)).ranked;
 }
