@@ -64,6 +64,7 @@ describe("0004 external Ethereum payout address", () => {
       expect.objectContaining({ table_name: "payout_profiles", column_name: "entrant_id" }),
       expect.objectContaining({ table_name: "payout_profiles", column_name: "address" }),
       expect.objectContaining({ table_name: "payout_profiles", column_name: "chain_id" }),
+      expect.objectContaining({ table_name: "payout_profiles", column_name: "consent_version" }),
       expect.objectContaining({ table_name: "payout_profiles", column_name: "change_effective_at" }),
       expect.objectContaining({ table_name: "address_challenges", column_name: "nonce_hash" }),
       expect.objectContaining({ table_name: "address_challenges", column_name: "consumed_at" }),
@@ -113,7 +114,7 @@ describe("0004 external Ethereum payout address", () => {
       idempotency_key: "verify-1",
     };
     const first = await payouts.verify(valid);
-    expect(first).toMatchObject({ ok: true, profile: { provider: "external", address: ADDRESS, chain_id: 1, verification_method: "eip191", effective: true } });
+    expect(first).toMatchObject({ ok: true, profile: { provider: "external", address: ADDRESS, chain_id: 1, verification_method: "eip191", consent_version: "payout-address.v1", effective: true } });
     await expect(payouts.verify(valid)).resolves.toEqual(first);
     await expect(payouts.verify({ ...valid, idempotency_key: "verify-replay" })).resolves.toEqual({ ok: false, error: { code: "challenge_consumed" } });
 
@@ -122,6 +123,37 @@ describe("0004 external Ethereum payout address", () => {
     await expect(payouts.verify({ ...valid, actor: BOB, challenge_id: other.challenge.id, idempotency_key: "cross-user" }))
       .resolves.toEqual({ ok: false, error: { code: "not_found" } });
     await expect(payouts.verify({ ...valid, challenge_id: other.challenge.id, signature: "0xbad", idempotency_key: "bad-proof" }))
+      .resolves.toEqual({ ok: false, error: { code: "invalid_signature" } });
+  });
+
+  it("verifies outside the SQL transaction, sanitizes verifier failures, and scopes idempotency across challenges", async () => {
+    let inTransaction = false;
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>) => db.transaction(async (tx) => {
+      inTransaction = true;
+      try { return await callback(tx as unknown as TransactionSql); } finally { inTransaction = false; }
+    });
+    const verifier = vi.fn(async () => {
+      expect(inTransaction).toBe(false);
+      return true;
+    });
+    const payouts = createExternalPayoutAddressService({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      nonce: { next: () => `nonce-${serial++}-${"x".repeat(32)}` },
+      now: () => clock,
+      domain: "harness-arena.example",
+      verifyMessage: verifier,
+    });
+    const first = await payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: clock.toISOString() });
+    const second = await payouts.prepare({ actor: ALICE, address: SECOND_ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!first.ok || !second.ok) throw new Error("fixture prepare failed");
+    await expect(payouts.verify({ actor: ALICE, challenge_id: first.challenge.id, signature: "0xvalid-one", consent_version: "payout-address.v1", idempotency_key: "global-key" })).resolves.toMatchObject({ ok: true });
+    await expect(payouts.verify({ actor: ALICE, challenge_id: second.challenge.id, signature: "0xvalid-two", consent_version: "payout-address.v1", idempotency_key: "global-key" })).resolves.toEqual({ ok: false, error: { code: "idempotency_conflict" } });
+
+    const third = await payouts.prepare({ actor: BOB, address: SECOND_ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!third.ok) throw new Error("fixture prepare failed");
+    verifier.mockRejectedValueOnce(new Error("rpc failed with postgres://secret"));
+    await expect(payouts.verify({ actor: BOB, challenge_id: third.challenge.id, signature: "0xthrows", consent_version: "payout-address.v1", idempotency_key: "verifier-error" }))
       .resolves.toEqual({ ok: false, error: { code: "invalid_signature" } });
   });
 
