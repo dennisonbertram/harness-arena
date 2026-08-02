@@ -47,6 +47,13 @@ describe("revocable scoped agent session tokens", () => {
     expect(JSON.stringify(decoded)).not.toMatch(/access.?token|refresh.?token|device.?code|github.?token/i);
   });
 
+  it("rejects sessions longer than 30 days and malformed authentication timestamps", async () => {
+    await expect(mintAgentSessionToken(identity, { ...session, expiresInSeconds: 30 * 24 * 60 * 60 + 1 }))
+      .rejects.toMatchObject({ code: "malformed" });
+    await expect(mintAgentSessionToken(identity, { ...session, authenticatedAt: "not-a-date" }))
+      .rejects.toMatchObject({ code: "malformed" });
+  });
+
   it("checks durable session state, exact token metadata, and required scopes before returning identity", async () => {
     const store = sessions();
     const token = await mintAgentSessionToken(identity, session);
