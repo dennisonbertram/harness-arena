@@ -16,6 +16,7 @@ beforeEach(async () => {
   db = await PGlite.create();
   await db.exec(migration("0001_agent_network.sql"));
   await db.exec(migration("0002_competition_chat.sql"));
+  await db.exec(migration("0005_competition_chat_sequences.sql"));
   id = 400;
 });
 

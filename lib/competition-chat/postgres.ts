@@ -1,9 +1,9 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-type Db = {
-  exec(sql: string): Promise<unknown>;
+type Sql = {
   query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
 };
+type Db = Sql & { transaction<T>(work: (tx: Sql) => Promise<T>): Promise<T> };
 
 export type PostgresChatActor = { id: string; github_id: number; github_login: string };
 type ErrorCode = "unauthenticated" | "forbidden" | "not_found" | "conflict" | "invalid_body" | "invalid_pagination" | "invalid_cursor";
@@ -61,9 +61,9 @@ export function createPostgresCompetitionChat(
         : null;
     } catch { return null; }
   };
-  async function member(competitionId: string, actor: PostgresChatActor | null): Promise<boolean> {
+  async function member(competitionId: string, actor: PostgresChatActor | null, sql: Sql = db): Promise<boolean> {
     if (!actor) return false;
-    const result = await db.query<{ ok: number }>(
+    const result = await sql.query<{ ok: number }>(
       "SELECT 1 AS ok FROM competition_memberships WHERE competition_id = $1 AND entrant_id = $2 AND state = 'active'",
       [competitionId, actor.id],
     );
@@ -73,15 +73,21 @@ export function createPostgresCompetitionChat(
     const previous = tails.get(competitionId) ?? Promise.resolve();
     let release!: () => void;
     const tail = new Promise<void>((resolve) => { release = resolve; });
-    tails.set(competitionId, previous.then(() => tail));
+    const queued = previous.then(() => tail);
+    tails.set(competitionId, queued);
     await previous;
-    try { return await work(); } finally { release(); }
+    try {
+      return await work();
+    } finally {
+      release();
+      if (tails.get(competitionId) === queued) tails.delete(competitionId);
+    }
   }
-  async function resolveMentions(competitionId: string, values: string[]) {
+  async function resolveMentions(competitionId: string, values: string[], sql: Sql = db) {
     const resolved: Array<{ id: string; login: string }> = [];
     const unresolved: string[] = [];
     for (const handle of values) {
-      const row = await db.query<{ id: string; github_login: string }>(
+      const row = await sql.query<{ id: string; github_login: string }>(
         `SELECT e.id, e.github_login FROM entrants e
          JOIN competition_memberships m ON m.entrant_id = e.id
          WHERE m.competition_id = $1 AND m.state = 'active' AND lower(e.github_login) = $2`,
@@ -92,14 +98,14 @@ export function createPostgresCompetitionChat(
     }
     return { resolved, unresolved };
   }
-  async function hydrate(id: string): Promise<PostgresChatMessage | null> {
-    const message = await db.query<{ id: string; competition_id: string; sequence: number; body: string; reply_to_id: string | null; github_id: number; github_login: string }>(
+  async function hydrate(id: string, sql: Sql = db): Promise<PostgresChatMessage | null> {
+    const message = await sql.query<{ id: string; competition_id: string; sequence: number; body: string; reply_to_id: string | null; github_id: number; github_login: string }>(
       `SELECT m.id, m.competition_id, m.sequence, m.body, m.reply_to_id, e.github_id, e.github_login
        FROM competition_messages m JOIN entrants e ON e.id = m.author_entrant_id WHERE m.id = $1`, [id],
     );
     const row = message.rows[0];
     if (!row) return null;
-    const mentions = await db.query<{ handle_snapshot: string }>("SELECT handle_snapshot FROM message_mentions WHERE message_id = $1 ORDER BY handle_snapshot", [id]);
+    const mentions = await sql.query<{ handle_snapshot: string }>("SELECT handle_snapshot FROM message_mentions WHERE message_id = $1 ORDER BY handle_snapshot", [id]);
     const resolved = mentions.rows.map((value) => value.handle_snapshot.toLowerCase());
     const unresolved_mentions = handles(row.body).filter((value) => !resolved.includes(value));
     return {
@@ -114,8 +120,7 @@ export function createPostgresCompetitionChat(
       if (!actor) return fail("unauthenticated");
       if (!(await member(competition_id, actor))) return fail("forbidden");
       if (typeof body !== "string" || body.length < 1 || body.length > 4000) return fail("invalid_body");
-      return serialized(competition_id, async (): Promise<Success | Failure> => {
-        if (!(await member(competition_id, actor))) return fail("forbidden");
+      return serialized(competition_id, async () => {
         const hash = requestHash(body, reply_to_id);
         const existing = await db.query<{ request_hash: string; entity_id: string | null; response_json: unknown }>(
           `SELECT request_hash, entity_id, response_json FROM idempotency_operations
@@ -128,42 +133,77 @@ export function createPostgresCompetitionChat(
           const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
           return replay as Success;
         }
-        await db.exec("BEGIN");
         try {
-          if (reply_to_id) {
-            const parent = await db.query<{ id: string }>("SELECT id FROM competition_messages WHERE id = $1 AND competition_id = $2", [reply_to_id, competition_id]);
-            if (!parent.rows[0]) { await db.exec("ROLLBACK"); return fail("not_found"); }
+          return await db.transaction(async (tx): Promise<Success | Failure> => {
+            if (!(await member(competition_id, actor, tx))) return fail("forbidden");
+            const concurrent = await tx.query<{ request_hash: string; entity_id: string | null; response_json: unknown }>(
+              `SELECT request_hash, entity_id, response_json FROM idempotency_operations
+               WHERE actor_id = $1 AND competition_id = $2 AND operation = 'competition.chat.post' AND idempotency_key = $3`,
+              [actor.id, competition_id, operation_id],
+            );
+            if (concurrent.rows[0]) {
+              if (concurrent.rows[0].request_hash !== hash) return fail("conflict");
+              const stored = concurrent.rows[0].response_json;
+              const replay = typeof stored === "string" ? JSON.parse(stored) : stored;
+              return replay as Success;
+            }
+            if (reply_to_id) {
+              const parent = await tx.query<{ id: string }>("SELECT id FROM competition_messages WHERE id = $1 AND competition_id = $2", [reply_to_id, competition_id]);
+              if (!parent.rows[0]) return fail("not_found");
+            }
+            await tx.query(
+              `INSERT INTO competition_chat_sequences (competition_id, next_sequence, updated_at)
+               VALUES ($1, 1, $2::timestamptz)
+               ON CONFLICT (competition_id) DO NOTHING`,
+              [competition_id, options.now().toISOString()],
+            );
+            const next = await tx.query<{ sequence: number }>(
+              `UPDATE competition_chat_sequences
+               SET next_sequence = next_sequence + 1, updated_at = $2::timestamptz
+               WHERE competition_id = $1
+               RETURNING next_sequence - 1 AS sequence`,
+              [competition_id, options.now().toISOString()],
+            );
+            const messageId = options.ids.next();
+            const operationId = options.ids.next();
+            const outboxId = options.ids.next();
+            const mention = await resolveMentions(competition_id, handles(body), tx);
+            const createdAt = options.now().toISOString();
+            await tx.query(
+              `INSERT INTO competition_messages (id, competition_id, sequence, author_entrant_id, reply_to_id, body, body_format, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,'plain',$7)`,
+              [messageId, competition_id, next.rows[0].sequence, actor.id, reply_to_id ?? null, body, createdAt],
+            );
+            for (const target of mention.resolved) await tx.query(
+              "INSERT INTO message_mentions (message_id, target_entrant_id, handle_snapshot) VALUES ($1,$2,$3)", [messageId, target.id, target.login],
+            );
+            const message = await hydrate(messageId, tx);
+            if (!message) throw new Error("message insert disappeared");
+            const response: Success = { ok: true, message };
+            await tx.query(
+              `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, response_json, state, created_at, updated_at, completed_at)
+               VALUES ($1,$2,$3,'competition.chat.post',$4,$5,$6,$7::jsonb,'completed',$8,$8,$8)`,
+              [operationId, actor.id, competition_id, operation_id, hash, messageId, JSON.stringify(response), createdAt],
+            );
+            await tx.query(
+              `INSERT INTO domain_outbox (id, operation_id, topic, payload_version, safe_payload, state, created_at)
+               VALUES ($1,$2,'competition.message.created',1,$3::jsonb,'pending',$4)`,
+              [outboxId, operationId, JSON.stringify({ message_id: messageId, competition_id }), createdAt],
+            );
+            return response;
+          });
+        } catch (error) {
+          const replay = await db.query<{ request_hash: string; response_json: unknown }>(
+            `SELECT request_hash, response_json FROM idempotency_operations
+             WHERE actor_id = $1 AND competition_id = $2 AND operation = 'competition.chat.post' AND idempotency_key = $3`,
+            [actor.id, competition_id, operation_id],
+          );
+          if (replay.rows[0]?.request_hash === hash) {
+            const stored = replay.rows[0].response_json;
+            return (typeof stored === "string" ? JSON.parse(stored) : stored) as Success;
           }
-          const next = await db.query<{ sequence: number }>("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM competition_messages WHERE competition_id = $1", [competition_id]);
-          const messageId = options.ids.next();
-          const operationId = options.ids.next();
-          const outboxId = options.ids.next();
-          const mention = await resolveMentions(competition_id, handles(body));
-          const createdAt = options.now().toISOString();
-          await db.query(
-            `INSERT INTO competition_messages (id, competition_id, sequence, author_entrant_id, reply_to_id, body, body_format, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,'plain',$7)`,
-            [messageId, competition_id, next.rows[0].sequence, actor.id, reply_to_id ?? null, body, createdAt],
-          );
-          for (const target of mention.resolved) await db.query(
-            "INSERT INTO message_mentions (message_id, target_entrant_id, handle_snapshot) VALUES ($1,$2,$3)", [messageId, target.id, target.login],
-          );
-          const message = await hydrate(messageId);
-          if (!message) throw new Error("message insert disappeared");
-          const response: Success = { ok: true, message };
-          await db.query(
-            `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, response_json, state, created_at, updated_at, completed_at)
-             VALUES ($1,$2,$3,'competition.chat.post',$4,$5,$6,$7::jsonb,'completed',$8,$8,$8)`,
-            [operationId, actor.id, competition_id, operation_id, hash, messageId, JSON.stringify(response), createdAt],
-          );
-          await db.query(
-            `INSERT INTO domain_outbox (id, operation_id, topic, payload_version, safe_payload, state, created_at)
-             VALUES ($1,$2,'competition.message.created',1,$3::jsonb,'pending',$4)`,
-            [outboxId, operationId, JSON.stringify({ message_id: messageId, competition_id }), createdAt],
-          );
-          await db.exec("COMMIT");
-          return response;
-        } catch (error) { await db.exec("ROLLBACK"); throw error; }
+          throw error;
+        }
       });
     },
     async list({ actor, competition_id, cursor: inputCursor, limit = defaultPage }: { actor: PostgresChatActor | null; competition_id: string; cursor?: string | null; limit?: number }) {

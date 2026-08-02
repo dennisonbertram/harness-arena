@@ -3,10 +3,11 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
   "0002_competition_chat",
   "0003_submission_artifacts",
   "0004_payout_profiles",
+  "0005_competition_chat_sequences",
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };
-type BoundQuery = (sql: string, params?: unknown[]) => Promise<QueryResult>;
+type BoundQuery = <Row = unknown>(sql: string, params?: unknown[]) => Promise<QueryResult<Row>>;
 type TransactionClient = { query: BoundQuery; release(): void };
 type Pool = { query: BoundQuery; connect(): Promise<TransactionClient> };
 

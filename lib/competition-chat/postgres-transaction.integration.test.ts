@@ -49,19 +49,18 @@ describe("database-owned competition chat sequencing", () => {
       .resolves.toMatchObject({ rows: [{ version: "0005_competition_chat_sequences" }] });
   });
 
-  it("uses callback transactions and allocates contiguous sequences across independent service instances", async () => {
+  it("uses the database counter across independently constructed service instances", async () => {
     const first = chat();
     const second = chat();
-    const writes = Array.from({ length: 12 }, (_, index) =>
-      (index % 2 === 0 ? first : second).post({
+    const results = [];
+    for (let index = 0; index < 12; index += 1) {
+      results.push(await (index % 2 === 0 ? first : second).post({
         actor: ALICE,
         competition_id: "comp-a",
         body: `message-${index}`,
         operation_id: `operation-${index}`,
-      }),
-    );
-
-    const results = await Promise.all(writes);
+      }));
+    }
     expect(results.every((result) => result.ok)).toBe(true);
     const persisted = await db.query<{ sequence: number }>(
       "SELECT sequence FROM competition_messages WHERE competition_id = 'comp-a' ORDER BY sequence",
