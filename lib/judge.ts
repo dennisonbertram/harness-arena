@@ -115,7 +115,9 @@ function tryParseVerdict(raw: string): JudgeVerdict | undefined {
 // leave the submission pending_review and respond 503 rather than treating
 // this as a rejection.
 async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> {
-  const response = await fetch(GATEWAY_URL, {
+  let response: Response;
+  try {
+    response = await fetch(GATEWAY_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -130,9 +132,14 @@ async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> 
         { role: "user", content: buildUserMessage(prompt, tasks) },
       ],
     }),
-  });
+    });
+  } catch (error) {
+    log("error", "provider.request_failed", { provider: "ai_gateway", stage: "request", error });
+    throw error;
+  }
 
   if (!response.ok) {
+    log("error", "provider.response_failed", { provider: "ai_gateway", stage: "response", status: response.status });
     throw new Error(`judge gateway returned ${response.status}`);
   }
 

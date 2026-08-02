@@ -1,4 +1,5 @@
 import { get, list, put } from "@vercel/blob";
+import { log } from "./log";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
@@ -141,6 +142,7 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
       await new Promise((r) => setTimeout(r, 150 * (i + 1)));
     }
   }
+  log("error", "storage.retry_exhausted", { attempts, error: lastErr });
   throw lastErr;
 }
 

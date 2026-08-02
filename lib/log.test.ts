@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { context, log, redactLogValue } from "./log";
+import { trace } from "@opentelemetry/api";
+import { log, redactLogValue } from "./log";
 
 describe("log", () => {
   it("reserved envelope fields (ts, level, event) always win over caller-supplied fields of the same name", () => {
@@ -9,7 +10,7 @@ describe("log", () => {
       level: "bogus-level",
       event: "bogus-event",
       ts: "not-a-real-timestamp",
-      task_id: "t1",
+      task_id: "task-one",
     });
 
     const line = spy.mock.calls[0]?.[0] as string;
@@ -19,7 +20,7 @@ describe("log", () => {
     expect(parsed.event).toBe("task.started");
     expect(parsed.ts).not.toBe("not-a-real-timestamp");
     expect(() => new Date(parsed.ts).toISOString()).not.toThrow();
-    expect(parsed.task_id).toBe("t1");
+    expect(parsed.task_id).toBe("task-one");
 
     spy.mockRestore();
   });
@@ -49,10 +50,10 @@ describe("observability logger contract", () => {
   });
 
   it("adds active trace/span IDs while preserving its reserved envelope", () => {
+    vi.restoreAllMocks();
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
-    context.with({
-      active: () => ({ spanContext: () => ({ traceId: "trace-123", spanId: "span-456", traceFlags: 1 }) }),
-    } as never, () => log("error", "provider.failed", { trace_id: "spoofed", span_id: "spoofed" }));
+    vi.spyOn(trace, "getActiveSpan").mockReturnValue({ spanContext: () => ({ traceId: "trace-123", spanId: "span-456", traceFlags: 1 }) } as never);
+    log("error", "provider.failed", { trace_id: "spoofed", span_id: "spoofed" });
     expect(JSON.parse(spy.mock.calls[0]?.[0] as string)).toMatchObject({ trace_id: "trace-123", span_id: "span-456" });
     spy.mockRestore();
   });

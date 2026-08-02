@@ -16,7 +16,10 @@ export async function GET() {
   // Reaping frees concurrency slots (stuck runs), so dispatch right after to
   // start queued runs. This is the daily backstop for the lazy dispatch on
   // GET /api/runs and the run-completion trigger.
-  const started = await dispatchQueuedRuns(storage).catch(() => [] as string[]);
+  const started = await dispatchQueuedRuns(storage).catch((error: unknown) => {
+    log("error", "cron.dispatch_failed", { stage: "dispatch", error });
+    return [] as string[];
+  });
   // Backstop for the baseline the create route kicked and the board render
   // retries: if both missed (judge outage during creation, nobody viewed the
   // board), this is the last line that guarantees a live competition has a

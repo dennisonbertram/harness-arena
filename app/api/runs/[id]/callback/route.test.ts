@@ -329,6 +329,7 @@ describe("POST /api/runs/[id]/callback", () => {
 
   describe("completed-requires-results schema refinement", () => {
     it("returns 400 when status is completed but totals/task_results are omitted", async () => {
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
       await storageRef.current.putRun({
         id: "run-incomplete",
         submission_id: "sub-incomplete",
@@ -343,6 +344,10 @@ describe("POST /api/runs/[id]/callback", () => {
       );
 
       expect(response.status).toBe(400);
+      const output = logSpy.mock.calls.flat().join(" ");
+      expect(output).toContain("callback.invalid_payload");
+      expect(output).not.toContain("events");
+      logSpy.mockRestore();
       const run = await storageRef.current.getRun("run-incomplete");
       expect(run?.status).toBe("running");
     });

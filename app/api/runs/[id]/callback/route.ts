@@ -65,6 +65,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const rawBody = await request.json().catch(() => null);
   const parsed = CallbackBodySchema.safeParse(rawBody);
   if (!parsed.success) {
+    // Do not include rawBody or validation details: callback payloads can
+    // contain prompts, trace URLs, and runner credentials.
+    log("warn", "callback.invalid_payload", { run_id: id, stage: "validation" });
     return NextResponse.json({ error: "invalid callback body" }, { status: 400 });
   }
 
