@@ -174,6 +174,12 @@ describe("0001 agent-network PostgreSQL foundation", () => {
     `);
 
     await expect(
+      db.query<{ authenticated_at: string | null }>(
+        "SELECT authenticated_at::text FROM agent_sessions WHERE jti = '00000000-0000-0000-0000-000000000002'",
+      ),
+    ).resolves.toMatchObject({ rows: [{ authenticated_at: expect.any(String) }] });
+
+    await expect(
       db.exec(`
         INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash)
         VALUES ('00000000-0000-0000-0000-000000000011', '${entrantId}', 'comp-1', 'entry.create', 'request-1', repeat('b', 64));
@@ -184,6 +190,12 @@ describe("0001 agent-network PostgreSQL foundation", () => {
       db.exec(`
         INSERT INTO competition_memberships (competition_id, entrant_id, state)
         VALUES ('comp-2', '${entrantId}', 'unknown');
+      `),
+    ).rejects.toThrow();
+    await expect(
+      db.exec(`
+        INSERT INTO competition_memberships (competition_id, entrant_id, role, state)
+        VALUES ('comp-2', '${entrantId}', 'owner', 'active');
       `),
     ).rejects.toThrow();
     await expect(
@@ -209,12 +221,13 @@ describe("0001 agent-network PostgreSQL foundation", () => {
       `),
     ).rejects.toThrow();
 
+    await db.exec(`
+      INSERT INTO entrants (id, github_id, github_login)
+      VALUES ('00000000-0000-0000-0000-000000000005', 424243, 'octo-agent');
+    `);
     await expect(
-      db.exec(`
-        INSERT INTO entrants (id, github_id, github_login)
-        VALUES ('00000000-0000-0000-0000-000000000005', 424243, 'octo-agent');
-      `),
-    ).resolves.toBeUndefined();
+      db.query<{ count: string }>("SELECT count(*)::text AS count FROM entrants WHERE github_login = 'octo-agent'"),
+    ).resolves.toMatchObject({ rows: [{ count: "2" }] });
 
     await expect(
       db.exec(`
