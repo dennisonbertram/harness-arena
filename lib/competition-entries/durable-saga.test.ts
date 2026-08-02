@@ -21,6 +21,7 @@ type DurableFactory = (deps: {
     reserve(input: { actor: { entrant_id: string; github_id: number; github_login: string }; request: typeof request }): Promise<{ operation_id: string; submission_id: string; run_id: string; phase: Phase; replay?: unknown }>;
     load(input: { operation_id: string }): Promise<{ operation_id: string; submission_id: string; run_id: string; actor: typeof actor; request: typeof request; phase: Phase; checkpoint_value?: unknown }>;
     claim(input: { operation_id: string; lease_ms: number }): Promise<{ lease_token: string } | null>;
+    renew?(input: { operation_id: string; lease_token: string; lease_ms: number }): Promise<boolean>;
     release(input: { operation_id: string; lease_token: string }): Promise<void>;
     checkpoint(input: { operation_id: string; lease_token: string; expected_phase: Phase; phase: Phase; value?: unknown }): Promise<void>;
     complete(input: { operation_id: string; lease_token: string; response: unknown }): Promise<void>;
@@ -33,6 +34,7 @@ type DurableFactory = (deps: {
     putSubmission(value: Record<string, unknown>): Promise<void>;
     putRun(value: Record<string, unknown>): Promise<void>;
     appendRunEvents(runId: string, events: Array<{ type: "run.created"; payload: Record<string, unknown> }>): Promise<void>;
+    ensureRunCreatedEvent?(input: { run_id: string; submission_id: string }): Promise<void>;
   };
   judge: (input: { submission_id: string; prompt: string }) => Promise<{ verdict: "approved" | "rejected"; reason: string }>;
   getCompetition(id: string): Promise<{ id: string; status: "live" | "closed"; model: string } | undefined>;
@@ -60,6 +62,9 @@ function fixture(failAt?: Phase) {
   let reservationCrashObserved = false;
   let checkpointValue: unknown;
   let reservedRequest: unknown;
+  let leaseExpired = false;
+  let enforceLeaseExpiry = false;
+  let claimCount = 0;
   const ledger = {
     reserve: vi.fn(async (input: { request: unknown }) => {
       if (reservedRequest !== undefined && JSON.stringify(input.request) !== JSON.stringify(reservedRequest)) {
@@ -74,7 +79,13 @@ function fixture(failAt?: Phase) {
       return { ...reservation, ...(replay === undefined ? {} : { replay }) };
     }),
     load: vi.fn(async () => ({ ...reservation, actor, request, phase: checkpointPhase, checkpoint_value: checkpointValue })),
-    claim: vi.fn(async () => ({ lease_token: "lease-op-001" })),
+    claim: vi.fn(async () => {
+      claimCount += 1;
+      if (claimCount === 1) return { lease_token: "lease-op-001" };
+      if (!enforceLeaseExpiry) return { lease_token: "lease-op-001" };
+      return leaseExpired ? { lease_token: "lease-op-002" } : null;
+    }),
+    renew: vi.fn(async () => { leaseExpired = false; return true; }),
     release: vi.fn(async () => undefined),
     checkpoint: vi.fn(async ({ expected_phase, phase, value }: { lease_token: string; expected_phase: Phase; phase: Phase; value?: unknown }) => {
       if (expected_phase !== checkpointPhase) throw Object.assign(new Error("phase conflict"), { code: "ENTRY_SAGA_PHASE_CONFLICT" });
@@ -91,11 +102,15 @@ function fixture(failAt?: Phase) {
     putSubmission: vi.fn(async (value: Record<string, unknown>) => { externalEffects.push("submission-blob"); submissions.set(String(value.id), value); }),
     putRun: vi.fn(async (value: Record<string, unknown>) => { externalEffects.push("run-blob"); runs.set(String(value.id), value); }),
     appendRunEvents: vi.fn(async (runId: string, value: Array<{ type: "run.created"; payload: Record<string, unknown> }>) => { externalEffects.push("run.created"); events.set(runId, value); }),
+    ensureRunCreatedEvent: vi.fn(async ({ run_id, submission_id }: { run_id: string; submission_id: string }) => {
+      externalEffects.push("run.created.ensure");
+      events.set(run_id, [{ type: "run.created", payload: { submission_id } }]);
+    }),
   };
   const judge = vi.fn(async () => { externalEffects.push("judge-charge"); return { verdict: "approved" as const, reason: "safe" }; });
   const memberships = { activate: vi.fn(async () => ({ state: "active" as const })) };
   const saga = durableFactory()({ ledger, memberships, storage, judge, getCompetition: async () => ({ id: "comp-live", status: "live", model: "zai/glm-5.2" }) });
-  return { saga, ledger, memberships, storage, judge, submissions, runs, events, phases, externalEffects, reservation, completed: () => completed, setReplay: (value: unknown) => { replay = value; } };
+  return { saga, ledger, memberships, storage, judge, submissions, runs, events, phases, externalEffects, reservation, expireLease: () => { enforceLeaseExpiry = true; leaseExpired = true; }, completed: () => completed, setReplay: (value: unknown) => { replay = value; } };
 }
 
 describe("durable submit_entry prompt.v1 saga contract", () => {
@@ -116,6 +131,44 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ id: f.reservation.submission_id, github_id: actor.githubId, github_login: actor.githubLogin, competition_id: "comp-live" });
     expect(f.runs.get(f.reservation.run_id)).toMatchObject({ id: f.reservation.run_id, submission_id: f.reservation.submission_id });
     expect(f.externalEffects).toEqual(["judge-charge", "submission-blob", "run-blob", "run.created"]);
+  });
+
+  it("heartbeats its durable lease through a blocked Blob write so a second recovery cannot claim the same operation", async () => {
+    const f = fixture();
+    let entered!: () => void;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { entered = resolve; });
+    const unblock = new Promise<void>((resolve) => { release = resolve; });
+    f.storage.putSubmission.mockImplementationOnce(async () => {
+      entered();
+      await unblock;
+    });
+
+    const submitting = f.saga.submit({ actor, request });
+    await blocked;
+    f.expireLease();
+
+    await expect(f.saga.recover({ operation_id: f.reservation.operation_id })).rejects.toMatchObject({ code: "ENTRY_SAGA_BUSY" });
+    expect(f.ledger.renew).toHaveBeenCalledWith({
+      operation_id: f.reservation.operation_id,
+      lease_token: "lease-op-001",
+      lease_ms: expect.any(Number),
+    });
+
+    release();
+    await submitting;
+  });
+
+  it("uses a deterministic ensure operation for run.created instead of append-after-read", async () => {
+    const f = fixture();
+
+    await f.saga.submit({ actor, request });
+
+    expect(f.storage.ensureRunCreatedEvent).toHaveBeenCalledWith({
+      run_id: f.reservation.run_id,
+      submission_id: f.reservation.submission_id,
+    });
+    expect(f.storage.appendRunEvents).not.toHaveBeenCalled();
   });
 
   it("replays an exact completed request, conflicts a changed one, and never judges or writes twice", async () => {

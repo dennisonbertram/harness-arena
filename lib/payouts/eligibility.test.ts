@@ -111,4 +111,50 @@ describe("payout eligibility freeze service", () => {
       payout_profile: completeReconciledSnapshot().payout_profile,
     }));
   });
+
+  it("rolls back the complete close-generation batch when a later immutable freeze write fails, then permits a clean retry", async () => {
+    const rows = new Map<string, Record<string, unknown>>();
+    let failSecondWrite = true;
+    let firstWriteComplete!: () => void;
+    const firstWritten = new Promise<void>((resolve) => { firstWriteComplete = resolve; });
+    const sql = {
+      transaction: async <Value>(work: (tx: typeof sql) => Promise<Value>) => work(sql),
+      async query<Row>(statement: string, params: unknown[] = []): Promise<{ rows: Row[] }> {
+        if (statement.startsWith("INSERT INTO payout_eligibility_freezes")) {
+          const submissionId = String(params[2]);
+          if (submissionId === "submission-2" && failSecondWrite) {
+            await firstWritten;
+            throw new Error("injected second immutable freeze failure");
+          }
+          rows.set(submissionId, {
+            id: params[0], competition_id: params[1], submission_id: submissionId, entrant_id: params[3],
+            status: params[5], reason_code: params[6], policy_version: params[7], cutoff_at: params[8],
+            result_rank: params[10], result_score: params[11], judge_revision: params[12], trace_sha256: params[13],
+            trace_scan_revision: params[14], payout_address: params[15], payout_chain_id: params[16], payout_profile_verified_at: params[17],
+          });
+          if (submissionId === "submission-1") firstWriteComplete();
+          return { rows: [] as Row[] };
+        }
+        const row = rows.get(String(params[1]));
+        return { rows: row ? [row as Row] : [] };
+      },
+    };
+    const snapshot = [
+      completeReconciledSnapshot(),
+      { ...completeReconciledSnapshot(), submission_id: "submission-2" },
+    ];
+    const service = createPayoutEligibilityService(sql, {
+      now: () => new Date("2026-08-03T12:00:00.000Z"),
+      loadCompetitionSnapshot: async () => snapshot,
+    });
+
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .rejects.toThrow("injected second immutable freeze failure");
+    const leftoverAfterFailedBatch = [...rows.keys()];
+
+    failSecondWrite = false;
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .resolves.toMatchObject({ ok: true, freezes: [{ submission_id: "submission-1" }, { submission_id: "submission-2" }] });
+    expect(leftoverAfterFailedBatch).toEqual([]);
+  });
 });
