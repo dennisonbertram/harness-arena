@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileStorage, LocalStorageReadError } from "./file-storage";
+import * as fileStorageModule from "./file-storage";
 import type { Run, Submission } from "./types";
 
 const dirs: string[] = [];
@@ -59,5 +61,37 @@ describe("FileStorage", () => {
     const second = await storage();
     await first.putSubmission(submission("sub-1"));
     await expect(second.getSubmission("sub-1")).resolves.toBeUndefined();
+  });
+
+  it("preserves all events with unique monotonic sequence across 20 processes", async () => {
+    const local = await storage();
+    await Promise.all(Array.from({ length: 20 }, (_, index) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["scripts/tests/file-storage-worker.mjs", local.root, "run-1", String(index)], { cwd: process.cwd(), stdio: "pipe" });
+      let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`worker ${index} failed (${code}): ${stderr}`)));
+    })));
+    const events = await local.listRunEvents("run-1");
+    expect(events).toHaveLength(20);
+    expect(events.map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+    expect(new Set(events.map((event) => event.payload.submission_id)).size).toBe(20);
+  }, 30000);
+
+  it.each([".", "..", "../escape", "a/b", "a\\b", "%2e%2e%2fescape", "a..b"])("rejects unsafe path segment %j", (part) => {
+    expect(() => fileStorageModule.safeStoragePart(part)).toThrow(/path segment/);
+  });
+
+  it("fails closed in production and Vercel environments", () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalVercel = process.env.VERCEL;
+    try {
+      process.env.NODE_ENV = "production";
+      expect(() => new FileStorage("/tmp/local-storage-must-not-open")).toThrow(/production/);
+      process.env.NODE_ENV = "test";
+      process.env.VERCEL = "1";
+      expect(() => new FileStorage("/tmp/local-storage-must-not-open")).toThrow(/Vercel/);
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      if (originalVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = originalVercel;
+    }
   });
 });
