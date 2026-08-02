@@ -78,4 +78,17 @@ describe("entrant trace policy boundary", () => {
       ok: false, disposition: "manual_review", error: { code: "scan_error" },
     });
   });
+
+  it("fails closed when the scanner explicitly rejects otherwise valid content", async () => {
+    const bytes = Buffer.from('{"schema_version":"execution.v1","events":[]}');
+    const policy = createEntrantTracePolicy({
+      maxUncompressedBytes: 1_024,
+      scanTimeoutMs: 50,
+      scan: vi.fn().mockResolvedValue({ ok: false, code: "malware" }),
+    });
+
+    await expect(policy.verify(artifact("execution", "none", bytes))).resolves.toEqual({
+      ok: false, disposition: "rejected", error: { code: "scan_rejected" },
+    });
+  });
 });

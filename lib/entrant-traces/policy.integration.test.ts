@@ -55,6 +55,7 @@ describe("0006 trace policy and reconciliation metadata", () => {
   });
 
   it("adds fail-closed scan, retention, and deletion metadata without storing trace content", async () => {
+    await expect(db.exec(migration("0006_trace_policy.sql"))).resolves.toBeUndefined();
     const columns = await db.query<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'submission_artifacts'
