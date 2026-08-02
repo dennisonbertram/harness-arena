@@ -12,6 +12,14 @@ const npmCache = mkdtempSync(join(tmpdir(), "harness-arena-npm-pack-"));
 afterAll(() => rmSync(npmCache, { recursive: true, force: true }));
 
 describe("published MCP package contract", () => {
+  it("is a first-class root CI surface with clean install, tests, build, and package proof", () => {
+    const workflow = readFileSync(join(packageDirectory, "..", ".github", "workflows", "ci.yml"), "utf8");
+    expect(workflow).toMatch(/working-directory:\s*mcp/);
+    expect(workflow).toMatch(/run:\s*npm ci/);
+    expect(workflow).toMatch(/run:\s*npm test/);
+    expect(workflow).toMatch(/run:\s*npm pack --dry-run/);
+  });
+
   it("cleans before compiling, excludes test sources from dist, and keeps test discovery source-only", () => {
     const packageJson = readJson("package.json") as { scripts?: Record<string, string> };
     const tsconfig = readJson("tsconfig.json") as { exclude?: string[] };
