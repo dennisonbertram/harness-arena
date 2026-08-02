@@ -15,7 +15,14 @@ describe("onRequestError", () => {
       routeType: "route",
     } as never);
     const line = JSON.parse(spy.mock.calls[0]?.[0] as string);
-    expect(line).toMatchObject({ event: "request.error", error_digest: "digest-42", request: { method: "POST", path: "/api/runs" } });
+    expect(line).toMatchObject({
+      event: "request.error",
+      error_class: "Error",
+      error_digest: "digest-42",
+      error_stage: "request",
+      request: { method: "POST", path: "/api/runs" },
+    });
+    expect(line.error_stack.length).toBeLessThanOrEqual(8);
     expect(JSON.stringify(line)).not.toContain("secret");
     expect(JSON.stringify(line)).not.toContain("signed-value");
     spy.mockRestore();
@@ -28,7 +35,9 @@ describe("onRequestError", () => {
       method: "POST",
       headers: { cookie: "secret" },
     }, { routerKind: "App Router", routePath: "/api/runs/[id]/callback", routeType: "route" } as never)).resolves.toBeUndefined();
-    expect(JSON.stringify(JSON.parse(spy.mock.calls[0]?.[0] as string))).not.toContain("secret");
+    const line = JSON.parse(spy.mock.calls[0]?.[0] as string);
+    expect(line).toMatchObject({ error_class: "NonError", error_stage: "request" });
+    expect(JSON.stringify(line)).not.toContain("secret");
     spy.mockRestore();
   });
 });

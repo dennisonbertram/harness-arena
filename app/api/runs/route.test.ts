@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
 import { reapThresholdMs } from "@/lib/reaper";
 
+const dispatchQueuedRuns = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+
 vi.mock("@/lib/storage", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/storage")>();
   return { ...actual, getStorage: () => storageRef.current };
 });
+vi.mock("@/lib/dispatch", () => ({ dispatchQueuedRuns }));
 
 import { GET } from "./route";
 
 describe("GET /api/runs", () => {
   beforeEach(() => {
     resetStorage();
+    dispatchQueuedRuns.mockReset().mockResolvedValue([]);
   });
 
   it("returns an empty array when no runs exist", async () => {
@@ -81,6 +85,22 @@ describe("GET /api/runs", () => {
       const body = await response.json();
 
       expect(body.find((r: { id: string }) => r.id === "run-fresh").status).toBe("running");
+    });
+
+    it("logs reaper and dispatcher failures with the affected run IDs", async () => {
+      await storageRef.current.putRun({ id: "run-failed-probe", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-01-01T00:00:00.000Z" });
+      vi.spyOn(storageRef.current, "latestEventTimestamp").mockRejectedValueOnce(new Error("blob unavailable"));
+      dispatchQueuedRuns.mockRejectedValueOnce(new Error("dispatcher unavailable"));
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      expect((await GET()).status).toBe(200);
+      await vi.waitFor(() => expect(dispatchQueuedRuns).toHaveBeenCalled());
+      const records = logSpy.mock.calls.map(([line]) => JSON.parse(line as string));
+      expect(records).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "runs.reap_failed", run_id: "run-failed-probe", error_stage: "reap" }),
+        expect.objectContaining({ event: "runs.dispatch_failed", error_stage: "dispatch" }),
+      ]));
+      logSpy.mockRestore();
     });
   });
 });

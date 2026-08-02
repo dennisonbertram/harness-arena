@@ -90,4 +90,22 @@ describe("dispatchQueuedRuns", () => {
     expect(started).toEqual([]);
     expect(startFn).not.toHaveBeenCalled();
   });
+
+  it("reports rejected startups as failures and excludes them from the successful started set", async () => {
+    await seed(2);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const startFn = vi.fn()
+      .mockRejectedValueOnce(new Error("sandbox startup rejected"))
+      .mockResolvedValueOnce(undefined);
+
+    const started = await dispatchQueuedRuns(storageRef.current, startFn);
+    const records = logSpy.mock.calls.map(([line]) => JSON.parse(line as string));
+
+    expect(started).toEqual(["02"]);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "dispatch.start_failed", run_id: "01", error_stage: "sandbox_start" }),
+      expect.objectContaining({ event: "dispatch.started", count: 1, run_ids: ["02"] }),
+    ]));
+    logSpy.mockRestore();
+  });
 });
