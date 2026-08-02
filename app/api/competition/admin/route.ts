@@ -5,6 +5,7 @@ import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
 import { log } from "@/lib/log";
 import { isAllowedModel } from "@/lib/models";
+import { normalizedPricingVersion } from "@/lib/normalized-pricing";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 import { PRIZE_CADENCES, type Competition } from "@/lib/types";
@@ -72,6 +73,7 @@ export async function POST(request: NextRequest) {
     harness: input.harness,
     model: input.model,
     gateway_provider: input.gateway_provider,
+    pricing_version: normalizedPricingVersion(input.model),
     prize_amount_usd: input.prize_amount_usd ?? null,
     prize_cadence: input.prize_cadence ?? null,
     status: "live",

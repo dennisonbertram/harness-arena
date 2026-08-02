@@ -689,6 +689,81 @@ describe("gateway proxy diagnostics", () => {
     });
     expect(complete.chunk_count).toBeGreaterThanOrEqual(2);
     expect(complete.total_bytes).toBeGreaterThan(0);
+    expect(complete).not.toHaveProperty("usage");
+  });
+
+  it("extracts OpenAI usage after the response id and 64KB of streamed content", async () => {
+    const upstreamServer = http.createServer(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"chat_late","choices":[]}\n\n');
+      // Usage can arrive long after the response id. Its collection must not
+      // be coupled to the bounded response-id correlation scan.
+      res.write(`data: ${JSON.stringify({ type: "content_block_delta", delta: { text: "x".repeat(65 * 1024) } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ usage: {
+        prompt_tokens: 50,
+        completion_tokens: 11,
+        prompt_tokens_details: { cached_tokens: 13 },
+      } })}\n\n`);
+      // Neither malformed events nor request-shaped usage are trustworthy.
+      res.write('data: {bad json}\n\n');
+      res.end("data: [DONE]\n\n");
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(createGatewayProxy({
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+      onDiagnostic: (event) => diagnostics.push(event),
+    }));
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", stream: true, usage: { input_tokens: 999_999 } }),
+    });
+    await response.text();
+
+    const complete = diagnostics.find((event) => event.type === "gateway_proxy.response_complete");
+    expect(complete).toMatchObject({
+      response_id: "chat_late",
+      usage: {
+        input_tokens: 37,
+        cache_read_tokens: 13,
+        output_tokens: 11,
+      },
+    });
+    expect(complete.usage).not.toHaveProperty("cache_write_tokens");
+    expect(complete.usage).not.toMatchObject({ input_tokens: 999_999 });
+  });
+
+  it("maps cumulative Anthropic message usage without fabricating omitted cache fields", async () => {
+    const upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "message_start", message: { id: "msg_usage", usage: {
+        input_tokens: 31,
+        cache_read_input_tokens: 9,
+        cache_creation_input_tokens: 4,
+        output_tokens: 0,
+      } } })}\n\n`);
+      res.end(`data: ${JSON.stringify({ type: "message_delta", usage: { output_tokens: 12 } })}\n\ndata: [DONE]\n\n`);
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(createGatewayProxy({
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+      onDiagnostic: (event) => diagnostics.push(event),
+    }));
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", stream: true }),
+    });
+    await response.text();
+
+    expect(diagnostics.find((event) => event.type === "gateway_proxy.response_complete")).toMatchObject({
+      response_id: "msg_usage",
+      usage: { input_tokens: 31, cache_read_tokens: 9, cache_write_tokens: 4, output_tokens: 12 },
+    });
   });
 
   it("keeps diagnostic retention bounded for a large synthetic stream", async () => {
