@@ -49,6 +49,7 @@ describe("POST /api/competitions/[id]/chat/join", () => {
   it.each([
     ["unauthenticated", 401, "unauthenticated"],
     ["forbidden", 403, "insufficient_scope"],
+    ["session_unavailable", 503, "session_unavailable"],
   ])("returns the stable %s error without consulting competition state", async (reason, status, code) => {
     runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: reason } });
     const response = await POST(request(), context());

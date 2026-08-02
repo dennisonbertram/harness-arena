@@ -57,6 +57,11 @@ describe("GET/POST /api/competitions/[id]/chat", () => {
     expect(unauthenticated.status).toBe(401);
     await expect(unauthenticated.json()).resolves.toEqual({ error: { code: "unauthenticated" } });
 
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: "session_unavailable" } });
+    const authenticationUnavailable = await GET(get(), context());
+    expect(authenticationUnavailable.status).toBe(503);
+    await expect(authenticationUnavailable.json()).resolves.toEqual({ error: { code: "session_unavailable" } });
+
     runtime.readCompetitionChat.mockResolvedValueOnce({ ok: false, error: { code: "forbidden" } });
     const forbidden = await GET(get(), context());
     expect(forbidden.status).toBe(403);
@@ -82,10 +87,27 @@ describe("GET/POST /api/competitions/[id]/chat", () => {
     expect(runtime.postCompetitionMessage).toHaveBeenCalledWith({ actor, competition_id: "live-cup", body: "hello @bob", reply_to_id: "message-1", idempotency_key: "post-1" });
   });
 
+  it("authenticates before parsing an untrusted post body", async () => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: "unauthenticated" } });
+    const request = new NextRequest("http://localhost/api/competitions/live-cup/chat", {
+      method: "POST",
+      headers: { authorization: "Bearer invalid" },
+      body: "not-json",
+    });
+
+    const response = await POST(request, context());
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: { code: "unauthenticated" } });
+    expect(runtime.getLiveCompetition).not.toHaveBeenCalled();
+    expect(runtime.postCompetitionMessage).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ body: "", idempotency_key: "post-1" }],
     [{ body: "x".repeat(4_001), idempotency_key: "post-1" }],
     [{ body: "ok", idempotency_key: "" }],
+    [{ body: "ok", idempotency_key: "x".repeat(129) }],
+    [{ body: "ok", reply_to_id: "x".repeat(129), idempotency_key: "post-1" }],
     [{ body: "ok", idempotency_key: "post-1", extra: true }],
   ])("rejects malformed post JSON before it reaches the facade", async (body) => {
     const response = await POST(post(body), context());
