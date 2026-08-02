@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPostgresAgentNetworkRepositories } from "./postgres";
 
 const migration = () => readFileSync(path.join(process.cwd(), "db", "migrations", "0001_agent_network.sql"), "utf8");
@@ -168,17 +169,20 @@ describe("PostgreSQL agent-network repositories", () => {
       outbox: { topic: "competition.entry.created", payloadVersion: 1, safePayload: {} },
     };
     let release!: () => void;
+    let callbackStarted!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { callbackStarted = resolve; });
     let effects = 0;
     const mutate = async () => {
       effects += 1;
+      callbackStarted();
       await blocked;
       return { entryId: "entry-2" };
     };
 
     const one = repos.execute(input, mutate);
     const two = repos.execute(input, mutate);
-    await Promise.resolve();
+    await started;
     expect(effects).toBe(1);
     release();
     await expect(Promise.all([one, two])).resolves.toEqual([
@@ -192,5 +196,33 @@ describe("PostgreSQL agent-network repositories", () => {
       replayed: false,
       response: { entryId: "entry-after-retry" },
     });
+  });
+
+  it("replays an already-completed durable operation without invoking its callback", async () => {
+    const repos = repositories();
+    const entrant = await repos.entrants.upsert({ githubId: "46", githubLogin: "durable-replay" });
+    const request = { entry: { kind: "prompt.v1", prompt: "safe" } };
+    const requestHash = createHash("sha256").update('{"entry":{"kind":"prompt.v1","prompt":"safe"}}').digest("hex");
+    await db.query(
+      `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, response_json, state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'completed')`,
+      ["00000000-0000-0000-0000-000000000090", entrant.id, "competition-durable", "competition.entry.create", "completed-key", requestHash, "entity-existing", JSON.stringify({ entryId: "already-created" })],
+    );
+    const callback = vi.fn(async () => ({ entryId: "must-not-run" }));
+
+    await expect(repos.execute({
+      actorId: entrant.id,
+      operation: "competition.entry.create",
+      competitionId: "competition-durable",
+      idempotencyKey: "completed-key",
+      request,
+      outbox: { topic: "competition.entry.created", payloadVersion: 1, safePayload: {} },
+    }, callback)).resolves.toMatchObject({
+      operationId: "00000000-0000-0000-0000-000000000090",
+      entityId: "entity-existing",
+      replayed: true,
+      response: { entryId: "already-created" },
+    });
+    expect(callback).not.toHaveBeenCalled();
   });
 });
