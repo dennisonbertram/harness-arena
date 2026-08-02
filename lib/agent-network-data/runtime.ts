@@ -7,13 +7,14 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };
-type BoundQuery = <Row = unknown>(sql: string, params?: unknown[]) => Promise<QueryResult<Row>>;
-type TransactionClient = { query: BoundQuery; release(): void };
-type Pool = { query: BoundQuery; connect(): Promise<TransactionClient> };
+type DriverQuery = (sql: string, params?: unknown[]) => Promise<QueryResult>;
+type TransactionClient = { query: DriverQuery; release(): void };
+type Pool = { query: DriverQuery; connect(): Promise<TransactionClient> };
+type RuntimeQuery = <Row = unknown>(sql: string, params?: unknown[]) => Promise<QueryResult<Row>>;
 
 export type RuntimeSqlTransaction = { query<Row = unknown>(sql: string, params?: unknown[]): Promise<QueryResult<Row>> };
 export type RuntimeSqlAdapter = {
-  query: BoundQuery;
+  query: RuntimeQuery;
   transaction<Result>(callback: (tx: RuntimeSqlTransaction) => Promise<Result>): Promise<Result>;
   readiness(): Promise<{ ready: boolean; schemaVersions: string[] }>;
 };

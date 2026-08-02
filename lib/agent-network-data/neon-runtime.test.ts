@@ -95,7 +95,11 @@ describe("agent-network service composition", () => {
       transaction: vi.fn(),
     };
 
-    const services = createAgentNetworkServices(sql);
+    const services = createAgentNetworkServices(sql, {
+      cursorSecret: "test-only-32-byte-cursor-secret-value",
+      ids: { next: () => "00000000-0000-0000-0000-000000000001" },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
 
     expect(services).toEqual({
       repositories: { kind: "repositories" },
