@@ -2,6 +2,7 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
   "0001_agent_network",
   "0002_competition_chat",
   "0003_submission_artifacts",
+  "0004_payout_profiles",
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };
