@@ -157,3 +157,225 @@ export function createCompetitionEntryService({
     },
   };
 }
+
+type DurablePhase = "reserved" | "judge_started" | "verdict_persisted" | "submission_written" | "run_written" | "run_created_appended" | "committed";
+type DurableActor = ServerActor & { entrantId: string };
+type DurableVerdict = { verdict: "approved" | "rejected"; reason: string };
+type DurableResponse = { submission_id: string; run_id?: string; status: "queued" | "rejected" };
+
+type DurableReservation = {
+  operation_id: string;
+  submission_id: string;
+  run_id: string;
+  replay?: unknown;
+};
+
+type DurableLedger = {
+  reserve(input: { actor_id: string; competition_id: string; idempotency_key: string; request: unknown }): Promise<DurableReservation>;
+  load(input: { operation_id: string }): Promise<{
+    operation_id: string;
+    submission_id: string;
+    run_id: string;
+    actor: DurableActor;
+    request: unknown;
+    phase: DurablePhase;
+    checkpoint_value?: unknown;
+  }>;
+  checkpoint(input: { operation_id: string; phase: DurablePhase; value?: unknown }): Promise<void>;
+  complete(input: { operation_id: string; response: DurableResponse }): Promise<void>;
+};
+
+type DurableStorage = {
+  getSubmission(id: string): Promise<unknown>;
+  getRun(id: string): Promise<unknown>;
+  putSubmission(value: Record<string, unknown>): Promise<void>;
+  putRun(value: Record<string, unknown>): Promise<void>;
+  appendRunEvents(runId: string, events: Array<{ type: "run.created"; payload: Record<string, unknown> }>): Promise<void>;
+  hasRunCreatedEvent?: (runId: string) => Promise<boolean>;
+};
+
+type DurableDependencies = {
+  ledger: DurableLedger;
+  memberships: { activate(input: { competition_id: string; entrant_id: string }): Promise<{ state: "active" }> };
+  storage: DurableStorage;
+  judge: (input: { submission_id: string; prompt: string }) => Promise<DurableVerdict>;
+  getCompetition(id: string): Promise<{ id: string; status: "live" | "closed"; model: string } | undefined>;
+};
+
+export class EntryReconciliationRequiredError extends Error {
+  readonly code = "ENTRY_RECONCILIATION_REQUIRED" as const;
+
+  constructor() {
+    super("entry state is ambiguous and requires reconciliation");
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function storedVerdict(value: unknown): DurableVerdict {
+  if (!isRecord(value) || (value.verdict !== "approved" && value.verdict !== "rejected") || typeof value.reason !== "string") {
+    throw new EntryReconciliationRequiredError();
+  }
+  return { verdict: value.verdict, reason: value.reason };
+}
+
+function persistedSubmissionVerdict(value: unknown): DurableVerdict {
+  if (!isRecord(value) || (value.judge_verdict !== "approved" && value.judge_verdict !== "rejected") || typeof value.judge_reason !== "string") {
+    throw new EntryReconciliationRequiredError();
+  }
+  return { verdict: value.judge_verdict, reason: value.judge_reason };
+}
+
+/**
+ * A recoverable, deliberately non-transactional submit_entry orchestration.
+ * The ledger is responsible for short Postgres reservations/checkpoints; Blob
+ * writes and the chargeable judge call happen after those transactions close.
+ */
+export function createDurableCompetitionEntrySaga({ ledger, memberships, storage, judge, getCompetition }: DurableDependencies) {
+  const read = async (value: Promise<unknown>) => {
+    try {
+      return await value;
+    } catch {
+      // A Blob read error is not evidence of absence.  Retrying the judge or
+      // replacing a document in that state could make the operation ambiguous.
+      throw new EntryReconciliationRequiredError();
+    }
+  };
+
+  const assertSameOrAbsent = (stored: unknown, expected: Record<string, unknown>) => {
+    if (stored === undefined) return false;
+    if (!isRecord(stored)) throw new EntryReconciliationRequiredError();
+    for (const [key, value] of Object.entries(expected)) {
+      if (stored[key] !== value) throw new EntryReconciliationRequiredError();
+    }
+    return true;
+  };
+
+  async function advance(state: {
+    operation_id: string;
+    submission_id: string;
+    run_id: string;
+    actor: DurableActor;
+    request: SubmitEntryRequest;
+    phase: DurablePhase;
+    checkpoint_value?: unknown;
+  }): Promise<DurableResponse> {
+    const competition = await getCompetition(state.request.competition_id);
+    if (!competition) throw new CompetitionEntryError("COMPETITION_NOT_FOUND");
+    if (competition.status !== "live") throw new CompetitionEntryError("COMPETITION_CLOSED");
+
+    // A probe at recovery start prevents an unreadable Blob from being treated
+    // as missing. It also makes each following put naturally idempotent.
+    const existingSubmission = await read(storage.getSubmission(state.submission_id));
+    const existingRun = await read(storage.getRun(state.run_id));
+    const submissionExists = assertSameOrAbsent(existingSubmission, {
+      id: state.submission_id,
+      competition_id: state.request.competition_id,
+      github_id: state.actor.githubId,
+      prompt: state.request.entry.prompt,
+    });
+    const runExists = assertSameOrAbsent(existingRun, { id: state.run_id, submission_id: state.submission_id });
+
+    await memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId });
+
+    let phase = state.phase;
+    let verdict: DurableVerdict;
+    if (phase === "judge_started") {
+      // The remote judge may have charged before the process died. Without a
+      // durable verdict, retrying would risk a second charge, so a reconciler
+      // with provider-side evidence must decide what happened.
+      throw new EntryReconciliationRequiredError();
+    }
+    if (phase === "reserved") {
+      await ledger.checkpoint({ operation_id: state.operation_id, phase: "judge_started" });
+      verdict = await judge({ submission_id: state.submission_id, prompt: state.request.entry.prompt });
+      await ledger.checkpoint({ operation_id: state.operation_id, phase: "verdict_persisted", value: verdict });
+      phase = "verdict_persisted";
+    } else {
+      // The verdict checkpoint is the only phase that needs to carry a
+      // payload. Later checkpoints may only record their phase, so recovery
+      // obtains the already-durable verdict from the submission document.
+      verdict = phase === "verdict_persisted"
+        ? storedVerdict(state.checkpoint_value)
+        : persistedSubmissionVerdict(existingSubmission);
+    }
+
+    const submission = {
+      id: state.submission_id,
+      agent_name: state.request.entry.agent_name,
+      prompt: state.request.entry.prompt,
+      status: verdict.verdict === "approved" ? "queued" : "rejected",
+      judge_verdict: verdict.verdict,
+      judge_reason: verdict.reason,
+      judged_at: new Date().toISOString(),
+      model: competition.model,
+      competition: true,
+      competition_id: competition.id,
+      github_id: state.actor.githubId,
+      github_login: state.actor.githubLogin,
+      ...(verdict.verdict === "approved" ? { run_id: state.run_id, run_ids: [state.run_id] } : {}),
+      created_at: new Date().toISOString(),
+    };
+
+    if (phase === "verdict_persisted") {
+      if (!submissionExists) await storage.putSubmission(submission);
+      await ledger.checkpoint({ operation_id: state.operation_id, phase: "submission_written" });
+      phase = "submission_written";
+    }
+
+    if (verdict.verdict === "rejected") {
+      const response: DurableResponse = { submission_id: state.submission_id, status: "rejected" };
+      await ledger.complete({ operation_id: state.operation_id, response });
+      return response;
+    }
+
+    const run = {
+      id: state.run_id,
+      submission_id: state.submission_id,
+      status: "queued",
+      model: competition.model,
+      task_results: [],
+      created_at: new Date().toISOString(),
+    };
+    if (phase === "submission_written") {
+      if (!runExists) await storage.putRun(run);
+      await ledger.checkpoint({ operation_id: state.operation_id, phase: "run_written" });
+      phase = "run_written";
+    }
+    if (phase === "run_written") {
+      if (!storage.hasRunCreatedEvent || !await storage.hasRunCreatedEvent(state.run_id)) {
+        await storage.appendRunEvents(state.run_id, [{ type: "run.created", payload: { submission_id: state.submission_id } }]);
+      }
+      await ledger.checkpoint({ operation_id: state.operation_id, phase: "run_created_appended" });
+    }
+    const response: DurableResponse = { submission_id: state.submission_id, run_id: state.run_id, status: "queued" };
+    await ledger.complete({ operation_id: state.operation_id, response });
+    return response;
+  }
+
+  return {
+    async submit({ actor, request }: { actor: DurableActor; request: unknown }) {
+      const parsed = parseSubmitEntryRequest(request);
+      const competition = await getCompetition(parsed.competition_id);
+      if (!competition) throw new CompetitionEntryError("COMPETITION_NOT_FOUND");
+      if (competition.status !== "live") throw new CompetitionEntryError("COMPETITION_CLOSED");
+      const reservation = await ledger.reserve({
+        actor_id: actor.entrantId,
+        competition_id: competition.id,
+        idempotency_key: parsed.idempotency_key,
+        request: parsed,
+      });
+      if (reservation.replay !== undefined) return { replayed: true, response: reservation.replay as DurableResponse };
+      await ledger.checkpoint({ operation_id: reservation.operation_id, phase: "reserved" });
+      const response = await advance({ ...reservation, actor, request: parsed, phase: "reserved" });
+      return { replayed: false, response };
+    },
+    async recover({ operation_id }: { operation_id: string }) {
+      const loaded = await ledger.load({ operation_id });
+      const request = parseSubmitEntryRequest(loaded.request);
+      await advance({ ...loaded, request });
+    },
+  };
+}
