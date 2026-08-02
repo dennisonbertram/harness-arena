@@ -132,4 +132,50 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
       replay: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" },
     });
   });
+
+  it("collapses the same reservation across independent service instances", async () => {
+    let serialId = 700;
+    const first = createPostgresCompetitionEntryLedger(db, {
+      ids: () => `00000000-0000-0000-0000-${String(serialId++).padStart(12, "0")}`,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    });
+    const second = createPostgresCompetitionEntryLedger(db, {
+      ids: () => `00000000-0000-0000-0000-${String(serialId++).padStart(12, "0")}`,
+      now: () => new Date("2026-08-03T00:00:00.000Z"),
+    });
+
+    const [one, two] = await Promise.all([
+      first.reserve({ actor: entrant, request }),
+      second.reserve({ actor: entrant, request }),
+    ]);
+
+    expect(two).toEqual(one);
+    await expect(db.query("SELECT count(*)::int AS count FROM competition_entry_sagas WHERE idempotency_key=$1", [request.idempotency_key]))
+      .resolves.toMatchObject({ rows: [{ count: 1 }] });
+  });
+
+  it("refuses premature or mismatched completion and emits one audit/outbox effect under concurrent replay", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request });
+
+    await expect(subject.complete({ operation_id: reserved.operation_id, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
+      .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    await expect(subject.complete({ operation_id: reserved.operation_id, response: { submission_id: "different", run_id: reserved.run_id, status: "queued" } }))
+      .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
+
+    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "run_written", phase: "run_created_appended" });
+    const response = { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" as const };
+    await Promise.all([subject.complete({ operation_id: reserved.operation_id, response }), subject.complete({ operation_id: reserved.operation_id, response })]);
+
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_outbox WHERE operation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 1 }] });
+  });
 });
