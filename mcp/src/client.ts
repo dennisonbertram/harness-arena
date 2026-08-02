@@ -7,6 +7,16 @@ export const DEFAULT_BASE_URL = "https://harness-arena-psi.vercel.app";
 export type FetchLike = typeof fetch;
 export type Sleep = (milliseconds: number) => Promise<void>;
 
+const sleepAbortable = async (sleep: Sleep, milliseconds: number, signal?: AbortSignal): Promise<void> => {
+  if (!signal) return sleep(milliseconds);
+  if (signal.aborted) throw new ToolError("Request cancelled.", { code: "request_cancelled" });
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(new ToolError("Request cancelled.", { code: "request_cancelled" }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(milliseconds).then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+};
+
 export class ToolError extends Error {
   readonly code: string;
   readonly retryable: boolean;
@@ -89,14 +99,14 @@ export class HarnessArenaClient {
     this.deviceAttempts = options.deviceAttempts ?? new FileDeviceAttemptStore(undefined, { now: this.now });
   }
 
-  async login(): Promise<LoginResult> {
-    const started = await this.beginLogin();
+  async login(signal?: AbortSignal): Promise<LoginResult> {
+    const started = await this.beginLogin(signal);
     const expiry = Date.parse(started.expires_at);
     while (this.now() < expiry) {
       const wait = Math.max(0, Date.parse(started.next_poll_at) - this.now());
-      if (wait > 0) await this.sleep(wait);
+      if (wait > 0) await sleepAbortable(this.sleep, wait, signal);
       if (this.now() >= expiry) break;
-      const status = await this.loginStatus(started.attempt_id);
+      const status = await this.loginStatus(started.attempt_id, signal);
       if (status.status === "authenticated") {
         return {
           status: "authenticated",
@@ -115,8 +125,8 @@ export class HarnessArenaClient {
     throw new ToolError("Device login expired before it was approved. Run login again to get a new code.");
   }
 
-  async loginStart(): Promise<LoginStartResult> {
-    const started = await this.beginLogin();
+  async loginStart(signal?: AbortSignal): Promise<LoginStartResult> {
+    const started = await this.beginLogin(signal);
     return {
       attempt_id: started.attempt_id,
       user_code: started.user_code,
@@ -126,8 +136,8 @@ export class HarnessArenaClient {
     };
   }
 
-  private async beginLogin(): Promise<StartedLoginAttempt> {
-    const start = await this.requestJson<DeviceStart>("/api/auth/device/start", { method: "POST" });
+  private async beginLogin(signal?: AbortSignal): Promise<StartedLoginAttempt> {
+    const start = await this.requestJson<DeviceStart>("/api/auth/device/start", { method: "POST", signal });
     const details = {
       user_code: start.user_code,
       verification_uri: start.verification_uri,
@@ -143,7 +153,7 @@ export class HarnessArenaClient {
     return { attempt_id: attemptId, user_code: start.user_code, verification_uri: start.verification_uri, expires_at: expiresAt, next_poll_at: nextPollAt, lifetimeSeconds: start.expires_in };
   }
 
-  async loginStatus(attemptId: string): Promise<LoginStatusResult> {
+  async loginStatus(attemptId: string, signal?: AbortSignal): Promise<LoginStatusResult> {
     let attempt;
     try {
       attempt = await this.deviceAttempts.get(this.baseUrl, attemptId);
@@ -152,7 +162,7 @@ export class HarnessArenaClient {
       throw error;
     }
     if (Date.parse(attempt.nextPollAt ?? attempt.expiresAt) > this.now()) return pendingResult(attempt);
-    const response = await this.rawRequest("/api/auth/device/poll", { method: "POST", body: { device_code: attempt.deviceCode } });
+    const response = await this.rawRequest("/api/auth/device/poll", { method: "POST", body: { device_code: attempt.deviceCode }, signal });
     if (response.status === 202 || response.status === 429) {
       const serverInterval = response.status === 429 ? numericProperty(response.body, "interval") : undefined;
       const intervalSeconds = Math.max(attempt.intervalSeconds, serverInterval ?? attempt.intervalSeconds);
@@ -177,29 +187,29 @@ export class HarnessArenaClient {
     return { status: "cancelled", attempt_id: attemptId };
   }
 
-  async whoami(): Promise<{ github_login: string; expires_at: string; base_url: string }> {
+  async whoami(_signal?: AbortSignal): Promise<{ github_login: string; expires_at: string; base_url: string }> {
     const credentials = await this.requireCredentials();
     return { github_login: credentials.github_login, expires_at: credentials.expires_at, base_url: this.baseUrl };
   }
 
-  async listCompetitions(): Promise<unknown> { return this.requestJson("/api/competitions"); }
-  async getLeaderboard(): Promise<unknown> { return this.requestJson("/api/leaderboard"); }
-  async listTasks(): Promise<unknown> { return this.requestJson("/api/tasks"); }
-  async getBaselinePrompt(): Promise<{ prompt: string }> { return { prompt: await this.requestText("/api/baseline-prompt") }; }
-  async getRun(runId: string): Promise<unknown> { return this.requestJson(`/api/runs/${encodeURIComponent(runId)}`); }
+  async listCompetitions(signal?: AbortSignal): Promise<unknown> { return this.requestJson("/api/competitions", { signal }); }
+  async getLeaderboard(signal?: AbortSignal): Promise<unknown> { return this.requestJson("/api/leaderboard", { signal }); }
+  async listTasks(signal?: AbortSignal): Promise<unknown> { return this.requestJson("/api/tasks", { signal }); }
+  async getBaselinePrompt(signal?: AbortSignal): Promise<{ prompt: string }> { return { prompt: await this.requestText("/api/baseline-prompt", signal) }; }
+  async getRun(runId: string, signal?: AbortSignal): Promise<unknown> { return this.requestJson(`/api/runs/${encodeURIComponent(runId)}`, { signal }); }
 
-  async getRunEvents(runId: string, since?: number): Promise<unknown> {
+  async getRunEvents(runId: string, since?: number, signal?: AbortSignal): Promise<unknown> {
     const search = since === undefined ? "" : `?since=${encodeURIComponent(String(since))}`;
-    return this.requestJson(`/api/runs/${encodeURIComponent(runId)}/events${search}`);
+    return this.requestJson(`/api/runs/${encodeURIComponent(runId)}/events${search}`, { signal });
   }
 
-  async getCompetitionResults(input: { competition_id: string }): Promise<unknown> {
-    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/results`);
+  async getCompetitionResults(input: { competition_id: string }, signal?: AbortSignal): Promise<unknown> {
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/results`, { signal });
   }
 
-  async joinCompetitionChat(input: { competition_id: string }): Promise<unknown> {
+  async joinCompetitionChat(input: { competition_id: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat/join`, { method: "POST", token });
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat/join`, { method: "POST", token, signal });
   }
 
   async readCompetitionChat(input: { competition_id: string; after_cursor?: string; limit?: number; wait_seconds?: number; signal?: AbortSignal }): Promise<unknown> {
@@ -212,39 +222,39 @@ export class HarnessArenaClient {
     return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat${suffix}`, { token, signal: input.signal });
   }
 
-  async postCompetitionMessage(input: { competition_id: string; body: string; reply_to_id?: string; idempotency_key: string }): Promise<unknown> {
+  async postCompetitionMessage(input: { competition_id: string; body: string; reply_to_id?: string; idempotency_key: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     const body = { body: input.body, ...(input.reply_to_id === undefined ? {} : { reply_to_id: input.reply_to_id }), idempotency_key: input.idempotency_key };
-    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat`, { method: "POST", token, body });
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat`, { method: "POST", token, body, signal });
   }
 
-  async submitEntry(input: { schema_version?: "submit_entry.v1"; competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }): Promise<unknown> {
+  async submitEntry(input: { schema_version?: "submit_entry.v1"; competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     return this.requestJson("/api/competition/entries", {
       method: "POST",
       token,
       // MCP's public input deliberately omits this transport discriminator;
       // clients must never be able to select an unreviewed entry schema.
-      body: { ...input, schema_version: "submit_entry.v1" },
+      body: { ...input, schema_version: "submit_entry.v1" }, signal,
     });
   }
 
-  async getTask(taskId: string): Promise<unknown> {
-    const tasks = await this.listTasks();
+  async getTask(taskId: string, signal?: AbortSignal): Promise<unknown> {
+    const tasks = await this.listTasks(signal);
     if (!Array.isArray(tasks)) throw new ToolError("Harness Arena returned an invalid task list.");
     const task = tasks.find((item) => isRecord(item) && (item.task_id === taskId || item.id === taskId));
     if (!task) throw new ToolError(`Task '${taskId}' was not found.`);
     return task;
   }
 
-  async submitPrompt(input: { agent_name: string; prompt: string; competition_id?: string; idempotency_key?: string }): Promise<unknown> {
+  async submitPrompt(input: { agent_name: string; prompt: string; competition_id?: string; idempotency_key?: string }, signal?: AbortSignal): Promise<unknown> {
     try {
       return await this.submitEntry({
         schema_version: "submit_entry.v1",
         competition_id: input.competition_id ?? legacyDefaultCompetitionId(),
         idempotency_key: input.idempotency_key ?? randomUUID(),
         entry: { kind: "prompt.v1", agent_name: input.agent_name, prompt: input.prompt },
-      });
+      }, signal);
     } catch (error) {
       if (error instanceof HttpToolError && error.status === 409) {
         throw new ToolError("This prompt was already entered in that competition.");
@@ -256,71 +266,71 @@ export class HarnessArenaClient {
     }
   }
 
-  async listMySubmissions(): Promise<unknown> {
+  async listMySubmissions(signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     // ?mine=true is what makes this "my" submissions: the unfiltered listing
     // returns every entrant's, and hides the caller's own rejected entries.
-    return this.requestJson("/api/competition/submissions?mine=true", { token });
+    return this.requestJson("/api/competition/submissions?mine=true", { token, signal });
   }
 
-  async listSessions(): Promise<unknown> {
+  async listSessions(signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/sessions", { token });
+    return this.requestJson("/api/agent/sessions", { token, signal });
   }
 
-  async logout(): Promise<unknown> {
+  async logout(signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/sessions/current/revoke", { method: "POST", token, body: {} });
+    return this.requestJson("/api/agent/sessions/current/revoke", { method: "POST", token, body: {}, signal });
   }
 
-  async revokeSession(input: { session_id: string }): Promise<unknown> {
+  async revokeSession(input: { session_id: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson(`/api/agent/sessions/${encodeURIComponent(input.session_id)}/revoke`, { method: "POST", token, body: {} });
+    return this.requestJson(`/api/agent/sessions/${encodeURIComponent(input.session_id)}/revoke`, { method: "POST", token, body: {}, signal });
   }
 
-  async prepareSubmissionTrace(input: { submission_id: string; manifest: unknown; idempotency_key: string }): Promise<unknown> {
+  async prepareSubmissionTrace(input: { submission_id: string; manifest: unknown; idempotency_key: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     return this.requestJson(`/api/submissions/${encodeURIComponent(input.submission_id)}/traces/prepare`, {
-      method: "POST", token, body: { manifest: input.manifest, idempotency_key: input.idempotency_key },
+      method: "POST", token, body: { manifest: input.manifest, idempotency_key: input.idempotency_key }, signal,
     });
   }
 
-  async finalizeSubmissionTrace(input: { artifact_id: string; sha256: string }): Promise<unknown> {
+  async finalizeSubmissionTrace(input: { artifact_id: string; sha256: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     return this.requestJson(`/api/submission-artifacts/${encodeURIComponent(input.artifact_id)}/finalize`, {
-      method: "POST", token, body: { sha256: input.sha256 },
+      method: "POST", token, body: { sha256: input.sha256 }, signal,
     });
   }
 
-  async getSubmissionTraceStatus(input: { submission_id: string }): Promise<unknown> {
+  async getSubmissionTraceStatus(input: { submission_id: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson(`/api/submissions/${encodeURIComponent(input.submission_id)}/traces`, { token });
+    return this.requestJson(`/api/submissions/${encodeURIComponent(input.submission_id)}/traces`, { token, signal });
   }
 
-  async prepareExternalPayoutAddress(input: { address: string }): Promise<unknown> {
+  async prepareExternalPayoutAddress(input: { address: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/payout-profile/challenge", { method: "POST", token, body: { address: input.address } });
+    return this.requestJson("/api/agent/payout-profile/challenge", { method: "POST", token, body: { address: input.address }, signal });
   }
 
-  async verifyExternalPayoutAddress(input: { challenge_id: string; signature: string; consent_version: string; idempotency_key: string }): Promise<unknown> {
+  async verifyExternalPayoutAddress(input: { challenge_id: string; signature: string; consent_version: string; idempotency_key: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/payout-profile/verify", { method: "POST", token, body: input });
+    return this.requestJson("/api/agent/payout-profile/verify", { method: "POST", token, body: input, signal });
   }
 
-  async getPayoutProfile(): Promise<unknown> {
+  async getPayoutProfile(signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/payout-profile", { token });
+    return this.requestJson("/api/agent/payout-profile", { token, signal });
   }
 
-  async getPayoutEligibility(input: { competition_id: string; submission_id: string }): Promise<unknown> {
+  async getPayoutEligibility(input: { competition_id: string; submission_id: string }, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
     const query = new URLSearchParams({ competition_id: input.competition_id, submission_id: input.submission_id });
-    return this.requestJson(`/api/agent/payout-eligibility?${query}`, { token });
+    return this.requestJson(`/api/agent/payout-eligibility?${query}`, { token, signal });
   }
 
-  async ensurePayoutWallet(input: Record<string, never>): Promise<unknown> {
+  async ensurePayoutWallet(input: Record<string, never>, signal?: AbortSignal): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    return this.requestJson("/api/agent/payout-wallet/ensure", { method: "POST", token, body: input });
+    return this.requestJson("/api/agent/payout-wallet/ensure", { method: "POST", token, body: input, signal });
   }
 
   private async requireCredentials(): Promise<Credentials> {
@@ -337,10 +347,10 @@ export class HarnessArenaClient {
     return response.body as T;
   }
 
-  private async requestText(path: string): Promise<string> {
+  private async requestText(path: string, signal?: AbortSignal): Promise<string> {
     const url = new URL(path, this.baseUrl);
     let response: Response;
-    try { response = await this.fetcher(url, { headers: { Accept: "text/plain" } }); }
+    try { response = await this.fetcher(url, { headers: { Accept: "text/plain" }, signal }); }
     catch { throw new ToolError("Unable to reach Harness Arena. Check HARNESS_ARENA_URL and try again."); }
     const text = await response.text();
     if (!response.ok) throw responseError(response.status, parseBody(text));
