@@ -7,55 +7,62 @@ const validIssue = {
   parent: { number: 139, labels: ["epic"] },
 };
 
-async function verify(body, issues = new Map([[141, validIssue]])) {
+async function verify({
+  baseRefName = "main",
+  defaultBranchName = "main",
+  closingIssueCount = 1,
+  closingIssues = [validIssue],
+} = {}) {
   return verifyPullRequestLineage({
-    body,
-    getIssue: async (number) => issues.get(number),
+    baseRefName,
+    defaultBranchName,
+    closingIssueCount,
+    closingIssues,
   });
 }
 
 describe("verifyPullRequestLineage", () => {
-  it("rejects a PR with no closing issue", async () => {
-    await expect(verify("Parent Epic #139")).rejects.toThrow("exactly one closing issue");
+  it("rejects a PR with no native closing issue reference", async () => {
+    await expect(verify({ closingIssueCount: 0, closingIssues: [] })).rejects.toThrow(
+      "exactly one native closing issue",
+    );
   });
 
-  it("rejects a PR that closes multiple issues", async () => {
-    await expect(verify("Closes #141\nFixes #142")).rejects.toThrow("exactly one closing issue");
+  it("rejects a PR with multiple native closing issue references", async () => {
+    await expect(
+      verify({
+        closingIssueCount: 2,
+        closingIssues: [validIssue, { number: 142, parent: { number: 139, labels: ["epic"] } }],
+      }),
+    ).rejects.toThrow("exactly one native closing issue");
   });
 
   it("rejects a linked implementation issue without a native parent", async () => {
-    await expect(verify("Closes #141", new Map([[141, { number: 141, parent: null }]]))).rejects.toThrow(
-      "native parent",
-    );
+    await expect(verify({ closingIssues: [{ number: 141, parent: null }] })).rejects.toThrow("native parent");
   });
 
   it("rejects a parent that is not labeled epic", async () => {
     await expect(
-      verify("Closes #141", new Map([[141, { number: 141, parent: { number: 139, labels: ["type:feature"] } }]])),
+      verify({ closingIssues: [{ number: 141, parent: { number: 139, labels: ["type:feature"] } }] }),
     ).rejects.toThrow('labeled "epic"');
   });
 
-  it("accepts one closing issue that is a native child of an epic", async () => {
-    await expect(verify("Closes #141\n\nParent Epic #139")).resolves.toEqual({
+  it("accepts exactly one native closing issue that is a child of an epic", async () => {
+    await expect(verify()).resolves.toEqual({
       issueNumber: 141,
       parentEpicNumber: 139,
     });
   });
 
-  it("fails closed when the metadata API returns malformed data", async () => {
-    await expect(verify("Closes #141", new Map([[141, { number: 141, parent: { labels: "epic" } }]]))).rejects.toThrow(
+  it("fails closed when the native issue metadata is malformed", async () => {
+    await expect(verify({ closingIssues: [{ number: 141, parent: { labels: "epic" } }] })).rejects.toThrow(
       "malformed",
     );
   });
 
-  it("fails closed when the metadata API fails", async () => {
-    await expect(
-      verifyPullRequestLineage({
-        body: "Closes #141",
-        getIssue: async () => {
-          throw new Error("GitHub API unavailable");
-        },
-      }),
-    ).rejects.toThrow("Unable to verify PR lineage");
+  it("fails closed for a non-default target because GitHub cannot prove native closing references", async () => {
+    await expect(verify({ baseRefName: "dev" })).rejects.toThrow(
+      "GitHub only populates native closing issue references for the default branch",
+    );
   });
 });
