@@ -58,6 +58,107 @@ describe("verifyDevelopmentEnvironment", () => {
     ).toEqual({ ok: true, missing: [], violations: [] });
   });
 
+  it("treats case and trailing-dot equivalent hosts and callbacks as live identities", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        host: "HARNESS-ARENA-PSI.VERCEL.APP.",
+        store: { id: "development-blob-store" },
+        callbackOrigin: "https://Harness-Arena-Psi.Vercel.App.",
+      }),
+      live,
+    });
+
+    expect(result.violations).toEqual(expect.arrayContaining(["host", "callbackOrigin"]));
+  });
+
+  it.each([
+    "http://harness-arena-development.vercel.app",
+    "https://user@harness-arena-development.vercel.app",
+    "https://harness-arena-development.vercel.app/callback",
+    "https://harness-arena-development.vercel.app?mode=dev",
+    "https://harness-arena-development.vercel.app#fragment",
+  ])("refuses a non-canonical callback origin: %s", (callbackOrigin) => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        host: "harness-arena-development.vercel.app",
+        store: { id: "development-blob-store" },
+        callbackOrigin,
+      }),
+      live,
+    });
+
+    expect(result.violations).toContain("callbackOrigin");
+  });
+
+  it("requires the callback origin to bind exactly to the development host", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        host: "harness-arena-development.vercel.app",
+        store: { id: "development-blob-store" },
+        callbackOrigin: "https://other-development.vercel.app",
+      }),
+      live,
+    });
+
+    expect(result.violations).toContain("callbackOrigin");
+  });
+
+  it.each([
+    ["environment", { environment: 7 }],
+    ["branch", { branch: { name: "dev" } }],
+    ["vercelProject.id", { vercelProject: { id: null, name: "harness-arena-development" } }],
+    ["vercelProject.name", { vercelProject: { id: "dev-project", name: 9 } }],
+    ["host", { host: { hostname: "dev.example" } }],
+    ["store.id", { store: { id: 9 } }],
+    ["callbackOrigin", { callbackOrigin: { origin: "https://dev.example" } }],
+  ])("reports malformed %s fields without throwing", (field, overrides) => {
+    const result = verifyDevelopmentEnvironment({ development: development(overrides), live });
+    expect([...result.missing, ...result.violations]).toContain(field);
+  });
+
+  it("rejects null entries in live identity arrays", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development(),
+      live: { ...live, aliases: [null], storeIds: [null] },
+    });
+
+    expect(result.violations).toEqual(expect.arrayContaining(["live.aliases[0]", "live.storeIds[0]"]));
+  });
+
+  it("rejects recursively nested and mixed-case credential-shaped keys without echoing values", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: {
+        ...development(),
+        metadata: { nested: [{ bLoB_rEaD_wRiTe_ToKeN: "never-print-this" }] },
+      },
+      live: { ...live, audit: { Api_Key: "also-never-print-this" } },
+    });
+
+    expect(result.violations).toEqual(
+      expect.arrayContaining([
+        "metadata.nested[0].bLoB_rEaD_wRiTe_ToKeN",
+        "live.audit.Api_Key",
+      ]),
+    );
+    expect(JSON.stringify(result)).not.toMatch(/never-print-this/);
+  });
+
+  it("rejects normalized project, store, and host identity equality", () => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({
+        vercelProject: { id: ` ${live.projectId.toUpperCase()} `, name: "harness-arena-development" },
+        host: "HARNESS-ARENA-PSI.VERCEL.APP.",
+        store: { id: " LIVE-BLOB-STORE " },
+        callbackOrigin: "https://harness-arena-psi.vercel.app",
+      }),
+      live,
+    });
+
+    expect(result.violations).toEqual(
+      expect.arrayContaining(["vercelProject.id", "host", "store.id", "callbackOrigin"]),
+    );
+  });
+
   it("refuses live projects, aliases, stores, callback origins, and token-shaped fields", () => {
     const result = verifyDevelopmentEnvironment({
       development: development({
@@ -75,5 +176,20 @@ describe("verifyDevelopmentEnvironment", () => {
       expect.arrayContaining(["vercelProject.id", "host", "store.id", "callbackOrigin", "BLOB_READ_WRITE_TOKEN"]),
     );
     expect(JSON.stringify(result)).not.toContain("must-not-be-here");
+  });
+
+  it("records the preview-routing incident and hard gate in the runbook source", async () => {
+    const runbook = await readFile(
+      new URL("../../docs/runbooks/development-environment.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(runbook).toContain("f15ba57");
+    expect(runbook).toMatch(/automatic non-production preview/i);
+    expect(runbook).toMatch(/no alias/i);
+    expect(runbook).toMatch(/no data/i);
+    expect(runbook).toMatch(/no request/i);
+    expect(runbook).toMatch(/branch-ignore routing/i);
+    expect(runbook).toMatch(/before any further push or deploy/i);
   });
 });

@@ -143,6 +143,31 @@ describe("checkPullRequestLineage", () => {
     ).resolves.toEqual({ issueNumber: 173, parentEpicNumber: 139 });
   });
 
+  it("rejects a dev issue response whose number differs from the parsed Closes reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
+    const payload = structuredClone(validPayload);
+    payload.data.repository.issue = {
+      number: 174,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
+
+    await expect(
+      checker()({
+        event: devEvent,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("does not match parsed Closes #173");
+  });
+
   it("rejects a dev PR without exactly one local Closes #N reference", async () => {
     const devEvent = structuredClone(event);
     devEvent.pull_request.base.ref = "dev";
@@ -161,6 +186,21 @@ describe("checkPullRequestLineage", () => {
     await expect(
       checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
     ).rejects.toThrow("local Closes #N");
+  });
+
+  it.each([
+    ["malformed", "Closes #173\nCloses not-an-issue"],
+    ["cross-repository", "Closes #173\nCloses attacker/foreign-repo#174"],
+    ["extra-token", "Closes #173\nCloses #174 because this also changed"],
+    ["second closing keyword", "Closes #173\nFixes #174"],
+  ])("rejects a valid dev reference plus a %s closing-directive candidate", async (_name, body) => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = body;
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one entire canonical local Closes #N");
   });
 
   it("fails closed when GitHub returns an HTTP error", async () => {
