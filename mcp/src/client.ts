@@ -218,15 +218,14 @@ export class HarnessArenaClient {
     return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/chat`, { method: "POST", token, body });
   }
 
-  async submitEntry(input: { competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }): Promise<unknown> {
+  async submitEntry(input: { schema_version?: "submit_entry.v1"; competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }): Promise<unknown> {
     const token = (await this.requireCredentials()).token;
-    // The current endpoint does not persist idempotency keys. Keep the key in
-    // this public contract for the upcoming versioned route, but do not claim
-    // retries are server-idempotent until that route exists.
-    return this.requestJson("/api/competition/submissions", {
+    return this.requestJson("/api/competition/entries", {
       method: "POST",
       token,
-      body: { agent_name: input.entry.agent_name, prompt: input.entry.prompt, competition_id: input.competition_id },
+      // MCP's public input deliberately omits this transport discriminator;
+      // clients must never be able to select an unreviewed entry schema.
+      body: { ...input, schema_version: "submit_entry.v1" },
     });
   }
 
@@ -238,10 +237,14 @@ export class HarnessArenaClient {
     return task;
   }
 
-  async submitPrompt(input: { agent_name: string; prompt: string; competition_id?: string }): Promise<unknown> {
-    const token = (await this.requireCredentials()).token;
+  async submitPrompt(input: { agent_name: string; prompt: string; competition_id?: string; idempotency_key?: string }): Promise<unknown> {
     try {
-      return await this.requestJson("/api/competition/submissions", { method: "POST", body: input, token });
+      return await this.submitEntry({
+        schema_version: "submit_entry.v1",
+        competition_id: input.competition_id ?? legacyDefaultCompetitionId(),
+        idempotency_key: input.idempotency_key ?? randomUUID(),
+        entry: { kind: "prompt.v1", agent_name: input.agent_name, prompt: input.prompt },
+      });
     } catch (error) {
       if (error instanceof HttpToolError && error.status === 409) {
         throw new ToolError("This prompt was already entered in that competition.");
@@ -397,3 +400,16 @@ const pendingResult = (attempt: DeviceAttempt): Extract<LoginStatusResult, { sta
   next_poll_at: attempt.nextPollAt ?? attempt.expiresAt,
 });
 const isExpiredDeviceAttempt = (error: unknown): error is Error => error instanceof Error && error.message === "Device attempt has expired. Run login again.";
+
+// Keep the deprecated tool's no-competition-id behavior while avoiding an
+// app-runtime import in the standalone MCP package. This is intentionally the
+// same deterministic seeded identifier used by the app; callers should use
+// submit_entry with an explicit competition_id for every new integration.
+function legacyDefaultCompetitionId(): string {
+  const model = process.env.COMPETITION_MODEL ?? "zai/glm-5.2-fast";
+  return ["comp", "harness-arena", "pi", model]
+    .join("__")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
