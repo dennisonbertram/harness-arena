@@ -16,9 +16,22 @@ export const toToolResult = (value: unknown): ToolResult => ({
 });
 
 export const toToolError = (error: unknown): ToolResult => {
-  const message = error instanceof ToolError ? error.message : "Harness Arena MCP encountered an unexpected error.";
-  return { content: [{ type: "text", text: JSON.stringify({ error: { message } }) }], structuredContent: { error: { message } }, isError: true };
+  const safe = error instanceof ToolError && !containsSensitiveValue(error.message);
+  const source = safe ? error : undefined;
+  const envelope: Record<string, unknown> = {
+    schema_version: "error.v1",
+    code: safeCode(source?.code) ?? "internal_error",
+    message: source?.message ?? "Harness Arena MCP encountered an unexpected error.",
+    retryable: source?.retryable === true,
+  };
+  if (source?.retry_after_ms !== undefined && Number.isInteger(source.retry_after_ms) && source.retry_after_ms >= 0) envelope.retry_after_ms = source.retry_after_ms;
+  if (source?.correlation_id !== undefined && safeCorrelationId(source.correlation_id)) envelope.correlation_id = source.correlation_id;
+  return { content: [{ type: "text", text: JSON.stringify({ error: envelope }) }], structuredContent: { error: envelope }, isError: true };
 };
+
+const safeCode = (value: unknown): string | undefined => typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : undefined;
+const safeCorrelationId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+const containsSensitiveValue = (value: string) => /(?:postgres(?:ql)?:\/\/|\b(?:secret|token|private[ _-]?key)\b|0x[0-9a-f]{8,})/i.test(value);
 
 const boundedId = z.string().min(1).max(256);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -162,5 +175,15 @@ export const toolDefinitions = (client: HarnessArenaClient) => ({
   get_payout_profile: {
     description: "Get your own user-owned Ethereum mainnet payout profile. This cannot send payments.",
     inputSchema: z.strictObject({}), handler: () => client.getPayoutProfile(),
+  },
+  get_payout_eligibility: {
+    description: "Get your own owner-only payout eligibility for a competition submission on Ethereum mainnet. This cannot send payments.",
+    inputSchema: z.strictObject({ competition_id: boundedId, submission_id: boundedId }),
+    handler: (input: { competition_id: string; submission_id: string }) => client.getPayoutEligibility(input),
+  },
+  ensure_payout_wallet: {
+    description: "Ensure your own user-owned Ethereum mainnet wallet when available. This cannot send payments and never sends transactions.",
+    inputSchema: z.strictObject({}),
+    handler: () => client.ensurePayoutWallet({}),
   },
 });

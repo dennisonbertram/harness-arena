@@ -8,9 +8,18 @@ export type FetchLike = typeof fetch;
 export type Sleep = (milliseconds: number) => Promise<void>;
 
 export class ToolError extends Error {
-  constructor(message: string) {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly retry_after_ms?: number;
+  readonly correlation_id?: string;
+
+  constructor(message: string, options: { code?: string; retryable?: boolean; retry_after_ms?: number; correlation_id?: string } = {}) {
     super(message);
     this.name = "ToolError";
+    this.code = options.code ?? "request_failed";
+    this.retryable = options.retryable ?? false;
+    this.retry_after_ms = options.retry_after_ms;
+    this.correlation_id = options.correlation_id;
   }
 }
 
@@ -158,7 +167,7 @@ export class HarnessArenaClient {
     }
     if (response.status === 400) {
       await this.deviceAttempts.consume(this.baseUrl, attemptId);
-      throw new ToolError(`Device login ${errorMessage(response.body, "was denied or expired")}. Run login again to get a new code.`);
+      throw new ToolError("Device login was denied or expired. Run login again to get a new code.", { code: "device_login_denied" });
     }
     throw responseError(response.status, response.body);
   }
@@ -300,6 +309,17 @@ export class HarnessArenaClient {
     return this.requestJson("/api/agent/payout-profile", { token });
   }
 
+  async getPayoutEligibility(input: { competition_id: string; submission_id: string }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    const query = new URLSearchParams({ competition_id: input.competition_id, submission_id: input.submission_id });
+    return this.requestJson(`/api/agent/payout-eligibility?${query}`, { token });
+  }
+
+  async ensurePayoutWallet(input: Record<string, never>): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    return this.requestJson("/api/agent/payout-wallet/ensure", { method: "POST", token, body: input });
+  }
+
   private async requireCredentials(): Promise<Credentials> {
     const credentials = await this.credentials.get(this.baseUrl);
     if (!credentials || Date.parse(credentials.expires_at) <= this.now()) {
@@ -341,15 +361,23 @@ export class HarnessArenaClient {
 }
 
 interface RequestOptions { method?: "GET" | "POST"; body?: unknown; token?: string; signal?: AbortSignal; }
-class HttpToolError extends ToolError { constructor(readonly status: number, message: string) { super(message); } }
+class HttpToolError extends ToolError {
+  constructor(readonly status: number, message: string, options: { code?: string; retryable?: boolean } = {}) {
+    super(message, { code: options.code, retryable: options.retryable ?? isRetryableStatus(status) });
+  }
+}
 const parseBody = (text: string): unknown => { try { return JSON.parse(text); } catch { return text; } };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const numericProperty = (value: unknown, key: string): number | undefined => isRecord(value) && typeof value[key] === "number" ? value[key] : undefined;
-const errorMessage = (body: unknown, fallback: string): string => isRecord(body) && typeof body.error === "string" ? body.error : fallback;
+const errorCode = (body: unknown): string | undefined => {
+  if (!isRecord(body) || !isRecord(body.error) || typeof body.error.code !== "string") return undefined;
+  return /^[a-z][a-z0-9_]{0,63}$/.test(body.error.code) ? body.error.code : undefined;
+};
+const isRetryableStatus = (status: number) => status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 const responseError = (status: number, body: unknown): HttpToolError => {
-  if (status === 401) return new HttpToolError(status, "Not authenticated; run the login tool first.");
-  if (status === 404) return new HttpToolError(status, "The requested Harness Arena resource was not found.");
-  return new HttpToolError(status, `Harness Arena request failed: ${errorMessage(body, "an unexpected response was returned")}`);
+  if (status === 401) return new HttpToolError(status, "Not authenticated; run the login tool first.", { code: "unauthenticated" });
+  if (status === 404) return new HttpToolError(status, "The requested Harness Arena resource was not found.", { code: "not_found" });
+  return new HttpToolError(status, "Harness Arena request failed.", { code: errorCode(body) ?? "request_failed" });
 };
 const isDeviceSuccess = (value: unknown): value is DeviceSuccess => isRecord(value) && typeof value.token === "string" && typeof value.github_login === "string" && typeof value.expires_at === "string";
 const pendingResult = (attempt: DeviceAttempt): Extract<LoginStatusResult, { status: "pending" }> => ({
