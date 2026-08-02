@@ -22,6 +22,7 @@ function fixture() {
   };
   const memberships = { set: vi.fn().mockResolvedValue({ competitionId: "live-cup", state: "active", joinedAt: NOW.toISOString() }) };
   const chat = {
+    join: vi.fn().mockResolvedValue({ ok: true, membership: { competition_id: "live-cup", state: "active", joined_at: NOW.toISOString() } }),
     list: vi.fn().mockResolvedValue({ ok: true, page: { messages: [], next_cursor: null, has_more: false, high_water_mark: 0 } }),
     post: vi.fn().mockResolvedValue({ ok: true, message: { id: "message-1" } }),
   };
@@ -107,7 +108,7 @@ describe("agent network runtime facade", () => {
     });
   });
 
-  it("adapts live competition, membership, read, and post boundaries without leaking entrant ids", async () => {
+  it("joins only an already-active member without reactivating membership, then adapts read and post boundaries", async () => {
     const { runtime, storage, memberships, chat } = fixture();
     await expect(runtime.getLiveCompetition("live-cup")).resolves.toEqual({ id: "live-cup", status: "live" });
     storage.getCompetition.mockResolvedValueOnce({ id: "closed-cup", status: "closed" });
@@ -118,7 +119,8 @@ describe("agent network runtime facade", () => {
       ok: true,
       membership: { competition_id: "live-cup", state: "active", joined_at: NOW.toISOString() },
     });
-    expect(memberships.set).toHaveBeenCalledWith({ competitionId: "live-cup", entrantId: ACTOR.entrantId, state: "active" });
+    expect(chat.join).toHaveBeenCalledWith({ actor: { id: ACTOR.entrantId, github_id: 101, github_login: "alice" }, competition_id: "live-cup" });
+    expect(memberships.set).not.toHaveBeenCalled();
 
     await runtime.readCompetitionChat({ actor, competition_id: "live-cup", cursor: "cursor", limit: 25, wait_seconds: 7 });
     expect(chat.list).toHaveBeenCalledWith({ actor: { id: ACTOR.entrantId, github_id: 101, github_login: "alice" }, competition_id: "live-cup", cursor: "cursor", limit: 25 });
