@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileStorage, LocalStorageReadError } from "./file-storage";
 import * as fileStorageModule from "./file-storage";
 import type { Run, Submission } from "./types";
@@ -81,17 +81,14 @@ describe("FileStorage", () => {
   });
 
   it("fails closed in production and Vercel environments", () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-    const originalVercel = process.env.VERCEL;
     try {
-      process.env.NODE_ENV = "production";
+      vi.stubEnv("NODE_ENV", "production");
       expect(() => new FileStorage("/tmp/local-storage-must-not-open")).toThrow(/production/);
-      process.env.NODE_ENV = "test";
-      process.env.VERCEL = "1";
+      vi.stubEnv("NODE_ENV", "test");
+      vi.stubEnv("VERCEL", "1");
       expect(() => new FileStorage("/tmp/local-storage-must-not-open")).toThrow(/Vercel/);
     } finally {
-      process.env.NODE_ENV = originalNodeEnv;
-      if (originalVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = originalVercel;
+      vi.unstubAllEnvs();
     }
   });
 });

@@ -17,12 +17,22 @@ Vercel commands, reads a production env file, accepts a Blob token, or writes
 to Vercel Blob. Data, PID metadata, and logs are gitignored and isolated by
 worktree.
 
+The launched process receives a strict allowlist rather than the caller's
+environment. Keys found in Next's auto-loaded development `.env*` files are
+preempted and removed before application code runs, so a forgotten local Blob,
+gateway, runner, or unrelated value cannot leak into the server. File storage
+also refuses to start under `NODE_ENV=production` or Vercel.
+
 - `./scripts/init.sh --check` validates Node, pnpm, port ownership, and stale
   PID metadata without installing or starting anything.
 - `./scripts/init.sh --no-install` is for a warm worktree.
-- Stop the printed PID, remove `.harness-arena/init.pid`, then use
-  `./scripts/init.sh --reset` to explicitly remove only that worktree's local
-  data. The script refuses to overwrite an existing operator-owned `.env.local`.
+- A repeat start or `--check` reports the same healthy PID/nonce/port. Starts
+  serialize through an atomic per-worktree lock; stale lock/PID metadata is
+  recovered within a bounded wait.
+- Stop the printed PID/process group, then use `./scripts/init.sh --reset` to
+  explicitly remove only that worktree's local data. Reset refuses symlinked
+  state/data paths. The script refuses to overwrite an operator-owned
+  `.env.local`.
 
 For a manually-managed environment, copy `.env.example`, populate only the
 credentials needed for that environment, then use `pnpm dev`; this is not the

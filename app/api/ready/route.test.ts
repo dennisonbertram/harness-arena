@@ -6,7 +6,7 @@ vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => ({ getManifest: v
 import { GET } from "./route";
 
 describe("GET /api/ready", () => {
-  beforeEach(() => { readiness.mockReset().mockResolvedValue({ seeded: true, writable: true }); process.env.LOCAL_INSTANCE_NONCE = "nonce-1"; });
+  beforeEach(() => { readiness.mockReset().mockResolvedValue({ seeded: true, writable: true }); process.env.LOCAL_INSTANCE_NONCE = "nonce-1"; process.env.LOCAL_INSTANCE_PID = String(process.pid); });
   it("binds readiness to the current process instance and verifies seed/writeability", async () => {
     const response = await GET();
     expect(response.status).toBe(200);
