@@ -9,6 +9,8 @@ import {
   buildModelsConfig,
   buildPiCommand,
   computeTotals,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
   drainGatewayDiagnostics,
   fetchWithTimeout,
@@ -245,6 +247,54 @@ describe("drainGatewayDiagnostics", () => {
 
     expect(drainGatewayDiagnostics(log, 1)).toEqual(taskSlice);
     expect(log).toEqual([]);
+  });
+});
+
+describe("bounded runner diagnostics", () => {
+  it("caps high-cardinality diagnostics while preserving request counts and terminal evidence", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector({ maxEntries: 12, maxBytes: 4_096 });
+    for (let index = 0; index < 500; index += 1) {
+      diagnostics.push({
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "x".repeat(2_048),
+      });
+      diagnostics.push({
+        type: "gateway_proxy.response_complete",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        total_bytes: index,
+      });
+    }
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(500);
+    expect(snapshot.droppedEvents).toBeGreaterThan(0);
+    expect(snapshot.events.length).toBeLessThanOrEqual(12);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.events))).toBeLessThanOrEqual(4_096);
+    expect(snapshot.events).toContainEqual(expect.objectContaining({
+      type: "gateway_proxy.response_complete",
+      request_id: "gw-499",
+      response_id: "gen-499",
+    }));
+    expect(diagnostics.drain()).toEqual({ events: [], requestCount: 0, droppedEvents: 0 });
+  });
+
+  it("bounds retained and uploaded runner logs with a deterministic truncation marker", () => {
+    const logs = createBoundedLogBuffer({ maxEntries: 6, maxBytes: 512, maxLineBytes: 96 });
+    for (let index = 0; index < 200; index += 1) {
+      logs.append(`gateway diagnostic ${index} ${"x".repeat(2_048)}`);
+    }
+    logs.append("gateway-proxy correlation task-500 response_complete");
+    logs.append("terminal run.failed provider_timeout");
+
+    const upload = logs.toString();
+    expect(logs.length).toBeLessThanOrEqual(6);
+    expect(logs.byteLength).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(upload)).toBeLessThanOrEqual(512);
+    expect(upload).toContain("[TRUNCATED]");
+    expect(upload).toContain("gateway-proxy correlation task-500 response_complete");
+    expect(upload).toContain("terminal run.failed provider_timeout");
   });
 });
 

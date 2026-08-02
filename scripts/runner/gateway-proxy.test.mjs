@@ -1,6 +1,12 @@
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createGatewayProxy, gatewayRequestHeaders, pinProviders } from "./gateway-proxy.mjs";
+import {
+  createGatewayProxy,
+  gatewayRequestHeaders,
+  pinProviders,
+  sanitizeDiagnosticEvent,
+  serializeDiagnosticError,
+} from "./gateway-proxy.mjs";
 
 const servers = [];
 function listen(server) {
@@ -588,6 +594,30 @@ describe("the sidecar is a transparent proxy", () => {
 });
 
 describe("gateway proxy diagnostics", () => {
+  it("bounds and marks every diagnostic string before emission", () => {
+    const giant = "🧪".repeat(8_192);
+    const event = sanitizeDiagnosticEvent({
+      type: "gateway_proxy.stream_error",
+      request_id: giant,
+      headers: {
+        authorization: `Bearer ${giant}`,
+        "x-provider-debug": giant,
+      },
+      error: serializeDiagnosticError(Object.assign(new Error(giant), {
+        name: giant,
+        code: giant,
+        cause: new Error(giant),
+      })),
+    });
+
+    expect(event.headers.authorization).toBe("[REDACTED]");
+    expect(event.request_id).toMatch(/\[TRUNCATED\]$/);
+    expect(event.headers["x-provider-debug"]).toMatch(/\[TRUNCATED\]$/);
+    expect(event.error.message).toMatch(/\[TRUNCATED\]$/);
+    expect(event.error.cause.message).toMatch(/\[TRUNCATED\]$/);
+    expect(Buffer.byteLength(JSON.stringify(event))).toBeLessThanOrEqual(8 * 1024);
+  });
+
   it("records request metadata, response headers, streamed chunk timing, byte totals, and response id", async () => {
     const upstreamServer = http.createServer(async (_req, res) => {
       res.writeHead(200, {

@@ -173,4 +173,59 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
       `archives/competition-cleanups/${COMPETITION_ID}/partial-cleanup/manifest.json`,
     )).toBe(true);
   });
+
+  it("resumes a late partial deletion from the durable operation archive", async () => {
+    seed();
+    blob.failDeleteOf = `submissions/${SUBMISSION_ID}.json`;
+    const input = {
+      competitionId: COMPETITION_ID,
+      submissionIds: [SUBMISSION_ID],
+      reason: "provider configuration error",
+      archiveId: "stable-operation-id",
+    };
+
+    await expect(archiveAndDeleteCompetitionSubmissions(input)).rejects.toMatchObject({
+      name: "CompetitionCleanupPartialError",
+      recovery: {
+        archivePrefix: `archives/competition-cleanups/${COMPETITION_ID}/stable-operation-id`,
+        deletedGroups: ["events", "traces", "runs"],
+        remainingGroups: ["submissions"],
+      },
+    });
+    expect(blob.objects.has(`runs/${RUN_ID}.json`)).toBe(false);
+    expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(true);
+
+    blob.failDeleteOf = undefined;
+    blob.operations.length = 0;
+    await expect(archiveAndDeleteCompetitionSubmissions(input)).resolves.toMatchObject({
+      archivePrefix: `archives/competition-cleanups/${COMPETITION_ID}/stable-operation-id`,
+      submissionIds: [SUBMISSION_ID],
+      runIds: [RUN_ID],
+    });
+
+    expect(blob.operations).toEqual([
+      `del:submissions/${SUBMISSION_ID}.json`,
+      `put:archives/competition-cleanups/${COMPETITION_ID}/stable-operation-id/recovery.json`,
+    ]);
+    expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(false);
+    expect(JSON.parse(blob.objects.get(
+      `archives/competition-cleanups/${COMPETITION_ID}/stable-operation-id/recovery.json`,
+    ) ?? "{}")).toMatchObject({ status: "completed", remainingPathnames: [] });
+  });
+
+  it("rejects reuse of an operation archive for different cleanup intent", async () => {
+    seed();
+    const input = {
+      competitionId: COMPETITION_ID,
+      submissionIds: [SUBMISSION_ID],
+      reason: "provider configuration error",
+      archiveId: "stable-operation-id",
+    };
+    await archiveAndDeleteCompetitionSubmissions(input);
+
+    await expect(archiveAndDeleteCompetitionSubmissions({
+      ...input,
+      reason: "different reason",
+    })).rejects.toThrow("operation does not match archived cleanup intent");
+  });
 });

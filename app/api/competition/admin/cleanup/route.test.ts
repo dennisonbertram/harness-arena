@@ -8,6 +8,7 @@ import { POST } from "./route";
 
 const ADMIN_TOKEN = "test-admin-token";
 const BODY = {
+  operation_id: "57e2c8a6-83a1-4758-bc28-fb5acdb59952",
   competition_id: "eda31800-e401-4c40-a112-b101079dd7f4",
   submission_ids: ["fb06836f-8dec-4e62-999e-b2dae1972fb6"],
   reason: "Provider configuration error created invalid results.",
@@ -46,6 +47,14 @@ describe("POST /api/competition/admin/cleanup", () => {
     expect(cleanup.archiveAndDeleteCompetitionSubmissions).not.toHaveBeenCalled();
   });
 
+  it("requires a stable operation ID before it can touch storage", async () => {
+    const { operation_id: _operationId, ...body } = BODY;
+    const response = await POST(request(body, {}, "7.7.7.5"));
+
+    expect(response.status).toBe(400);
+    expect(cleanup.archiveAndDeleteCompetitionSubmissions).not.toHaveBeenCalled();
+  });
+
   it("rejects a missing or invalid admin token before it can touch storage", async () => {
     const response = await POST(request(BODY, { "x-competition-admin-token": "wrong" }, "7.7.7.2"));
 
@@ -58,11 +67,16 @@ describe("POST /api/competition/admin/cleanup", () => {
 
     expect(response.status).toBe(200);
     expect(cleanup.archiveAndDeleteCompetitionSubmissions).toHaveBeenCalledWith({
+      archiveId: BODY.operation_id,
       competitionId: BODY.competition_id,
       submissionIds: BODY.submission_ids,
       reason: BODY.reason,
     });
-    expect(await response.json()).toMatchObject({ status: "deleted", archive_prefix: "archives/competition-cleanups/competition/archive" });
+    expect(await response.json()).toMatchObject({
+      status: "deleted",
+      operation_id: BODY.operation_id,
+      archive_prefix: "archives/competition-cleanups/competition/archive",
+    });
   });
 
   it("returns a truthful recovery receipt after partial deletion", async () => {
@@ -83,6 +97,7 @@ describe("POST /api/competition/admin/cleanup", () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
       status: "partial",
+      operation_id: BODY.operation_id,
       error: "cleanup partially completed; recover from the archive receipt",
       archive_prefix: "archives/competition-cleanups/competition/partial",
       deleted_groups: ["events", "traces"],
