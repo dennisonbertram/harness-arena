@@ -108,6 +108,7 @@ describe("0003 durable submission artifact metadata", () => {
       expect.objectContaining({ id: prepared.artifact.id, state: "uploaded" }),
     ]));
     await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toMatchObject({ ok: true, artifact: { state: "verified" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toMatchObject({ ok: true, artifact: { state: "verified" } });
     await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: "b".repeat(64) })).resolves.toEqual({ ok: false, error: { code: "conflict" } });
     await expect(db.query(
       "UPDATE submission_artifacts SET object_key = $2 WHERE id = $1",
