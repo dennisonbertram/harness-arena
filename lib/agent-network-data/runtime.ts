@@ -25,30 +25,48 @@ export function createRuntimeSqlAdapter({ pool, databaseUrl }: { pool: Pool; dat
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
 
   return {
-    query<Row = unknown>(sql: string, params?: unknown[]) {
-      return pool.query(sql, params) as Promise<QueryResult<Row>>;
+    async query<Row = unknown>(sql: string, params?: unknown[]) {
+      try {
+        return await pool.query(sql, params) as QueryResult<Row>;
+      } catch {
+        throw new Error("database query failed");
+      }
     },
 
     async transaction<Result>(callback: (tx: RuntimeSqlTransaction) => Promise<Result>): Promise<Result> {
-      const client = await pool.connect();
-      let began = false;
+      let client: TransactionClient;
       try {
-        await client.query("BEGIN");
-        began = true;
-        const txQuery = <Row = unknown>(sql: string, params?: unknown[]) => client.query(sql, params) as Promise<QueryResult<Row>>;
-        const result = await callback({ query: txQuery });
-        await client.query("COMMIT");
-        return result;
-      } catch (error) {
-        if (began) {
-          try {
-            await client.query("ROLLBACK");
-          } catch {
-            // The original callback/commit error is the useful failure. The
-            // connection is still released below and the pool will discard it.
-          }
+        client = await pool.connect();
+      } catch {
+        throw new Error("database transaction failed");
+      }
+      try {
+        try {
+          await client.query("BEGIN");
+        } catch {
+          throw new Error("database transaction failed");
         }
-        throw error;
+        const txQuery = async <Row = unknown>(sql: string, params?: unknown[]) => {
+          try {
+            return await client.query(sql, params) as QueryResult<Row>;
+          } catch {
+            throw new Error("database query failed");
+          }
+        };
+        let result: Result;
+        try {
+          result = await callback({ query: txQuery });
+        } catch (error) {
+          try { await client.query("ROLLBACK"); } catch { /* preserve the callback error */ }
+          throw error;
+        }
+        try {
+          await client.query("COMMIT");
+        } catch {
+          try { await client.query("ROLLBACK"); } catch { /* preserve the sanitized commit failure */ }
+          throw new Error("database transaction failed");
+        }
+        return result;
       } finally {
         client.release();
       }
