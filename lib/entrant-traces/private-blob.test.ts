@@ -21,7 +21,7 @@ describe("private entrant artifact blob boundary", () => {
   it.each([
     [{ object_key: "public/escape", compression: "gzip", compressed_bytes: 128, state: "pending_upload" }],
     [{ object_key: "private/artifacts/../../escape", compression: "gzip", compressed_bytes: 128, state: "pending_upload" }],
-    [{ object_key: KEY, compression: "none", compressed_bytes: 128, state: "pending_upload" }],
+    [{ object_key: KEY, compression: "brotli", compressed_bytes: 128, state: "pending_upload" }],
     [{ object_key: KEY, compression: "gzip", compressed_bytes: 1_048_577, state: "pending_upload" }],
   ])("rejects unsafe keys, encodings, and sizes before issuing credentials", async (input) => {
     const blob = service();
@@ -56,6 +56,28 @@ describe("private entrant artifact blob boundary", () => {
     });
     expect(result).toEqual({ upload_url: "https://upload.example/private", expires_at: 600_000 });
     expect(JSON.stringify(result)).not.toMatch(/token|delegation|signing/i);
+  });
+
+  it("supports an uncompressed JSON artifact without weakening the same private upload constraints", async () => {
+    const blob = service();
+    const api = createPrivateArtifactBlob(blob, { privateWriteToken: "write", privateReadToken: "read", now: () => 0 });
+
+    await expect(api.prepareUpload({ object_key: KEY, compression: "none", compressed_bytes: 64, state: "pending_upload" }))
+      .resolves.toEqual({ upload_url: "https://upload.example/private", expires_at: 600_000 });
+    expect(blob.issueSignedToken).toHaveBeenCalledWith(expect.objectContaining({
+      allowedContentTypes: ["application/json"],
+      maximumSizeInBytes: 64,
+    }));
+    expect(blob.presignUrl).toHaveBeenCalledWith(blob.signedToken, expect.objectContaining({
+      access: "private",
+      allowedContentTypes: ["application/json"],
+      allowOverwrite: false,
+      addRandomSuffix: false,
+    }));
+
+    await expect(api.serverPut({ object_key: KEY, bytes: Buffer.from("{}"), compression: "none", max_bytes: 64, state: "pending_upload" }))
+      .resolves.toEqual({ ok: true });
+    expect(blob.put).toHaveBeenCalledWith(KEY, expect.anything(), expect.objectContaining({ contentType: "application/json" }));
   });
 
   it("reads private blobs by pathname with the separate read token, bounded abortable streaming, and checksum/not-found handling", async () => {
