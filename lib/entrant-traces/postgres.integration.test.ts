@@ -84,7 +84,9 @@ describe("0003 durable submission artifact metadata", () => {
   });
 
   it("pins every prepare write to the injected transaction-scoped SQL client", async () => {
-    const transaction = vi.fn(async <Result>(callback: (tx: PGlite) => Promise<Result>) => db.transaction(callback));
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const transaction = vi.fn(async <Result>(callback: (tx: TransactionSql) => Promise<Result>) =>
+      db.transaction((tx) => callback(tx as unknown as TransactionSql)));
     const repo = createPostgresEntrantTraces({ exec: db.exec.bind(db), query: db.query.bind(db), transaction }, {
       ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
       now: () => new Date("2026-08-02T12:00:00.000Z"),
@@ -120,6 +122,15 @@ describe("0003 durable submission artifact metadata", () => {
       error: { code: "checksum_mismatch" },
       artifact: { state: "rejected" },
     });
+    await expect(repo.recordUpload({ actor: BOB, artifact_id: mismatch.artifact.id, sha256: "b".repeat(64), compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+    await expect(repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("derives storage keys only from server IDs, never owner-controlled submission text", async () => {
+    await db.exec(`INSERT INTO submission_bindings (submission_id, competition_id, entrant_id) VALUES ('../../escape', 'comp-a', '${ALICE.id}')`);
+    const prepared = await traces().prepare({ actor: ALICE, operation_id: "prepare-path", artifact: { ...execution, submission_id: "../../escape" } });
+    expect(prepared).toMatchObject({ ok: true, artifact: { object_key: expect.stringMatching(/^private\/artifacts\/[0-9a-f-]{36}$/) } });
+    expect(JSON.stringify(prepared)).not.toContain("..");
   });
 
   it("denies cross-user reads and returns public metadata DTOs without bytes, prompts, tokens, or URLs", async () => {
