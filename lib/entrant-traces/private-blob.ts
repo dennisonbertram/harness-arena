@@ -46,7 +46,11 @@ function validSize(value: unknown): value is number {
 }
 
 function validArtifact(value: Artifact): boolean {
-  return validKey(value.object_key) && value.compression === "gzip";
+  return validKey(value.object_key) && (value.compression === "gzip" || value.compression === "none");
+}
+
+function contentType(compression: string): "application/gzip" | "application/json" {
+  return compression === "gzip" ? "application/gzip" : "application/json";
 }
 
 function nowInMs(now: () => number | Date): number {
@@ -73,13 +77,14 @@ export function createPrivateArtifactBlob(blob: BlobAdapter, options: {
       if (input.state !== "pending_upload") return fail("invalid_state");
 
       const expiresAt = nowInMs(options.now) + UPLOAD_TTL_MS;
+      const uploadContentType = contentType(input.compression);
       try {
         const signedToken = await blob.issueSignedToken({
           pathname: input.object_key,
           operations: ["put"],
           validUntil: expiresAt,
           maximumSizeInBytes: input.compressed_bytes,
-          allowedContentTypes: ["application/gzip"],
+          allowedContentTypes: [uploadContentType],
           token: options.privateWriteToken,
         });
         const { presignedUrl } = await blob.presignUrl(signedToken, {
@@ -88,7 +93,7 @@ export function createPrivateArtifactBlob(blob: BlobAdapter, options: {
           access: "private",
           validUntil: expiresAt,
           maximumSizeInBytes: input.compressed_bytes,
-          allowedContentTypes: ["application/gzip"],
+          allowedContentTypes: [uploadContentType],
           allowOverwrite: false,
           addRandomSuffix: false,
         });
@@ -154,7 +159,7 @@ export function createPrivateArtifactBlob(blob: BlobAdapter, options: {
         await blob.put(input.object_key, input.bytes, {
           access: "private",
           token: options.privateWriteToken,
-          contentType: "application/gzip",
+          contentType: contentType(input.compression),
           maximumSizeInBytes: input.max_bytes,
           allowOverwrite: false,
           addRandomSuffix: false,
