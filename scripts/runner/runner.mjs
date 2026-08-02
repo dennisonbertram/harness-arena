@@ -17,15 +17,27 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import {
+  agentProcessFailure,
   budgetExceeded,
+  buildPiSettings,
   buildContainerName,
   buildPiCommand,
+  buildPinnedModelsConfig,
+  PI_MODELS_CONFIG_PATH,
+  PI_SETTINGS_CONFIG_PATH,
+  preflightProxy,
+  resolvePinnedProvider,
   computeTotals,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
+  parseSessionAgentError,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -33,7 +45,8 @@ import {
   resolveTaskCost,
   safeCleanup,
   sh,
-  truncateForUpload,
+  shAsync,
+  summarizeGatewayRequests,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -46,18 +59,37 @@ const RUNNER_TASKS_DIR = process.env.RUNNER_TASKS_DIR || "/opt/runner/tasks";
 // harnessarena.xyz's exact provider. Both provider API keys are forwarded into
 // the task container; pi uses the one matching --provider.
 const RUNNER_PROVIDER = process.env.RUNNER_PROVIDER || "vercel-ai-gateway";
+// Which upstream the gateway is pinned to for this run. Empty = unpinned, and
+// the run is recorded without provider_pinned so the board can mark it as not
+// comparable. See scripts/runner/gateway-proxy.mjs.
+const PINNED_PROVIDER = process.env.PINNED_PROVIDER || "";
+const GATEWAY_PROXY_PORT = Number(process.env.GATEWAY_PROXY_PORT || 4599);
 const RUNNER_MODEL = process.env.RUNNER_MODEL || "zai/glm-5.2";
-const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "2");
-// A real per-task cost is ~$0.003-0.02; the old $0.50 default was 25-150x
-// reality and dominated the leaderboard whenever it was hit (live-run
-// evidence: run 9f4a1b3e, 2 floored tasks alone reported $1.00 of the
-// $1.06 total run cost vs. $0.32 real gateway spend).
-const MISSING_COST_FLOOR_USD = parseFloat(process.env.RUNNER_MISSING_COST_FLOOR ?? "0.05");
-// Cap on the bytes of a trace actually UPLOADED to the callback (live-run
-// evidence: run 9f4a1b3e -- "callback POST failed ... trace?task_id=regex-log&name=pi-stdout.txt:
-// HTTP 413", pi stdout exceeded Vercel's ~4.5MB function body limit). Does
-// not affect the local 5MB capture used for cost parsing.
-const TRACE_UPLOAD_MAX_BYTES = parseInt(process.env.RUNNER_TRACE_UPLOAD_MAX_BYTES ?? "262144", 10);
+// Pi defaults reasoning models to medium. The dedicated fast-tier GLM route is
+// for low-latency competition runs, so do not spend the whole task window on
+// hidden reasoning before the first tool call. An explicit env value still
+// wins for controlled experiments.
+const RUNNER_THINKING =
+  process.env.RUNNER_THINKING || (RUNNER_MODEL === "zai/glm-5.2-fast" ? "off" : undefined);
+// Safety ceiling only, NOT the metric: raised 2->10 so a fuller (costlier)
+// solution can complete the whole test instead of being killed mid-run, which
+// would deflate its pass rate. Sandbox.ts passes the real value; this default
+// is the fallback.
+const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
+// Upper bound on the pi stdout we hold in memory (cost parsing + trace). Traces
+// are gzip-uploaded in full, so this is only a memory-safety ceiling for a
+// runaway-verbose process, not a routine trace cut -- a real per-task stdout is
+// well under this. gzip keeps even this bound's worth of text far below the
+// callback body limit.
+const STDOUT_CAP_BYTES = parseInt(process.env.RUNNER_STDOUT_CAP_BYTES ?? String(16 * 1024 * 1024), 10);
+const GATEWAY_DIAGNOSTIC_MAX_ENTRIES = parseInt(process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_ENTRIES ?? "1024", 10);
+const GATEWAY_DIAGNOSTIC_MAX_BYTES = parseInt(
+  process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_BYTES ?? String(512 * 1024),
+  10,
+);
+const RUNNER_LOG_MAX_ENTRIES = parseInt(process.env.RUNNER_LOG_MAX_ENTRIES ?? "2000", 10);
+const RUNNER_LOG_MAX_BYTES = parseInt(process.env.RUNNER_LOG_MAX_BYTES ?? String(1024 * 1024), 10);
+const RUNNER_LOG_MAX_LINE_BYTES = parseInt(process.env.RUNNER_LOG_MAX_LINE_BYTES ?? String(8 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -80,11 +112,14 @@ if (!RUN_ID || !CALLBACK_BASE || !RUNNER_CALLBACK_SECRET) {
   process.exit(1);
 }
 
-const runnerLogLines = [];
+const runnerLogLines = createBoundedLogBuffer({
+  maxEntries: RUNNER_LOG_MAX_ENTRIES,
+  maxBytes: RUNNER_LOG_MAX_BYTES,
+  maxLineBytes: RUNNER_LOG_MAX_LINE_BYTES,
+});
 function log(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`;
-  runnerLogLines.push(stamped);
-  console.log(stamped);
+  console.log(runnerLogLines.append(stamped));
 }
 
 function sleep(ms) {
@@ -212,9 +247,85 @@ async function flushEvents(extra = {}) {
   return result;
 }
 
+// Fetch grading materials (tests/*) from the authenticated /api/runner-tests
+// route and write them under RUNNER_TASKS_DIR/<id>/tests, where runOneTask's
+// verify step docker-cp's them into each task container AFTER the agent's turn.
+// These are NOT in the public runner bundle (that would let any harness read
+// the assertions it's graded against); only this runner, which holds
+// RUNNER_CALLBACK_SECRET, can fetch them. Fails closed: a run cannot be scored
+// without tests, so a fetch failure aborts the run rather than silently passing.
+async function fetchTaskTests() {
+  const url = `${CALLBACK_BASE}/api/runner-tests`;
+  const delays = [0, 500, 1500];
+  let lastErr;
+  for (const delay of delays) {
+    if (delay) await sleep(delay);
+    try {
+      const res = await fetchWithTimeout(
+        fetch,
+        url,
+        { method: "GET", headers: { "x-runner-secret": RUNNER_CALLBACK_SECRET } },
+        HTTP_TIMEOUT_MS,
+      );
+      if (!res.ok) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const { tests } = await res.json();
+      let fileCount = 0;
+      for (const [taskId, files] of Object.entries(tests ?? {})) {
+        for (const [rel, b64] of Object.entries(files)) {
+          const dst = path.join(RUNNER_TASKS_DIR, taskId, "tests", rel);
+          mkdirSync(path.dirname(dst), { recursive: true });
+          writeFileSync(dst, Buffer.from(b64, "base64"));
+          fileCount += 1;
+        }
+      }
+      log(`fetched tests for ${Object.keys(tests ?? {}).length} task(s), ${fileCount} file(s)`);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`fetch task tests failed after retries: ${lastErr?.message ?? lastErr}`);
+}
+
+// Traces are uploaded gzip-compressed so the FULL, untruncated trace fits
+// under the callback's request-body limit (a JSONL/text trace compresses
+// ~10x). The server stores the bytes as-is; the trace-view route decompresses
+// on read. We never truncate — cutting data out of a trace is not allowed.
 async function uploadTrace(taskId, name, buffer) {
   const url = `${CALLBACK_BASE}/api/runs/${RUN_ID}/trace?task_id=${encodeURIComponent(taskId)}&name=${encodeURIComponent(name)}`;
-  return postWithRetry(url, buffer, false);
+  const gz = gzipSync(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
+  return postWithRetry(url, gz, false);
+}
+
+// Upload the agent-side evidence on every terminal task path, including an
+// agent timeout that never reaches verification. Previously timeout traces
+// disappeared with the thrown error, leaving only a run-level message and no
+// way to distinguish a provider stall from an agent that produced bad work.
+async function uploadAgentTraces(taskId, sessionText, piStdout) {
+  const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
+  let traceBlobUrl;
+  const redactedSession = redactSecrets(sessionText, secrets);
+  const sessionUpload = await uploadTrace(
+    taskId,
+    "session.jsonl",
+    Buffer.from(redactedSession, "utf8"),
+  );
+  if (sessionUpload?.url) {
+    traceBlobUrl = sessionUpload.url;
+    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: sessionUpload.url });
+  }
+  const redactedStdout = Buffer.from(
+    redactSecrets(piStdout.toString("utf8"), secrets),
+    "utf8",
+  );
+  const stdoutUpload = await uploadTrace(taskId, "pi-stdout.txt", redactedStdout);
+  if (stdoutUpload?.url) {
+    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: stdoutUpload.url });
+  }
+  return { traceBlobUrl, secrets };
 }
 
 // Terminal status delivery (status completed/failed + totals) is the one
@@ -297,10 +408,56 @@ function readRewardFile(containerName) {
   }
 }
 
+let gatewayProxy = null;
+const gatewayDiagnosticLog = createBoundedGatewayDiagnosticCollector({
+  maxEntries: GATEWAY_DIAGNOSTIC_MAX_ENTRIES,
+  maxBytes: GATEWAY_DIAGNOSTIC_MAX_BYTES,
+});
+let currentGatewayTaskId;
+
+/**
+ * Starts the pinning sidecar on the sandbox VM. pi runs inside the task
+ * container and reaches this through the --add-host host-gateway mapping.
+ * Only started when a provider is actually pinned, so an unpinned run behaves
+ * exactly as before rather than gaining a new failure mode.
+ */
+// The prompt pi actually sent, captured off the wire by the sidecar. A
+// baseline runs vanilla, so this is the only faithful record of what pi's
+// default resolved to inside this container -- see systemPromptOf().
+let resolvedSystemPrompt;
+// Set only when the sidecar actually pinned a request -- see
+// resolvePinnedProvider(). Configuration alone must never mark a run pinned.
+let pinWasApplied = false;
+
+async function startGatewayProxy() {
+  const { createGatewayProxy } = await import("./gateway-proxy.mjs");
+  const server = createGatewayProxy({
+    only: PINNED_PROVIDER ? [PINNED_PROVIDER] : [],
+    onForward: (event) => {
+      if (!resolvedSystemPrompt && event.systemPrompt) resolvedSystemPrompt = event.systemPrompt;
+      if (event.only?.length) pinWasApplied = true;
+    },
+    onDiagnostic: (event) => {
+      const correlated = {
+        ...(currentGatewayTaskId ? { task_id: currentGatewayTaskId } : {}),
+        ...event,
+      };
+      gatewayDiagnosticLog.push(correlated);
+    },
+  });
+  await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
+  log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER || "(nothing)"}`);
+  return server;
+}
+
 async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
   const tempDirs = [];
+  // The proxy preflight uses the same sidecar before task 1. Establish the
+  // task scope here so preflight requests/statuses never enter task evidence.
+  gatewayDiagnosticLog.beginScope();
+  currentGatewayTaskId = task.id;
 
   try {
     queueEvent("task.started", { task_id: task.id, index });
@@ -310,6 +467,10 @@ async function runOneTask(task, index, systemPrompt) {
     sh(DOCKER_CMD, [
       "run",
       "-d",
+      // Lets pi inside the container reach the pinning sidecar running on the
+      // sandbox VM. Harmless when nothing is pinned.
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "--name",
       containerName,
       task.image,
@@ -318,20 +479,43 @@ async function runOneTask(task, index, systemPrompt) {
       `sleep ${task.agent_timeout_sec + 900}`,
     ]);
 
+    {
+      // pi cannot add the gateway's providerOptions itself, but it can take a
+      // baseUrl -- so point its gateway provider at the sidecar, which injects
+      // the pin (when there is one) and forwards. Unpinned runs go through it
+      // too: it is what captures the resolved system prompt, and routing only
+      // some runs through a proxy would itself be a difference between them
+      // beyond the pin under test.
+      const cfg = buildPinnedModelsConfig({ proxyPort: GATEWAY_PROXY_PORT, model: RUNNER_MODEL });
+      const cfgFile = path.join(os.tmpdir(), `models-${RUN_ID}-${index}.json`);
+      writeFileSync(cfgFile, cfg);
+      tempDirs.push(cfgFile);
+      // pi only reads this path (see PI_MODELS_CONFIG_PATH); mkdir -p because
+      // the agent/ directory does not exist in a bare container.
+      sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", path.posix.dirname(PI_MODELS_CONFIG_PATH)]);
+      sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:${PI_MODELS_CONFIG_PATH}`]);
+
+      const settings = buildPiSettings({ model: RUNNER_MODEL });
+      if (settings) {
+        const settingsFile = path.join(os.tmpdir(), `settings-${RUN_ID}-${index}.json`);
+        writeFileSync(settingsFile, settings);
+        tempDirs.push(settingsFile);
+        sh(DOCKER_CMD, ["cp", settingsFile, `${containerName}:${PI_SETTINGS_CONFIG_PATH}`]);
+      }
+    }
+
     if (PI_INSTALL_MODE === "agentkit") {
       sh(DOCKER_CMD, ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
       sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
     }
 
-    // NOTE: an earlier version wrote a pi models.json here capping maxTokens
-    // (anti-runaway). It backfired badly: glm-5.2 does very heavy hidden
-    // thinking, and an 8192-token output cap starved its real work, so the
-    // agent quit after a few turns and the 16-task baseline scored 2/16
-    // instead of ~10/16 (a with/without-config A/B on fix-git showed 15 turns
-    // vanilla vs a few turns capped). The 16-task ranked set contains no
-    // runaway tasks, so the cap has no upside here. Removed — pi runs with its
-    // own defaults, matching harnessarena.xyz's vanilla baseline. Bound
-    // runaways at the runner level (agent timeout) instead if it recurs.
+    // NOTE: an earlier global 8192-token anti-runaway cap backfired badly for
+    // non-fast glm-5.2: it starved real work and reduced the 16-task baseline
+    // from ~10/16 to 2/16. The provider metadata therefore keeps that model's
+    // native ceiling. GLM-5.2 Fast is different: production showed Fireworks
+    // spending hidden reasoning despite thinking=off until the five-minute
+    // task timeout. Its model definition carries a Fast-only 8192 ceiling,
+    // which applies equally to baseline and competitors.
     // An empty submitted prompt means "run vanilla pi with its own default
     // system prompt" (the baseline), matching harnessarena.xyz. Only write and
     // pass a prompt file when there's actually a submitted prompt.
@@ -357,14 +541,17 @@ async function runOneTask(task, index, systemPrompt) {
       hasSystemPrompt,
       provider: RUNNER_PROVIDER,
       model: RUNNER_MODEL,
+      thinking: RUNNER_THINKING,
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
-    // through from this process's own environment -- execFileSync inherits
-    // process.env by default, so no extra plumbing is needed here. maxBuffer is
-    // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
-    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks.
-    const execResult = sh(
+    // through from this process's own environment -- spawn inherits
+    // process.env by default, so no extra plumbing is needed here. shAsync
+    // drains both streams continuously and retains only STDOUT_CAP_BYTES for
+    // diagnostics; reaching that capture bound must never kill Pi. This call
+    // MUST be async: the gateway proxy runs in this same Node process and a
+    // synchronous docker exec starves its event loop for the whole model turn.
+    const execResult = await shAsync(
       DOCKER_CMD,
       [
         "exec",
@@ -379,12 +566,28 @@ async function runOneTask(task, index, systemPrompt) {
         "-c",
         piCommand,
       ],
-      { maxBuffer: 64 * 1024 * 1024 },
+      { maxBuffer: STDOUT_CAP_BYTES },
     );
-    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), 5 * 1024 * 1024);
+    const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
+    const agentDurationS = (agentFinishedAt - taskStart) / 1000;
 
     const sessionText = extractNewestSessionJsonl(containerName);
+    const piCorrelation = parsePiCorrelation(sessionText, piStdout.toString("utf8"));
+    const diagnosticSnapshot = gatewayDiagnosticLog.drain();
+    const proxyRequests = summarizeGatewayRequests(diagnosticSnapshot.events);
+    const gatewayCorrelation = {
+      proxy_requests: proxyRequests,
+      proxy_request_count: diagnosticSnapshot.requestCount,
+      gateway_diagnostics_dropped: diagnosticSnapshot.droppedEvents,
+      pi_response_ids: piCorrelation.response_ids,
+      pi_retry_events: piCorrelation.retry_events,
+    };
+    log(`gateway-proxy correlation ${JSON.stringify({ task_id: task.id, ...gatewayCorrelation })}`);
+    queueEvent("task.gateway_correlation", {
+      task_id: task.id,
+      ...gatewayCorrelation,
+    });
     const sessionUnreadable = isSessionTextUnreadable(sessionText);
     const parsed = parseSessionCost(sessionText);
     const turns = parsed.turns;
@@ -406,17 +609,17 @@ async function runOneTask(task, index, systemPrompt) {
       sessionUnreadable,
       sessionCost: parsed.totalCost,
       stdoutCost,
-      floorUsd: MISSING_COST_FLOOR_USD,
     });
 
     if (sessionUnreadable) {
       log(`task ${task.id}: cost_source: ${costSource}`);
-      if (costSource === "floor (session unreadable)") {
+      if (costSource === "unmeasured") {
+        // Neither session nor stdout carried a cost — reported as unmeasured
+        // (no fabricated number). Surfaced as a signal for visibility.
         queueEvent("task.cost_tamper_signal", {
           task_id: task.id,
-          reason: "session_unreadable",
+          reason: "cost_unmeasured",
           cost_source: costSource,
-          floor_usd: MISSING_COST_FLOOR_USD,
         });
       }
     } else if (parsed.negativeCostCount > 0) {
@@ -431,14 +634,118 @@ async function runOneTask(task, index, systemPrompt) {
       });
     }
 
+    if (execResult.outputTruncated) {
+      log(`task ${task.id}: Pi stdout/stderr capture reached ${STDOUT_CAP_BYTES} bytes; child continued`);
+    }
     queueEvent("task.agent_finished", {
       task_id: task.id,
       turns,
-      cost_usd: totalCost,
+      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+      ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
-      duration_s: (agentFinishedAt - taskStart) / 1000,
+      duration_s: agentDurationS,
+      ...(execResult.outputTruncated ? { output_capture_truncated: true } : {}),
     });
     await flushEvents();
+
+    // GNU timeout exits 124 after the configured agent deadline. This is a
+    // failed task, not a failed benchmark run: a weak or temporarily stalled
+    // model must not discard earlier results or prevent the remaining selected
+    // tasks from running. The hard kill still bounds each task; the runner now
+    // records the timeout transparently and continues.
+    if (execResult.code === 124 || execResult.code === 137) {
+      const error = (
+        `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
+      );
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: "agent_timeout",
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+        agent_duration_s: agentDurationS,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        failure_stage: "agent_timeout",
+        error,
+      };
+    }
+
+    const processFailure = agentProcessFailure(execResult);
+    if (processFailure) {
+      const error =
+        `${processFailure} ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: "agent_process_error",
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        failure_stage: "agent_process_error",
+        error,
+      };
+    }
+
+    // Pi exits 0 when its provider stream fails and records the real failure
+    // only in the terminal assistant session record. Do not run the verifier
+    // against an untouched workspace and mislabel that as a test failure.
+    const agentError = parseSessionAgentError(sessionText);
+    if (agentError) {
+      const error =
+        `${agentError.error} ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: agentError.stage,
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        failure_stage: agentError.stage,
+        error,
+      };
+    }
 
     // Verification against a clean copy of the task's tests.
     sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
@@ -449,7 +756,7 @@ async function runOneTask(task, index, systemPrompt) {
     await flushEvents();
 
     const verifyStart = Date.now();
-    sh(
+    const verifyResult = sh(
       DOCKER_CMD,
       ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
       { maxBuffer: 20 * 1024 * 1024 },
@@ -466,31 +773,23 @@ async function runOneTask(task, index, systemPrompt) {
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
     // finding 1): a root agent could printenv AI_GATEWAY_API_KEY into its
-    // own session/stdout, and these traces are uploaded publicly. Cost was
-    // already parsed from the FULL piStdout above; the bytes actually
-    // uploaded are capped to TRACE_UPLOAD_MAX_BYTES (live-run evidence: run
-    // 9f4a1b3e, HTTP 413 uploading pi-stdout.txt past Vercel's ~4.5MB
-    // function body limit).
-    const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
-    let traceBlobUrl;
-    const redactedSession = redactSecrets(sessionText, secrets);
-    const sessionUpload = await uploadTrace(
+    // own session/stdout, and these traces are uploaded publicly. The FULL
+    // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
+    // ~4.5MB callback body limit) -- no truncation.
+    const { traceBlobUrl, secrets } = await uploadAgentTraces(task.id, sessionText, piStdout);
+    // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
+    // Verifier tab shows WHY a task passed or failed, not just the reward.
+    const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
+    const verifyStderr = verifyResult.stderr?.toString("utf8") ?? "";
+    if (verifyStderr.trim()) verifierParts.push(`\n[stderr]\n${verifyStderr}`);
+    verifierParts.push(`\n[reward.txt] ${rewardText ?? "(missing)"}`);
+    const verifierUpload = await uploadTrace(
       task.id,
-      "session.jsonl",
-      truncateForUpload(Buffer.from(redactedSession, "utf8"), TRACE_UPLOAD_MAX_BYTES),
+      "verifier.txt",
+      Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
     );
-    if (sessionUpload?.url) {
-      traceBlobUrl = sessionUpload.url;
-      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sessionUpload.url });
-    }
-    const redactedStdout = Buffer.from(redactSecrets(piStdout.toString("utf8"), secrets), "utf8");
-    const stdoutUpload = await uploadTrace(
-      task.id,
-      "pi-stdout.txt",
-      truncateForUpload(redactedStdout, TRACE_UPLOAD_MAX_BYTES),
-    );
-    if (stdoutUpload?.url) {
-      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: stdoutUpload.url });
+    if (verifierUpload?.url) {
+      queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: verifierUpload.url });
     }
     await flushEvents();
 
@@ -499,13 +798,21 @@ async function runOneTask(task, index, systemPrompt) {
       attempted: true,
       passed,
       reward,
-      cost_usd: totalCost,
+      // null (unmeasured) is carried as an absent cost_usd, never a fabricated
+      // number; cost_source records why (unmeasured vs session/stdout).
+      cost_usd: totalCost === null ? undefined : totalCost,
       cost_source: costSource,
       duration_s: (Date.now() - taskStart) / 1000,
       turns,
+      agent_duration_s: agentDurationS,
+      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
       trace_blob_url: traceBlobUrl,
     };
   } finally {
+    // A task that exits before correlation still must not retain diagnostics
+    // for every later task in the run.
+    gatewayDiagnosticLog.drain();
+    if (currentGatewayTaskId === task.id) currentGatewayTaskId = undefined;
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its
     // container or temp files (issue #19 finding 5). Each cleanup step is
@@ -522,7 +829,34 @@ async function runOneTask(task, index, systemPrompt) {
 // --- main -------------------------------------------------------------
 async function main() {
   const startedAt = Date.now();
+  const taskResults = [];
+  let cumulativeCost = 0;
+  let overBudget = false;
   try {
+    // Must be listening before any task container starts, since pi's models.json
+    // points at it. Started here rather than per-task so all 16 tasks in a run
+    // share one pinned upstream.
+    gatewayProxy = await startGatewayProxy();
+
+    // Prove the path pi will use actually answers, before spending 16 tasks
+    // finding out. When this broke, every task ran its full timeout and the run
+    // reported 0 passes at 0 cost -- indistinguishable from a hopeless model.
+    const preflight = await preflightProxy({
+      port: GATEWAY_PROXY_PORT,
+      model: RUNNER_MODEL,
+      apiKey: process.env.AI_GATEWAY_API_KEY ?? "",
+    });
+    if (!preflight.ok) {
+      log(`gateway preflight FAILED: ${preflight.detail}`);
+      queueEvent("run.failed", {
+        error: `gateway sidecar preflight failed (pinned=${PINNED_PROVIDER || "none"}): ${preflight.detail}`,
+        stage: "gateway_preflight",
+      });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
+    }
+    log(`gateway preflight ok (pinned to ${PINNED_PROVIDER || "nothing"})`);
+
     const dockerReady = await ensureDockerReady();
     if (!dockerReady) {
       queueEvent("run.failed", {
@@ -547,12 +881,19 @@ async function main() {
       await flushEvents();
     }
 
+    // Pull grading materials before any task runs. Fail closed (see
+    // fetchTaskTests): without tests we cannot verify, so abort rather than
+    // report unscored passes.
+    try {
+      await fetchTaskTests();
+    } catch (err) {
+      queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
+    }
+
     const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
     const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
-
-    const taskResults = [];
-    let cumulativeCost = 0;
-    let overBudget = false;
 
     for (let index = 0; index < tasks.length; index++) {
       const task = tasks[index];
@@ -584,23 +925,38 @@ async function main() {
       duration_s: durationS,
     });
 
-    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
 
+    gatewayProxy?.close();
     const delivered = await finalizeTerminalStatus({
       status: "completed",
       totals: { ...totals, over_budget: overBudget },
       task_results: taskResults,
+      provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
+      resolved_system_prompt: resolvedSystemPrompt,
     });
     process.exit(delivered ? 0 : 1);
   } catch (err) {
+    gatewayProxy?.close();
     log(`uncaught error: ${err?.stack ?? err}`);
-    queueEvent("run.failed", { error: String(err?.message ?? err), stage: "run" });
+    queueEvent("run.failed", {
+      error: String(err?.message ?? err),
+      stage: err?.stage ?? "run",
+      ...(err?.taskId ? { task_id: err.taskId } : {}),
+    });
     try {
-      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
     } catch {
       // best-effort only
     }
-    const delivered = await finalizeTerminalStatus({ status: "failed" });
+    const totals = computeTotals(taskResults);
+    const delivered = await finalizeTerminalStatus({
+      status: "failed",
+      totals: { ...totals, over_budget: overBudget },
+      task_results: taskResults,
+      provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
+      resolved_system_prompt: resolvedSystemPrompt,
+    });
     process.exit(delivered ? 0 : 1);
   }
 }

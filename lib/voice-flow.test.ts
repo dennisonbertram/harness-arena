@@ -90,6 +90,11 @@ describe("parseNextResponse", () => {
     const result = await parseNextResponse(fakeResponse(200, true, async () => ({ surprise: true })));
     expect(result).toEqual({ kind: "error", message: "Unexpected response from the server." });
   });
+
+  it("uses the HTTP fallback when an error response has no parseable error body", async () => {
+    const result = await parseNextResponse(fakeResponse(503, false, async () => { throw new Error("not JSON"); }));
+    expect(result).toEqual({ kind: "error", message: "The server returned HTTP 503." });
+  });
 });
 
 describe("parseJudgmentResponse", () => {
@@ -106,6 +111,11 @@ describe("parseJudgmentResponse", () => {
   it("4xx -> rejected", async () => {
     const result = await parseJudgmentResponse(fakeResponse(400, false, async () => ({ error: "unknown response id" })));
     expect(result).toEqual({ kind: "rejected", message: "unknown response id" });
+  });
+
+  it("uses the HTTP fallback when a rejected judgment response has no error message", async () => {
+    const result = await parseJudgmentResponse(fakeResponse(422, false, async () => ({ detail: "invalid" })));
+    expect(result).toEqual({ kind: "rejected", message: "The server returned HTTP 422." });
   });
 });
 
@@ -323,6 +333,33 @@ describe("voiceFlowReducer", () => {
     };
     expect(voiceFlowReducer(done, { type: "audioErrored", clip: "a" })).toBe(done);
   });
+
+  it("ignores editing and submission actions when the state is not eligible", () => {
+    const pending = initialVoiceFlowState;
+    expect(voiceFlowReducer(pending, { type: "played", clip: "a" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "clearAudioError" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "vote", outcome: "a", now: 1 })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "setReason", reason: "other" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "setFreeText", text: "note" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "submit" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "retrySubmit" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "submitSucceeded", comparisonId: "r1_r2" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "submitFailedRetryable", message: "nope" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "submitFailedRejected", message: "nope" })).toBe(pending);
+    expect(voiceFlowReducer(pending, { type: "skip", comparisonId: "r1_r2" })).toBe(pending);
+  });
+
+  it("does not allow edits after submit and clears a retry error on a subsequent edit", () => {
+    let state: VoiceFlowState = voiceFlowReducer(initialVoiceFlowState, { type: "loaded", comparison: comparison(), loadedAt: 0 });
+    state = voiceFlowReducer(state, { type: "vote", outcome: "a", now: 10 });
+    state = voiceFlowReducer(state, { type: "setReason", reason: "other" });
+    state = voiceFlowReducer(state, { type: "submit" });
+    expect(voiceFlowReducer(state, { type: "setFreeText", text: "too late" })).toBe(state);
+
+    state = voiceFlowReducer(state, { type: "submitFailedRetryable", message: "try again" });
+    state = voiceFlowReducer(state, { type: "setFreeText", text: "a reason" });
+    expect((state as ActiveFlowState).submitError).toBeUndefined();
+  });
 });
 
 describe("buildJudgmentPayload", () => {
@@ -338,5 +375,20 @@ describe("buildJudgmentPayload", () => {
       freeText: "",
     };
     expect(buildJudgmentPayload(active)).toBeUndefined();
+  });
+
+  it("omits whitespace-only free text while retaining a provided reason", () => {
+    const active: ActiveFlowState = {
+      phase: "diagnostic",
+      excludeIds: [],
+      comparison: comparison(),
+      loadedAt: 20,
+      playCounts: { prompt: 1, a: 2, b: 3 },
+      outcome: "tie",
+      votedAt: 100,
+      reason: "not_sure",
+      freeText: "   ",
+    };
+    expect(buildJudgmentPayload(active)).toMatchObject({ free_text: undefined, time_to_judgment_ms: 80 });
   });
 });

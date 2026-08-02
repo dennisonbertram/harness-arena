@@ -1,8 +1,10 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
+import { PINNED_PROVIDERS } from "./arena-params";
 import { log } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
+import type { RunnerTask } from "./tasks-for-runner";
 import type { Run } from "./types";
 
 // FINAL golden snapshot per architect spike (issue #7 comments): docker +
@@ -12,15 +14,30 @@ import type { Run } from "./types";
 const DEFAULT_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
 const DEFAULT_CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
 
-// Raised from 45 to 120 minutes (issue #23 finding E) -- the Vercel account
-// is confirmed Pro (5h sandboxes supported), and the per-task timeout caps
-// in lib/tasks-for-runner.ts bound worst-case run duration to well under
-// 120 minutes regardless. Override via RUNNER_SANDBOX_TIMEOUT_MIN.
+// Requested lifetime before applying the task-derived safety floor below.
+// Vercel Pro currently permits much longer runs, but keeping the requested
+// default small avoids paying for an idle VM after a runner crash.
 const DEFAULT_SANDBOX_TIMEOUT_MIN = 120;
+const SANDBOX_SHUTDOWN_MARGIN_MIN = 30;
+const MINUTES_PER_HOUR = 60;
+const MS_PER_MINUTE = 60 * 1000;
 
-function sandboxTimeoutMs(): number {
-  const minutes = Number(process.env.RUNNER_SANDBOX_TIMEOUT_MIN ?? DEFAULT_SANDBOX_TIMEOUT_MIN);
-  return minutes * 60 * 1000;
+/**
+ * A configured timeout is only safe when every task could consume both of its
+ * enforced stage timeouts and the runner would still have time to upload traces
+ * and post its terminal callback. Round that floor up to a whole hour so small
+ * task-list changes do not repeatedly churn the Sandbox configuration.
+ */
+function sandboxTimeoutMs(tasks: RunnerTask[]): number {
+  const configured = Number(process.env.RUNNER_SANDBOX_TIMEOUT_MIN ?? DEFAULT_SANDBOX_TIMEOUT_MIN);
+  const configuredMinutes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_SANDBOX_TIMEOUT_MIN;
+  const taskBudgetMinutes = tasks.reduce(
+    (sum, task) => sum + (task.agent_timeout_sec + task.verifier_timeout_sec) / 60,
+    0,
+  );
+  const safeFloorMinutes =
+    Math.ceil((taskBudgetMinutes + SANDBOX_SHUTDOWN_MARGIN_MIN) / MINUTES_PER_HOUR) * MINUTES_PER_HOUR;
+  return Math.max(configuredMinutes, safeFloorMinutes) * MS_PER_MINUTE;
 }
 
 // Egress allowlist for the sandbox's default network policy (issue #23
@@ -100,6 +117,11 @@ async function markFailed(run: Run, err: unknown): Promise<void> {
   await storage.appendRunEvents(run.id, [
     { ts: new Date().toISOString(), type: "run.failed", payload: { error: message, stage: "sandbox_create" } },
   ]);
+  const submission = await storage.getSubmission(run.submission_id);
+  if (submission && (submission.status === "queued" || submission.status === "running")) {
+    submission.status = "failed";
+    await storage.putSubmission(submission);
+  }
 }
 
 export async function createRunSandbox(run: Run, opts: { prompt: string }): Promise<{ sandbox_id: string }> {
@@ -107,13 +129,16 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const callbackBase = process.env.CALLBACK_BASE ?? DEFAULT_CALLBACK_BASE;
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
-    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "2";
+    // Safety ceiling per run (not the metric). Headroom for pricier models like
+    // Claude; glm-5.2 runs cost ~$1 and never approach it.
+    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "15";
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
-    const tasksJsonB64 = Buffer.from(JSON.stringify(buildRunnerTasks()), "utf8").toString("base64");
+    const runnerTasks = buildRunnerTasks();
+    const tasksJsonB64 = Buffer.from(JSON.stringify(runnerTasks), "utf8").toString("base64");
 
     const sandbox = await Sandbox.create({
       source: { type: "snapshot", snapshotId: process.env.RUNNER_SNAPSHOT_ID ?? DEFAULT_SNAPSHOT_ID },
-      timeout: sandboxTimeoutMs(),
+      timeout: sandboxTimeoutMs(runnerTasks),
       networkPolicy: networkPolicy(),
       ...vercelCredentials(),
     });
@@ -126,10 +151,18 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     ]);
     log("info", "sandbox.creating", { run_id: run.id, sandbox_id: sandbox.name });
 
+    // Vercel's public static-asset cache can continue serving a previous
+    // deployment's runner-bundle.tgz from this stable pathname. That silently
+    // launched old transport code in production (/v1/v1/messages) even though
+    // the application deployment contained the fix. Tie the download URL to
+    // the deployment commit so every code revision has a distinct cache key.
+    const runnerBundleUrl = new URL(`${callbackBase}/runner-bundle.tgz`);
+    runnerBundleUrl.searchParams.set("v", process.env.VERCEL_GIT_COMMIT_SHA ?? "dev");
+
     // Bootstrap carries no secrets, so a plain shell string is fine here.
     const bootstrapCmd =
       `mkdir -p /opt/runner && ` +
-      `curl -fsSL ${shQuote(`${callbackBase}/runner-bundle.tgz`)} -o /tmp/rb.tgz && ` +
+      `curl -fsSL ${shQuote(runnerBundleUrl.toString())} -o /tmp/rb.tgz && ` +
       `tar -xzf /tmp/rb.tgz -C /opt/runner`;
     // sudo: /opt is root-owned, and the runner (also root) must be able to
     // read what we extract here.
@@ -156,10 +189,17 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
     };
-    // Optional model-routing overrides (default = Vercel AI Gateway). Set to
-    // route the fixed board through OpenRouter, matching harnessarena.xyz.
+    // Model routing (default = Vercel AI Gateway). The run's own model wins so
+    // different runs can use different models (glm-5.2, Claude Sonnet 5, …);
+    // all resolve through the gateway, so the provider stays the default.
     if (process.env.RUNNER_PROVIDER) runnerEnv.RUNNER_PROVIDER = process.env.RUNNER_PROVIDER;
-    if (process.env.RUNNER_MODEL) runnerEnv.RUNNER_MODEL = process.env.RUNNER_MODEL;
+    // Pin the gateway to one upstream for this model, so repeated runs measure
+    // the same machine. Unpinned models fall through unchanged and their runs
+    // are recorded without provider_pinned (see docs/provider-pinning.md).
+    const pinned = run.provider_requested ?? PINNED_PROVIDERS[run.model ?? process.env.RUNNER_MODEL ?? ""];
+    if (pinned) runnerEnv.PINNED_PROVIDER = pinned;
+    const runnerModel = run.model ?? process.env.RUNNER_MODEL;
+    if (runnerModel) runnerEnv.RUNNER_MODEL = runnerModel;
     if (process.env.OPENROUTER_API_KEY) runnerEnv.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
     // sudo: the runner starts dockerd, which requires root; the docker CLI
     // it then drives also needs root to reach the root-owned socket. Running

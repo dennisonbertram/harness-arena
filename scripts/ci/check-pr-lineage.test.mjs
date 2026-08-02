@@ -1,0 +1,230 @@
+import { describe, expect, it, vi } from "vitest";
+
+import * as wrapper from "./check-pr-lineage.mjs";
+
+const event = {
+  pull_request: {
+    number: 149,
+    base: { ref: "main" },
+  },
+};
+
+const repositoryNameWithOwner = "dennisonbertram/harness-arena";
+
+const validPayload = {
+  data: {
+    repository: {
+      nameWithOwner: repositoryNameWithOwner,
+      defaultBranchRef: { name: "main" },
+      pullRequest: {
+        number: 149,
+        closingIssuesReferences: {
+          totalCount: 1,
+          nodes: [
+            {
+              number: 141,
+              repository: { nameWithOwner: repositoryNameWithOwner },
+              parent: {
+                number: 139,
+                repository: { nameWithOwner: repositoryNameWithOwner },
+                labels: { nodes: [{ name: "epic" }] },
+              },
+            },
+          ],
+        },
+      },
+    },
+  },
+};
+
+function response(payload = validPayload, { ok = true, status = 200 } = {}) {
+  return { ok, status, json: async () => payload };
+}
+
+function checker() {
+  expect(wrapper.checkPullRequestLineage, "wrapper must export a testable end-to-end checker").toBeTypeOf("function");
+  return wrapper.checkPullRequestLineage;
+}
+
+describe("checkPullRequestLineage", () => {
+  it("queries native closingIssuesReferences for the event PR and validates its Epic parent", async () => {
+    const fetchImpl = vi.fn(async () => response());
+
+    await expect(
+      checker()({ event, token: "test-token", repository: "dennisonbertram/harness-arena", fetchImpl }),
+    ).resolves.toEqual({ issueNumber: 141, parentEpicNumber: 139 });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [url, options] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://api.github.com/graphql");
+    const request = JSON.parse(options.body);
+    expect(request.query).toContain("closingIssuesReferences");
+    expect(request.query.match(/\bnameWithOwner\b/g)).toHaveLength(5);
+    expect(request.variables).toEqual({ owner: "dennisonbertram", name: "harness-arena", number: 149, issueNumber: 1 });
+  });
+
+  it("rejects a foreign closing issue and foreign Epic from the GraphQL fixture", async () => {
+    const payload = structuredClone(validPayload);
+    const [issue] = payload.data.repository.pullRequest.closingIssuesReferences.nodes;
+    issue.repository.nameWithOwner = "attacker/foreign-repo";
+    issue.parent.repository.nameWithOwner = "attacker/foreign-repo";
+
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("closing issue repository must match the pull request base repository");
+  });
+
+  it("rejects a base-repository closing issue with a foreign Epic from the GraphQL fixture", async () => {
+    const payload = structuredClone(validPayload);
+    const [issue] = payload.data.repository.pullRequest.closingIssuesReferences.nodes;
+    issue.parent.repository.nameWithOwner = "attacker/foreign-repo";
+
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("parent issue repository must match the pull request base repository");
+  });
+
+  it("fails closed when native metadata reports multiple closing issues", async () => {
+    const payload = structuredClone(validPayload);
+    payload.data.repository.pullRequest.closingIssuesReferences.totalCount = 2;
+    payload.data.repository.pullRequest.closingIssuesReferences.nodes.push({
+      number: 142,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    });
+
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: "dennisonbertram/harness-arena",
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("exactly one native closing issue");
+  });
+
+  it("fails closed with explicit semantics for dev targets", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
+    const payload = structuredClone(validPayload);
+    payload.data.repository.pullRequest.closingIssuesReferences = { totalCount: 0, nodes: [] };
+    payload.data.repository.issue = {
+      number: 173,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
+
+    await expect(
+      checker()({
+        event: devEvent,
+        token: "test-token",
+        repository: "dennisonbertram/harness-arena",
+        fetchImpl: async () => response(payload),
+      }),
+    ).resolves.toEqual({ issueNumber: 173, parentEpicNumber: 139 });
+  });
+
+  it("rejects a dev issue response whose number differs from the parsed Closes reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
+    const payload = structuredClone(validPayload);
+    payload.data.repository.issue = {
+      number: 174,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
+
+    await expect(
+      checker()({
+        event: devEvent,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("does not match parsed Closes #173");
+  });
+
+  it("rejects a dev PR without exactly one local Closes #N reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173\nCloses #174";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one local Closes #N");
+  });
+
+  it("rejects cross-repository closing syntax for a dev PR", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes attacker/foreign-repo#173";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("local Closes #N");
+  });
+
+  it.each([
+    ["malformed", "Closes #173\nCloses not-an-issue"],
+    ["cross-repository", "Closes #173\nCloses attacker/foreign-repo#174"],
+    ["extra-token", "Closes #173\nCloses #174 because this also changed"],
+    ["second closing keyword", "Closes #173\nFixes #174"],
+    ["inline closing keyword", "Closes #173\nThis also fixes #174"],
+    ["list-item closing keyword", "Closes #173\n- Fixes #174"],
+    ["blockquote closing keyword", "Closes #173\n> Resolves #174"],
+  ])("rejects a valid dev reference plus a %s closing-directive candidate", async (_name, body) => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = body;
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one entire canonical local Closes #N");
+  });
+
+  it("fails closed when GitHub returns an HTTP error", async () => {
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: "dennisonbertram/harness-arena",
+        fetchImpl: async () => response({}, { ok: false, status: 503 }),
+      }),
+    ).rejects.toThrow("HTTP 503");
+  });
+
+  it("fails closed when the GraphQL fixture is malformed", async () => {
+    await expect(
+      checker()({
+        event,
+        token: "test-token",
+        repository: "dennisonbertram/harness-arena",
+        fetchImpl: async () => response({ data: { repository: null } }),
+      }),
+    ).rejects.toThrow("malformed");
+  });
+});

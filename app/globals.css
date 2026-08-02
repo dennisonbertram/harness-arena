@@ -133,6 +133,19 @@ a {
   color: var(--gray-900);
 }
 
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover {
+  background: var(--gray-100);
+}
+
+.clickable-row:focus-visible {
+  outline: 2px solid var(--blue-700);
+  outline-offset: -2px;
+}
+
 .site-nav {
   display: flex;
   align-items: center;
@@ -156,4 +169,11 @@ a {
     gap: 12px;
     font-size: 13px;
   }
+}
+
+/* Native <dialog> renders its backdrop transparent by default, so without
+   this the page behind a modal stays fully lit and the modal reads as a
+   floating panel rather than a layer above the page. */
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
 }

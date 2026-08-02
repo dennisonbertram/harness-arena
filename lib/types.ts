@@ -29,6 +29,10 @@ export const RUN_EVENT_TYPES = [
   "task.agent_finished",
   "task.verify_started",
   "task.verified",
+  // A task-level execution failure (for example, the model response timed
+  // out). This is not a run infrastructure failure: the runner records a
+  // failed task result and continues the benchmark.
+  "task.failed",
   "task.trace_uploaded",
   "run.budget_exceeded",
   "run.completed",
@@ -41,6 +45,11 @@ export const RUN_EVENT_TYPES = [
   // batch -- including the run's status -- whenever the runner emitted it
   // (issue #23 finding A).
   "task.cost_tamper_signal",
+  // Compact, non-secret provider-routing evidence captured by the local
+  // Gateway proxy after each task. Persisting this makes provider failures,
+  // response IDs, retry signals, and stream timing inspectable from the run
+  // event history instead of only from ephemeral sandbox logs.
+  "task.gateway_correlation",
 ] as const;
 
 export const SubmissionSchema = z.object({
@@ -52,7 +61,38 @@ export const SubmissionSchema = z.object({
   judge_reason: z.string().optional(),
   judge_model: z.string().optional(),
   judged_at: z.iso.datetime().optional(),
+  // First of the submission's runs, kept for backward-compatible readers.
   run_id: z.string().optional(),
+  // All runs spawned for this submission (RUNS_PER_SUBMISSION of them). Absent
+  // for legacy single-run submissions.
+  run_ids: z.array(z.string()).optional(),
+  // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
+  // for legacy submissions made before multi-model support.
+  model: z.string().optional(),
+  // Marks this submission as belonging to the /competition pool rather than
+  // the main arena. Absent/false = main arena (the default, unaffected). Kept
+  // (not repurposed) alongside competition_id: legacy rows predate the
+  // Competition entity and only ever set this boolean, and slice 2 still
+  // reads it as the fallback when competition_id is absent (issue #75/#76).
+  competition: z.boolean().optional(),
+  // Which Competition entity (see CompetitionSchema) this submission belongs
+  // to. Absent on every row written before the backfill script ran (see
+  // scripts/seed-competition.mjs) -- those rows are identified by
+  // `competition: true` instead.
+  competition_id: z.string().optional(),
+  // Marks the one competition submission that is the reference baseline.
+  competition_baseline: z.boolean().optional(),
+  // Snapshot of the competition's requested AI Gateway provider. Keeping it
+  // on the submission makes the routing target auditable even if the
+  // Competition record is edited after this entry was queued.
+  gateway_provider: z.string().optional(),
+  // The submitter's GitHub identity, stamped server-side from the session —
+  // never from the request body. Optional at the schema level because the
+  // admin-triggered competition baseline has no submitting user; both
+  // user-facing submission routes (main arena and competition) require a
+  // session and always set these before storing.
+  github_id: z.number().optional(),
+  github_login: z.string().optional(),
   created_at: z.iso.datetime(),
 });
 export type Submission = z.infer<typeof SubmissionSchema>;
@@ -63,11 +103,61 @@ export const TaskResultSchema = z.object({
   passed: z.boolean(),
   reward: z.number().optional(),
   cost_usd: z.number().optional(),
+  // How cost_usd was derived: "session" | "stdout" | "unmeasured". Absent
+  // cost_usd with cost_source "unmeasured" means no cost record existed — we
+  // report it as unknown rather than inventing a number.
+  cost_source: z.string().optional(),
   duration_s: z.number().optional(),
+  // Agent execution time excludes verifier work; together with output_tokens
+  // it makes output-token throughput a meaningful model measurement.
+  agent_duration_s: z.number().optional(),
   turns: z.number().optional(),
+  // Sum of assistant output tokens for this task. Absent when the runner's
+  // provider session did not report output usage.
+  output_tokens: z.number().optional(),
   trace_blob_url: z.string().optional(),
+  failure_stage: z.string().optional(),
+  error: z.string().optional(),
 });
 export type TaskResult = z.infer<typeof TaskResultSchema>;
+
+export const PRIZE_CADENCES = ["daily", "weekly", "monthly", "one-time"] as const;
+
+// A (arena, harness, model, gateway provider) target -- one leaderboard, one
+// prize pot (epic #74). "Harness Arena" is the one arena type that exists
+// today, but arena is deliberately an open string rather than a closed enum: a
+// future arena type (e.g. a bounty) is not a schema change, just a new value.
+export const CompetitionSchema = z.object({
+  id: z.string(),
+  // Slug for the competition TYPE, e.g. "harness-arena". Open string on
+  // purpose -- see comment above.
+  arena: z.string(),
+  harness: z.string(),
+  // Gateway id, e.g. "zai/glm-5.2" -- must pass isAllowedModel (lib/models.ts).
+  model: z.string(),
+  // Provider slug supplied to AI Gateway's providerOptions.gateway.only.
+  // Optional for legacy competitions, which continue to use the historical
+  // model-level default in PINNED_PROVIDERS.
+  gateway_provider: z.string().optional(),
+  // Prize amount/cadence are data, not a constant, but deliberately UNSET at
+  // seed time (epic #74: "TBD, do not invent a figure"). Nullable because a
+  // seeded row explicitly carries "no value yet" rather than omitting the
+  // field, so callers can distinguish "seeded, TBD" from "field doesn't
+  // exist on this schema version."
+  prize_amount_usd: z.number().nullable().optional(),
+  prize_cadence: z.enum(PRIZE_CADENCES).nullable().optional(),
+  // Closing is manual (epic #74) -- no scheduled rollover computes this.
+  status: z.enum(["live", "closed"]),
+  // Whether the reconciler may create a baseline for this competition.
+  // Absent means yes: a competition without a baseline has no reference point.
+  // Stored rather than inferred, because the board render and the cron sweep
+  // reconcile independently of whoever created it and would otherwise
+  // recreate the run an admin explicitly declined to pay for.
+  auto_baseline: z.boolean().optional(),
+  created_at: z.iso.datetime(),
+  closed_at: z.iso.datetime().optional(),
+});
+export type Competition = z.infer<typeof CompetitionSchema>;
 
 export const RunSchema = z.object({
   id: z.string(),
@@ -79,6 +169,28 @@ export const RunSchema = z.object({
   total_cost_usd: z.number().optional(),
   over_budget: z.boolean().optional(),
   sandbox_id: z.string().optional(),
+  // When the dispatcher claimed this run and fired its sandbox. Set BEFORE the
+  // sandbox call so concurrency accounting counts it as active and a second
+  // dispatch is less likely to double-start it. Absent = not yet dispatched.
+  dispatched_at: z.iso.datetime().optional(),
+  // The model this run executed on (gateway id). Absent = default glm-5.2.
+  // Which upstream provider the AI Gateway was pinned to for this run.
+  //
+  // The gateway fans one model id across many upstreams -- zai/glm-5.2 reports
+  // fifteen -- which differ in quantisation and serving stack. Runs recorded
+  // BEFORE pinning shipped have no value here, and are therefore not strictly
+  // comparable with pinned ones: each sampled an unknown mix. Absence is the
+  // deprecation marker; see isPrePinningRun and docs/provider-pinning.md.
+  provider_pinned: z.string().optional(),
+  // Provider this run was ASKED to pin. This is distinct from
+  // provider_pinned, which is written only after the sidecar actually applies
+  // the pin and therefore remains trustworthy as execution evidence.
+  provider_requested: z.string().optional(),
+  // What pi's system prompt actually resolved to inside the container, read
+  // off the request body by the gateway sidecar. Absent on runs that predate
+  // the capture, and on any run whose model never reached the sidecar.
+  resolved_system_prompt: z.string().optional(),
+  model: z.string().optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),
 });

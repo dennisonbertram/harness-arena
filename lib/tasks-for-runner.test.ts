@@ -3,7 +3,7 @@ import { buildRunnerTasks } from "./tasks-for-runner";
 import { getTasks } from "./tasks";
 
 describe("buildRunnerTasks", () => {
-  it("maps every getTasks() entry to the runner's TASKS_JSON shape, capping the two timeouts", () => {
+  it("maps every getTasks() entry to the runner's TASKS_JSON shape with its benchmark timeouts", () => {
     const tasks = getTasks();
     const runnerTasks = buildRunnerTasks();
 
@@ -13,8 +13,8 @@ describe("buildRunnerTasks", () => {
         id: t.id,
         image: t.dockerImage,
         instruction: t.instruction,
-        agent_timeout_sec: Math.min(t.agentTimeoutSec, 300),
-        verifier_timeout_sec: Math.min(t.verifierTimeoutSec, 240),
+        agent_timeout_sec: t.agentTimeoutSec,
+        verifier_timeout_sec: t.verifierTimeoutSec,
       })),
     );
   });
@@ -36,25 +36,15 @@ describe("regression: image field carries the full docker_image tag runner.mjs p
   });
 });
 
-describe("timeout caps (issue #23 finding E): bound worst-case run duration under the 120-minute sandbox timeout", () => {
-  it("caps agent_timeout_sec at 300s even though the real task.toml values are 900s", () => {
+describe("timeout caps: preserve each benchmark-defined task window by default", () => {
+  it("does not cut the benchmark's 10-30 minute stage timeouts down to five minutes", () => {
     const tasks = getTasks();
-    // Sanity-check the fixture assumption this test relies on: every real
-    // task's source timeout exceeds the cap, so capping is actually
-    // exercised here (not vacuously true).
-    expect(tasks.every((t) => t.agentTimeoutSec > 300)).toBe(true);
+    expect(Math.min(...tasks.map((t) => t.agentTimeoutSec))).toBe(600);
+    expect(Math.max(...tasks.map((t) => t.agentTimeoutSec))).toBe(1800);
 
-    for (const runnerTask of buildRunnerTasks()) {
-      expect(runnerTask.agent_timeout_sec).toBe(300);
-    }
-  });
-
-  it("caps verifier_timeout_sec at 240s even though the real task.toml values are 900s", () => {
-    const tasks = getTasks();
-    expect(tasks.every((t) => t.verifierTimeoutSec > 240)).toBe(true);
-
-    for (const runnerTask of buildRunnerTasks()) {
-      expect(runnerTask.verifier_timeout_sec).toBe(240);
+    for (const [index, runnerTask] of buildRunnerTasks().entries()) {
+      expect(runnerTask.agent_timeout_sec).toBe(tasks[index].agentTimeoutSec);
+      expect(runnerTask.verifier_timeout_sec).toBe(tasks[index].verifierTimeoutSec);
     }
   });
 
@@ -81,6 +71,17 @@ describe("timeout caps (issue #23 finding E): bound worst-case run duration unde
       for (const runnerTask of buildRunnerTasks()) {
         expect(runnerTask.agent_timeout_sec).toBe(120);
         expect(runnerTask.verifier_timeout_sec).toBe(90);
+      }
+    });
+
+    it("does not let an environment override exceed each task's benchmark timeout", () => {
+      process.env.RUNNER_AGENT_TIMEOUT_CAP = "3600";
+      process.env.RUNNER_VERIFY_TIMEOUT_CAP = "3600";
+
+      const tasks = getTasks();
+      for (const [index, runnerTask] of buildRunnerTasks().entries()) {
+        expect(runnerTask.agent_timeout_sec).toBe(tasks[index].agentTimeoutSec);
+        expect(runnerTask.verifier_timeout_sec).toBe(tasks[index].verifierTimeoutSec);
       }
     });
   });

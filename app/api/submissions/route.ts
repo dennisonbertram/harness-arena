@@ -1,15 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { resolveIdentity } from "@/lib/identity";
 import { JUDGE_MODEL, judgeSubmission } from "@/lib/judge";
 import { log } from "@/lib/log";
-import { startRun } from "@/lib/run-trigger";
+import { dispatchQueuedRuns } from "@/lib/dispatch";
+import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
+import { clientIp, createRateLimiter } from "@/lib/rate-limit";
+import { isBaselinePrompt } from "@/lib/prompt";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
 
 const MAX_PROMPT_CHARS = 32768;
 const MAX_BODY_BYTES = 262144;
+
+// Fixed sample size per submission: each approved (prompt, model) runs this many
+// times so pass rate is a mean over a uniform n, not a single noisy run. The
+// runs are created queued and started by the dispatcher under a global
+// concurrency cap (lib/dispatch.ts) — NOT spawned inline, which is what
+// overwhelmed the serverless budget when several submissions landed at once.
+// Override via RUNS_PER_SUBMISSION; floored at 1.
+const RUNS_PER_SUBMISSION = Math.max(1, Math.floor(Number(process.env.RUNS_PER_SUBMISSION ?? 5)) || 5);
 
 const SubmissionInputSchema = z.object({
   agent_name: z.string().min(1).max(40),
@@ -18,28 +30,17 @@ const SubmissionInputSchema = z.object({
   // baseline, which passes no --system-prompt. Non-empty prompts go through
   // the fraud judge as usual.
   prompt: z.string().max(MAX_PROMPT_CHARS),
+  // Optional model (gateway id); defaults to glm-5.2. Must be on the allowlist
+  // so a public submitter can't route to an arbitrary/expensive model.
+  model: z.string().optional(),
 });
 
-// ponytail: naive in-memory per-IP rate limit — explicitly POC-level, not a
-// real abuse boundary. It's per-process state, so on serverless (each
-// invocation may be a separate instance/cold start) this does not actually
-// enforce a global 5/hour limit across all traffic to an IP; upgrade to a
-// shared store (e.g. Redis) if that ever matters.
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-const RATE_LIMIT_MAX = 5;
-const submissionTimestamps = new Map<string, number[]>();
-
-function isRateLimited(ip: string, now: number = Date.now()): boolean {
-  const recent = (submissionTimestamps.get(ip) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  const limited = recent.length >= RATE_LIMIT_MAX;
-  if (!limited) recent.push(now);
-  submissionTimestamps.set(ip, recent);
-  return limited;
-}
-
-function clientIp(request: NextRequest): string {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-}
+// A GitHub account is cheap to mint, so identity alone is a weak rate-limit
+// key — both buckets must admit the request (R3). Shares the naive
+// in-memory limiter with the competition submissions route (see
+// lib/rate-limit.ts for the POC-level caveat).
+const isIpRateLimited = createRateLimiter(5);
+const isGithubIdRateLimited = createRateLimiter(5);
 
 export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") ?? "";
@@ -52,9 +53,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "request body too large" }, { status: 413 });
   }
 
+  // IP-based check runs before auth() (matches the competition route's
+  // ordering) so a flood of malformed/oversized/unauthenticated requests is
+  // rejected via a cheap in-memory lookup before paying for a session decrypt.
   const ip = clientIp(request);
-  if (isRateLimited(ip)) {
+  if (isIpRateLimited(ip)) {
     log("warn", "submission.rate_limited", { ip });
+    return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
+  }
+
+  const identity = await resolveIdentity(request);
+  if (!identity) {
+    return NextResponse.json({ error: "sign in with GitHub to submit" }, { status: 401 });
+  }
+  const { githubId, githubLogin } = identity;
+
+  if (isGithubIdRateLimited(String(githubId))) {
+    log("warn", "submission.rate_limited", { ip, github_id: githubId });
     return NextResponse.json({ error: "rate limit exceeded, max 5 submissions per hour" }, { status: 429 });
   }
 
@@ -67,26 +82,40 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const model = parsedInput.data.model ?? DEFAULT_MODEL;
+  if (!isAllowedModel(model)) {
+    return NextResponse.json({ error: `model "${model}" is not allowed` }, { status: 400 });
+  }
+
   const storage = getStorage();
   const submission: Submission = {
     id: randomUUID(),
     agent_name: parsedInput.data.agent_name,
     prompt: parsedInput.data.prompt,
     status: "pending_review",
+    model,
+    github_id: githubId,
+    github_login: githubLogin,
     created_at: new Date().toISOString(),
   };
   await storage.putSubmission(submission);
 
   let verdict;
-  if (submission.prompt.trim().length === 0) {
+  if (isBaselinePrompt(submission.prompt)) {
     // Vanilla baseline: no submitted prompt, nothing to judge for fraud.
     verdict = { verdict: "approved" as const, reason: "vanilla baseline (no custom system prompt)" };
   } else {
     try {
       verdict = await judgeSubmission(submission.prompt, getTasks());
     } catch (err) {
-      log("error", "judge.unavailable", { submission_id: submission.id, error: (err as Error).message });
-      return NextResponse.json({ error: "judge unavailable, retry later" }, { status: 503 });
+      const detail = (err as Error).message;
+      log("error", "judge.unavailable", { submission_id: submission.id, error: detail });
+      return NextResponse.json(
+        {
+          error: `The fairness judge was temporarily unavailable, so we couldn't screen your prompt. Nothing was charged — please resubmit in a moment. (${detail})`,
+        },
+        { status: 503 },
+      );
     }
   }
 
@@ -111,40 +140,54 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const run: Run = {
+  // Create the fixed sample of runs as `queued`. They are NOT started inline —
+  // the dispatcher (kicked below and on every run-list poll / run completion)
+  // starts them under a global concurrency cap so a burst of submissions can't
+  // overwhelm the sandbox/serverless budget.
+  const now = new Date().toISOString();
+  const runs: Run[] = Array.from({ length: RUNS_PER_SUBMISSION }, () => ({
     id: randomUUID(),
     submission_id: submission.id,
-    status: "queued",
+    status: "queued" as const,
+    model,
     task_results: [],
-    created_at: new Date().toISOString(),
-  };
-  await storage.putRun(run);
-  await storage.appendRunEvents(run.id, [
-    { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
-  ]);
+    created_at: now,
+  }));
+  for (const run of runs) {
+    await storage.putRun(run);
+    await storage.appendRunEvents(run.id, [
+      { ts: new Date().toISOString(), type: "run.created", payload: { submission_id: submission.id } },
+    ]);
+  }
+  const runIds = runs.map((r) => r.id);
 
   submission.status = "queued";
-  submission.run_id = run.id;
+  submission.run_id = runIds[0]; // first run, kept for backward-compatible readers
+  submission.run_ids = runIds;
   await storage.putSubmission(submission);
 
-  // Run the trigger via after() so it executes once the response has been
-  // sent but is still awaited within the function's lifetime (a bare
-  // fire-and-forget setTimeout would get killed once the invocation ends).
-  // after() throws synchronously if there's no live Next.js request scope
-  // (e.g. this route handler invoked directly, as this repo's route tests
-  // do) -- fall back to the original ticket #4 fire-and-forget contract in
-  // that case so the trigger still runs. Either way, a failing/stubbed
-  // trigger must never fail the submission response.
-  const onTriggerFailure = (err: unknown) => {
-    log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message });
-  };
+  // Kick the dispatcher via after() so it runs once the response has been sent
+  // but is still awaited within the invocation's lifetime. after() throws
+  // synchronously if there's no live request scope (e.g. this handler invoked
+  // directly, as the route tests do) -- fall back to a direct call so the
+  // dispatch still fires. A failing dispatch must never fail the response.
+  const kickDispatch = () =>
+    dispatchQueuedRuns(storage).catch((err: unknown) =>
+      log("warn", "dispatch.failed", { submission_id: submission.id, error: (err as Error).message }),
+    );
   try {
-    after(() => startRun(run, submission.prompt).catch(onTriggerFailure));
+    after(kickDispatch);
   } catch {
-    void startRun(run, submission.prompt).catch(onTriggerFailure);
+    void kickDispatch();
   }
 
-  return NextResponse.json({ submission_id: submission.id, run_id: run.id, status: submission.status });
+  return NextResponse.json({
+    submission_id: submission.id,
+    run_id: runIds[0],
+    run_ids: runIds,
+    status: submission.status,
+    judge_reason: verdict.reason,
+  });
 }
 
 export async function GET() {

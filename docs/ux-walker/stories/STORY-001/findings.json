@@ -1,0 +1,30 @@
+[
+  {
+    "id": "F-001-1",
+    "story_id": "STORY-001",
+    "severity": "medium",
+    "category": "layout",
+    "criterion": "Text Fit & Wrap / Responsive behavior (rubric 3, 9)",
+    "score": "warn",
+    "description": "At a 390px mobile viewport the header nav has no responsive treatment: the logo 'Harness Arena' wraps to 2 lines and the 'How it works' link wraps to 3 lines. geometry-audit.js also flags the nav container overflowing its box by 15px (overflow-x: visible).",
+    "expected": "Nav collapses to a hamburger/menu pattern, or links abbreviate/stack cleanly, below a reasonable breakpoint (matches Visual Correctness / Layout Quality rubric: 'elements reflow gracefully').",
+    "actual": "Five nav items (logo + 4 links) are forced into one row at 390px, causing 2 of them to wrap mid-phrase ('How' / 'it' / 'works' on 3 separate lines).",
+    "screenshot": "docs/ux-walker/stories/STORY-001/screenshots/step-4-mobile.png",
+    "suggested_fix": "Add a mobile breakpoint that switches the header nav to a hamburger/drawer, or reduce to icon-only / stacked links under ~480px.",
+    "files_likely_involved": []
+  },
+  {
+    "id": "F-001-2",
+    "story_id": "STORY-001",
+    "severity": "low",
+    "category": "hierarchy",
+    "criterion": "Information stated once (rubric 10)",
+    "score": "warn",
+    "description": "Progress is shown via two separate counters that always move in lockstep for this 10-clip/5-comparison fixture: the batch-relative heading ('Comparison 2 of 5') and the lifetime counter ('1 of 5 judged'). A first-time user has no way to tell these are two different concepts (position-in-batch vs. total-judged) rather than a restated duplicate, since with this fixture N-1 always equals the judged count.",
+    "expected": "Either a single counter, or a visual/textual cue that these represent different things (matters once real sessions span multiple batches of 10).",
+    "actual": "Two numeric progress indicators presented with no distinguishing framing beyond position (top-left vs. top-right) and different phrasing.",
+    "screenshot": "docs/ux-walker/stories/STORY-001/screenshots/step-1-initial.png",
+    "suggested_fix": "Low priority given fixture size; worth revisiting once real sessions have >1 batch and the two numbers diverge meaningfully.",
+    "files_likely_involved": []
+  }
+]

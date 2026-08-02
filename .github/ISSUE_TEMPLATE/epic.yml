@@ -1,0 +1,50 @@
+name: Epic
+description: Track a multi-slice outcome using native GitHub subissues.
+title: "epic: "
+labels: ["epic", "status:tracking"]
+body:
+  - type: markdown
+    attributes:
+      value: "Create PR-sized native subissues from this Epic before code work begins."
+  - type: textarea
+    id: why-observed
+    attributes: { label: "Why / observed behavior", description: "Problem, evidence, and desired outcome." }
+    validations: { required: true }
+  - type: textarea
+    id: operator-path
+    attributes: { label: "Operator path", description: "Who runs what path, including failure and recovery." }
+  - type: textarea
+    id: behavior-contract
+    attributes: { label: "Behavior / integration contract", description: "Inputs, outputs, compatibility, and boundaries." }
+  - type: textarea
+    id: scope
+    attributes: { label: Scope, description: "In scope, out of scope, and PR-sized native child issues." }
+    validations: { required: true }
+  - type: textarea
+    id: research-context
+    attributes: { label: "Research / context", description: "Links, constraints, and source evidence." }
+  - type: textarea
+    id: coordination
+    attributes: { label: Coordination, description: "Owners, dependencies, and sequencing." }
+  - type: textarea
+    id: tests-first
+    attributes: { label: "Tests first", description: "Regression tests and expected red failure." }
+  - type: textarea
+    id: tdd-trail
+    attributes: { label: "TDD trail", description: "Red/green commit and command evidence." }
+  - type: textarea
+    id: risk
+    attributes: { label: Risk, description: "Risks, mitigations, and security/privacy concerns." }
+  - type: textarea
+    id: deploy-rollback
+    attributes: { label: "Deploy / rollback", description: "Release checks, rollback, and emergency incident-child path." }
+  - type: textarea
+    id: docs-handoff
+    attributes: { label: "Docs / handoff", description: "Documentation and operator handoff needed." }
+  - type: checkboxes
+    id: dod
+    attributes:
+      label: Definition of done
+      options:
+        - label: Native PR-sized subissues exist and are attached to this Epic.
+        - label: Tests, rollout evidence, and handoff are complete.
