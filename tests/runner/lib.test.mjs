@@ -251,6 +251,26 @@ describe("drainGatewayDiagnostics", () => {
 });
 
 describe("bounded runner diagnostics", () => {
+  it("starts task 1 with a fresh scope after gateway preflight diagnostics", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "preflight-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "preflight-1", status: 503 });
+    diagnostics.push({ type: "gateway_proxy.retry", request_id: "preflight-1", attempt: 1 });
+
+    diagnostics.beginScope();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "task-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "task-1", status: 200 });
+    diagnostics.push({ type: "gateway_proxy.response_complete", request_id: "task-1", response_id: "gen-1" });
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(1);
+    expect(snapshot.droppedEvents).toBe(0);
+    expect(snapshot.events.map((event) => event.request_id)).not.toContain("preflight-1");
+    expect(summarizeGatewayRequests(snapshot.events)).toEqual([
+      expect.objectContaining({ request_id: "task-1", status: 200, response_id: "gen-1" }),
+    ]);
+  });
+
   it("caps high-cardinality diagnostics while preserving request counts and terminal evidence", () => {
     const diagnostics = createBoundedGatewayDiagnosticCollector({ maxEntries: 12, maxBytes: 4_096 });
     for (let index = 0; index < 500; index += 1) {

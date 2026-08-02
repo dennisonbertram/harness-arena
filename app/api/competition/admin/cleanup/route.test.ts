@@ -34,6 +34,7 @@ describe("POST /api/competition/admin/cleanup", () => {
     vi.stubEnv("COMPETITION_ADMIN_TOKEN", ADMIN_TOKEN);
     cleanup.archiveAndDeleteCompetitionSubmissions.mockResolvedValue({
       archivePrefix: "archives/competition-cleanups/competition/archive",
+      receiptPath: "archives/competition-cleanups/competition/archive/recovery.json",
       submissionIds: BODY.submission_ids,
       runIds: ["a760aa4e-643f-4934-94b8-18eccf196793"],
       counts: { submissions: 1, runs: 1, events: 100, traces: 33 },
@@ -76,6 +77,7 @@ describe("POST /api/competition/admin/cleanup", () => {
       status: "deleted",
       operation_id: BODY.operation_id,
       archive_prefix: "archives/competition-cleanups/competition/archive",
+      receipt_path: "archives/competition-cleanups/competition/archive/recovery.json",
     });
   });
 

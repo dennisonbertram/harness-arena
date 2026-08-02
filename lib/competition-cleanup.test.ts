@@ -34,8 +34,11 @@ vi.mock("@vercel/blob", () => ({
     if (value === undefined) throw new Error(`missing ${from}`);
     blob.objects.set(to, value);
   }),
-  put: vi.fn(async (pathname: string, body: string) => {
+  put: vi.fn(async (pathname: string, body: string, options?: { allowOverwrite?: boolean }) => {
     blob.operations.push(`put:${pathname}`);
+    if (blob.objects.has(pathname) && options?.allowOverwrite !== true) {
+      throw new Error(`blob already exists: ${pathname}`);
+    }
     blob.objects.set(pathname, body);
   }),
   del: vi.fn(async (pathnames: string[]) => {
@@ -50,18 +53,31 @@ import { archiveAndDeleteCompetitionSubmissions } from "./competition-cleanup";
 const COMPETITION_ID = "competition-1";
 const SUBMISSION_ID = "submission-1";
 const RUN_ID = "run-1";
+const OPERATION_INDEX_PREFIX = "archives/competition-cleanup-operations";
 
-function seed({ baseline = false, runStatus = "completed" }: { baseline?: boolean; runStatus?: string } = {}) {
-  blob.objects.set(`competitions/${COMPETITION_ID}.json`, JSON.stringify({ id: COMPETITION_ID, status: "live" }));
-  blob.objects.set(`submissions/${SUBMISSION_ID}.json`, JSON.stringify({
-    id: SUBMISSION_ID,
-    competition_id: COMPETITION_ID,
+function seed({
+  baseline = false,
+  runStatus = "completed",
+  competitionId = COMPETITION_ID,
+  submissionId = SUBMISSION_ID,
+  runId = RUN_ID,
+}: {
+  baseline?: boolean;
+  runStatus?: string;
+  competitionId?: string;
+  submissionId?: string;
+  runId?: string;
+} = {}) {
+  blob.objects.set(`competitions/${competitionId}.json`, JSON.stringify({ id: competitionId, status: "live" }));
+  blob.objects.set(`submissions/${submissionId}.json`, JSON.stringify({
+    id: submissionId,
+    competition_id: competitionId,
     competition_baseline: baseline,
-    run_ids: [RUN_ID],
+    run_ids: [runId],
   }));
-  blob.objects.set(`runs/${RUN_ID}.json`, JSON.stringify({ id: RUN_ID, submission_id: SUBMISSION_ID, status: runStatus }));
-  blob.objects.set(`events/${RUN_ID}/0000000001.json`, JSON.stringify({ type: "run.completed" }));
-  blob.objects.set(`traces/${RUN_ID}/task/trace.json`, "trace");
+  blob.objects.set(`runs/${runId}.json`, JSON.stringify({ id: runId, submission_id: submissionId, status: runStatus }));
+  blob.objects.set(`events/${runId}/0000000001.json`, JSON.stringify({ type: "run.completed" }));
+  blob.objects.set(`traces/${runId}/task/trace.json`, "trace");
 }
 
 describe("archiveAndDeleteCompetitionSubmissions", () => {
@@ -74,6 +90,7 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
 
   it("archives every target object before deleting children before parents", async () => {
     seed();
+    const receiptPath = `archives/competition-cleanups/${COMPETITION_ID}/test-cleanup/recovery.json`;
 
     const result = await archiveAndDeleteCompetitionSubmissions({
       competitionId: COMPETITION_ID,
@@ -84,9 +101,11 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
 
     expect(result).toMatchObject({
       archivePrefix: `archives/competition-cleanups/${COMPETITION_ID}/test-cleanup`,
+      receiptPath,
       counts: { submissions: 1, runs: 1, events: 1, traces: 1 },
     });
     expect(blob.operations).toEqual([
+      `put:${OPERATION_INDEX_PREFIX}/test-cleanup.json`,
       `copy:submissions/${SUBMISSION_ID}.json`,
       `copy:runs/${RUN_ID}.json`,
       `copy:events/${RUN_ID}/0000000001.json`,
@@ -96,9 +115,75 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
       `del:traces/${RUN_ID}/task/trace.json`,
       `del:runs/${RUN_ID}.json`,
       `del:submissions/${SUBMISSION_ID}.json`,
+      `put:${receiptPath}`,
     ]);
     expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(false);
     expect(blob.objects.has(`archives/competition-cleanups/${COMPETITION_ID}/test-cleanup/submissions/${SUBMISSION_ID}.json`)).toBe(true);
+    expect(JSON.parse(blob.objects.get(receiptPath) ?? "{}")).toMatchObject({
+      status: "completed",
+      operationId: "test-cleanup",
+      remainingPathnames: [],
+    });
+  });
+
+  it("replays a completed operation as a zero-delete no-op after a lost response", async () => {
+    seed();
+    const input = {
+      competitionId: COMPETITION_ID,
+      submissionIds: [SUBMISSION_ID],
+      reason: "provider configuration error",
+      archiveId: "lost-response-operation",
+    };
+    const first = await archiveAndDeleteCompetitionSubmissions(input);
+    blob.operations.length = 0;
+
+    const replay = await archiveAndDeleteCompetitionSubmissions(input);
+
+    expect(replay).toEqual(first);
+    expect(replay.receiptPath).toBe(
+      `archives/competition-cleanups/${COMPETITION_ID}/lost-response-operation/recovery.json`,
+    );
+    expect(blob.operations).toEqual([]);
+  });
+
+  it("globally binds one operation ID when different competitions race", async () => {
+    seed();
+    seed({ competitionId: "competition-2", submissionId: "submission-2", runId: "run-2" });
+    const archiveId = "shared-global-operation";
+
+    const outcomes = await Promise.allSettled([
+      archiveAndDeleteCompetitionSubmissions({
+        competitionId: COMPETITION_ID,
+        submissionIds: [SUBMISSION_ID],
+        reason: "provider configuration error",
+        archiveId,
+      }),
+      archiveAndDeleteCompetitionSubmissions({
+        competitionId: "competition-2",
+        submissionIds: ["submission-2"],
+        reason: "provider configuration error",
+        archiveId,
+      }),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([
+      expect.objectContaining({ reason: expect.objectContaining({
+        message: "operation ID is already bound to a different cleanup intent",
+      }) }),
+    ]);
+    const index = JSON.parse(blob.objects.get(`${OPERATION_INDEX_PREFIX}/${archiveId}.json`) ?? "{}");
+    expect(index).toMatchObject({
+      schema_version: 1,
+      operation_id: archiveId,
+    });
+    expect([COMPETITION_ID, "competition-2"]).toContain(index.competition_id);
+    expect(index.manifest_path).toBe(
+      `archives/competition-cleanups/${index.competition_id}/${archiveId}/manifest.json`,
+    );
+    const losingSubmission = index.competition_id === COMPETITION_ID ? "submission-2" : SUBMISSION_ID;
+    expect(blob.operations).not.toContain(`copy:submissions/${losingSubmission}.json`);
+    expect(blob.objects.has(`submissions/${losingSubmission}.json`)).toBe(true);
   });
 
   it("refuses a baseline before copying or deleting anything", async () => {
