@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -39,5 +39,19 @@ describe("safe local init helpers", () => {
     const path = await localEnv(dir, { write: true });
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     await expect(localEnv(dir, { write: true })).rejects.toThrow(/already exists/);
+  });
+
+  it("never exposes a partial .env.local and recovers on retry after publication is interrupted", async () => {
+    const dir = await worktree();
+    const path = join(dir, ".env.local");
+    await expect(localEnv(dir, {
+      write: true,
+      beforePublish: () => { throw new Error("injected env publication interruption"); },
+    })).rejects.toThrow(/injected env publication interruption/);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    await localEnv(dir, { write: true });
+    expect(await readFile(path, "utf8")).toContain("# harness-arena-init:v2");
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 });

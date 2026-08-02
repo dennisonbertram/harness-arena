@@ -35,9 +35,12 @@ describe("init security and lifecycle", () => {
     expect(child.RANDOM_PARENT_SECRET).toBeUndefined();
   });
 
-  it("rejects Node 19 and probes the real selected port instead of accepting a hardcoded flag", async () => {
-    expect(() => init.assertNodeVersion("19.9.0")).toThrow(/Node\.js 20/);
-    expect(() => init.assertNodeVersion("20.0.0")).not.toThrow();
+  it("enforces Next 16.2.11's complete Node >=20.9.0 semver floor and probes the selected port", async () => {
+    for (const version of ["19.9.0", "20.8.999", "20.9", "20", "garbage", "", "20.9.0.1"]) {
+      expect(() => init.assertNodeVersion(version), version).toThrow(/Node\.js 20(?:\.9\.0)?\+/);
+    }
+    expect(() => init.assertNodeVersion("20.9.0")).not.toThrow();
+    expect(() => init.assertNodeVersion("21.0.0")).not.toThrow();
     const server = createServer();
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = server.address().port;

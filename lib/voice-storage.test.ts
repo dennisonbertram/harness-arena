@@ -85,6 +85,25 @@ describe("FileVoiceStorage", () => {
     await expect(storage.getManifest()).rejects.toThrow(/manifest|schema|invalid/i);
   });
 
+  it("publishes write-once judgments only after a complete temp file and recovers after interruption", async () => {
+    const FaultInjectableFileVoiceStorage = FileVoiceStorage as unknown as new (
+      storageRoot: string,
+      options: { beforeJudgmentPublish?: () => void | Promise<void> },
+    ) => FileVoiceStorage;
+    const interrupted = new FaultInjectableFileVoiceStorage(root, {
+      beforeJudgmentPublish: () => { throw new Error("injected judgment publication interruption"); },
+    });
+    const path = join(root, "voice", "judgments", "eval-1", "resp-a_resp-b.json");
+
+    await expect(interrupted.putJudgment(makeJudgment())).rejects.toThrow(/injected judgment publication interruption/);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const retry = new FileVoiceStorage(root);
+    await expect(retry.putJudgment(makeJudgment({ outcome: "a" }))).resolves.toEqual({ created: true });
+    await expect(retry.putJudgment(makeJudgment({ outcome: "b" }))).resolves.toEqual({ created: false });
+    expect(JSON.parse(await readFile(path, "utf8")).outcome).toBe("a");
+  });
+
   it.each([".", "..", "../escape", "a/b", "a\\b", "%2e%2e%2fescape"])("rejects unsafe judgment/evaluator path %j", async (part) => {
     const storage = new FileVoiceStorage(root);
     await expect(storage.putJudgment(makeJudgment({ evaluator_id: part }))).rejects.toThrow(/path segment/);
