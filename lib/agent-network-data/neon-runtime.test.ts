@@ -5,12 +5,14 @@ const factories = vi.hoisted(() => ({
   chat: vi.fn(() => ({ kind: "chat" })),
   traces: vi.fn(() => ({ kind: "traces" })),
   payouts: vi.fn(() => ({ kind: "payouts" })),
+  eligibility: vi.fn(() => ({ kind: "eligibility" })),
 }));
 
 vi.mock("./postgres", () => ({ createPostgresAgentNetworkRepositories: factories.repositories }));
 vi.mock("../competition-chat/postgres", () => ({ createPostgresCompetitionChat: factories.chat }));
 vi.mock("../entrant-traces/postgres", () => ({ createPostgresEntrantTraces: factories.traces }));
 vi.mock("../payouts/external-address", () => ({ createExternalPayoutAddressService: factories.payouts }));
+vi.mock("../payouts/eligibility", () => ({ createPayoutEligibilityService: factories.eligibility }));
 
 import {
   closeNeonRuntimeForTests,
@@ -89,7 +91,7 @@ describe("lazy Neon runtime factory", () => {
 });
 
 describe("agent-network service composition", () => {
-  it("builds repositories, chat, traces, and payout services over the same injected transaction adapter without a network call", () => {
+  it("builds repositories, chat, traces, payout, and owner-only eligibility services over the same injected transaction adapter without a network call", () => {
     const sql = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
       transaction: vi.fn(),
@@ -106,8 +108,9 @@ describe("agent-network service composition", () => {
       chat: { kind: "chat" },
       traces: { kind: "traces" },
       payouts: { kind: "payouts" },
+      eligibility: { kind: "eligibility" },
     });
-    for (const factory of [factories.repositories, factories.chat, factories.traces, factories.payouts]) {
+    for (const factory of [factories.repositories, factories.chat, factories.traces, factories.payouts, factories.eligibility]) {
       expect(factory).toHaveBeenCalledWith(sql, expect.any(Object));
     }
     expect(sql.query).not.toHaveBeenCalled();

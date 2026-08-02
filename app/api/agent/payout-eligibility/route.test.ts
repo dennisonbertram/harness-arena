@@ -32,4 +32,23 @@ describe("GET /api/agent/payout-eligibility", () => {
     await expect(response.json()).resolves.toEqual({ error: { code: "invalid_query" } });
     expect(runtime.getOwnPayoutEligibility).not.toHaveBeenCalled();
   });
+
+  it("returns an indistinguishable not_found when the runtime refuses a cross-owner snapshot", async () => {
+    runtime.getOwnPayoutEligibility.mockResolvedValue({ ok: false, error: { code: "not_found" } });
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found" } });
+    expect(runtime.getOwnPayoutEligibility).toHaveBeenCalledWith({ actor, competition_id: "competition-1", submission_id: "submission-1" });
+  });
+
+  it("does not turn an eligibility read failure into a payment capability", async () => {
+    runtime.getOwnPayoutEligibility.mockResolvedValue({ ok: false, error: { code: "unavailable" } });
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: { code: "snapshot_unavailable" } });
+  });
 });
