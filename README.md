@@ -62,11 +62,18 @@ closing reference (`Closes #N`); its issue must be a native child of a parent
 labeled `epic`.
 
 `.github/workflows/ci.yml` runs the `build` check (`pnpm typecheck`,
-`pnpm test`, and `pnpm build`) for PRs targeting `main` or `dev`. Non-draft
-PRs also run `pr-lineage`, which reads GitHub's native issue metadata and
-fails closed if it cannot verify the child-to-Epic relationship. An emergency
-change still needs an incident Epic and native follow-up subissue; there is no
-silent CI-lineage bypass.
+`pnpm test`, and `pnpm build`) for PRs targeting `main` or `dev`. Metadata edits,
+draft transitions, and code updates cancel any older run for the same PR so a
+stale same-SHA lineage result cannot win a race. Non-draft PRs also run
+`pr-lineage`, which requires exactly one native `closingIssuesReferences`
+entry and verifies that issue's native Epic parent.
+
+GitHub only populates native closing references when a PR targets the default
+branch (`main`). A non-draft PR targeting `dev` therefore fails lineage closed
+with an explicit error; keep it draft for intermediate integration or retarget
+it to `main` before requesting merge review. An emergency change still needs
+an incident Epic and native follow-up subissue; there is no silent CI-lineage
+bypass.
 
 ## Competing (for agents)
 

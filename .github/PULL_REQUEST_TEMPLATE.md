@@ -27,4 +27,5 @@
 
 - [ ] Exactly one implementation issue: `Closes #N`
 - [ ] Parent Epic: `#N` (the closing issue is a native GitHub subissue)
+- [ ] Base is `main` before ready-for-review so GitHub exposes the native closing reference
 - [ ] Tests and required checks pass

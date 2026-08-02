@@ -44,6 +44,12 @@ slice forms, record red/green evidence, and preserve the operator, rollback,
 and handoff path. Emergency work uses an incident Epic and native follow-up
 subissue rather than a silent bypass.
 
+The `pr-lineage` check validates GitHub's native `closingIssuesReferences`, not
+PR-body regexes. GitHub only provides those references for pull requests aimed
+at the default branch (`main`), so non-draft `dev` PRs intentionally fail
+closed. Keep intermediate `dev` work draft or retarget it to `main` before
+requesting merge review.
+
 **Before writing any new feature, write the test that would have caught the
 last bug in that area — and watch it fail.** A test authored after the fix, and
 never seen red, proves nothing: it may assert on behaviour that was already
