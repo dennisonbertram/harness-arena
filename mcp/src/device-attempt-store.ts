@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, basename, join } from "node:path";
 
 const VERSION = 1 as const;
@@ -16,11 +17,15 @@ export interface DeviceAttempt {
   verificationUri: string;
   expiresAt: string;
   intervalSeconds: number;
+  nextPollAt?: string;
 }
 
-interface ActiveAttempt extends DeviceAttempt {
+interface ActiveAttempt extends Omit<DeviceAttempt, "nextPollAt"> {
   status: "active";
+  nextPollAt: string;
 }
+
+interface LegacyActiveAttempt extends Omit<ActiveAttempt, "nextPollAt"> {}
 
 interface CancelledAttempt {
   status: "cancelled";
@@ -31,7 +36,7 @@ interface CancelledAttempt {
 
 interface DeviceAttemptFile {
   version: typeof VERSION;
-  attempts: Record<string, ActiveAttempt | CancelledAttempt>;
+  attempts: Record<string, ActiveAttempt | LegacyActiveAttempt | CancelledAttempt>;
 }
 
 export interface DeviceAttemptStoreOptions {
@@ -44,7 +49,7 @@ export class FileDeviceAttemptStore {
   readonly path: string;
   private readonly now: () => number;
 
-  constructor(path: string, options: DeviceAttemptStoreOptions = {}) {
+  constructor(path = join(homedir(), ".harness-arena", "device-attempts.json"), options: DeviceAttemptStoreOptions = {}) {
     this.path = path;
     this.now = options.now ?? Date.now;
   }
@@ -91,6 +96,19 @@ export class FileDeviceAttemptStore {
     });
   }
 
+  async updateSchedule(baseUrl: string, attemptId: string, intervalSeconds: number, nextPollAt: string): Promise<void> {
+    await this.withLock(async () => {
+      const file = await this.read();
+      const key = keyFor(baseUrl, attemptId);
+      const attempt = await this.findActive(file, baseUrl, attemptId);
+      if (!Number.isInteger(intervalSeconds) || intervalSeconds <= 0 || !Number.isFinite(Date.parse(nextPollAt))) {
+        throw new Error("Invalid Harness Arena device attempt.");
+      }
+      file.attempts[key] = { ...attempt, intervalSeconds, nextPollAt };
+      await this.write(file);
+    });
+  }
+
   async cleanupExpired(): Promise<number> {
     return this.withLock(async () => {
       const file = await this.read();
@@ -111,7 +129,7 @@ export class FileDeviceAttemptStore {
     if (!attempt) throw new Error(MISSING_ERROR);
     if (attempt.status === "cancelled") throw new Error(CANCELLED_ERROR);
     if (Date.parse(attempt.expiresAt) <= this.now()) throw new Error(EXPIRED_ERROR);
-    return attempt;
+    return "nextPollAt" in attempt ? attempt : { ...attempt, nextPollAt: attempt.expiresAt };
   }
 
   private async read(): Promise<DeviceAttemptFile> {
@@ -171,6 +189,7 @@ const withoutStatus = (attempt: ActiveAttempt): DeviceAttempt => ({
   verificationUri: attempt.verificationUri,
   expiresAt: attempt.expiresAt,
   intervalSeconds: attempt.intervalSeconds,
+  nextPollAt: attempt.nextPollAt,
 });
 
 const validateAttempt = (input: DeviceAttempt): ActiveAttempt => {
@@ -180,7 +199,9 @@ const validateAttempt = (input: DeviceAttempt): ActiveAttempt => {
       !Number.isFinite(Date.parse(input.expiresAt))) {
     throw new Error("Invalid Harness Arena device attempt.");
   }
-  return { status: "active", baseUrl, attemptId: input.attemptId, deviceCode: input.deviceCode, userCode: input.userCode, verificationUri: input.verificationUri, expiresAt: input.expiresAt, intervalSeconds: input.intervalSeconds };
+  const nextPollAt = input.nextPollAt ?? input.expiresAt;
+  if (!Number.isFinite(Date.parse(nextPollAt))) throw new Error("Invalid Harness Arena device attempt.");
+  return { status: "active", baseUrl, attemptId: input.attemptId, deviceCode: input.deviceCode, userCode: input.userCode, verificationUri: input.verificationUri, expiresAt: input.expiresAt, intervalSeconds: input.intervalSeconds, nextPollAt };
 };
 
 const isDeviceAttemptFile = (value: unknown): value is DeviceAttemptFile => {
@@ -188,12 +209,16 @@ const isDeviceAttemptFile = (value: unknown): value is DeviceAttemptFile => {
   return Object.entries(value.attempts).every(([key, attempt]) => isStoredAttempt(attempt) && key === keyFor(attempt.baseUrl, attempt.attemptId));
 };
 
-const isStoredAttempt = (value: unknown): value is ActiveAttempt | CancelledAttempt => {
+const isStoredAttempt = (value: unknown): value is ActiveAttempt | LegacyActiveAttempt | CancelledAttempt => {
   if (!isRecord(value) || typeof value.status !== "string" || !isCanonicalOrigin(value.baseUrl) || !isNonEmptyString(value.attemptId) || !Number.isFinite(Date.parse(String(value.expiresAt)))) return false;
   if (value.status === "cancelled") return hasOnlyKeys(value, ["status", "baseUrl", "attemptId", "expiresAt"]);
-  return value.status === "active" && isNonEmptyString(value.deviceCode) && isNonEmptyString(value.userCode) &&
-    isNonEmptyString(value.verificationUri) && typeof value.intervalSeconds === "number" && Number.isInteger(value.intervalSeconds) && value.intervalSeconds > 0 &&
-    hasOnlyKeys(value, ["status", "baseUrl", "attemptId", "deviceCode", "userCode", "verificationUri", "expiresAt", "intervalSeconds"]);
+  if (value.status !== "active" || !isNonEmptyString(value.deviceCode) || !isNonEmptyString(value.userCode) ||
+      !isNonEmptyString(value.verificationUri) || typeof value.intervalSeconds !== "number" || !Number.isInteger(value.intervalSeconds) || value.intervalSeconds <= 0) return false;
+  if (!("nextPollAt" in value)) {
+    return hasOnlyKeys(value, ["status", "baseUrl", "attemptId", "deviceCode", "userCode", "verificationUri", "expiresAt", "intervalSeconds"]);
+  }
+  return isNonEmptyString(value.nextPollAt) && Number.isFinite(Date.parse(value.nextPollAt)) &&
+    hasOnlyKeys(value, ["status", "baseUrl", "attemptId", "deviceCode", "userCode", "verificationUri", "expiresAt", "intervalSeconds", "nextPollAt"]);
 };
 
 const hasOnlyKeys = (value: Record<string, unknown>, keys: string[]): boolean => Object.keys(value).every((key) => keys.includes(key));

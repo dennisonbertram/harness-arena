@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { CredentialStore, Credentials } from "./credentials.js";
+import { FileDeviceAttemptStore, type DeviceAttempt } from "./device-attempt-store.js";
 
 export const DEFAULT_BASE_URL = "https://harness-arena-psi.vercel.app";
 
@@ -33,6 +35,22 @@ export interface LoginResult {
   expires_at: string;
 }
 
+export interface LoginStartResult {
+  attempt_id: string;
+  user_code: string;
+  verification_uri: string;
+  expires_at: string;
+  next_poll_at: string;
+}
+
+interface StartedLoginAttempt extends LoginStartResult {
+  lifetimeSeconds: number;
+}
+
+export type LoginStatusResult =
+  | { status: "pending"; attempt_id: string; expires_at: string; next_poll_at: string }
+  | { status: "authenticated"; github_login: string; expires_at: string };
+
 export interface HarnessArenaClientOptions {
   baseUrl?: string;
   fetch?: FetchLike;
@@ -40,6 +58,7 @@ export interface HarnessArenaClientOptions {
   sleep?: Sleep;
   now?: () => number;
   onDeviceCode?: (details: Omit<DeviceStart, "device_code">) => void;
+  deviceAttempts?: FileDeviceAttemptStore;
 }
 
 export class HarnessArenaClient {
@@ -49,6 +68,7 @@ export class HarnessArenaClient {
   private readonly sleep: Sleep;
   private readonly now: () => number;
   private readonly onDeviceCode?: HarnessArenaClientOptions["onDeviceCode"];
+  private readonly deviceAttempts: FileDeviceAttemptStore;
 
   constructor(options: HarnessArenaClientOptions) {
     this.baseUrl = new URL(options.baseUrl ?? DEFAULT_BASE_URL).origin;
@@ -57,9 +77,47 @@ export class HarnessArenaClient {
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
     this.onDeviceCode = options.onDeviceCode;
+    this.deviceAttempts = options.deviceAttempts ?? new FileDeviceAttemptStore(undefined, { now: this.now });
   }
 
   async login(): Promise<LoginResult> {
+    const started = await this.beginLogin();
+    const expiry = Date.parse(started.expires_at);
+    while (this.now() < expiry) {
+      const wait = Math.max(0, Date.parse(started.next_poll_at) - this.now());
+      if (wait > 0) await this.sleep(wait);
+      if (this.now() >= expiry) break;
+      const status = await this.loginStatus(started.attempt_id);
+      if (status.status === "authenticated") {
+        return {
+          status: "authenticated",
+          authorization: {
+            user_code: started.user_code,
+            verification_uri: started.verification_uri,
+            expires_in: started.lifetimeSeconds,
+          },
+          github_login: status.github_login,
+          expires_at: status.expires_at,
+        };
+      }
+      started.next_poll_at = status.next_poll_at;
+    }
+    await this.deviceAttempts.cleanupExpired();
+    throw new ToolError("Device login expired before it was approved. Run login again to get a new code.");
+  }
+
+  async loginStart(): Promise<LoginStartResult> {
+    const started = await this.beginLogin();
+    return {
+      attempt_id: started.attempt_id,
+      user_code: started.user_code,
+      verification_uri: started.verification_uri,
+      expires_at: started.expires_at,
+      next_poll_at: started.next_poll_at,
+    };
+  }
+
+  private async beginLogin(): Promise<StartedLoginAttempt> {
     const start = await this.requestJson<DeviceStart>("/api/auth/device/start", { method: "POST" });
     const details = {
       user_code: start.user_code,
@@ -68,41 +126,46 @@ export class HarnessArenaClient {
       interval: start.interval,
     };
     this.onDeviceCode?.(details);
-    const deadline = this.now() + start.expires_in * 1_000;
-    let interval = Math.max(1, start.interval) * 1_000;
+    const intervalSeconds = Math.max(1, start.interval);
+    const expiresAt = new Date(this.now() + start.expires_in * 1_000).toISOString();
+    const nextPollAt = new Date(this.now() + intervalSeconds * 1_000).toISOString();
+    const attemptId = randomUUID();
+    await this.deviceAttempts.save({ baseUrl: this.baseUrl, attemptId, deviceCode: start.device_code, userCode: start.user_code, verificationUri: start.verification_uri, expiresAt, intervalSeconds, nextPollAt });
+    return { attempt_id: attemptId, user_code: start.user_code, verification_uri: start.verification_uri, expires_at: expiresAt, next_poll_at: nextPollAt, lifetimeSeconds: start.expires_in };
+  }
 
-    while (this.now() < deadline) {
-      await this.sleep(Math.min(interval, Math.max(0, deadline - this.now())));
-      if (this.now() >= deadline) break;
-      const response = await this.rawRequest("/api/auth/device/poll", {
-        method: "POST",
-        body: { device_code: start.device_code },
-      });
-      if (response.status === 202) continue;
-      if (response.status === 429) {
-        const nextInterval = numericProperty(response.body, "interval");
-        interval = Math.max(interval, (nextInterval ?? interval / 1_000) * 1_000);
-        continue;
-      }
-      if (response.status === 200 && isDeviceSuccess(response.body)) {
-        await this.credentials.set(this.baseUrl, response.body);
-        return {
-          status: "authenticated",
-          authorization: {
-            user_code: start.user_code,
-            verification_uri: start.verification_uri,
-            expires_in: start.expires_in,
-          },
-          github_login: response.body.github_login,
-          expires_at: response.body.expires_at,
-        };
-      }
-      if (response.status === 400) {
-        throw new ToolError(`Device login ${errorMessage(response.body, "was denied or expired")}. Run login again to get a new code.`);
-      }
-      throw responseError(response.status, response.body);
+  async loginStatus(attemptId: string): Promise<LoginStatusResult> {
+    let attempt;
+    try {
+      attempt = await this.deviceAttempts.get(this.baseUrl, attemptId);
+    } catch (error) {
+      if (isExpiredDeviceAttempt(error)) await this.deviceAttempts.cleanupExpired();
+      throw error;
     }
-    throw new ToolError("Device login expired before it was approved. Run login again to get a new code.");
+    if (Date.parse(attempt.nextPollAt ?? attempt.expiresAt) > this.now()) return pendingResult(attempt);
+    const response = await this.rawRequest("/api/auth/device/poll", { method: "POST", body: { device_code: attempt.deviceCode } });
+    if (response.status === 202 || response.status === 429) {
+      const serverInterval = response.status === 429 ? numericProperty(response.body, "interval") : undefined;
+      const intervalSeconds = Math.max(attempt.intervalSeconds, serverInterval ?? attempt.intervalSeconds);
+      const nextPollAt = new Date(this.now() + intervalSeconds * 1_000).toISOString();
+      await this.deviceAttempts.updateSchedule(this.baseUrl, attemptId, intervalSeconds, nextPollAt);
+      return { status: "pending", attempt_id: attemptId, expires_at: attempt.expiresAt, next_poll_at: nextPollAt };
+    }
+    if (response.status === 200 && isDeviceSuccess(response.body)) {
+      await this.credentials.set(this.baseUrl, response.body);
+      await this.deviceAttempts.consume(this.baseUrl, attemptId);
+      return { status: "authenticated", github_login: response.body.github_login, expires_at: response.body.expires_at };
+    }
+    if (response.status === 400) {
+      await this.deviceAttempts.consume(this.baseUrl, attemptId);
+      throw new ToolError(`Device login ${errorMessage(response.body, "was denied or expired")}. Run login again to get a new code.`);
+    }
+    throw responseError(response.status, response.body);
+  }
+
+  async loginCancel(attemptId: string): Promise<{ status: "cancelled"; attempt_id: string }> {
+    await this.deviceAttempts.cancel(this.baseUrl, attemptId);
+    return { status: "cancelled", attempt_id: attemptId };
   }
 
   async whoami(): Promise<{ github_login: string; expires_at: string; base_url: string }> {
@@ -202,3 +265,10 @@ const responseError = (status: number, body: unknown): HttpToolError => {
   return new HttpToolError(status, `Harness Arena request failed: ${errorMessage(body, "an unexpected response was returned")}`);
 };
 const isDeviceSuccess = (value: unknown): value is DeviceSuccess => isRecord(value) && typeof value.token === "string" && typeof value.github_login === "string" && typeof value.expires_at === "string";
+const pendingResult = (attempt: DeviceAttempt): Extract<LoginStatusResult, { status: "pending" }> => ({
+  status: "pending",
+  attempt_id: attempt.attemptId,
+  expires_at: attempt.expiresAt,
+  next_poll_at: attempt.nextPollAt ?? attempt.expiresAt,
+});
+const isExpiredDeviceAttempt = (error: unknown): error is Error => error instanceof Error && error.message === "Device attempt has expired. Run login again.";
