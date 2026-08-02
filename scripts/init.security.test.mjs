@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,6 +59,51 @@ describe("init security and lifecycle", () => {
     await symlink(outside, join(root, ".harness-arena", "local-data"));
     await expect(init.resetLocalData(root)).rejects.toThrow(/symlink|confined/i);
     await expect(readFile(join(outside, "keep.txt"), "utf8")).resolves.toBe("keep");
+  });
+
+  it("fails closed on a live legacy numeric PID and preserves local data", async () => {
+    const root = await temp();
+    const state = join(root, ".harness-arena");
+    const data = join(state, "local-data");
+    await mkdir(data, { recursive: true });
+    await writeFile(join(data, "keep.txt"), "keep");
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+    try {
+      await writeFile(join(state, "init.pid"), String(child.pid));
+      await expect(init.resetLocalData(root)).rejects.toThrow(new RegExp(`live|running|${child.pid}`, "i"));
+      await expect(readFile(join(data, "keep.txt"), "utf8")).resolves.toBe("keep");
+    } finally {
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+  });
+
+  it("recovers a stale legacy numeric PID with the same explicit recovery evidence", async () => {
+    const root = await temp();
+    const state = join(root, ".harness-arena");
+    const data = join(state, "local-data");
+    await mkdir(data, { recursive: true });
+    await writeFile(join(data, "remove.txt"), "remove");
+    await writeFile(join(state, "init.pid"), "99999999");
+    const canonicalData = join(await realpath(root), ".harness-arena", "local-data");
+
+    await expect(init.resetLocalData(root)).resolves.toMatchObject({ removed: true, stale_pid_recovered: true, storage: canonicalData });
+    await expect(stat(join(state, "init.pid"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(data)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses reset when any nested local-data component is a symlink", async () => {
+    const root = await temp();
+    const outside = await temp("harness-init-nested-outside-");
+    const data = join(root, ".harness-arena", "local-data");
+    await mkdir(data, { recursive: true });
+    await writeFile(join(outside, "keep.txt"), "keep");
+    await symlink(outside, join(data, "traces"));
+
+    await expect(init.resetLocalData(root)).rejects.toThrow(/symlink|confined/i);
+    await expect(readFile(join(outside, "keep.txt"), "utf8")).resolves.toBe("keep");
+    expect((await stat(data)).isDirectory()).toBe(true);
   });
 
   it("recovers a bounded stale init lock but never steals a live owner's lock", async () => {

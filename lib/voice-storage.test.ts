@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { get, list, put } from "@vercel/blob";
@@ -72,8 +72,9 @@ describe("MemoryVoiceStorage", () => {
 
 describe("FileVoiceStorage", () => {
   let root: string;
+  let outside: string | undefined;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "voice-file-storage-")); });
-  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); if (outside) await rm(outside, { recursive: true, force: true }); outside = undefined; });
 
   it("atomically writes and schema-validates manifests", async () => {
     const storage = new FileVoiceStorage(root);
@@ -89,6 +90,19 @@ describe("FileVoiceStorage", () => {
     await expect(storage.putJudgment(makeJudgment({ evaluator_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.putJudgment(makeJudgment({ comparison_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.listJudgmentKeys(part)).rejects.toThrow(/path segment/);
+  });
+
+  it("rejects a symlink component before manifest reads or atomic writes and preserves the external target", async () => {
+    outside = await mkdtemp(join(tmpdir(), "voice-file-storage-outside-"));
+    const original = JSON.stringify(makeManifest({ created_at: "2026-07-24T00:00:00.000Z" }));
+    await writeFile(join(outside, "manifest.json"), original);
+    await symlink(outside, join(root, "voice"));
+    const storage = new FileVoiceStorage(root);
+
+    const readOutcome = await storage.getManifest().then(() => "resolved", () => "rejected");
+    const writeOutcome = await storage.putManifest(makeManifest({ created_at: "2026-07-24T00:00:09.000Z" })).then(() => "resolved", () => "rejected");
+    const externalValue = await readFile(join(outside, "manifest.json"), "utf8").catch(() => "missing");
+    expect({ readOutcome, writeOutcome, externalValue }).toEqual({ readOutcome: "rejected", writeOutcome: "rejected", externalValue: original });
   });
 });
 

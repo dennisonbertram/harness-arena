@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,7 @@ function run(id: string): Run {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -90,5 +91,46 @@ describe("FileStorage", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("rejects a symlink component before trace reads or writes and never modifies the external target", async () => {
+    const local = await storage();
+    const outside = await mkdtemp(join(tmpdir(), "harness-arena-file-storage-outside-"));
+    dirs.push(outside);
+    await mkdir(join(outside, "run-1", "task-1"), { recursive: true });
+    const external = join(outside, "run-1", "task-1", "stdout.log");
+    await writeFile(external, "keep");
+    await symlink(outside, join(local.root, "traces"));
+
+    const readOutcome = await local.getTraceBytes("run-1", "task-1", "stdout.log").then(() => "resolved", () => "rejected");
+    const writeOutcome = await local.putTraceBlob("run-1", "task-1", "stdout.log", "clobber").then(() => "resolved", () => "rejected");
+    const externalValue = await readFile(external, "utf8").catch(() => "missing");
+    expect({ readOutcome, writeOutcome, externalValue }).toEqual({ readOutcome: "rejected", writeOutcome: "rejected", externalValue: "keep" });
+  });
+
+  it("rejects a symlinked readiness directory before its write/delete probe touches the external target", async () => {
+    const local = await storage();
+    await local.putCompetition({
+      id: "local-development", arena: "harness-arena", harness: "pi", model: "local", prize_amount_usd: null,
+      prize_cadence: null, status: "live", auto_baseline: false, created_at: "2026-08-02T00:00:00.000Z",
+    });
+    const outside = await mkdtemp(join(tmpdir(), "harness-arena-ready-outside-"));
+    dirs.push(outside);
+    const uuid = "00000000-0000-4000-8000-000000000000";
+    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(uuid);
+    const external = join(outside, `probe-${process.pid}-${uuid}.txt`);
+    await writeFile(external, "keep");
+    await symlink(outside, join(local.root, "ready"));
+
+    const readinessOutcome = await local.checkReady().then(() => "resolved", () => "rejected");
+    const externalValue = await readFile(external, "utf8").catch(() => "missing");
+    expect({ readinessOutcome, externalValue }).toEqual({ readinessOutcome: "rejected", externalValue: "keep" });
+  });
+
+  it("does not accept a partial object as the local-development readiness seed", async () => {
+    const local = await storage();
+    await mkdir(join(local.root, "competitions"), { recursive: true });
+    await writeFile(join(local.root, "competitions", "local-development.json"), JSON.stringify({ auto_baseline: false }));
+    await expect(local.checkReady()).rejects.toThrow(/seed|competition|invalid|schema/i);
   });
 });
