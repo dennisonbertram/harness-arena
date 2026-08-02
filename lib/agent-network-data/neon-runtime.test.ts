@@ -6,6 +6,7 @@ const factories = vi.hoisted(() => ({
   traces: vi.fn(() => ({ kind: "traces" })),
   payouts: vi.fn(() => ({ kind: "payouts" })),
   eligibility: vi.fn(() => ({ kind: "eligibility" })),
+  entries: vi.fn(() => ({ kind: "entries" })),
 }));
 
 vi.mock("./postgres", () => ({ createPostgresAgentNetworkRepositories: factories.repositories }));
@@ -13,6 +14,7 @@ vi.mock("../competition-chat/postgres", () => ({ createPostgresCompetitionChat: 
 vi.mock("../entrant-traces/postgres", () => ({ createPostgresEntrantTraces: factories.traces }));
 vi.mock("../payouts/external-address", () => ({ createExternalPayoutAddressService: factories.payouts }));
 vi.mock("../payouts/eligibility", () => ({ createPayoutEligibilityService: factories.eligibility }));
+vi.mock("../competition-entries/postgres-ledger", () => ({ createPostgresCompetitionEntryLedger: factories.entries }));
 
 import {
   closeNeonRuntimeForTests,
@@ -109,8 +111,9 @@ describe("agent-network service composition", () => {
       traces: { kind: "traces" },
       payouts: { kind: "payouts" },
       eligibility: { kind: "eligibility" },
+      entries: { kind: "entries" },
     });
-    for (const factory of [factories.repositories, factories.chat, factories.traces, factories.payouts, factories.eligibility]) {
+    for (const factory of [factories.repositories, factories.chat, factories.traces, factories.payouts, factories.eligibility, factories.entries]) {
       expect(factory).toHaveBeenCalledWith(sql, expect.any(Object));
     }
     expect(sql.query).not.toHaveBeenCalled();
