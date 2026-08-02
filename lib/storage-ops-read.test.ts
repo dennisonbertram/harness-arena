@@ -10,4 +10,9 @@ describe("read-only ops storage", () => {
     expect(page.partial).toEqual([]);
     await expect(storage.readOpsRecord("events/run-a/0000000001.json")).resolves.toEqual({ found: false });
   });
+  it("includes persisted event paths without invoking a dispatcher or write path", async () => {
+    const storage = new MemoryStorage();
+    await storage.appendRunEvents("run-a", [{ ts: "2026-01-01T00:00:00.000Z", type: "run.created", payload: {} }]);
+    await expect(storage.listOpsRecords("events/", { limit: 10 })).resolves.toMatchObject({ records: [{ pathname: "events/run-a/0000000001.json" }] });
+  });
 });
