@@ -5,9 +5,10 @@ Next.js (App Router, TypeScript strict) scaffold for Harness Arena.
 ## Read-only operations API
 
 Provision a random 32+ byte `OPS_READ_TOKEN` server-side. It is distinct from,
-and never returns, `BLOB_READ_WRITE_TOKEN`. Optionally set a separate
-`OPS_READ_CURSOR_SECRET`; rotating either effective cursor key invalidates all
-outstanding cursors.
+and never returns, `BLOB_READ_WRITE_TOKEN`. Set a separate, server-only
+`OPS_READ_CURSOR_SECRET`; it must not be given to callers or equal
+`OPS_READ_TOKEN`. Missing cursor configuration fails closed. Rotating it
+invalidates all outstanding cursors.
 
 All routes require the exact header `Authorization: Bearer <token>`, export
 GET plus explicit 405 handlers for POST/PUT/PATCH/DELETE/OPTIONS, and return

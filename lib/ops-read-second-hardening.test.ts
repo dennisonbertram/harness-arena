@@ -17,6 +17,8 @@ describe("second Sol hardening", () => {
     expect(archive).toMatchObject({ item: expect.stringContaining("[REDACTED]") });
     adapter.read = vi.fn(async ({ pathname }) => ({ status: "ok" as const, bytes: Buffer.from([0,1,2,3]), metadata: metadata(pathname,4) }));
     await expect(service.read("archives", { path: "unknown.bin" })).resolves.toMatchObject({ error: { code: "unsupported_binary" } });
+    const bomb=gzipSync("x".repeat(800_000));adapter.read=vi.fn(async({pathname})=>({status:"ok" as const,bytes:bomb,metadata:metadata(pathname,bomb.length)}));
+    await expect(service.read("traces",{run_id:"r",task_id:"t",name:"bomb.gz"})).resolves.toMatchObject({error:{code:"too_large"}});
   });
 
   it("redacts embedded, multiple, and overlapping secret and bearer values recursively", () => {
@@ -45,5 +47,14 @@ describe("second Sol hardening", () => {
     const adapter={listPage:()=>new Promise<never>(()=>{}),read:vi.fn()} as OpsReadAdapter;
     const result=await createOpsReadService(adapter,{summaryDeadlineMs:20}).summary();
     expect(result.scan).toMatchObject({complete:false,truncated:true,reason:"deadline"});
+  });
+  it("uses the shared stale policy across paginated runs and recent event metadata", async () => {
+    process.env.REAP_STALE_MINUTES="20";const old="2020-01-01T00:00:00.000Z",recent=new Date().toISOString();
+    const runs=[{id:"silent",status:"running",created_at:old},{id:"recent",status:"running",created_at:old},{id:"waiting",status:"queued",created_at:old},{id:"claimed",status:"queued",created_at:old,dispatched_at:old}];
+    const listPage=vi.fn(async({prefix,cursor})=>prefix==="runs/"?cursor?{records:runs.slice(2).map((r)=>metadata(`runs/${r.id}.json`,20)),has_more:false}:{records:runs.slice(0,2).map((r)=>metadata(`runs/${r.id}.json`,20)),cursor:"runs-2",has_more:true}:prefix==="events/"?{records:[{...metadata("events/recent/0000000001.json",1),uploaded_at:recent}],has_more:false}:{records:[],has_more:false});
+    const read=vi.fn(async({pathname})=>{const run=runs.find((candidate)=>pathname===`runs/${candidate.id}.json`);return {status:"ok" as const,bytes:Buffer.from(JSON.stringify(run??{})),metadata:metadata(pathname,20)};});
+    const summary=await createOpsReadService({listPage,read} as OpsReadAdapter).summary();
+    expect(summary.run_states).toEqual({queued:2,running:2,failed:0,stale:2});
+    expect(listPage).toHaveBeenCalledWith(expect.objectContaining({prefix:"runs/",cursor:"runs-2"}));
   });
 });

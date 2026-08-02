@@ -5,6 +5,7 @@ import type { OpsReadAdapter } from "./ops-read-adapter";
 describe("ops storage pagination", () => {
   it("preserves the Blob cursor and reports event holes in the bounded page", async () => {
     process.env.OPS_READ_TOKEN = "cursor-secret";
+    process.env.OPS_READ_CURSOR_SECRET = "server-cursor-secret";
     const listPage = vi.fn().mockResolvedValue({
       records: [
         { pathname: "events/run-1/0000000001.json", size: 1, uploaded_at: "2026-08-02T00:00:01.000Z", etag: "1" },

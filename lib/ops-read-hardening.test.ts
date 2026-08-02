@@ -19,6 +19,7 @@ describe("ops read hardening contract", () => {
 
   it("requires exact Bearer grammar and rejects tampered or cross-kind cursors", () => {
     process.env.OPS_READ_TOKEN = "read-token";
+    process.env.OPS_READ_CURSOR_SECRET = "cursor-secret";
     expect(opsAuthorized("Bearer read-token")).toBe(true);
     expect(opsAuthorized("bearer read-token")).toBe(false);
     expect(opsAuthorized("Bearer  read-token")).toBe(false);

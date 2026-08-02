@@ -27,5 +27,15 @@ describe("Blob ops read adapter", () => {
     blob.get.mockReset().mockResolvedValue(null);
     await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toMatchObject({ status: "transient" });
     expect(blob.get).toHaveBeenCalledTimes(2);
+    blob.list.mockResolvedValue({blobs:[],hasMore:false});blob.get.mockClear();
+    await expect(new BlobOpsReadAdapter().read({pathname:"traces/missing",maxBytes:10,timeoutMs:100})).resolves.toEqual({status:"not_found"});
+    expect(blob.get).not.toHaveBeenCalled();
+  });
+  it("applies one deadline to a slow stream, aborts the SDK request, and cancels the reader", async()=>{
+    let cancelled=false;blob.list.mockResolvedValue({blobs:[metadata(2)],hasMore:false});
+    const stream=new ReadableStream<Uint8Array>({async pull(controller){await new Promise((resolve)=>setTimeout(resolve,30));controller.enqueue(new Uint8Array([1]));},cancel(){cancelled=true;}});
+    blob.get.mockResolvedValue({statusCode:200,stream});
+    await expect(new BlobOpsReadAdapter().read({pathname:"traces/r/t/log.txt",maxBytes:10,timeoutMs:15})).resolves.toEqual({status:"transient",error:"read_timeout"});
+    expect(cancelled).toBe(true);expect(blob.get.mock.calls[0][1].abortSignal.aborted).toBe(true);
   });
 });
