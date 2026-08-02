@@ -64,4 +64,29 @@ describe("POST /api/competition/admin/cleanup", () => {
     });
     expect(await response.json()).toMatchObject({ status: "deleted", archive_prefix: "archives/competition-cleanups/competition/archive" });
   });
+
+  it("returns a truthful recovery receipt after partial deletion", async () => {
+    cleanup.archiveAndDeleteCompetitionSubmissions.mockRejectedValueOnce(Object.assign(
+      new Error("cleanup partially completed"),
+      {
+        name: "CompetitionCleanupPartialError",
+        recovery: {
+          archivePrefix: "archives/competition-cleanups/competition/partial",
+          deletedGroups: ["events", "traces"],
+          remainingGroups: ["runs", "submissions"],
+        },
+      },
+    ));
+
+    const response = await POST(request(BODY, {}, "7.7.7.4"));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      status: "partial",
+      error: "cleanup partially completed; recover from the archive receipt",
+      archive_prefix: "archives/competition-cleanups/competition/partial",
+      deleted_groups: ["events", "traces"],
+      remaining_groups: ["runs", "submissions"],
+    });
+  });
 });

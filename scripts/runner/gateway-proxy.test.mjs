@@ -647,10 +647,6 @@ describe("gateway proxy diagnostics", () => {
       }),
     });
 
-    const chunks = diagnostics.filter((event) => event.type === "gateway_proxy.response_chunk");
-    expect(chunks.length).toBeGreaterThanOrEqual(2);
-    expect(chunks.every((event) => typeof event.idle_ms === "number")).toBe(true);
-
     const complete = diagnostics.find((event) => event.type === "gateway_proxy.response_complete");
     expect(complete).toMatchObject({
       request_id: request.request_id,
@@ -658,10 +654,48 @@ describe("gateway proxy diagnostics", () => {
       first_byte_at: expect.any(String),
       last_byte_at: expect.any(String),
       total_bytes: expect.any(Number),
-      chunk_count: chunks.length,
+      chunk_count: expect.any(Number),
       max_idle_ms: expect.any(Number),
     });
+    expect(complete.chunk_count).toBeGreaterThanOrEqual(2);
     expect(complete.total_bytes).toBeGreaterThan(0);
+  });
+
+  it("keeps diagnostic retention bounded for a large synthetic stream", async () => {
+    const upstreamServer = http.createServer(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (let index = 0; index < 96; index += 1) {
+        res.write(`data: {"id":"gen_many","index":${index}}\n\n`);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      res.end("data: [DONE]\n\n");
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(createGatewayProxy({
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+      onDiagnostic: (event) => diagnostics.push(event),
+    }));
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "zai/glm-5.2-fast", stream: true }),
+    });
+    expect(await response.text()).toContain("gen_many");
+
+    const chunks = diagnostics.filter((event) => event.type === "gateway_proxy.response_chunk");
+    const complete = diagnostics.find((event) => event.type === "gateway_proxy.response_complete");
+    expect(complete).toMatchObject({
+      response_id: "gen_many",
+      chunk_count: expect.any(Number),
+      total_bytes: expect.any(Number),
+      max_idle_ms: expect.any(Number),
+    });
+    expect(complete.chunk_count).toBeGreaterThan(32);
+    expect(chunks).toHaveLength(16);
+    expect(complete).not.toHaveProperty("idle_gaps_ms");
+    expect(diagnostics.length).toBeLessThanOrEqual(20);
   });
 
   it("preserves a terminated upstream stream error and its cause in diagnostics", async () => {

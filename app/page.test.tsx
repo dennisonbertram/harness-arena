@@ -212,7 +212,7 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Claude Opus 5");
   });
 
-  it("hides the competition selector when there is only one live competition", async () => {
+  it("keeps closed competition history discoverable when there is one live successor", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition({ gateway_provider: "togetherai" }));
@@ -223,7 +223,8 @@ describe("CompetitionPage", () => {
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
     expect(html).toContain("Current competition");
-    expect(html).not.toContain("Browse competitions");
+    expect(html).toContain("Browse competitions");
+    expect(html).toContain('<option value="closed">Closed</option>');
     expect(html).toContain("Arena");
     expect(html).toContain("Harness");
     expect(html).toContain("Model");

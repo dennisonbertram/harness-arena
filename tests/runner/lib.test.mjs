@@ -10,6 +10,7 @@ import {
   buildPiCommand,
   computeTotals,
   deliverTerminalStatus,
+  drainGatewayDiagnostics,
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
@@ -207,6 +208,42 @@ describe("summarizeGatewayRequests", () => {
         stream_error: undefined,
       },
     ]);
+  });
+
+  it("caps persisted request summaries and oversized stream error messages", () => {
+    const events = Array.from({ length: 300 }, (_, index) => [
+      {
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "wafer",
+      },
+      {
+        type: "gateway_proxy.stream_error",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        stream_error: "ignored",
+        error: { name: "Error", message: "x".repeat(4_096) },
+      },
+    ]).flat();
+
+    const summaries = summarizeGatewayRequests(events);
+    expect(summaries).toHaveLength(128);
+    expect(summaries.at(-1)?.request_id).toBe("gw-299");
+    expect(summaries.every((summary) => JSON.stringify(summary.stream_error).length <= 600)).toBe(true);
+  });
+});
+
+describe("drainGatewayDiagnostics", () => {
+  it("returns one task slice without retaining diagnostics across the run", () => {
+    const log = [
+      { type: "gateway_proxy.started" },
+      { type: "gateway_proxy.request", request_id: "gw-1" },
+      { type: "gateway_proxy.response_complete", request_id: "gw-1" },
+    ];
+
+    expect(drainGatewayDiagnostics(log, 1)).toEqual(log.slice(1));
+    expect(log).toEqual([]);
   });
 });
 

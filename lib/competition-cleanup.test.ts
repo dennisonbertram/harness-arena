@@ -4,6 +4,7 @@ const blob = vi.hoisted(() => ({
   objects: new Map<string, string>(),
   operations: [] as string[],
   failCopyOf: undefined as string | undefined,
+  failDeleteOf: undefined as string | undefined,
 }));
 
 vi.mock("@vercel/blob", () => ({
@@ -39,6 +40,7 @@ vi.mock("@vercel/blob", () => ({
   }),
   del: vi.fn(async (pathnames: string[]) => {
     blob.operations.push(`del:${pathnames.join(",")}`);
+    if (blob.failDeleteOf && pathnames.includes(blob.failDeleteOf)) throw new Error("delete unavailable");
     for (const pathname of pathnames) blob.objects.delete(pathname);
   }),
 }));
@@ -67,6 +69,7 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
     blob.objects.clear();
     blob.operations.length = 0;
     blob.failCopyOf = undefined;
+    blob.failDeleteOf = undefined;
   });
 
   it("archives every target object before deleting children before parents", async () => {
@@ -142,5 +145,32 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
     ]);
     expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(true);
     expect(blob.objects.has(`runs/${RUN_ID}.json`)).toBe(true);
+  });
+
+  it("reports truthful recovery evidence when deletion stops after child groups", async () => {
+    seed();
+    blob.failDeleteOf = `runs/${RUN_ID}.json`;
+
+    await expect(archiveAndDeleteCompetitionSubmissions({
+      competitionId: COMPETITION_ID,
+      submissionIds: [SUBMISSION_ID],
+      reason: "provider configuration error",
+      archiveId: "partial-cleanup",
+    })).rejects.toMatchObject({
+      name: "CompetitionCleanupPartialError",
+      recovery: {
+        archivePrefix: `archives/competition-cleanups/${COMPETITION_ID}/partial-cleanup`,
+        deletedGroups: ["events", "traces"],
+        remainingGroups: ["runs", "submissions"],
+      },
+    });
+
+    expect(blob.objects.has(`events/${RUN_ID}/0000000001.json`)).toBe(false);
+    expect(blob.objects.has(`traces/${RUN_ID}/task/trace.json`)).toBe(false);
+    expect(blob.objects.has(`runs/${RUN_ID}.json`)).toBe(true);
+    expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(true);
+    expect(blob.objects.has(
+      `archives/competition-cleanups/${COMPETITION_ID}/partial-cleanup/manifest.json`,
+    )).toBe(true);
   });
 });

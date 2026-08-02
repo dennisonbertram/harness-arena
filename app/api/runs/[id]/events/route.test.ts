@@ -39,6 +39,49 @@ describe("GET /api/runs/[id]/events", () => {
     expect(await response.json()).toEqual([]);
   });
 
+  it("projects gateway diagnostics into a safe public payload", async () => {
+    await storageRef.current.appendRunEvents("run-private", [
+      {
+        ts: "2026-07-21T00:00:00.000Z",
+        type: "task.gateway_correlation",
+        payload: {
+          task_id: "task-1",
+          proxy_requests: [{
+            status: 502,
+            request_id: "internal-request-id",
+            response_id: "internal-response-id",
+            stream_error: {
+              message: "provider body with Bearer private-token",
+              reason: "upstream reset details",
+            },
+          }],
+          pi_retry_events: [{ error: "secret retry reason" }],
+          trace_url: "https://blob.example/private-trace",
+        },
+      },
+    ]);
+
+    const response = await GET(new NextRequest("http://localhost/api/runs/run-private/events"), {
+      params: Promise.resolve({ id: "run-private" }),
+    });
+    const body = await response.json();
+
+    expect(body).toEqual([{
+      seq: 1,
+      ts: "2026-07-21T00:00:00.000Z",
+      type: "task.gateway_correlation",
+      payload: {
+        task_id: "task-1",
+        proxy_request_count: 1,
+        response_statuses: [502],
+        retry_count: 1,
+      },
+    }]);
+    expect(JSON.stringify(body)).not.toMatch(
+      /internal-request-id|internal-response-id|private-token|upstream reset|secret retry|private-trace/,
+    );
+  });
+
   describe("?since= cursor", () => {
     async function seed() {
       await storageRef.current.appendRunEvents("run-1", [
