@@ -32,6 +32,21 @@ CLI cannot query directly. Never print or commit Vercel tokens. If CLI/API
 access is unavailable, report the exact authentication or permission blocker
 instead of silently proceeding without production evidence.
 
+# Vercel mutation boundary
+
+All Vercel mutations are development-only and must run through
+`node scripts/ops/vercel-development.mjs deploy`. The wrapper resolves local
+linked-project metadata, accepts only a clean `dev` or `codex/*` checkout,
+requires the strict development manifest, and invokes one fixed argv without a
+shell. Raw write-capable Vercel commands are forbidden in agent instructions
+and runbooks. In particular, never use production deploy, promote, rollback,
+alias/domain, environment, or store mutation commands directly.
+
+Production evidence remains read-only: `inspect`, `ls`, `logs`, `activity`,
+alias identity, and environment metadata inspection are permitted. Do not read
+credential values. The live project `prj_f4ppu0xpO0LZeHOAH99RHotVbwyo` is
+never a wrapper target.
+
 # Regression tests come first
 
 # Epic-first delivery

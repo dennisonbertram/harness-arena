@@ -121,10 +121,8 @@ describe("Development-only Vercel mutation wrapper", () => {
     });
 
     await expect(runDevelopmentVercelOperation({ operation: "deploy", ...deps })).rejects.toThrow(
-      "development Vercel operation failed (exit 1)",
+      "Development Vercel operation failed (exit 1)",
     );
-    await expect(runDevelopmentVercelOperation({ operation: "deploy", ...deps })).rejects.not.toThrow(
-      /secret-token-value/,
-    );
+    await expect(runDevelopmentVercelOperation({ operation: "deploy", ...deps })).rejects.not.toThrow(/secret-token-value/);
   });
 });

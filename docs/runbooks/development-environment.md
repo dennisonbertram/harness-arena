@@ -58,11 +58,26 @@ Deploy only from `dev` into the reserved project after review. A successful
 development deployment does not constitute production approval or authorize a
 production deployment.
 
+The sole approved mutation entry point is:
+
+```sh
+node scripts/ops/vercel-development.mjs deploy
+```
+
+It resolves `.vercel/project.json` locally and fails before spawning unless
+that project is exactly `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`, the tree is clean,
+the branch is `dev` or `codex/*`, and the manifest fully verifies. Its one
+allowlisted argv targets `development`; it does not accept extra options.
+Raw write-capable Vercel CLI commands are forbidden in this runbook. This
+includes deploys with production targets, promote/rollback, alias/domain,
+environment, and store mutation. Read-only production `inspect`, `ls`, `logs`,
+`activity`, alias-identity, and environment-metadata checks remain permitted.
+
 ## Rollback and stop rules
 
-Rollback means removing a development alias or redeploying a prior `dev`
-revision in the reserved project only. Never roll back by changing the live
-project or its data.
+Rollback is not an approved wrapper operation. Stop and obtain a separately
+reviewed development-only policy rather than changing a live project, alias,
+or data.
 
 Stop immediately if an operation goes beyond read-only inspection of live
 identifiers, routing, or deployment metadata, or if it could read credential
