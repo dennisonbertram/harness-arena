@@ -8,6 +8,8 @@ export const REQUIRED_SCHEMA_MIGRATIONS = [
   "0007_payout_eligibility",
   "0008_entry_saga",
   "0009_chat_safety",
+  "0010_submission_trace_closures",
+  "0011_entry_saga_leases",
 ] as const;
 
 type QueryResult<Row = unknown> = { rows: Row[] };

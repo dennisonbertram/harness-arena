@@ -333,7 +333,9 @@ export function createAgentNetworkRuntime({
         if (code === "COMPETITION_NOT_FOUND") return { ok: false as const, error: { code: "competition_not_found" as const } };
         if (code === "COMPETITION_CLOSED") return { ok: false as const, error: { code: "competition_closed" as const } };
         if (code === "COMPETITION_MEMBERSHIP_FORBIDDEN") return { ok: false as const, error: { code: "forbidden" as const } };
+        if (code === "ENTRY_AUTHORIZATION_REVOKED") return { ok: false as const, error: { code: "forbidden" as const } };
         if (code === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST") return { ok: false as const, error: { code: "idempotency_conflict" as const } };
+        if (code === "ENTRY_SAGA_BUSY") return { ok: false as const, error: { code: "entry_in_progress" as const } };
         if (code === "ENTRY_RECONCILIATION_REQUIRED" || code === "ENTRY_SAGA_PHASE_CONFLICT") {
           return { ok: false as const, error: { code: "reconciliation_required" as const } };
         }

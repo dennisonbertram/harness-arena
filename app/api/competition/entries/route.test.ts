@@ -113,6 +113,11 @@ describe("POST /api/competition/entries", () => {
     const changedKey = await POST(request({ ...body, entry: { ...body.entry, prompt: "different" } }));
     expect(changedKey.status).toBe(409);
     await expect(changedKey.json()).resolves.toEqual({ error: { code: "idempotency_conflict" } });
+
+    runtime.submitCompetitionEntry.mockResolvedValueOnce({ ok: false, error: { code: "entry_in_progress" } });
+    const inProgress = await POST(request());
+    expect(inProgress.status).toBe(409);
+    await expect(inProgress.json()).resolves.toEqual({ error: { code: "entry_in_progress" } });
   });
 
   it("fails ambiguous judge recovery closed with 503 and does not retry the saga in the request", async () => {

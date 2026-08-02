@@ -76,7 +76,7 @@ function fixture(failAt?: Phase) {
     load: vi.fn(async () => ({ ...reservation, actor, request, phase: checkpointPhase, checkpoint_value: checkpointValue })),
     claim: vi.fn(async () => ({ lease_token: "lease-op-001" })),
     release: vi.fn(async () => undefined),
-    checkpoint: vi.fn(async ({ expected_phase, phase, value }: { expected_phase: Phase; phase: Phase; value?: unknown }) => {
+    checkpoint: vi.fn(async ({ expected_phase, phase, value }: { lease_token: string; expected_phase: Phase; phase: Phase; value?: unknown }) => {
       if (expected_phase !== checkpointPhase) throw Object.assign(new Error("phase conflict"), { code: "ENTRY_SAGA_PHASE_CONFLICT" });
       phases.push(phase);
       checkpointPhase = phase;

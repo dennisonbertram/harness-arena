@@ -75,6 +75,7 @@ function entryFailure(code: string) {
   if (code === "competition_closed") return error("competition_closed", 409);
   if (code === "forbidden") return error("forbidden", 403);
   if (code === "idempotency_conflict") return error("idempotency_conflict", 409);
+  if (code === "entry_in_progress") return error("entry_in_progress", 409);
   if (code === "reconciliation_required") return error("entry_reconciliation_required", 503);
   return error("entries_unavailable", 503);
 }

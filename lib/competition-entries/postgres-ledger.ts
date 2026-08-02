@@ -11,6 +11,7 @@ type SagaRow = {
   operation_id: string; entrant_id: string; competition_id: string; idempotency_key: string;
   request_hash: string; request_json: unknown; submission_id: string; run_id: string;
   phase: Phase; verdict_json: unknown; response_json: unknown; state: "pending" | "completed";
+  lease_token: string | null; lease_expires_at: string | Date | null;
 };
 
 const canonicalJson = (value: unknown): string => {
@@ -29,7 +30,7 @@ const json = <Value>(value: unknown): Value => typeof value === "string" ? JSON.
 const isPhase = (value: string): value is Phase => ["reserved", "judge_started", "verdict_persisted", "submission_written", "run_written", "run_created_appended", "committed"].includes(value);
 
 export class CompetitionEntryLedgerError extends Error {
-  constructor(readonly code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" | "ENTRY_SAGA_PHASE_CONFLICT" | "ENTRY_SAGA_NOT_FOUND") {
+  constructor(readonly code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" | "ENTRY_SAGA_PHASE_CONFLICT" | "ENTRY_SAGA_NOT_FOUND" | "ENTRY_AUTHORIZATION_REVOKED") {
     super(code);
   }
 }
@@ -74,11 +75,29 @@ export function createPostgresCompetitionEntryLedger(
       const submissionId = id();
       const runId = id();
       const at = now().toISOString();
-      await tx.query(
+      const inserted = await tx.query<{ id: string }>(
         `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, state, created_at, updated_at)
-         VALUES ($1, $2, $3, 'competition.entry.submit.v1', $4, $5, $6, 'pending', $7::timestamptz, $7::timestamptz)`,
+         VALUES ($1, $2, $3, 'competition.entry.submit.v1', $4, $5, $6, 'pending', $7::timestamptz, $7::timestamptz)
+         ON CONFLICT (actor_id, competition_id, operation, idempotency_key) DO NOTHING
+         RETURNING id`,
         [operationId, input.actor.entrant_id, input.request.competition_id, input.request.idempotency_key, hash, submissionId, at],
       );
+      if (!inserted.rows[0]) {
+        const winner = await tx.query<SagaRow>(
+          `SELECT s.operation_id, s.entrant_id, s.competition_id, s.idempotency_key, s.request_hash,
+                  s.request_json, s.submission_id, s.run_id, s.phase, s.verdict_json, s.response_json,
+                  s.state, s.lease_token, s.lease_expires_at
+           FROM competition_entry_sagas s
+           JOIN idempotency_operations i ON i.id = s.operation_id
+           WHERE i.actor_id=$1 AND i.competition_id=$2
+             AND i.operation='competition.entry.submit.v1' AND i.idempotency_key=$3
+           FOR UPDATE OF s`,
+          [input.actor.entrant_id, input.request.competition_id, input.request.idempotency_key],
+        );
+        if (!winner.rows[0]) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+        if (winner.rows[0].request_hash !== hash) throw new CompetitionEntryLedgerError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
+        return reservation(winner.rows[0]);
+      }
       await tx.query(
         `INSERT INTO competition_entry_sagas (operation_id, entrant_id, competition_id, idempotency_key, request_hash, request_json, submission_id, run_id, phase, state, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'reserved', 'pending', $9::timestamptz, $9::timestamptz)`,
@@ -90,7 +109,7 @@ export function createPostgresCompetitionEntryLedger(
 
   async function saga(operationId: string, sql: Sql = db, lock = false): Promise<SagaRow> {
     const result = await sql.query<SagaRow>(
-      `SELECT operation_id, entrant_id, competition_id, idempotency_key, request_hash, request_json, submission_id, run_id, phase, verdict_json, response_json, state
+      `SELECT operation_id, entrant_id, competition_id, idempotency_key, request_hash, request_json, submission_id, run_id, phase, verdict_json, response_json, state, lease_token, lease_expires_at
        FROM competition_entry_sagas WHERE operation_id = $1${lock ? " FOR UPDATE" : ""}`, [operationId],
     );
     if (!result.rows[0]) throw new CompetitionEntryLedgerError("ENTRY_SAGA_NOT_FOUND");
@@ -126,25 +145,57 @@ export function createPostgresCompetitionEntryLedger(
       };
     },
 
-    async checkpoint(input: { operation_id: string; expected_phase: Phase; phase: Phase; value?: unknown }) {
+    async claim({ operation_id, lease_ms }: { operation_id: string; lease_ms: number }) {
+      if (!Number.isSafeInteger(lease_ms) || lease_ms < 1_000 || lease_ms > 300_000) {
+        throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
+      }
+      const leaseToken = id();
+      const at = now();
+      const expiresAt = new Date(at.getTime() + lease_ms);
+      const result = await db.query<{ lease_token: string }>(
+        `UPDATE competition_entry_sagas
+         SET lease_token=$2, lease_expires_at=$3::timestamptz, updated_at=$4::timestamptz
+         WHERE operation_id=$1 AND state='pending'
+           AND (lease_token IS NULL OR lease_expires_at <= $4::timestamptz)
+         RETURNING lease_token`,
+        [operation_id, leaseToken, expiresAt.toISOString(), at.toISOString()],
+      );
+      return result.rows[0] ? { lease_token: result.rows[0].lease_token } : null;
+    },
+
+    async release({ operation_id, lease_token }: { operation_id: string; lease_token: string }) {
+      await db.query(
+        `UPDATE competition_entry_sagas
+         SET lease_token=NULL, lease_expires_at=NULL, updated_at=$3::timestamptz
+         WHERE operation_id=$1 AND state='pending' AND lease_token=$2`,
+        [operation_id, lease_token, now().toISOString()],
+      );
+    },
+
+    async checkpoint(input: { operation_id: string; lease_token: string; expected_phase: Phase; phase: Phase; value?: unknown }) {
       if (!isPhase(input.phase) || !isPhase(input.expected_phase)) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
       const at = now().toISOString();
       const result = await db.query<{ operation_id: string }>(
         `UPDATE competition_entry_sagas
          SET phase = $3, verdict_json = CASE WHEN $3 = 'verdict_persisted' THEN $4::jsonb ELSE verdict_json END, updated_at = $5::timestamptz
          WHERE operation_id = $1 AND state = 'pending' AND phase = $2
+           AND lease_token = $6 AND lease_expires_at > $5::timestamptz
          RETURNING operation_id`,
-        [input.operation_id, input.expected_phase, input.phase, input.value === undefined ? null : JSON.stringify(input.value), at],
+        [input.operation_id, input.expected_phase, input.phase, input.value === undefined ? null : JSON.stringify(input.value), at, input.lease_token],
       );
       if (!result.rows[0]) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
     },
 
-    async complete({ operation_id, response }: { operation_id: string; response: Response }) {
+    async complete({ operation_id, lease_token, response }: { operation_id: string; lease_token: string; response: Response }) {
       await db.transaction(async (tx) => {
         const row = await saga(operation_id, tx, true);
         if (row.state === "completed") {
           if (canonicalJson(json<unknown>(row.response_json)) !== canonicalJson(response)) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
           return;
+        }
+        const at = now().toISOString();
+        if (row.lease_token !== lease_token || row.lease_expires_at === null || new Date(row.lease_expires_at).getTime() <= new Date(at).getTime()) {
+          throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
         }
         const verdict = row.verdict_json === null ? null : json<{ verdict?: unknown }>(row.verdict_json);
         const validQueued = response.status === "queued"
@@ -158,7 +209,14 @@ export function createPostgresCompetitionEntryLedger(
           && row.phase === "submission_written"
           && verdict?.verdict === "rejected";
         if (!validQueued && !validRejected) throw new CompetitionEntryLedgerError("ENTRY_SAGA_PHASE_CONFLICT");
-        const at = now().toISOString();
+        const membership = await tx.query<{ state: "active" | "left" | "banned" }>(
+          `SELECT state FROM competition_memberships
+           WHERE competition_id=$1 AND entrant_id=$2 FOR UPDATE`,
+          [row.competition_id, row.entrant_id],
+        );
+        if (membership.rows[0] && membership.rows[0].state !== "active") {
+          throw new CompetitionEntryLedgerError("ENTRY_AUTHORIZATION_REVOKED");
+        }
         await tx.query(
           `INSERT INTO submission_bindings (submission_id, competition_id, entrant_id, entry_kind, entry_schema_version, created_at)
            VALUES ($1, $2, $3, 'prompt', 'submit_entry.v1', $4::timestamptz)
@@ -192,7 +250,11 @@ export function createPostgresCompetitionEntryLedger(
           [randomUUID(), row.operation_id, JSON.stringify({ submission_id: row.submission_id, run_id: row.run_id, status: response.status }), at],
         );
         await tx.query(
-          `UPDATE competition_entry_sagas SET phase = 'committed', response_json = $2::jsonb, state = 'completed', completed_at = $3::timestamptz, updated_at = $3::timestamptz WHERE operation_id = $1`,
+          `UPDATE competition_entry_sagas
+           SET phase = 'committed', response_json = $2::jsonb, state = 'completed',
+               lease_token=NULL, lease_expires_at=NULL,
+               completed_at = $3::timestamptz, updated_at = $3::timestamptz
+           WHERE operation_id = $1`,
           [row.operation_id, JSON.stringify(response), at],
         );
         await tx.query(

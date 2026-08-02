@@ -185,8 +185,10 @@ type DurableLedger = {
     phase: DurablePhase;
     checkpoint_value?: unknown;
   }>;
-  checkpoint(input: { operation_id: string; expected_phase: DurablePhase; phase: DurablePhase; value?: unknown }): Promise<void>;
-  complete(input: { operation_id: string; response: DurableResponse }): Promise<void>;
+  claim(input: { operation_id: string; lease_ms: number }): Promise<{ lease_token: string } | null>;
+  release(input: { operation_id: string; lease_token: string }): Promise<void>;
+  checkpoint(input: { operation_id: string; lease_token: string; expected_phase: DurablePhase; phase: DurablePhase; value?: unknown }): Promise<void>;
+  complete(input: { operation_id: string; lease_token: string; response: DurableResponse }): Promise<void>;
 };
 
 type DurableStorage = {
@@ -211,6 +213,14 @@ export class EntryReconciliationRequiredError extends Error {
 
   constructor() {
     super("entry state is ambiguous and requires reconciliation");
+  }
+}
+
+export class EntrySagaBusyError extends Error {
+  readonly code = "ENTRY_SAGA_BUSY" as const;
+
+  constructor() {
+    super("entry operation is already being reconciled");
   }
 }
 
@@ -265,6 +275,7 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     request: SubmitEntryRequest;
     phase: DurablePhase;
     checkpoint_value?: unknown;
+    lease_token: string;
   }): Promise<DurableResponse> {
     const competition = await getCompetition(state.request.competition_id);
     if (!competition) throw new CompetitionEntryError("COMPETITION_NOT_FOUND");
@@ -294,9 +305,9 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       throw new EntryReconciliationRequiredError();
     }
     if (phase === "reserved") {
-      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "reserved", phase: "judge_started" });
+      await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "reserved", phase: "judge_started" });
       verdict = await judge({ submission_id: state.submission_id, prompt: state.request.entry.prompt });
-      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: verdict });
+      await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "judge_started", phase: "verdict_persisted", value: verdict });
       phase = "verdict_persisted";
     } else {
       // The verdict checkpoint is the only phase that needs to carry a
@@ -327,13 +338,13 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
 
     if (phase === "verdict_persisted") {
       if (!submissionExists) await storage.putSubmission(submission);
-      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
+      await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "verdict_persisted", phase: "submission_written" });
       phase = "submission_written";
     }
 
     if (verdict.verdict === "rejected") {
       const response: DurableResponse = { submission_id: state.submission_id, status: "rejected" };
-      await ledger.complete({ operation_id: state.operation_id, response });
+      await ledger.complete({ operation_id: state.operation_id, lease_token: state.lease_token, response });
       return response;
     }
 
@@ -348,18 +359,36 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
     };
     if (phase === "submission_written") {
       if (!runExists) await storage.putRun(run);
-      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "submission_written", phase: "run_written" });
+      await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "submission_written", phase: "run_written" });
       phase = "run_written";
     }
     if (phase === "run_written") {
       if (!storage.hasRunCreatedEvent || !await storage.hasRunCreatedEvent(state.run_id)) {
         await storage.appendRunEvents(state.run_id, [{ type: "run.created", payload: { submission_id: state.submission_id } }]);
       }
-      await ledger.checkpoint({ operation_id: state.operation_id, expected_phase: "run_written", phase: "run_created_appended" });
+      await ledger.checkpoint({ operation_id: state.operation_id, lease_token: state.lease_token, expected_phase: "run_written", phase: "run_created_appended" });
     }
     const response: DurableResponse = { submission_id: state.submission_id, run_id: state.run_id, status: "queued" };
-    await ledger.complete({ operation_id: state.operation_id, response });
+    await ledger.complete({ operation_id: state.operation_id, lease_token: state.lease_token, response });
     return response;
+  }
+
+  async function withClaim<State extends {
+    operation_id: string;
+    submission_id: string;
+    run_id: string;
+    actor: DurableActor;
+    request: SubmitEntryRequest;
+    phase: DurablePhase;
+    checkpoint_value?: unknown;
+  }>(state: State): Promise<DurableResponse> {
+    const claim = await ledger.claim({ operation_id: state.operation_id, lease_ms: 60_000 });
+    if (!claim) throw new EntrySagaBusyError();
+    try {
+      return await advance({ ...state, lease_token: claim.lease_token });
+    } finally {
+      await ledger.release({ operation_id: state.operation_id, lease_token: claim.lease_token });
+    }
   }
 
   return {
@@ -373,13 +402,14 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
         request: parsed,
       });
       if (reservation.replay !== undefined) return { replayed: true, response: reservation.replay as DurableResponse };
-      const response = await advance({ ...reservation, actor, request: parsed });
+      const response = await withClaim({ ...reservation, actor, request: parsed });
       return { replayed: false, response };
     },
     async recover({ operation_id }: { operation_id: string }) {
       const loaded = await ledger.load({ operation_id });
+      if (loaded.phase === "committed") return;
       const request = parseSubmitEntryRequest(loaded.request);
-      await advance({ ...loaded, request });
+      await withClaim({ ...loaded, request });
     },
   };
 }

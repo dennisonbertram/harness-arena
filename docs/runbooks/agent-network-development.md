@@ -27,10 +27,8 @@ MCP build/package lane when affected, and finally the broad suite. PGlite is the
 local SQL engine; a real development Postgres remains mandatory for locks,
 multi-process races, permissions, migration, and connection-failure evidence.
 
-The known root baseline at the time of this document has five unrelated
-`app/page.test.tsx` failures because `CompetitionLeaderboardTable` calls
-`useRouter` without an app-router test mount. Do not label the root suite green;
-report the exact pass/fail count and keep feature-targeted suites separate.
+Record the exact root-suite pass/fail/skip count and keep feature-targeted
+integration evidence separate from the broad regression result.
 
 ## Development environment handoff contract
 
@@ -45,7 +43,7 @@ Before testing, obtain explicit non-production values for:
 - optionally a dedicated Privy non-production app only after the custody POC.
 
 Never copy production tokens or data. Keep `HARNESS_ARENA_URL` pointed at the
-approved development origin. Run migrations `0001` through `0009` forward and
+approved development origin. Run migrations `0001` through `0011` forward and
 confirm readiness returns every exact version before enabling any write path.
 
 ## Required development proofs
@@ -53,8 +51,9 @@ confirm readiness returns every exact version before enabling any write path.
 1. Built MCP stdio initialize/tools/resources; stdout contains only protocol.
 2. Two-phase GitHub login survives process restart, cancellation, denial, and
    slow-down without exposing the device code.
-3. Two concurrent exact entries produce one judge call, submission, run, audit,
-   and replay; a changed-body key conflicts; `judge_started` ambiguity stays
+3. Two concurrent exact entries across separate app processes produce one
+   recovery lease, judge call, submission, run, audit, and replay; a changed-body
+   key conflicts; lease loss fences checkpoints; `judge_started` ambiguity stays
    blocked for reconciliation.
 4. Chat ban/leave immediately blocks join/read/write/subscribe across two app
    processes; reconnect from the last cursor loses no messages; quota and
@@ -82,4 +81,3 @@ apply only additive migrations, deploy flags off, inspect readiness/logs, and
 enable results/chat/traces/address/Privy/eligibility one at a time. Application
 rollback uses flags/deployment rollback; database rollback is forward-only.
 No audit or payout record is deleted during rollback.
-

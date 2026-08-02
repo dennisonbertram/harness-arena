@@ -36,7 +36,7 @@ flowchart LR
 |---|---|---|
 | MCP protocol | SDK `1.30.0`, stdio negotiation, tools/resources, subscription cleanup, abortable polling, `error.v1` | Packed MCP to real dev API still awaits the shared local/dev stack |
 | GitHub auth | Two-phase start/status/cancel, `0600` attempt store, scoped revocable sessions | Real GitHub device approval requires an approved stable non-production origin/app |
-| Entries | Strict `submit_entry.v1`, durable Postgres saga/CAS, deterministic submission/run ids, no DB transaction around judge or Blob, replay/outbox/audit | Needs dev Postgres migrations and deterministic judge/provider adapter |
+| Entries | Strict `submit_entry.v1`, durable Postgres saga/CAS and recovery lease, deterministic submission/run ids, no DB transaction around judge or Blob, replay/outbox/audit | Needs dev Postgres migrations and deterministic judge/provider adapter |
 | Results | Selected public competition board projection | Needs dev API smoke |
 | Chat | Private active-member read/write/join, cursor order, subscriptions, durable quota, mentions, ban/tombstone audit | Needs multi-process dev Postgres and built-MCP reconnect smoke |
 | Traces | Private upload metadata, checksum/policy verification, reconciliation/close inputs, owner-only status | Private Blob binding/expiry/non-public POC is still a blocking environment proof |
@@ -51,8 +51,10 @@ flowchart LR
 Each transition is a short compare-and-swap transaction. The chargeable judge
 call and Blob writes happen outside the database transaction. An operation left
 at `judge_started` is ambiguous and cannot be retried automatically. Completion
-atomically creates the submission binding, preserves bans, records one safe
-audit event/outbox item, and stores the replay response.
+requires the exact unexpired recovery lease, rejects revoked membership,
+atomically creates the submission binding, records one safe audit event/outbox
+item, and stores the replay response. Real multi-session PostgreSQL lease and
+close-race proof remains a development-environment gate.
 
 ## Trace eligibility model
 
@@ -61,8 +63,10 @@ audit event/outbox item, and stores the replay response.
 
 Only a verified artifact with the exact compressed digest, approved policy
 revision, verified timestamps, and no deletion marker can enter a frozen payout
-snapshot. Scanner timeout/error is manual review, never approval. Artifact bytes,
-object keys, and scanner details do not enter public responses or audit metadata.
+snapshot. Scanner absence, timeout, or error is manual review, never approval.
+Trace close locks the submission binding and writes an immutable artifact-id/SHA
+snapshot; later prepares are rejected. Artifact bytes, object keys, and scanner
+details do not enter public responses or audit metadata.
 
 ## Observability contract
 
@@ -76,4 +80,3 @@ and correlation ids plus outcome, duration, retryability, and provider status.
 
 Never log prompts, request/chat bodies, trace bytes, addresses, device codes,
 tokens, signed URLs, connection strings, Privy identifiers, or private reasoning.
-

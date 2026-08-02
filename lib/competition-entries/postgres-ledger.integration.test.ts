@@ -19,6 +19,12 @@ const ids = [
   "00000000-0000-0000-0000-000000000104",
   "00000000-0000-0000-0000-000000000105",
   "00000000-0000-0000-0000-000000000106",
+  "00000000-0000-0000-0000-000000000107",
+  "00000000-0000-0000-0000-000000000108",
+  "00000000-0000-0000-0000-000000000109",
+  "00000000-0000-0000-0000-000000000110",
+  "00000000-0000-0000-0000-000000000111",
+  "00000000-0000-0000-0000-000000000112",
 ];
 let db: PGlite;
 
@@ -26,6 +32,7 @@ beforeEach(async () => {
   db = await PGlite.create();
   await db.exec(migration("0001_agent_network.sql"));
   await db.exec(migration("0008_entry_saga.sql"));
+  await db.exec(migration("0011_entry_saga_leases.sql"));
   await db.query(
     "INSERT INTO entrants (id, github_id, github_login) VALUES ($1, $2::bigint, $3)",
     [entrant.entrant_id, entrant.github_id, entrant.github_login],
@@ -42,6 +49,12 @@ function ledger() {
     ids: () => ids[index++],
     now: () => new Date("2026-08-03T00:00:00.000Z"),
   });
+}
+
+async function acquire(subject: ReturnType<typeof ledger>, operation_id: string): Promise<string> {
+  const claim = await subject.claim({ operation_id, lease_ms: 30_000 });
+  if (!claim) throw new Error("fixture lease was not granted");
+  return claim.lease_token;
 }
 
 describe("0008 durable competition-entry PostgreSQL ledger", () => {
@@ -79,23 +92,25 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
   it("loads the immutable actor and private request only at the private seam, preserves the verdict across monotonic CAS checkpoints, and rejects an ambiguous in-flight judge", async () => {
     const subject = ledger();
     const reserved = await subject.reserve({ actor: entrant, request });
+    const lease = await acquire(subject, reserved.operation_id);
 
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
     await expect(subject.load({ operation_id: reserved.operation_id })).resolves.toMatchObject({
       actor: { entrantId: entrant.entrant_id, githubId: entrant.github_id, githubLogin: entrant.github_login },
       request,
       phase: "judge_started",
       reconciliation_required: true,
     });
-    await expect(subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "reserved", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } }))
+    await expect(subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } }))
       .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
 
     // A separate reserved operation proves the normal monotonic path retains
     // the verdict even after later phase values no longer carry it.
     const normal = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-002" } });
-    await subject.checkpoint({ operation_id: normal.operation_id, expected_phase: "reserved", phase: "judge_started" });
-    await subject.checkpoint({ operation_id: normal.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
-    await subject.checkpoint({ operation_id: normal.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
+    const normalLease = await acquire(subject, normal.operation_id);
+    await subject.checkpoint({ operation_id: normal.operation_id, lease_token: normalLease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: normal.operation_id, lease_token: normalLease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: normal.operation_id, lease_token: normalLease, expected_phase: "verdict_persisted", phase: "submission_written" });
     await expect(subject.load({ operation_id: normal.operation_id })).resolves.toMatchObject({
       phase: "submission_written",
       verdict: { verdict: "approved", reason: "safe" },
@@ -130,13 +145,14 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
   it("completes atomically with submission binding, active membership, audit and outbox records without accepting an external callback", async () => {
     const subject = ledger();
     const reserved = await subject.reserve({ actor: entrant, request });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "reserved", phase: "judge_started" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "submission_written", phase: "run_written" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "run_written", phase: "run_created_appended" });
+    const lease = await acquire(subject, reserved.operation_id);
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "run_written", phase: "run_created_appended" });
 
-    await subject.complete({ operation_id: reserved.operation_id, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } });
+    await subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } });
 
     await expect(db.query("SELECT entrant_id FROM submission_bindings WHERE submission_id = $1", [reserved.submission_id]))
       .resolves.toMatchObject({ rows: [{ entrant_id: entrant.entrant_id }] });
@@ -206,21 +222,22 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
   it("refuses premature or mismatched completion and emits one audit/outbox effect under concurrent replay", async () => {
     const subject = ledger();
     const reserved = await subject.reserve({ actor: entrant, request });
+    const lease = await acquire(subject, reserved.operation_id);
 
-    await expect(subject.complete({ operation_id: reserved.operation_id, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
+    await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
       .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
-    await expect(subject.complete({ operation_id: reserved.operation_id, response: { submission_id: "different", run_id: reserved.run_id, status: "queued" } }))
+    await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: "different", run_id: reserved.run_id, status: "queued" } }))
       .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
     await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
       .resolves.toMatchObject({ rows: [{ count: 0 }] });
 
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "reserved", phase: "judge_started" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "verdict_persisted", phase: "submission_written" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "submission_written", phase: "run_written" });
-    await subject.checkpoint({ operation_id: reserved.operation_id, expected_phase: "run_written", phase: "run_created_appended" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "run_written", phase: "run_created_appended" });
     const response = { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" as const };
-    await Promise.all([subject.complete({ operation_id: reserved.operation_id, response }), subject.complete({ operation_id: reserved.operation_id, response })]);
+    await Promise.all([subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response }), subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response })]);
 
     await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });

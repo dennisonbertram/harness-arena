@@ -13,15 +13,17 @@
   proof an object is absent; entry and trace recovery must fail closed.
 - A judge crash after `judge_started` may have charged. Automatic retry can
   double-charge and is forbidden until provider-side reconciliation exists.
+- Entry recovery uses a durable, expiring database lease and fences every phase
+  checkpoint. PGlite proves the SQL contract, not lease behavior across real
+  Postgres sessions; the development race test remains mandatory.
 - Joining chat is an authorization check for an already-active member. It must
   never call the generic membership setter or reactivate a ban.
 - MCP resource notifications are lossy hints. Cursor reads own no-gap recovery.
 - Trace SHA is over compressed bytes. Decompress only after verifying it and
   enforce both compressed and uncompressed limits.
-- The root test suite's five `app/page.test.tsx` router-mount failures predate
-  this branch; preserve their exact classification until independently fixed.
+- A configured trace scanner is mandatory for approval. Missing, timed-out, or
+  failed scanning remains manual review and cannot qualify for payout.
 - Local builds may need network access for Next font resolution. A successful
   escalated local build is not a deployment and proves no hosted behavior.
 - Production is explicitly off limits until the separate development
   environment is ready and the owner lifts the hold.
-
