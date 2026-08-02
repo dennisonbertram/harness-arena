@@ -34,6 +34,16 @@ instead of silently proceeding without production evidence.
 
 # Regression tests come first
 
+# Epic-first delivery
+
+For every code change, create or select an Epic and a PR-sized **native GitHub
+subissue** before implementation. PRs must close exactly one implementation
+issue, and the issue must have a native parent labeled `epic`; body checklists
+and textual parent references are not lineage. Use the Epic and implementation
+slice forms, record red/green evidence, and preserve the operator, rollback,
+and handoff path. Emergency work uses an incident Epic and native follow-up
+subissue rather than a silent bypass.
+
 **Before writing any new feature, write the test that would have caught the
 last bug in that area — and watch it fail.** A test authored after the fix, and
 never seen red, proves nothing: it may assert on behaviour that was already

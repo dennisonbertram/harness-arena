@@ -3,10 +3,12 @@ name: CI
 on:
   pull_request:
     branches:
+      - main
       - dev
 
 jobs:
-  test:
+  build:
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,3 +25,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm build
+
+  pr-lineage:
+    name: pr-lineage
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/ci/check-pr-lineage.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
