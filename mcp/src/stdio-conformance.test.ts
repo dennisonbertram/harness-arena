@@ -61,13 +61,17 @@ class StdioFixture {
     this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
   }
 
-  async notification(method: string): Promise<JsonRpcMessage> {
+  notifyRequest(id: number, method: string, params?: Record<string, unknown>): void {
+    this.process.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  }
+
+  async notification(method: string, matches: (message: JsonRpcMessage) => boolean = () => true): Promise<JsonRpcMessage> {
     const deadline = Date.now() + 2_000;
-    while (!this.notifications.some((message) => message.method === method)) {
+    while (!this.notifications.some((message) => message.method === method && matches(message))) {
       if (Date.now() >= deadline) throw new Error(`timed out waiting for ${method}`);
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    return this.notifications.find((message) => message.method === method)!;
+    return this.notifications.find((message) => message.method === method && matches(message))!;
   }
 
   async close(): Promise<void> {
@@ -123,10 +127,19 @@ describe("stdio MCP compatibility POC", () => {
       expect(await fixture.notification("notifications/progress")).toMatchObject({ params: { progressToken: "poc-progress" } });
       expect((await progress).error).toBeUndefined();
 
-      const cancel = fixture.startRequest("tools/call", { name: "poc_wait_for_cancel", arguments: {} });
-      fixture.notify("notifications/cancelled", { requestId: cancel.id, reason: "conformance cleanup" });
-      expect(await cancel.response).toMatchObject({
-        result: { structuredContent: { cancelled: true } },
+      const cancelRequestId = 100;
+      fixture.notifyRequest(cancelRequestId, "tools/call", {
+        name: "poc_wait_for_cancel",
+        arguments: {},
+        _meta: { progressToken: "poc-cancel-ready" },
+      });
+      await fixture.notification("notifications/progress", (message) =>
+        (message.result as { progressToken?: string } | undefined)?.progressToken === "poc-cancel-ready"
+        || (message as { params?: { progressToken?: string } }).params?.progressToken === "poc-cancel-ready",
+      );
+      fixture.notify("notifications/cancelled", { requestId: cancelRequestId, reason: "conformance cleanup" });
+      expect(await fixture.request("tools/call", { name: "poc_subscription_state", arguments: {} })).toMatchObject({
+        result: { structuredContent: { activeSubscriptions: 0, cancelledRequests: 1 } },
       });
     } finally {
       await fixture.close();
