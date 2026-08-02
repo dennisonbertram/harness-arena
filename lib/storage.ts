@@ -319,7 +319,7 @@ export class BlobStorage implements Storage {
     return blobs;
   }
   async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) { const page=await withRetry(()=>list({prefix,limit:options.limit,cursor:options.cursor})); return {records:page.blobs.map((b)=>({pathname:b.pathname})),nextCursor:page.hasMore?page.cursor:undefined,partial:[]}; }
-  async readOpsRecord(pathname: string) { try { const value=await this.readJson<unknown>(pathname); return value===undefined?{found:false}:{found:true,value}; } catch { return {found:false,partial:pathname}; } }
+  async readOpsRecord(pathname: string) { try { if(pathname.startsWith("traces/")){const result=await get(pathname,{access:"public"});if(!result||result.statusCode!==200||!result.stream)return {found:false};return {found:true,value:await new Response(result.stream).text()};} const value=await this.readJson<unknown>(pathname); return value===undefined?{found:false}:{found:true,value}; } catch { return {found:false,partial:pathname}; } }
 
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
