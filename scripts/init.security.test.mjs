@@ -115,6 +115,7 @@ describe("init security and lifecycle", () => {
     expect((await stat(lock)).isDirectory()).toBe(true);
     await release();
 
+    await rm(lock, { recursive: true, force: true });
     await mkdir(lock);
     await writeFile(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, created_at_ms: Date.now() }));
     await expect(init.acquireInitLock(lock, { staleMs: 1, timeoutMs: 30 })).rejects.toThrow(/lock timeout/);
