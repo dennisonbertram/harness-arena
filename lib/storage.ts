@@ -2,6 +2,9 @@ import { get, list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
+  /** Strictly read-only raw inventory for the operations plane. No callers receive Blob URLs. */
+  listOpsRecords(prefix: string, options: { limit: number; cursor?: string }): Promise<{ records: { pathname: string }[]; nextCursor?: string; partial: string[] }>;
+  readOpsRecord(pathname: string): Promise<{ found: boolean; value?: unknown; partial?: string }>;
   getSubmission(id: string): Promise<Submission | undefined>;
   putSubmission(submission: Submission): Promise<void>;
   listSubmissions(): Promise<Submission[]>;
@@ -43,6 +46,14 @@ export class MemoryStorage implements Storage {
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
   private traces = new Map<string, Buffer>();
+
+  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) {
+    const paths = [...this.submissions.keys()].map((id) => `submissions/${id}.json`)
+      .concat([...this.competitions.keys()].map((id) => `competitions/${id}.json`), [...this.runs.keys()].map((id) => `runs/${id}.json`), [...this.traces.keys()])
+      .filter((p) => p.startsWith(prefix)).sort(); const offset = Number(options.cursor ?? 0); const records=paths.slice(offset, offset+options.limit).map((pathname)=>({pathname}));
+    return { records, nextCursor: offset + records.length < paths.length ? String(offset + records.length) : undefined, partial: [] };
+  }
+  async readOpsRecord(pathname: string) { const m=/^(submissions|competitions|runs)\/(.+)\.json$/.exec(pathname); if(m){const value=m[1]==="submissions"?this.submissions.get(m[2]):m[1]==="competitions"?this.competitions.get(m[2]):this.runs.get(m[2]);return value?{found:true,value}:{found:false};} const bytes=this.traces.get(pathname);return bytes?{found:true,value:bytes.toString("utf8")}:{found:false}; }
 
   async getSubmission(id: string): Promise<Submission | undefined> {
     return this.submissions.get(id);
@@ -307,6 +318,8 @@ export class BlobStorage implements Storage {
     } while (cursor);
     return blobs;
   }
+  async listOpsRecords(prefix: string, options: { limit: number; cursor?: string }) { const page=await withRetry(()=>list({prefix,limit:options.limit,cursor:options.cursor})); return {records:page.blobs.map((b)=>({pathname:b.pathname})),nextCursor:page.hasMore?page.cursor:undefined,partial:[]}; }
+  async readOpsRecord(pathname: string) { try { const value=await this.readJson<unknown>(pathname); return value===undefined?{found:false}:{found:true,value}; } catch { return {found:false,partial:pathname}; } }
 
   async listSubmissions(): Promise<Submission[]> {
     const blobs = await this.listAllBlobs("submissions/");
