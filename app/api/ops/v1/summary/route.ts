@@ -1,0 +1,2 @@
+import { NextRequest, NextResponse } from "next/server"; import { createOpsReadService, OPS_SCHEMA_VERSION, opsAuthorized } from "@/lib/ops-read";
+export const dynamic="force-dynamic"; export async function GET(r:NextRequest){const h={"cache-control":"no-store"};if(!opsAuthorized(r.headers.get("authorization")))return NextResponse.json({error:"unauthorized"},{status:401,headers:h});return NextResponse.json({schema_version:OPS_SCHEMA_VERSION,...await createOpsReadService().summary()},{headers:h});}
