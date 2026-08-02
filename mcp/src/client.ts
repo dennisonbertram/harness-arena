@@ -184,6 +184,22 @@ export class HarnessArenaClient {
     return this.requestJson(`/api/runs/${encodeURIComponent(runId)}/events${search}`);
   }
 
+  async getCompetitionResults(input: { competition_id: string }): Promise<unknown> {
+    return this.requestJson(`/api/competitions/${encodeURIComponent(input.competition_id)}/results`);
+  }
+
+  async submitEntry(input: { competition_id: string; idempotency_key: string; entry: { kind: "prompt.v1"; agent_name: string; prompt: string } }): Promise<unknown> {
+    const token = (await this.requireCredentials()).token;
+    // The current endpoint does not persist idempotency keys. Keep the key in
+    // this public contract for the upcoming versioned route, but do not claim
+    // retries are server-idempotent until that route exists.
+    return this.requestJson("/api/competition/submissions", {
+      method: "POST",
+      token,
+      body: { agent_name: input.entry.agent_name, prompt: input.entry.prompt, competition_id: input.competition_id },
+    });
+  }
+
   async getTask(taskId: string): Promise<unknown> {
     const tasks = await this.listTasks();
     if (!Array.isArray(tasks)) throw new ToolError("Harness Arena returned an invalid task list.");
