@@ -86,4 +86,37 @@ describe("FileDeviceAttemptStore", () => {
     await expect(store.get("https://arena.example.test", "expired"))
       .rejects.toThrow("Device attempt was not found or has already been consumed.");
   });
+
+  it("reads the earlier version-1 active shape without nextPollAt and upgrades it on the next write", async () => {
+    const { path } = await storeAt();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      attempts: {
+        "https://arena.example.test\u0000legacy-attempt": {
+          status: "active",
+          baseUrl: "https://arena.example.test",
+          attemptId: "legacy-attempt",
+          deviceCode: "legacy-device-code",
+          userCode: "LEGACY",
+          verificationUri: "https://github.com/login/device",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          intervalSeconds: 5,
+        },
+      },
+    }), { encoding: "utf8", mode: 0o600 });
+
+    const store = new FileDeviceAttemptStore(path, { now: () => Date.parse("2029-01-01T00:00:00.000Z") });
+    await expect(store.get("https://arena.example.test", "legacy-attempt")).resolves.toMatchObject({
+      nextPollAt: "2030-01-01T00:00:00.000Z",
+    });
+    await store.updateSchedule(
+      "https://arena.example.test",
+      "legacy-attempt",
+      10,
+      "2029-01-01T00:00:10.000Z",
+    );
+    expect(JSON.parse(await readFile(path, "utf8")).attempts["https://arena.example.test\u0000legacy-attempt"])
+      .toMatchObject({ nextPollAt: "2029-01-01T00:00:10.000Z" });
+  });
 });
