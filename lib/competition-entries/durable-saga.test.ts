@@ -9,7 +9,7 @@ const request = Object.freeze({
   entry: { kind: "prompt.v1" as const, agent_name: "Octo Agent", prompt: "Improve the harness safely." },
 });
 
-type Phase = "reserved" | "verdict_persisted" | "submission_written" | "run_written" | "run_created_appended" | "committed";
+type Phase = "reserved" | "judge_started" | "verdict_persisted" | "submission_written" | "run_written" | "run_created_appended" | "committed";
 type DurableSaga = {
   submit(input: { actor: typeof actor; request: unknown }): Promise<{ replayed: boolean; response: { submission_id: string; run_id?: string; status: string } }>;
   recover(input: { operation_id: string }): Promise<void>;
@@ -125,6 +125,16 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.runs.size).toBeLessThanOrEqual(1);
     expect(f.events.get(f.reservation.run_id)).toEqual([{ type: "run.created", payload: { submission_id: f.reservation.submission_id } }]);
     expect(f.phases).toContain("committed");
+  });
+
+  it("fails closed when a crash makes an in-flight judge charge ambiguous", async () => {
+    const f = fixture("judge_started");
+    await expect(f.saga.submit({ actor, request })).rejects.toThrow("crash after judge_started");
+
+    await expect(f.saga.recover({ operation_id: f.reservation.operation_id }))
+      .rejects.toMatchObject({ code: "ENTRY_RECONCILIATION_REQUIRED" });
+    expect(f.judge).not.toHaveBeenCalled();
+    expect(f.ledger.complete).not.toHaveBeenCalled();
   });
 
   it("commits the submission-to-competition binding and active membership with the durable outcome", async () => {
