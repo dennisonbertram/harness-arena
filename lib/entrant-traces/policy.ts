@@ -103,20 +103,20 @@ export function createEntrantTracePolicy(options: { maxUncompressedBytes: number
       if (containsSensitive(document)) return fail("rejected", "sensitive_content");
       if (!allowlisted(input.kind, document)) return fail("rejected", "schema_not_allowlisted");
 
-      if (options.scan) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const timeout = new Promise<typeof scanTimedOut>((resolve) => {
-            timer = setTimeout(() => resolve(scanTimedOut), options.scanTimeoutMs);
-          });
-          const outcome = await Promise.race([Promise.resolve(options.scan(document)), timeout]);
-          if (outcome === scanTimedOut) return fail("manual_review", "scan_timeout");
-          if (record(outcome) && outcome.ok === false) return fail("rejected", "scan_rejected");
-        } catch {
-          return fail("manual_review", "scan_error");
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
+      if (!options.scan) return fail("manual_review", "scanner_unavailable");
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<typeof scanTimedOut>((resolve) => {
+          timer = setTimeout(() => resolve(scanTimedOut), options.scanTimeoutMs);
+        });
+        const outcome = await Promise.race([Promise.resolve(options.scan(document)), timeout]);
+        if (outcome === scanTimedOut) return fail("manual_review", "scan_timeout");
+        if (record(outcome) && outcome.ok === false) return fail("rejected", "scan_rejected");
+      } catch {
+        return fail("manual_review", "scan_error");
+      } finally {
+        if (timer) clearTimeout(timer);
       }
       return freeze({ ok: true, verified_sha256: input.sha256 });
     },

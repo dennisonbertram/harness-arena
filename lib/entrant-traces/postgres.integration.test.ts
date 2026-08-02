@@ -41,6 +41,7 @@ beforeEach(async () => {
   await db.exec(migration("0002_competition_chat.sql"));
   await db.exec(migration("0003_submission_artifacts.sql"));
   await db.exec(migration("0006_trace_policy.sql"));
+  await db.exec(migration("0010_submission_trace_closures.sql"));
   serial = 400;
   await db.exec(`
     INSERT INTO entrants (id, github_id, github_login) VALUES
@@ -119,6 +120,10 @@ describe("0003 durable submission artifact metadata", () => {
     await closer.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
     await closer.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
     await expect(closer.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })).resolves.toMatchObject({ ok: true });
+    await expect(db.query<{ snapshot: unknown }>("SELECT snapshot FROM submission_trace_closures WHERE submission_id='sub-a'"))
+      .resolves.toMatchObject({ rows: [{ snapshot: { schema_version: "submission-trace-close.v1", artifact_ids: [prepared.artifact.id], artifact_shas: [SHA] } }] });
+    await expect(db.query("UPDATE submission_trace_closures SET closed_at=NOW() WHERE submission_id='sub-a'"))
+      .rejects.toThrow();
 
     await expect(laterWriter.prepare({
       actor: ALICE,

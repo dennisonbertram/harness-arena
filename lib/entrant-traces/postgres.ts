@@ -43,10 +43,21 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       const request_hash = hash(artifact);
       const prior = await db.query<any>(`SELECT request_hash, entity_id, response_json FROM idempotency_operations WHERE actor_id=$1 AND competition_id IS NULL AND operation='entrant.trace.prepare' AND idempotency_key=$2`, [actor.id, operation_id]);
       if (prior.rows[0]) return prior.rows[0].request_hash === request_hash ? prior.rows[0].response_json : fail("conflict");
-      const owner = await db.query<{ entrant_id: string }>("SELECT entrant_id FROM submission_bindings WHERE submission_id=$1 AND entrant_id=$2", [artifact.submission_id, actor.id]);
-      if (!owner.rows[0]) return fail("not_found");
       try {
         return await db.transaction(async (tx) => {
+        // This parent-row lock is shared with closeSubmission, so a completed
+        // close snapshot cannot race a later artifact preparation in another
+        // runtime.
+        const owner = await tx.query<{ entrant_id: string }>(
+          "SELECT entrant_id FROM submission_bindings WHERE submission_id=$1 AND entrant_id=$2 FOR UPDATE",
+          [artifact.submission_id, actor.id],
+        );
+        if (!owner.rows[0]) return fail("not_found");
+        const closed = await tx.query<{ submission_id: string }>(
+          "SELECT submission_id FROM submission_trace_closures WHERE submission_id=$1",
+          [artifact.submission_id],
+        );
+        if (closed.rows[0]) return fail("invalid_state");
         const id = options.ids.next(); const op = options.ids.next(); const now = options.now().toISOString();
         const object_key = `private/artifacts/${id}`;
         await tx.query(`INSERT INTO submission_artifacts (id,submission_id,owner_entrant_id,kind,schema_version,object_key,sha256,compression,compressed_bytes,uncompressed_bytes,mime_type,consent,state,reconcile_after,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending_upload',$13,$13,$13)`, [id,artifact.submission_id,actor.id,artifact.kind,artifact.schema_version,object_key,artifact.sha256,artifact.compression,artifact.compressed_bytes,artifact.uncompressed_bytes,artifact.mime_type,artifact.consent,now]);
@@ -66,7 +77,9 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       if (a.state !== "pending_upload") return fail("invalid_state");
       const now = options.now().toISOString();
       if (a.sha256 !== sha256 || Number(a.compressed_bytes) !== compressed_bytes) { await db.query("UPDATE submission_artifacts SET state='rejected', rejected_at=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='pending_upload'", [artifact_id, actor.id, now]); return { ok: false as const, error: { code: "checksum_mismatch" }, artifact: await read(artifact_id) }; }
-      await db.query("UPDATE submission_artifacts SET state='uploaded', reconcile_after=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='pending_upload'", [artifact_id, actor.id, now]); return { ok: true as const, artifact: await read(artifact_id) };
+      const updated = await db.query<{ id: string }>("UPDATE submission_artifacts SET state='uploaded', reconcile_after=$3, updated_at=$3 WHERE id=$1 AND owner_entrant_id=$2 AND state='pending_upload' RETURNING id", [artifact_id, actor.id, now]);
+      if (!updated.rows[0]) return fail("invalid_state");
+      return { ok: true as const, artifact: await read(artifact_id) };
     },
     async finalize({ actor, artifact_id, sha256, policy }: { actor: Actor | null; artifact_id: string; sha256: string; policy?: VerifiedPolicy }) {
       if (!actor) return fail("unauthenticated"); const a = await read(artifact_id); if (!a || a.owner_entrant_id !== actor.id) return fail("not_found");
@@ -191,10 +204,9 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       return settled ? { ok: true as const, artifact: settled } : fail("not_found");
     },
     async withSubmissionLock<T>(submissionId: string, work: () => Promise<T>): Promise<T> {
-      // The local queue serializes the asynchronous reconcile/close sequence
-      // in one runtime. Cross-runtime close is made idempotent below with a
-      // deterministic audit-event primary key, rather than holding a SQL
-      // transaction open across Blob/policy work.
+      // This queue avoids redundant close probes in one runtime. The durable
+      // exclusion is the submission binding row and immutable closure written
+      // transactionally by closeSubmission below.
       const previous = tails.get(`submission-close\u0000${submissionId}`) ?? Promise.resolve();
       let release!: () => void;
       const tail = new Promise<void>((resolve) => { release = resolve; });
@@ -222,30 +234,43 @@ export function createPostgresEntrantTraces(db: Db, options: { ids: { next(): st
       return rows.rows;
     },
     async closeSubmission({ submission_id, artifact_shas }: { submission_id: string; artifact_shas: string[] }) {
-      const all = await db.query<{ id: string; sha256: string; state: string; scan_state: string; scan_revision: string | null; policy_verified_at: unknown; verified_at: unknown; deleted_at: unknown }>(
-        `SELECT id, sha256, state, scan_state, scan_revision, policy_verified_at, verified_at, deleted_at
-         FROM submission_artifacts WHERE submission_id=$1 ORDER BY id`, [submission_id],
-      );
-      const expected = [...new Set(artifact_shas)].sort();
-      const approved = all.rows.filter((row) => row.state === "verified" && row.scan_state === "approved"
-        && typeof row.scan_revision === "string" && row.scan_revision.length > 0
-        && row.policy_verified_at !== null && row.policy_verified_at !== undefined
-        && row.verified_at !== null && row.verified_at !== undefined && row.deleted_at == null);
-      const actual = approved.map((row) => row.sha256).sort();
-      // The approved projection is not enough: an uploaded/manual/rejected
-      // trace for the same submission is unresolved payout evidence.
-      if (all.rows.length === 0 || approved.length !== all.rows.length
-        || actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
-        return { ok: false as const, error: { code: "traces_not_eligible" as const } };
-      }
-      const now = options.now().toISOString();
-      const inserted = await db.query<{ id: string }>(
-        `INSERT INTO domain_audit_events (id,actor_id,action,entity_type,entity_id,correlation_id,safe_metadata,occurred_at)
-         VALUES ($1,NULL,'entrant.trace.submission_closed','submission',$2,$3,$4::jsonb,$5)
-         ON CONFLICT (id) DO NOTHING RETURNING id`,
-        [deterministicUuid(`entrant.trace.submission_closed\u0000${submission_id}`), submission_id, `trace-close:${submission_id}`, JSON.stringify({ artifact_count: approved.length, artifact_shas: actual }), now],
-      );
-      return inserted.rows[0] ? { ok: true as const } : { ok: true as const, already_closed: true };
+      return db.transaction(async (tx) => {
+        const binding = await tx.query<{ entrant_id: string }>(
+          "SELECT entrant_id FROM submission_bindings WHERE submission_id=$1 FOR UPDATE", [submission_id],
+        );
+        if (!binding.rows[0]) return fail("not_found");
+        const all = await tx.query<{ id: string; sha256: string; state: string; scan_state: string; scan_revision: string | null; policy_verified_at: unknown; verified_at: unknown; deleted_at: unknown }>(
+          `SELECT id, sha256, state, scan_state, scan_revision, policy_verified_at, verified_at, deleted_at
+           FROM submission_artifacts WHERE submission_id=$1 ORDER BY id FOR UPDATE`, [submission_id],
+        );
+        const expected = [...new Set(artifact_shas)].sort();
+        const approved = all.rows.filter((row) => row.state === "verified" && row.scan_state === "approved"
+          && typeof row.scan_revision === "string" && row.scan_revision.length > 0
+          && row.policy_verified_at !== null && row.policy_verified_at !== undefined
+          && row.verified_at !== null && row.verified_at !== undefined && row.deleted_at == null);
+        const actual = approved.map((row) => row.sha256).sort();
+        // The approved projection is not enough: an uploaded/manual/rejected
+        // trace for the same submission is unresolved payout evidence.
+        if (all.rows.length === 0 || approved.length !== all.rows.length
+          || actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
+          return { ok: false as const, error: { code: "traces_not_eligible" as const } };
+        }
+        const now = options.now().toISOString();
+        const snapshot = { schema_version: "submission-trace-close.v1", artifact_ids: approved.map((row) => row.id), artifact_shas: actual };
+        const closed = await tx.query<{ submission_id: string }>(
+          `INSERT INTO submission_trace_closures (submission_id, owner_entrant_id, snapshot, closed_at)
+           VALUES ($1,$2,$3::jsonb,$4::timestamptz)
+           ON CONFLICT (submission_id) DO NOTHING RETURNING submission_id`,
+          [submission_id, binding.rows[0].entrant_id, JSON.stringify(snapshot), now],
+        );
+        if (!closed.rows[0]) return { ok: true as const, already_closed: true };
+        await tx.query(
+          `INSERT INTO domain_audit_events (id,actor_id,action,entity_type,entity_id,correlation_id,safe_metadata,occurred_at)
+           VALUES ($1,NULL,'entrant.trace.submission_closed','submission',$2,$3,$4::jsonb,$5)`,
+          [deterministicUuid(`entrant.trace.submission_closed\u0000${submission_id}`), submission_id, `trace-close:${submission_id}`, JSON.stringify(snapshot), now],
+        );
+        return { ok: true as const };
+      });
     },
   };
 }

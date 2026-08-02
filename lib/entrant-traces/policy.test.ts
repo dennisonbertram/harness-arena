@@ -28,7 +28,7 @@ describe("entrant trace policy boundary", () => {
   });
 
   it("accepts only allowlisted JSON schemas: operational execution events and self-authored rationale", async () => {
-    const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50 });
+    const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50, scan: vi.fn().mockResolvedValue({ ok: true }) });
     const execution = Buffer.from(JSON.stringify({ schema_version: "execution.v1", events: [{ at: "2026-08-03T00:00:00.000Z", type: "tool.completed", tool: "tests", exit_code: 0 }] }));
     const rationale = Buffer.from(JSON.stringify({ schema_version: "rationale.v1", authored_by: "entrant", summary: "I ran the verifier and selected the passing result." }));
 
