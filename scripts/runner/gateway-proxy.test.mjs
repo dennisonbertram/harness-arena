@@ -1,6 +1,12 @@
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createGatewayProxy, pinProviders } from "./gateway-proxy.mjs";
+import {
+  createGatewayProxy,
+  gatewayRequestHeaders,
+  pinProviders,
+  sanitizeDiagnosticEvent,
+  serializeDiagnosticError,
+} from "./gateway-proxy.mjs";
 
 const servers = [];
 function listen(server) {
@@ -56,6 +62,24 @@ describe("pinProviders", () => {
   it("leaves the body untouched when nothing is pinned", () => {
     const body = { model: "m" };
     expect(pinProviders(body, [])).toBe(body);
+  });
+});
+
+describe("gatewayRequestHeaders", () => {
+  it("drops caller framing and hop-by-hop headers so fetch derives a valid transformed body length", () => {
+    expect(
+      gatewayRequestHeaders({
+        authorization: "Bearer k",
+        "content-type": "application/json",
+        host: "127.0.0.1:4599",
+        connection: "keep-alive",
+        "content-length": "7183",
+        "transfer-encoding": "chunked",
+      }),
+    ).toEqual({
+      authorization: "Bearer k",
+      "content-type": "application/json",
+    });
   });
 });
 
@@ -116,6 +140,46 @@ describe("gateway proxy", () => {
     // Vercel AI Gateway so a Pi compatibility path cannot silently bypass the
     // ceiling again.
     expect(upstream.received[0].body.max_tokens).toBe(8_192);
+  });
+
+  it("caps Inkling completions at Baseten's live output ceiling", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["baseten"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "thinkingmachines/inkling-small",
+        system: "A custom competition prompt",
+        messages: [],
+        max_tokens: 994_589,
+      }),
+    });
+
+    // Three real custom-prompt runs failed 16/16 because Pi used the model's
+    // 1M context metadata as an output request while Baseten rejects any
+    // max_tokens value above 262,144. The sidecar is the authoritative last
+    // hop and must enforce the provider's observed live ceiling.
+    expect(upstream.received[0].body.max_tokens).toBe(262_144);
+  });
+
+  it("preserves a smaller Inkling completion request", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["baseten"], upstream: upstream.url }));
+
+    await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "thinkingmachines/inkling-small",
+        system: "A custom competition prompt",
+        messages: [],
+        max_tokens: 4_096,
+      }),
+    });
+
+    expect(upstream.received[0].body.max_tokens).toBe(4_096);
   });
 
   // generationId used to be read here, which required buffering the whole
@@ -220,6 +284,21 @@ describe("buildPinnedModelsConfig", () => {
     const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 1234, model: "anthropic/claude-opus-5" }));
 
     expect(Object.keys(cfg.providers["vercel-ai-gateway"].modelOverrides)).toEqual(["anthropic/claude-opus-5"]);
+  });
+
+  it("gives Pi's Anthropic-compatible Inkling transport a root proxy URL", () => {
+    const model = "thinkingmachines/inkling-small";
+    const cfg = JSON.parse(buildPinnedModelsConfig({ proxyPort: 4599, model }));
+    const provider = cfg.providers["vercel-ai-gateway"];
+
+    // Pi's catalog entry for Inkling uses Anthropic Messages and appends
+    // /v1/messages itself. Giving that transport a /v1 base produced the
+    // production-only /v1/v1/messages 404. Preserve Pi's model metadata and
+    // hand it the root sidecar URL, as Vercel documents for Anthropic clients.
+    expect(provider.models).toBeUndefined();
+    expect(`${provider.baseUrl}/v1/messages`).toBe(
+      "http://host.docker.internal:4599/v1/messages",
+    );
   });
 
   it("marks Z.AI models so Pi sends an explicit disabled-thinking payload", () => {
@@ -465,6 +544,288 @@ describe("the sidecar is a transparent proxy", () => {
     if (declared !== undefined) expect(Number(declared)).toBe(Buffer.byteLength(got.raw));
     expect(JSON.parse(got.raw).providerOptions.gateway.only).toEqual(["zai"]);
   });
+
+  it("lets fetch derive content-length for transformed multibyte production-shaped requests", async () => {
+    const upstream = await fakeUpstream();
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        only: ["fireworks"],
+        upstream: upstream.url,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+    const body = {
+      model: "zai/glm-5.2-fast",
+      messages: [
+        { role: "developer", content: "Use tools safely — preserve exact output." },
+        { role: "user", content: "Inspect the model → report logits." },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Read ≥ one file",
+            parameters: { type: "object", properties: { path: { type: "string" } } },
+          },
+        },
+      ],
+      thinking: { type: "disabled" },
+      max_tokens: 8_192,
+      stream: true,
+    };
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.ok).toBe(true);
+    expect(upstream.received).toHaveLength(1);
+    expect(JSON.parse(upstream.received[0].raw)).toMatchObject({
+      providerOptions: { gateway: { only: ["fireworks"] } },
+      reasoning: { enabled: false },
+      max_tokens: 8_192,
+    });
+    expect(diagnostics.some((event) => event.type === "gateway_proxy.fetch_error")).toBe(false);
+  });
+});
+
+describe("gateway proxy diagnostics", () => {
+  it("bounds and marks every diagnostic string before emission", () => {
+    const giant = "🧪".repeat(8_192);
+    const event = sanitizeDiagnosticEvent({
+      type: "gateway_proxy.stream_error",
+      request_id: giant,
+      headers: {
+        authorization: `Bearer ${giant}`,
+        "x-provider-debug": giant,
+      },
+      error: serializeDiagnosticError(Object.assign(new Error(giant), {
+        name: giant,
+        code: giant,
+        cause: new Error(giant),
+      })),
+    });
+
+    expect(event.headers.authorization).toBe("[REDACTED]");
+    expect(event.request_id).toMatch(/\[TRUNCATED\]$/);
+    expect(event.headers["x-provider-debug"]).toMatch(/\[TRUNCATED\]$/);
+    expect(event.error.message).toMatch(/\[TRUNCATED\]$/);
+    expect(event.error.cause.message).toMatch(/\[TRUNCATED\]$/);
+    expect(Buffer.byteLength(JSON.stringify(event))).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  it("records request metadata, response headers, streamed chunk timing, byte totals, and response id", async () => {
+    const upstreamServer = http.createServer(async (_req, res) => {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "x-request-id": "upstream-request-1",
+      });
+      res.write('data: {"id":"gen_stream_1","choices":[]}' + "\n\n");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      res.end("data: [DONE]\n\n");
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        only: ["wafer"],
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+    const requestBody = {
+      model: "zai/glm-5.2-fast",
+      messages: [
+        { role: "user", content: "inspect" },
+        { role: "tool", content: "tool output", tool_call_id: "call_1" },
+      ],
+      tools: [{ type: "function", function: { name: "inspect" } }],
+      stream: true,
+    };
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+    expect(await response.text()).toContain("gen_stream_1");
+
+    const request = diagnostics.find((event) => event.type === "gateway_proxy.request");
+    expect(request).toMatchObject({
+      method: "POST",
+      model: "zai/glm-5.2-fast",
+      pinned_provider: "wafer",
+      request_bytes: expect.any(Number),
+      message_count: 2,
+      tool_definition_count: 1,
+      tool_result_count: 1,
+      tool_count: 2,
+    });
+    expect(request.request_id).toEqual(expect.any(String));
+
+    const headers = diagnostics.find((event) => event.type === "gateway_proxy.response_headers");
+    expect(headers).toMatchObject({
+      request_id: request.request_id,
+      status: 200,
+      headers: expect.objectContaining({
+        "content-type": expect.stringContaining("text/event-stream"),
+        "x-request-id": "upstream-request-1",
+      }),
+    });
+
+    const complete = diagnostics.find((event) => event.type === "gateway_proxy.response_complete");
+    expect(complete).toMatchObject({
+      request_id: request.request_id,
+      response_id: "gen_stream_1",
+      first_byte_at: expect.any(String),
+      last_byte_at: expect.any(String),
+      total_bytes: expect.any(Number),
+      chunk_count: expect.any(Number),
+      max_idle_ms: expect.any(Number),
+    });
+    expect(complete.chunk_count).toBeGreaterThanOrEqual(2);
+    expect(complete.total_bytes).toBeGreaterThan(0);
+  });
+
+  it("keeps diagnostic retention bounded for a large synthetic stream", async () => {
+    const upstreamServer = http.createServer(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (let index = 0; index < 96; index += 1) {
+        res.write(`data: {"id":"gen_many","index":${index}}\n\n`);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      res.end("data: [DONE]\n\n");
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(createGatewayProxy({
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+      onDiagnostic: (event) => diagnostics.push(event),
+    }));
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "zai/glm-5.2-fast", stream: true }),
+    });
+    expect(await response.text()).toContain("gen_many");
+
+    const chunks = diagnostics.filter((event) => event.type === "gateway_proxy.response_chunk");
+    const complete = diagnostics.find((event) => event.type === "gateway_proxy.response_complete");
+    expect(complete).toMatchObject({
+      response_id: "gen_many",
+      chunk_count: expect.any(Number),
+      total_bytes: expect.any(Number),
+      max_idle_ms: expect.any(Number),
+    });
+    expect(complete.chunk_count).toBeGreaterThan(32);
+    expect(chunks).toHaveLength(16);
+    expect(complete).not.toHaveProperty("idle_gaps_ms");
+    expect(diagnostics.length).toBeLessThanOrEqual(20);
+  });
+
+  it("preserves a terminated upstream stream error and its cause in diagnostics", async () => {
+    const upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"gen_broken"}\n\n');
+      setTimeout(() => res.destroy(new Error("upstream stream exploded")), 5);
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "zai/glm-5.2-fast", stream: true }),
+    });
+    await expect(response.text()).rejects.toThrow();
+
+    const error = diagnostics.find((event) => event.type === "gateway_proxy.stream_error");
+    expect(error).toMatchObject({
+      phase: "upstream_read",
+      error: {
+        name: expect.any(String),
+        message: expect.any(String),
+      },
+    });
+    expect(error.error.cause ?? error.error.message).toBeTruthy();
+    // Undici normally wraps the socket/body failure as TypeError("terminated")
+    // with the useful lower-level exception in cause. The fallback assertion
+    // above keeps this portable across Node versions that expose only the
+    // wrapper message.
+    if (error.error.message === "terminated") expect(error.error.cause).toBeDefined();
+  });
+
+  it("aborts the upstream request when the downstream client disconnects", async () => {
+    let upstreamClosed = false;
+    const upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"gen_disconnect"}\n\n');
+      res.on("close", () => {
+        upstreamClosed = true;
+      });
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+
+    const client = http.request(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    client.end(JSON.stringify({ model: "zai/glm-5.2-fast", stream: true }));
+    await new Promise((resolve, reject) => {
+      client.once("response", (response) => {
+        response.once("data", () => {
+          response.destroy();
+          resolve();
+        });
+      });
+      client.once("error", reject);
+    });
+
+    await vi.waitFor(() => expect(upstreamClosed).toBe(true), { timeout: 1_000 });
+    expect(diagnostics.some((event) => event.type === "gateway_proxy.client_disconnect")).toBe(true);
+  });
+
+  it("waits for downstream backpressure before writing the next chunk", async () => {
+    const upstreamServer = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(Buffer.alloc(128 * 1024, "x"));
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        upstream: `http://127.0.0.1:${upstreamPort}`,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/data`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m" }),
+    });
+    const body = await response.arrayBuffer();
+    expect(body.byteLength).toBe(128 * 1024);
+    expect(diagnostics.some((event) => event.type === "gateway_proxy.backpressure")).toBe(true);
+  });
 });
 
 import * as runnerLib from "./lib.mjs";
@@ -475,7 +836,7 @@ describe("runner subprocess isolation", () => {
 
     const upstream = await fakeUpstream();
     const port = await listen(createGatewayProxy({ only: ["wafer"], upstream: upstream.url }));
-    const child = runnerLib.shAsync(process.execPath, ["-e", "setTimeout(() => {}, 250)"]);
+    const child = runnerLib.shAsync(process.execPath, ["-e", "setTimeout(() => {}, 600)"]);
 
     const response = await Promise.race([
       fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -484,12 +845,44 @@ describe("runner subprocess isolation", () => {
         body: JSON.stringify({ model: "zai/glm-5.2-fast", messages: [] }),
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("gateway proxy starved while the child process ran")), 100),
+        // Parallel full-suite startup can delay this worker by ~180 ms on the
+        // release host. Keep the deadline below the child lifetime so a
+        // synchronous subprocess implementation still fails deterministically
+        // without treating ordinary scheduler contention as proxy starvation.
+        setTimeout(() => reject(new Error("gateway proxy starved while the child process ran")), 400),
       ),
     ]);
 
     expect(response.ok).toBe(true);
     expect((await child).code).toBe(0);
+  });
+
+  it("drains verbose Pi output without killing the child when capture reaches its bound", async () => {
+    const captureLimit = 64 * 1024;
+    const child = await runnerLib.shAsync(
+      process.execPath,
+      ["-e", "process.stdout.write('x'.repeat(256 * 1024))"],
+      { maxBuffer: captureLimit },
+    );
+
+    // Inkling's JSON event stream repeats its growing reasoning partial on
+    // every delta. The old execFile maxBuffer killed Pi mid-turn; the runner
+    // then verified an untouched workspace and called it a model failure.
+    expect(child.code).toBe(0);
+    expect(child.stdout).toHaveLength(captureLimit);
+    expect(child.outputTruncated).toBe(true);
+  });
+});
+
+describe("agentProcessFailure", () => {
+  it("surfaces an unexpected Pi exit instead of verifying an untouched workspace", () => {
+    expect(
+      runnerLib.agentProcessFailure({
+        code: 1,
+        outputTruncated: true,
+        error: { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+      }),
+    ).toMatch(/Pi process exited with code 1.*ERR_CHILD_PROCESS_STDIO_MAXBUFFER.*truncated/);
   });
 });
 

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStorage, storageRef } from "@/lib/test-support/storage-ref";
-import type { Run, Submission } from "@/lib/types";
+import type { Competition, Run, Submission } from "@/lib/types";
 
 vi.mock("@/auth", () => ({ auth: vi.fn(), signIn: vi.fn() }));
 
@@ -42,15 +42,20 @@ describe("benchmarks board", () => {
 
     const html = renderToStaticMarkup(await LeaderboardPage.default());
 
-    expect(html).toContain("No scored runs yet — be the first.");
+    expect(html).toContain("No scored prompt runs yet — be the first.");
     expect(html).toContain('href="/submit"');
     expect(html).toContain('href="/pending"');
     expect(html).toContain("2 runs in progress — see live status →");
     expect(html).not.toContain("Cost vs. tasks passed");
   });
 
-  it("renders main-arena standings, chart, and task rates while excluding competition entries", async () => {
+  it("renders main-arena standings separately from completed competition benchmark runs", async () => {
     const storage = storageRef.current;
+    await storage.putCompetition(competition("inkling-baseten", {
+      model: "thinkingmachines/inkling-small",
+      gateway_provider: "baseten",
+      status: "closed",
+    }));
     await storage.putSubmission(submission("entrant", {
       agent_name: "Precision Agent",
       github_login: "octocat",
@@ -64,10 +69,13 @@ describe("benchmarks board", () => {
       model: "zai/glm-5.2",
     }));
     await storage.putSubmission(submission("competition", {
-      agent_name: "Competition-only entrant",
-      github_login: "competition-account-must-not-render",
+      agent_name: "Contract First",
+      github_login: "competition-account",
       prompt: "This must stay off the board",
       competition: true,
+      competition_id: "inkling-baseten",
+      model: "thinkingmachines/inkling-small",
+      gateway_provider: "baseten",
     }));
 
     await storage.putRun(run("entrant-run", {
@@ -88,8 +96,11 @@ describe("benchmarks board", () => {
     }));
     await storage.putRun(run("competition-run", {
       submission_id: "competition",
-      tasks_passed: 15,
-      total_cost_usd: 0.05,
+      model: "thinkingmachines/inkling-small",
+      provider_requested: "baseten",
+      provider_pinned: "baseten",
+      tasks_passed: 12,
+      total_cost_usd: 1.0912,
       task_results: [{ task_id: "fix-git", attempted: true, passed: true }],
     }));
     await storage.putRun(run("live-run", { status: "running" }));
@@ -114,9 +125,54 @@ describe("benchmarks board", () => {
     expect(html).toContain('src="https://github.com/octocat.png?size=40"');
     expect(html).toMatch(/<svg viewBox="0 0 24 24" width="12" height="12">[\s\S]*?<\/svg><\/span><a href="\/runs\/baseline-run">glm-5\.2 Baseline<\/a>/);
     expect(html).not.toContain("baseline-account-must-not-render");
-    expect(html).not.toContain("Competition-only entrant");
-    expect(html).not.toContain("competition-account-must-not-render");
+    const competitionSection = html.match(
+      /<section[^>]*data-benchmark-source="competition"[\s\S]*?<\/section>/,
+    )?.[0];
+    expect(competitionSection).toBeDefined();
+    expect(competitionSection).toContain("Competition runs");
+    expect(competitionSection).toContain("Contract First");
+    expect(competitionSection).toContain("competition-account");
+    expect(competitionSection).toContain("Inkling Small");
+    expect(competitionSection).toContain("baseten");
+    expect(competitionSection).toContain("12/16");
+    expect(competitionSection).toContain("$1.0912");
+    expect(competitionSection).toContain('href="/runs/competition-run"');
+    expect(competitionSection).toContain('href="/?competition=inkling-baseten"');
     expect(html).not.toContain("This must stay off the board");
+  });
+
+  it("shows completed competition runs even when there are no scored main-arena prompts", async () => {
+    const storage = resetStorage();
+    await storage.putCompetition(competition("inkling-baseten", {
+      model: "thinkingmachines/inkling-small",
+      gateway_provider: "baseten",
+    }));
+    await storage.putSubmission(submission("competition-only", {
+      agent_name: "Evidence Loop",
+      github_login: "octocat",
+      competition: true,
+      competition_id: "inkling-baseten",
+      model: "thinkingmachines/inkling-small",
+    }));
+    await storage.putRun(run("competition-only-run", {
+      submission_id: "competition-only",
+      model: "thinkingmachines/inkling-small",
+      provider_pinned: "baseten",
+      tasks_passed: 8,
+      total_cost_usd: 0.5579,
+      task_results: Array.from({ length: 16 }, (_, index) => ({
+        task_id: `task-${index}`,
+        attempted: true,
+        passed: index < 8,
+      })),
+    }));
+
+    const html = renderToStaticMarkup(await LeaderboardPage.default());
+
+    expect(html).toContain("No scored prompt runs yet");
+    expect(html).toContain("Competition runs");
+    expect(html).toContain("Evidence Loop");
+    expect(html).toContain('href="/runs/competition-only-run"');
   });
 
   // Every model on the allowlist has a provider logomark (ModelLogo); the
@@ -225,6 +281,19 @@ function run(id: string, overrides: Partial<Run> = {}): Run {
     tasks_passed: 1,
     total_cost_usd: 0.5,
     task_results: [],
+    created_at: "2026-07-27T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function competition(id: string, overrides: Partial<Competition> = {}): Competition {
+  return {
+    id,
+    arena: "harness-arena",
+    harness: "pi",
+    model: "zai/glm-5.2",
+    gateway_provider: "wafer",
+    status: "live",
     created_at: "2026-07-27T00:00:00.000Z",
     ...overrides,
   };

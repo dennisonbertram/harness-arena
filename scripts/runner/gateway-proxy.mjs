@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 
 /**
@@ -69,15 +70,21 @@ export function normalizeZaiReasoning(body) {
   };
 }
 
+const MODEL_COMPLETION_TOKEN_CEILINGS = new Map([
+  ["zai/glm-5.2-fast", 8_192],
+  ["thinkingmachines/inkling-small", 262_144],
+]);
+
 /**
- * Enforce GLM Fast's per-turn completion ceiling at the last hop before the
- * Gateway. Pi's model metadata should already emit the same value, but the
- * proxy body is the request Vercel actually receives and is therefore the
- * authoritative boundary.
+ * Enforce each model route's observed completion ceiling at the last hop
+ * before the Gateway. Pi derives max_tokens from its model metadata, but that
+ * value can describe the context window rather than the serving provider's
+ * output limit. The proxy body is the request Vercel actually receives and is
+ * therefore the authoritative boundary.
  */
 export function boundCompletionTokens(body) {
-  if (body?.model !== "zai/glm-5.2-fast") return body;
-  const ceiling = 8_192;
+  const ceiling = MODEL_COMPLETION_TOKEN_CEILINGS.get(body?.model);
+  if (ceiling === undefined) return body;
   const field = Object.hasOwn(body, "max_completion_tokens") ? "max_completion_tokens" : "max_tokens";
   const requested = body[field];
   return {
@@ -120,11 +127,265 @@ function textOf(value) {
   return undefined;
 }
 
-export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}) {
+const SENSITIVE_HEADER_NAMES = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization"]);
+const MAX_CHUNK_DIAGNOSTICS = 16;
+const MAX_DIAGNOSTIC_STRING_BYTES = 512;
+const MAX_DIAGNOSTIC_EVENT_BYTES = 8 * 1024;
+const MAX_DIAGNOSTIC_OBJECT_KEYS = 32;
+const MAX_DIAGNOSTIC_ARRAY_ENTRIES = 16;
+const TRUNCATION_MARKER = "[TRUNCATED]";
+
+function truncateUtf8(value, maxBytes = MAX_DIAGNOSTIC_STRING_BYTES) {
+  const text = String(value);
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+  const contentBudget = Math.max(0, maxBytes - markerBytes);
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentBudget) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${TRUNCATION_MARKER}`;
+}
+
+function headerRecord(headers) {
+  const result = {};
+  headers.forEach((value, key) => {
+    result[key] = SENSITIVE_HEADER_NAMES.has(key.toLowerCase()) ? "[REDACTED]" : value;
+  });
+  return result;
+}
+
+export function serializeDiagnosticError(error, seen = new Set(), depth = 0) {
+  if (error === undefined || error === null) return undefined;
+  if (depth > 4 || seen.has(error)) return { name: "Error", message: "[circular cause]" };
+  if (typeof error !== "object") {
+    return { name: truncateUtf8(typeof error, 64), message: truncateUtf8(error) };
+  }
+  seen.add(error);
+  const result = {
+    name: truncateUtf8(typeof error.name === "string" && error.name ? error.name : "Error", 64),
+    message: truncateUtf8(typeof error.message === "string" ? error.message : String(error)),
+  };
+  if (error.code !== undefined) result.code = truncateUtf8(error.code, 64);
+  if (error.cause !== undefined) result.cause = serializeDiagnosticError(error.cause, seen, depth + 1);
+  return result;
+}
+
+function sanitizeDiagnosticValue(value, key, depth = 0) {
+  if (SENSITIVE_HEADER_NAMES.has(String(key ?? "").toLowerCase())) return "[REDACTED]";
+  if (typeof value === "string") return truncateUtf8(value);
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  if (depth >= 5) return TRUNCATION_MARKER;
+  if (Array.isArray(value)) {
+    const kept = value
+      .slice(0, MAX_DIAGNOSTIC_ARRAY_ENTRIES - 1)
+      .map((entry) => sanitizeDiagnosticValue(entry, undefined, depth + 1));
+    if (value.length >= MAX_DIAGNOSTIC_ARRAY_ENTRIES) kept.push(TRUNCATION_MARKER);
+    return kept;
+  }
+  const entries = Object.entries(value);
+  const result = {};
+  for (const [entryKey, entryValue] of entries.slice(0, MAX_DIAGNOSTIC_OBJECT_KEYS - 1)) {
+    result[entryKey] = sanitizeDiagnosticValue(entryValue, entryKey, depth + 1);
+  }
+  if (entries.length >= MAX_DIAGNOSTIC_OBJECT_KEYS) result._truncated_fields = TRUNCATION_MARKER;
+  return result;
+}
+
+export function sanitizeDiagnosticEvent(event) {
+  const sanitized = sanitizeDiagnosticValue(event, undefined);
+  if (Buffer.byteLength(JSON.stringify(sanitized)) <= MAX_DIAGNOSTIC_EVENT_BYTES) return sanitized;
+  return {
+    type: truncateUtf8(event?.type ?? "gateway_proxy.diagnostic", 128),
+    ...(event?.at === undefined ? {} : { at: truncateUtf8(event.at, 64) }),
+    ...(event?.request_id === undefined ? {} : { request_id: truncateUtf8(event.request_id) }),
+    ...(event?.response_id === undefined ? {} : { response_id: truncateUtf8(event.response_id) }),
+    ...(event?.phase === undefined ? {} : { phase: truncateUtf8(event.phase, 128) }),
+    ...(event?.status === undefined ? {} : { status: event.status }),
+    ...(event?.error === undefined ? {} : { error: serializeDiagnosticError(event.error) }),
+    diagnostic_truncation: TRUNCATION_MARKER,
+  };
+}
+
+function emitDiagnostic(onDiagnostic, event) {
+  const enriched = sanitizeDiagnosticEvent({ at: new Date().toISOString(), ...event });
+  try {
+    onDiagnostic?.(enriched);
+  } catch (error) {
+    // Diagnostics must never become a new model-serving failure. Preserve the
+    // sink failure locally so it is visible without breaking the proxy.
+    console.error(`[gateway-proxy] diagnostic sink failed: ${JSON.stringify(serializeDiagnosticError(error))}`);
+  }
+  if (!onDiagnostic) console.error(`[gateway-proxy] ${JSON.stringify(enriched)}`);
+  return enriched;
+}
+
+function requestToolCounts(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const toolDefinitions = Array.isArray(body?.tools) ? body.tools.length : 0;
+  const toolResults = messages.filter((message) => message?.role === "tool").length;
+  const toolCalls = messages.reduce((count, message) => {
+    const calls = Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0;
+    const contentCalls = Array.isArray(message?.content)
+      ? message.content.filter((part) => part?.type === "tool_use" || part?.type === "tool_call").length
+      : 0;
+    return count + calls + contentCalls;
+  }, 0);
+  return {
+    message_count: messages.length,
+    tool_definition_count: toolDefinitions,
+    tool_result_count: toolResults,
+    tool_call_count: toolCalls,
+    tool_count: toolDefinitions + toolResults + toolCalls,
+  };
+}
+
+function responseIdFromJson(value) {
+  if (!value || typeof value !== "object") return undefined;
+  return [value.id, value.response_id, value.generationId, value.message?.id].find(
+    (candidate) => typeof candidate === "string" && candidate,
+  );
+}
+
+function inspectStreamJson(state, value) {
+  if (!state.response_id) state.response_id = responseIdFromJson(value);
+}
+
+function inspectStreamChunk(state, chunk) {
+  if (state.response_id || state.inspect_bytes >= 64 * 1024) return;
+  const text = Buffer.from(chunk).toString("utf8");
+  state.inspect_bytes += Buffer.byteLength(text);
+  state.sse_buffer += text;
+  let newline;
+  while ((newline = state.sse_buffer.indexOf("\n")) !== -1) {
+    const line = state.sse_buffer.slice(0, newline).replace(/\r$/, "");
+    state.sse_buffer = state.sse_buffer.slice(newline + 1);
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      inspectStreamJson(state, JSON.parse(payload));
+    } catch {
+      // The proxy only observes JSON for correlation; it never changes or
+      // rejects a stream because a provider uses a non-JSON SSE event.
+    }
+    if (state.response_id) break;
+  }
+}
+
+function waitForDrain(res, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      res.off("drain", onDrain);
+      res.off("error", onError);
+      res.off("close", onClose);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onDrain = () => finish();
+    const onError = (error) => finish(error);
+    const onClose = () => {
+      if (!res.writableEnded) finish(new Error("downstream response closed while waiting for drain"));
+    };
+    const onAbort = () => finish(signal.reason ?? new Error("downstream client disconnected"));
+    res.once("drain", onDrain);
+    res.once("error", onError);
+    res.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+const REQUEST_HEADERS_FETCH_MUST_DERIVE = new Set([
+  "accept-encoding",
+  "connection",
+  "content-length",
+  "host",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/**
+ * Preserve end-to-end request headers while removing framing that belongs to
+ * the client -> sidecar hop. The proxy rewrites JSON, so forwarding or
+ * hand-computing content-length can disagree with Undici's encoded fetch body
+ * for production-shaped requests. Leaving it absent lets fetch derive the
+ * exact wire length.
+ */
+export function gatewayRequestHeaders(incoming) {
+  const headers = { ...incoming };
+  for (const name of REQUEST_HEADERS_FETCH_MUST_DERIVE) delete headers[name];
+  return headers;
+}
+
+export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDiagnostic } = {}) {
   const pinned = (only ?? []).filter(Boolean);
   return http.createServer(async (req, res) => {
+    const requestId = req.headers["x-request-id"] || randomUUID();
+    const abortController = new AbortController();
+    const requestStartedAt = Date.now();
+    let downstreamDisconnected = false;
+    const abortForDisconnect = (reason) => {
+      if (downstreamDisconnected) return;
+      downstreamDisconnected = true;
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.client_disconnect",
+        request_id: requestId,
+        error: serializeDiagnosticError(reason),
+      });
+      abortController.abort(reason);
+    };
+    req.once("aborted", () => abortForDisconnect(new Error("client aborted request body")));
+    req.once("error", (error) => {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.request_error",
+        request_id: requestId,
+        phase: "downstream_request",
+        error: serializeDiagnosticError(error),
+      });
+      abortController.abort(error);
+    });
+    res.once("error", (error) => {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.write_error",
+        request_id: requestId,
+        phase: "downstream_write",
+        error: serializeDiagnosticError(error),
+      });
+      abortController.abort(error);
+    });
+    res.once("close", () => {
+      if (!res.writableEnded) abortForDisconnect(new Error("downstream response closed"));
+    });
+
     const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
+    try {
+      for await (const chunk of req) chunks.push(chunk);
+    } catch (error) {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.request_error",
+        request_id: requestId,
+        phase: "downstream_request",
+        error: serializeDiagnosticError(error),
+      });
+      if (!res.destroyed) res.destroy(error);
+      return;
+    }
     const raw = Buffer.concat(chunks).toString() || "{}";
 
     let body;
@@ -139,22 +400,48 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       body === null
         ? raw
         : JSON.stringify(pinProviders(boundCompletionTokens(normalizeZaiReasoning(body)), pinned));
+    const requestBytes = Buffer.byteLength(forwarded);
+    const counts = requestToolCounts(body);
+    emitDiagnostic(onDiagnostic, {
+      type: "gateway_proxy.request",
+      request_id: requestId,
+      method: req.method,
+      path: req.url,
+      model: body?.model,
+      pinned_provider: pinned.length === 1 ? pinned[0] : pinned,
+      incoming_request_bytes: Buffer.byteLength(raw),
+      request_bytes: requestBytes,
+      incoming_content_length: req.headers["content-length"],
+      computed_content_length: String(requestBytes),
+      forwarded_code_units: forwarded.length,
+      incoming_transfer_encoding: req.headers["transfer-encoding"],
+      ...counts,
+      started_at: new Date(requestStartedAt).toISOString(),
+    });
 
-    // Pass every header through. An earlier version forwarded only
-    // authorization + content-type, which silently dropped things the api
-    // depends on (anthropic-version among them). host/content-length are
-    // rebuilt because we are talking to a different host and may have made the
-    // body longer by injecting the pin.
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers["content-length"];
-    delete headers["accept-encoding"];
-    headers["content-length"] = String(Buffer.byteLength(forwarded));
+    // Pass end-to-end headers through. An earlier version forwarded only
+    // authorization + content-type, which silently dropped things the API
+    // depends on (anthropic-version among them). Framing and hop-by-hop headers
+    // are removed because this is a new request with a rewritten body; fetch
+    // must derive its own content-length.
+    const headers = gatewayRequestHeaders(req.headers);
 
     let upstreamRes;
     try {
-      upstreamRes = await fetch(upstream + req.url, { method: req.method, headers, body: forwarded });
+      upstreamRes = await fetch(upstream + req.url, {
+        method: req.method,
+        headers,
+        body: forwarded,
+        signal: abortController.signal,
+      });
     } catch (error) {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.fetch_error",
+        request_id: requestId,
+        phase: "upstream_fetch",
+        error: serializeDiagnosticError(error),
+        aborted_by_client: downstreamDisconnected,
+      });
       // The agent must see a real failure, not a hang: a dead proxy that
       // silently swallows calls would look like a model that stopped
       // answering, and we would misread it as a bad prompt.
@@ -162,6 +449,14 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
       res.end(JSON.stringify({ error: { message: `gateway proxy could not reach upstream: ${error.message}` } }));
       return;
     }
+
+    const responseHeaders = headerRecord(upstreamRes.headers);
+    emitDiagnostic(onDiagnostic, {
+      type: "gateway_proxy.response_headers",
+      request_id: requestId,
+      status: upstreamRes.status,
+      headers: responseHeaders,
+    });
 
     if (onForward) {
       onForward({
@@ -185,13 +480,108 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward } = {}
     res.writeHead(upstreamRes.status, outHeaders);
 
     if (!upstreamRes.body) {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.response_complete",
+        request_id: requestId,
+        response_id: undefined,
+        first_byte_at: undefined,
+        last_byte_at: undefined,
+        total_bytes: 0,
+        chunk_count: 0,
+        max_idle_ms: 0,
+        duration_ms: Date.now() - requestStartedAt,
+      });
       res.end();
       return;
     }
+
+    const streamState = {
+      response_id: undefined,
+      inspect_bytes: 0,
+      sse_buffer: "",
+      first_byte_at: undefined,
+      last_byte_at: undefined,
+      previous_byte_at: undefined,
+      total_bytes: 0,
+      chunk_count: 0,
+      max_idle_ms: 0,
+    };
     try {
-      for await (const chunk of upstreamRes.body) res.write(chunk);
-    } catch {
-      /* client hung up mid-stream */
+      for await (const chunk of upstreamRes.body) {
+        const now = Date.now();
+        const bytes = Buffer.byteLength(chunk);
+        const idleMs = streamState.previous_byte_at === undefined ? 0 : now - streamState.previous_byte_at;
+        if (streamState.first_byte_at === undefined) streamState.first_byte_at = new Date(now).toISOString();
+        streamState.last_byte_at = new Date(now).toISOString();
+        streamState.previous_byte_at = now;
+        streamState.total_bytes += bytes;
+        streamState.chunk_count += 1;
+        streamState.max_idle_ms = Math.max(streamState.max_idle_ms, idleMs);
+        inspectStreamChunk(streamState, chunk);
+        if (streamState.chunk_count <= MAX_CHUNK_DIAGNOSTICS) {
+          emitDiagnostic(onDiagnostic, {
+            type: "gateway_proxy.response_chunk",
+            request_id: requestId,
+            chunk_index: streamState.chunk_count,
+            bytes,
+            idle_ms: idleMs,
+          });
+        }
+        let wrote;
+        try {
+          wrote = res.write(chunk);
+        } catch (error) {
+          emitDiagnostic(onDiagnostic, {
+            type: "gateway_proxy.write_error",
+            request_id: requestId,
+            phase: "downstream_write",
+            error: serializeDiagnosticError(error),
+          });
+          throw error;
+        }
+        if (!wrote) {
+          const backpressureStartedAt = Date.now();
+          try {
+            await waitForDrain(res, abortController.signal);
+          } finally {
+            emitDiagnostic(onDiagnostic, {
+              type: "gateway_proxy.backpressure",
+              request_id: requestId,
+              wait_ms: Date.now() - backpressureStartedAt,
+            });
+          }
+        }
+      }
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.response_complete",
+        request_id: requestId,
+        response_id: streamState.response_id,
+        first_byte_at: streamState.first_byte_at,
+        last_byte_at: streamState.last_byte_at,
+        total_bytes: streamState.total_bytes,
+        chunk_count: streamState.chunk_count,
+        max_idle_ms: streamState.max_idle_ms,
+        duration_ms: Date.now() - requestStartedAt,
+      });
+    } catch (error) {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.stream_error",
+        request_id: requestId,
+        phase: downstreamDisconnected ? "downstream_disconnect" : "upstream_read",
+        error: serializeDiagnosticError(error),
+        response_id: streamState.response_id,
+        first_byte_at: streamState.first_byte_at,
+        last_byte_at: streamState.last_byte_at,
+        total_bytes: streamState.total_bytes,
+        chunk_count: streamState.chunk_count,
+        max_idle_ms: streamState.max_idle_ms,
+        duration_ms: Date.now() - requestStartedAt,
+      });
+      // A response that already emitted headers cannot be converted into a
+      // useful JSON error. Destroying it preserves the failure boundary for
+      // Pi, while the structured event retains the actual cause and phase.
+      if (!res.destroyed) res.destroy(error);
+      return;
     }
     res.end();
   });

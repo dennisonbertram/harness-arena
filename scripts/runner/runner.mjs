@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
+  agentProcessFailure,
   budgetExceeded,
   buildPiSettings,
   buildContainerName,
@@ -29,11 +30,14 @@ import {
   preflightProxy,
   resolvePinnedProvider,
   computeTotals,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
   parseSessionAgentError,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -42,6 +46,7 @@ import {
   safeCleanup,
   sh,
   shAsync,
+  summarizeGatewayRequests,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -77,6 +82,14 @@ const BUDGET_CAP_USD = parseFloat(process.env.BUDGET_CAP_USD ?? "10");
 // well under this. gzip keeps even this bound's worth of text far below the
 // callback body limit.
 const STDOUT_CAP_BYTES = parseInt(process.env.RUNNER_STDOUT_CAP_BYTES ?? String(16 * 1024 * 1024), 10);
+const GATEWAY_DIAGNOSTIC_MAX_ENTRIES = parseInt(process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_ENTRIES ?? "1024", 10);
+const GATEWAY_DIAGNOSTIC_MAX_BYTES = parseInt(
+  process.env.RUNNER_GATEWAY_DIAGNOSTIC_MAX_BYTES ?? String(512 * 1024),
+  10,
+);
+const RUNNER_LOG_MAX_ENTRIES = parseInt(process.env.RUNNER_LOG_MAX_ENTRIES ?? "2000", 10);
+const RUNNER_LOG_MAX_BYTES = parseInt(process.env.RUNNER_LOG_MAX_BYTES ?? String(1024 * 1024), 10);
+const RUNNER_LOG_MAX_LINE_BYTES = parseInt(process.env.RUNNER_LOG_MAX_LINE_BYTES ?? String(8 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
 const TERMINAL_FALLBACK_PATH =
@@ -99,11 +112,14 @@ if (!RUN_ID || !CALLBACK_BASE || !RUNNER_CALLBACK_SECRET) {
   process.exit(1);
 }
 
-const runnerLogLines = [];
+const runnerLogLines = createBoundedLogBuffer({
+  maxEntries: RUNNER_LOG_MAX_ENTRIES,
+  maxBytes: RUNNER_LOG_MAX_BYTES,
+  maxLineBytes: RUNNER_LOG_MAX_LINE_BYTES,
+});
 function log(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`;
-  runnerLogLines.push(stamped);
-  console.log(stamped);
+  console.log(runnerLogLines.append(stamped));
 }
 
 function sleep(ms) {
@@ -393,6 +409,11 @@ function readRewardFile(containerName) {
 }
 
 let gatewayProxy = null;
+const gatewayDiagnosticLog = createBoundedGatewayDiagnosticCollector({
+  maxEntries: GATEWAY_DIAGNOSTIC_MAX_ENTRIES,
+  maxBytes: GATEWAY_DIAGNOSTIC_MAX_BYTES,
+});
+let currentGatewayTaskId;
 
 /**
  * Starts the pinning sidecar on the sandbox VM. pi runs inside the task
@@ -416,6 +437,13 @@ async function startGatewayProxy() {
       if (!resolvedSystemPrompt && event.systemPrompt) resolvedSystemPrompt = event.systemPrompt;
       if (event.only?.length) pinWasApplied = true;
     },
+    onDiagnostic: (event) => {
+      const correlated = {
+        ...(currentGatewayTaskId ? { task_id: currentGatewayTaskId } : {}),
+        ...event,
+      };
+      gatewayDiagnosticLog.push(correlated);
+    },
   });
   await new Promise((resolve) => server.listen(GATEWAY_PROXY_PORT, "0.0.0.0", resolve));
   log(`gateway proxy listening on :${GATEWAY_PROXY_PORT}, pinned to ${PINNED_PROVIDER || "(nothing)"}`);
@@ -426,6 +454,10 @@ async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
   const taskStart = Date.now();
   const tempDirs = [];
+  // The proxy preflight uses the same sidecar before task 1. Establish the
+  // task scope here so preflight requests/statuses never enter task evidence.
+  gatewayDiagnosticLog.beginScope();
+  currentGatewayTaskId = task.id;
 
   try {
     queueEvent("task.started", { task_id: task.id, index });
@@ -513,10 +545,10 @@ async function runOneTask(task, index, systemPrompt) {
     });
 
     // `-e AI_GATEWAY_API_KEY` (no `=value`) makes docker exec pass the value
-    // through from this process's own environment -- execFile inherits
-    // process.env by default, so no extra plumbing is needed here. maxBuffer is
-    // large (64MB): a verbose pi run streamed ~5.2MB and the old 5MB cap threw
-    // (ENOBUFS), killing pi mid-task -- the "0-turn crash" tasks. This call
+    // through from this process's own environment -- spawn inherits
+    // process.env by default, so no extra plumbing is needed here. shAsync
+    // drains both streams continuously and retains only STDOUT_CAP_BYTES for
+    // diagnostics; reaching that capture bound must never kill Pi. This call
     // MUST be async: the gateway proxy runs in this same Node process and a
     // synchronous docker exec starves its event loop for the whole model turn.
     const execResult = await shAsync(
@@ -534,13 +566,28 @@ async function runOneTask(task, index, systemPrompt) {
         "-c",
         piCommand,
       ],
-      { maxBuffer: 64 * 1024 * 1024 },
+      { maxBuffer: STDOUT_CAP_BYTES },
     );
     const piStdout = capAt(Buffer.concat([execResult.stdout, execResult.stderr]), STDOUT_CAP_BYTES);
     const agentFinishedAt = Date.now();
     const agentDurationS = (agentFinishedAt - taskStart) / 1000;
 
     const sessionText = extractNewestSessionJsonl(containerName);
+    const piCorrelation = parsePiCorrelation(sessionText, piStdout.toString("utf8"));
+    const diagnosticSnapshot = gatewayDiagnosticLog.drain();
+    const proxyRequests = summarizeGatewayRequests(diagnosticSnapshot.events);
+    const gatewayCorrelation = {
+      proxy_requests: proxyRequests,
+      proxy_request_count: diagnosticSnapshot.requestCount,
+      gateway_diagnostics_dropped: diagnosticSnapshot.droppedEvents,
+      pi_response_ids: piCorrelation.response_ids,
+      pi_retry_events: piCorrelation.retry_events,
+    };
+    log(`gateway-proxy correlation ${JSON.stringify({ task_id: task.id, ...gatewayCorrelation })}`);
+    queueEvent("task.gateway_correlation", {
+      task_id: task.id,
+      ...gatewayCorrelation,
+    });
     const sessionUnreadable = isSessionTextUnreadable(sessionText);
     const parsed = parseSessionCost(sessionText);
     const turns = parsed.turns;
@@ -587,6 +634,9 @@ async function runOneTask(task, index, systemPrompt) {
       });
     }
 
+    if (execResult.outputTruncated) {
+      log(`task ${task.id}: Pi stdout/stderr capture reached ${STDOUT_CAP_BYTES} bytes; child continued`);
+    }
     queueEvent("task.agent_finished", {
       task_id: task.id,
       turns,
@@ -594,6 +644,7 @@ async function runOneTask(task, index, systemPrompt) {
       ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
       duration_s: agentDurationS,
+      ...(execResult.outputTruncated ? { output_capture_truncated: true } : {}),
     });
     await flushEvents();
 
@@ -629,6 +680,36 @@ async function runOneTask(task, index, systemPrompt) {
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_timeout",
+        error,
+      };
+    }
+
+    const processFailure = agentProcessFailure(execResult);
+    if (processFailure) {
+      const error =
+        `${processFailure} ` +
+        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
+      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueEvent("task.failed", {
+        task_id: task.id,
+        stage: "agent_process_error",
+        error,
+        duration_s: (Date.now() - taskStart) / 1000,
+      });
+      await flushEvents();
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed: false,
+        reward: 0,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        failure_stage: "agent_process_error",
         error,
       };
     }
@@ -728,6 +809,10 @@ async function runOneTask(task, index, systemPrompt) {
       trace_blob_url: traceBlobUrl,
     };
   } finally {
+    // A task that exits before correlation still must not retain diagnostics
+    // for every later task in the run.
+    gatewayDiagnosticLog.drain();
+    if (currentGatewayTaskId === task.id) currentGatewayTaskId = undefined;
     // Runs on every path -- success, verification failure, or a thrown
     // exception mid-task -- so a task that errors never leaks its
     // container or temp files (issue #19 finding 5). Each cleanup step is
@@ -840,7 +925,7 @@ async function main() {
       duration_s: durationS,
     });
 
-    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+    await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
 
     gatewayProxy?.close();
     const delivered = await finalizeTerminalStatus({
@@ -860,7 +945,7 @@ async function main() {
       ...(err?.taskId ? { task_id: err.taskId } : {}),
     });
     try {
-      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.join("\n"), "utf8"));
+      await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
     } catch {
       // best-effort only
     }

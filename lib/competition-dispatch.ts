@@ -9,7 +9,33 @@ import type { Run, Submission } from "./types";
 
 /** A run that ended in infra failure (not the submitter's/admin's fault) — shared by both competition routes' duplicate/retry guards. */
 export function isInfraFailedRun(run: Run | undefined): boolean {
-  return run?.status === "failed" || run?.status === "reaped";
+  if (!run) return false;
+  if (run.status === "failed" || run.status === "reaped") return true;
+
+  // The runner is intentionally task-resilient: it keeps going after a task
+  // cannot reach the model and can therefore finish a broken transport as a
+  // formally "completed" 0/16 run. Treat the narrow zero-output form as
+  // infrastructure failure so a baseline or entrant may be retried. A
+  // provider error after productive turns is deliberately not included; that
+  // can be a real model/provider interaction and needs to remain visible.
+  return (
+    run.status === "completed" &&
+    run.task_results.length > 0 &&
+    run.task_results.every((result) => {
+      if (!result.attempted || result.passed || (result.output_tokens ?? 0) !== 0) return false;
+      const surfacedEarlyFailure =
+        (result.failure_stage === "provider_error" ||
+          result.failure_stage === "provider_timeout" ||
+          result.failure_stage === "agent_timeout" ||
+          result.failure_stage === "agent_process_error") &&
+        (result.turns ?? 0) <= 1;
+      const hiddenProcessFailure =
+        (result.turns ?? 0) === 0 &&
+        result.cost_source === "unmeasured" &&
+        result.failure_stage === undefined;
+      return surfacedEarlyFailure || hiddenProcessFailure;
+    })
+  );
 }
 
 export type JudgeAndDispatchResult =

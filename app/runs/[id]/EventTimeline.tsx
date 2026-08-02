@@ -2,6 +2,26 @@
 
 import { useEffect, useState } from "react";
 
+// This client component is also server-rendered. A viewer-local
+// `toLocaleTimeString()` produces different text in Vercel's UTC renderer and
+// the browser, causing one React hydration error per event row. Pin both
+// formatters to UTC so the initial HTML is identical on both sides.
+const eventTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
+const eventDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 export interface TimelineEvent {
   seq: number;
   ts: string;
@@ -21,20 +41,20 @@ export function EventTimeline({ events }: { events: TimelineEvent[] }) {
               <th style={{ ...cell, width: 40 }} className="label">#</th>
               <th style={{ ...cell, width: 110 }} className="label">Time</th>
               <th style={{ ...cell, width: 200 }} className="label">Event</th>
-              <th style={cell} className="label">Payload</th>
+              <th style={cell} className="label">Public details</th>
             </tr>
           </thead>
           <tbody>
             {events.map((event) => (
               <tr key={event.seq} style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
                 <td style={{ ...cell, color: "var(--gray-700)" }}>{event.seq}</td>
-                <td style={{ ...cell, whiteSpace: "nowrap" }}>{new Date(event.ts).toLocaleTimeString()}</td>
+                <td style={{ ...cell, whiteSpace: "nowrap" }}>{eventTimeFormatter.format(new Date(event.ts))}</td>
                 <td style={{ ...cell, color: "var(--gray-1000)", whiteSpace: "nowrap" }}>{event.type}</td>
                 <td style={{ ...cell, maxWidth: 0 }}>
                   <button
                     type="button"
                     onClick={() => setSelected(event)}
-                    title="Click to view formatted JSON"
+                    title="Click to view public event details"
                     style={{
                       display: "block",
                       width: "100%",
@@ -118,7 +138,7 @@ function JsonModal({ event, onClose }: { event: TimelineEvent; onClose: () => vo
               {event.type}
             </div>
             <div style={{ fontSize: 12, color: "var(--gray-700)" }}>
-              #{event.seq} · {new Date(event.ts).toLocaleString()}
+              #{event.seq} · {eventDateTimeFormatter.format(new Date(event.ts))}
             </div>
           </div>
           <button

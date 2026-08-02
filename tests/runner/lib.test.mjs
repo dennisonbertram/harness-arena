@@ -9,11 +9,16 @@ import {
   buildModelsConfig,
   buildPiCommand,
   computeTotals,
+  createBoundedGatewayDiagnosticCollector,
+  createBoundedLogBuffer,
   deliverTerminalStatus,
+  drainGatewayDiagnostics,
   fetchWithTimeout,
   flushWithPendingStatus,
   isSessionTextUnreadable,
   parseSessionAgentError,
+  summarizeGatewayRequests,
+  parsePiCorrelation,
   parseReward,
   parseSessionCost,
   parseStdoutCost,
@@ -133,6 +138,183 @@ describe("parseSessionAgentError", () => {
         JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop" } }),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("parsePiCorrelation", () => {
+  it("extracts Pi response ids from session messages and retry events from stdout", () => {
+    const session = [
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_1" } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", responseId: "gen_2" } }),
+    ].join("\n");
+    const stdout = [
+      JSON.stringify({ type: "message_end", message: { role: "assistant" } }),
+      JSON.stringify({ type: "auto_retry_start", attempt: 1, error: "terminated" }),
+      JSON.stringify({ type: "turn_end", usage: {} }),
+    ].join("\n");
+
+    expect(parsePiCorrelation(session, stdout)).toEqual({
+      response_ids: ["gen_1", "gen_2"],
+      retry_events: [{ type: "auto_retry_start", attempt: 1, error: "terminated" }],
+    });
+  });
+});
+
+describe("summarizeGatewayRequests", () => {
+  it("retains the compact timing fields needed to distinguish stalls from provider errors", () => {
+    const events = [
+      {
+        type: "gateway_proxy.request",
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+      },
+      {
+        type: "gateway_proxy.response_headers",
+        request_id: "gw-1",
+        status: 200,
+      },
+      {
+        type: "gateway_proxy.response_complete",
+        request_id: "gw-1",
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+      },
+    ];
+
+    expect(summarizeGatewayRequests(events)).toEqual([
+      {
+        request_id: "gw-1",
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "fireworks",
+        request_bytes: 8_283,
+        message_count: 6,
+        tool_count: 4,
+        status: 200,
+        response_id: "gen-1",
+        first_byte_at: "2026-07-31T00:00:01.000Z",
+        last_byte_at: "2026-07-31T00:00:37.000Z",
+        total_bytes: 2_120,
+        chunk_count: 4,
+        max_idle_ms: 15_068,
+        duration_ms: 37_081,
+        stream_error: undefined,
+      },
+    ]);
+  });
+
+  it("caps persisted request summaries and oversized stream error messages", () => {
+    const events = Array.from({ length: 300 }, (_, index) => [
+      {
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "zai/glm-5.2-fast",
+        pinned_provider: "wafer",
+      },
+      {
+        type: "gateway_proxy.stream_error",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        stream_error: "ignored",
+        error: { name: "Error", message: "x".repeat(4_096) },
+      },
+    ]).flat();
+
+    const summaries = summarizeGatewayRequests(events);
+    expect(summaries).toHaveLength(128);
+    expect(summaries.at(-1)?.request_id).toBe("gw-299");
+    expect(summaries.every((summary) => JSON.stringify(summary.stream_error).length <= 600)).toBe(true);
+  });
+});
+
+describe("drainGatewayDiagnostics", () => {
+  it("returns one task slice without retaining diagnostics across the run", () => {
+    const log = [
+      { type: "gateway_proxy.started" },
+      { type: "gateway_proxy.request", request_id: "gw-1" },
+      { type: "gateway_proxy.response_complete", request_id: "gw-1" },
+    ];
+    const taskSlice = log.slice(1);
+
+    expect(drainGatewayDiagnostics(log, 1)).toEqual(taskSlice);
+    expect(log).toEqual([]);
+  });
+});
+
+describe("bounded runner diagnostics", () => {
+  it("starts task 1 with a fresh scope after gateway preflight diagnostics", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "preflight-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "preflight-1", status: 503 });
+    diagnostics.push({ type: "gateway_proxy.retry", request_id: "preflight-1", attempt: 1 });
+
+    diagnostics.beginScope();
+    diagnostics.push({ type: "gateway_proxy.request", request_id: "task-1" });
+    diagnostics.push({ type: "gateway_proxy.response_headers", request_id: "task-1", status: 200 });
+    diagnostics.push({ type: "gateway_proxy.response_complete", request_id: "task-1", response_id: "gen-1" });
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(1);
+    expect(snapshot.droppedEvents).toBe(0);
+    expect(snapshot.events.map((event) => event.request_id)).not.toContain("preflight-1");
+    expect(summarizeGatewayRequests(snapshot.events)).toEqual([
+      expect.objectContaining({ request_id: "task-1", status: 200, response_id: "gen-1" }),
+    ]);
+  });
+
+  it("caps high-cardinality diagnostics while preserving request counts and terminal evidence", () => {
+    const diagnostics = createBoundedGatewayDiagnosticCollector({ maxEntries: 12, maxBytes: 4_096 });
+    for (let index = 0; index < 500; index += 1) {
+      diagnostics.push({
+        type: "gateway_proxy.request",
+        request_id: `gw-${index}`,
+        model: "x".repeat(2_048),
+      });
+      diagnostics.push({
+        type: "gateway_proxy.response_complete",
+        request_id: `gw-${index}`,
+        response_id: `gen-${index}`,
+        total_bytes: index,
+      });
+    }
+
+    const snapshot = diagnostics.drain();
+    expect(snapshot.requestCount).toBe(500);
+    expect(snapshot.droppedEvents).toBeGreaterThan(0);
+    expect(snapshot.events.length).toBeLessThanOrEqual(12);
+    expect(Buffer.byteLength(JSON.stringify(snapshot.events))).toBeLessThanOrEqual(4_096);
+    expect(snapshot.events).toContainEqual(expect.objectContaining({
+      type: "gateway_proxy.response_complete",
+      request_id: "gw-499",
+      response_id: "gen-499",
+    }));
+    expect(diagnostics.drain()).toEqual({ events: [], requestCount: 0, droppedEvents: 0 });
+  });
+
+  it("bounds retained and uploaded runner logs with a deterministic truncation marker", () => {
+    const logs = createBoundedLogBuffer({ maxEntries: 6, maxBytes: 512, maxLineBytes: 96 });
+    for (let index = 0; index < 200; index += 1) {
+      logs.append(`gateway diagnostic ${index} ${"x".repeat(2_048)}`);
+    }
+    logs.append("gateway-proxy correlation task-500 response_complete");
+    logs.append("terminal run.failed provider_timeout");
+
+    const upload = logs.toString();
+    expect(logs.length).toBeLessThanOrEqual(6);
+    expect(logs.byteLength).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(upload)).toBeLessThanOrEqual(512);
+    expect(upload).toContain("[TRUNCATED]");
+    expect(upload).toContain("gateway-proxy correlation task-500 response_complete");
+    expect(upload).toContain("terminal run.failed provider_timeout");
   });
 });
 
