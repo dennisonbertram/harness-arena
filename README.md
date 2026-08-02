@@ -66,7 +66,8 @@ labeled `epic`.
 draft transitions, and code updates cancel any older run for the same PR so a
 stale same-SHA lineage result cannot win a race. Non-draft PRs also run
 `pr-lineage`, which requires exactly one native `closingIssuesReferences`
-entry and verifies that issue's native Epic parent.
+entry and verifies that both the issue and its native Epic parent belong to the
+pull request's base repository.
 
 GitHub only populates native closing references when a PR targets the default
 branch (`main`). A non-draft PR targeting `dev` therefore fails lineage closed

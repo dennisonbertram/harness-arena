@@ -7,6 +7,7 @@ const GRAPHQL_URL = "https://api.github.com/graphql";
 
 const LINEAGE_QUERY = `query PullRequestLineage($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
+    nameWithOwner
     defaultBranchRef { name }
     pullRequest(number: $number) {
       number
@@ -14,8 +15,10 @@ const LINEAGE_QUERY = `query PullRequestLineage($owner: String!, $name: String!,
         totalCount
         nodes {
           number
+          repository { nameWithOwner }
           parent {
             number
+            repository { nameWithOwner }
             labels(first: 100) { nodes { name } }
           }
         }
@@ -78,6 +81,7 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
   const references = pullRequest?.closingIssuesReferences;
   if (
     payload?.errors?.length ||
+    graphRepository?.nameWithOwner !== repository ||
     !graphRepository?.defaultBranchRef ||
     pullRequest?.number !== number ||
     !references
@@ -87,16 +91,19 @@ export async function checkPullRequestLineage({ event, token, repository, fetchI
 
   const closingIssues = references.nodes?.map((issue) => ({
     number: issue?.number,
+    repositoryNameWithOwner: issue?.repository?.nameWithOwner,
     parent:
       issue?.parent === null
         ? null
         : {
             number: issue?.parent?.number,
+            repositoryNameWithOwner: issue?.parent?.repository?.nameWithOwner,
             labels: issue?.parent?.labels?.nodes?.map((label) => label?.name),
           },
   }));
 
   return verifyPullRequestLineage({
+    baseRepositoryNameWithOwner: graphRepository.nameWithOwner,
     baseRefName,
     defaultBranchName: graphRepository.defaultBranchRef.name,
     closingIssueCount: references.totalCount,

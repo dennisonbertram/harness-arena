@@ -59,6 +59,7 @@ describe("checkPullRequestLineage", () => {
     expect(url).toBe("https://api.github.com/graphql");
     const request = JSON.parse(options.body);
     expect(request.query).toContain("closingIssuesReferences");
+    expect(request.query.match(/\bnameWithOwner\b/g)).toHaveLength(3);
     expect(request.variables).toEqual({ owner: "dennisonbertram", name: "harness-arena", number: 149 });
   });
 

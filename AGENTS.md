@@ -45,8 +45,9 @@ and handoff path. Emergency work uses an incident Epic and native follow-up
 subissue rather than a silent bypass.
 
 The `pr-lineage` check validates GitHub's native `closingIssuesReferences`, not
-PR-body regexes. GitHub only provides those references for pull requests aimed
-at the default branch (`main`), so non-draft `dev` PRs intentionally fail
+PR-body regexes. Both the closing issue and its native Epic parent must belong
+to this repository. GitHub only provides those references for pull requests
+aimed at the default branch (`main`), so non-draft `dev` PRs intentionally fail
 closed. Keep intermediate `dev` work draft or retarget it to `main` before
 requesting merge review.
 
