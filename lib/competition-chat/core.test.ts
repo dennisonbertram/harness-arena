@@ -117,7 +117,21 @@ describe("competition chat core", () => {
     expect(second.page.next_cursor).not.toBe(first.page.next_cursor);
 
     await expect(chat.list({ actor: ALICE, competition_id: "comp-a", cursor: second.page.next_cursor, limit: 2 }))
-      .resolves.toMatchObject({ ok: true, page: { messages: [], high_water_mark: 3, has_more: false } });
+      .resolves.toMatchObject({
+        ok: true,
+        page: { messages: [], next_cursor: second.page.next_cursor, high_water_mark: 3, has_more: false },
+      });
+
+    await post(chat, ALICE, "comp-a", "message 4", "op-page-4");
+    await expect(chat.list({ actor: ALICE, competition_id: "comp-a", cursor: second.page.next_cursor, limit: 2 }))
+      .resolves.toMatchObject({
+        ok: true,
+        page: {
+          messages: [expect.objectContaining({ sequence: 4, body: "message 4" })],
+          high_water_mark: 4,
+          has_more: false,
+        },
+      });
   });
 
   it("rejects malformed cursors and cursors bound to another competition", async () => {

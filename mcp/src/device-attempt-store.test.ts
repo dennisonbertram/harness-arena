@@ -54,6 +54,10 @@ describe("FileDeviceAttemptStore", () => {
     await writeFile(path, JSON.stringify({ version: 1, attempts: { broken: { deviceCode: 42 } } }), "utf8");
     await expect(new FileDeviceAttemptStore(path).get("https://arena.example.test", "attempt"))
       .rejects.toThrow("Unable to read Harness Arena device attempts. Fix or remove the device attempts file and run login again.");
+
+    await writeFile(path, JSON.stringify({ version: 1, attempts: {}, unexpected: "must-not-be-accepted" }), "utf8");
+    await expect(new FileDeviceAttemptStore(path).get("https://arena.example.test", "attempt"))
+      .rejects.toThrow("Unable to read Harness Arena device attempts. Fix or remove the device attempts file and run login again.");
   });
 
   it("terminalizes cancellations, consumes successful attempts, and rejects replay", async () => {
