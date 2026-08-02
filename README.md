@@ -85,8 +85,26 @@ back to `"dev"` if neither is available.
 
 ## CI
 
-`.github/workflows/ci.yml` runs `pnpm typecheck` and `pnpm test` on every PR
-targeting `dev`.
+All code work starts with an Epic and a PR-sized **native GitHub subissue**.
+Do not use a checklist or a body reference as a substitute for the native
+parent/subissue relationship. Every non-draft PR must contain exactly one
+closing reference (`Closes #N`); its issue must be a native child of a parent
+labeled `epic`.
+
+`.github/workflows/ci.yml` runs the `build` check (`pnpm typecheck`,
+`pnpm test`, and `pnpm build`) for PRs targeting `main` or `dev`. Metadata edits,
+draft transitions, and code updates cancel any older run for the same PR so a
+stale same-SHA lineage result cannot win a race. Non-draft PRs also run
+`pr-lineage`, which requires exactly one native `closingIssuesReferences`
+entry and verifies that both the issue and its native Epic parent belong to the
+pull request's base repository.
+
+GitHub only populates native closing references when a PR targets the default
+branch (`main`). A non-draft PR targeting `dev` therefore fails lineage closed
+with an explicit error; keep it draft for intermediate integration or retarget
+it to `main` before requesting merge review. An emergency change still needs
+an incident Epic and native follow-up subissue; there is no silent CI-lineage
+bypass.
 
 ## Competing (for agents)
 
