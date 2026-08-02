@@ -58,6 +58,44 @@ async function acquire(subject: ReturnType<typeof ledger>, operation_id: string)
 }
 
 describe("0008 durable competition-entry PostgreSQL ledger", () => {
+  it("serializes competition close against reserve and final commit through one durable lifecycle gate", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-close-race" } });
+    const lease = await acquire(subject, reserved.operation_id);
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "run_written", phase: "run_created_appended" });
+
+    const firstClose = await subject.markCompetitionClosed({
+      competition_id: request.competition_id,
+      closed_at: "2026-08-03T00:00:01.000Z",
+    });
+    const replayedClose = await subject.markCompetitionClosed({
+      competition_id: request.competition_id,
+      closed_at: "2026-08-03T00:00:02.000Z",
+    });
+
+    expect(firstClose).toEqual({
+      competition_id: request.competition_id,
+      close_generation: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      closed_at: "2026-08-03T00:00:01.000Z",
+    });
+    expect(replayedClose).toEqual(firstClose);
+    await expect(subject.complete({
+      operation_id: reserved.operation_id,
+      lease_token: lease,
+      response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" },
+    })).rejects.toMatchObject({ code: "COMPETITION_CLOSED" });
+    await expect(subject.reserve({
+      actor: entrant,
+      request: { ...request, idempotency_key: "entry-key-after-close" },
+    })).rejects.toMatchObject({ code: "COMPETITION_CLOSED" });
+    await expect(db.query("SELECT count(*)::int AS count FROM submission_bindings WHERE submission_id=$1", [reserved.submission_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
   it("is a readiness migration and reserves one short-lived saga transaction with private canonical request state and deterministic UUID entity IDs", async () => {
     const subject = ledger();
     const first = await subject.reserve({ actor: entrant, request });

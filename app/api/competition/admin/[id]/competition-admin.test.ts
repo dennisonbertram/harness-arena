@@ -97,6 +97,18 @@ describe("competition admin close and prize endpoints", () => {
     expect(await storageRef.current.getCompetition("competition-1")).toEqual(body);
   });
 
+  it("fails closed before mutating public storage when durable entry lifecycle coordination is enabled but unavailable", async () => {
+    vi.stubEnv("AGENT_NETWORK_ENTRIES_ENABLED", "true");
+
+    const response = await closeCompetition(
+      adminRequest("POST", "/api/competition/admin/competition-1/close", undefined, "3.3.3.14"),
+      { params: Promise.resolve({ id: "competition-1" }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await storageRef.current.getCompetition("competition-1")).toEqual(competition);
+  });
+
   it("updates a prize and rejects an invalid cadence", async () => {
     const update = await updatePrize(
       adminRequest(

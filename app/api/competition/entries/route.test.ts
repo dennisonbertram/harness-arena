@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
   authenticateAgentSession: vi.fn(),
@@ -32,14 +32,27 @@ const request = (value: unknown = body) => new NextRequest("http://localhost/api
 });
 
 describe("POST /api/competition/entries", () => {
+  it("fails closed without constructing the agent runtime until the explicit entry feature gate is enabled", async () => {
+    vi.stubEnv("AGENT_NETWORK_ENTRIES_ENABLED", "false");
+
+    const response = await POST(request(body));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: { code: "entries_unavailable" } });
+    expect(runtime.authenticateAgentSession).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.stubEnv("AGENT_NETWORK_ENTRIES_ENABLED", "true");
     runtime.authenticateAgentSession.mockResolvedValue({ ok: true, actor });
     runtime.submitCompetitionEntry.mockResolvedValue({
       ok: true,
       entry: { submission_id: "submission-1", run_id: "run-1", status: "queued" },
     });
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   it("accepts only submit_entry.v1 under competitions:write and gives the durable saga the session identity", async () => {
     const response = await POST(request());
