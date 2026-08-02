@@ -62,6 +62,29 @@ describe("entrant execution/rationale trace manifest v1", () => {
     expect(missingSubmission).toEqual({ ok: false, errors: [{ code: "required", path: "submission_id" }] });
   });
 
+  it("rejects whitespace-only and oversized submission identifiers", () => {
+    expect(validateEntrantTraceManifest({ ...validManifest(), submission_id: "   " })).toEqual({
+      ok: false,
+      errors: [{ code: "required", path: "submission_id" }],
+    });
+    expect(validateEntrantTraceManifest({ ...validManifest(), submission_id: "s".repeat(257) })).toEqual({
+      ok: false,
+      errors: [{ code: "value_too_long", path: "submission_id" }],
+    });
+  });
+
+  it("returns a detached, deeply immutable manifest for the storage boundary", () => {
+    const input = validManifest();
+    const result = validateEntrantTraceManifest(input);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected a valid manifest");
+    expect(result.value).not.toBe(input);
+    expect(Object.isFrozen(result.value)).toBe(true);
+    expect(Object.isFrozen(result.value.artifacts)).toBe(true);
+    expect(Object.isFrozen(result.value.artifacts[0])).toBe(true);
+  });
+
   it("derives entrant identity from authentication rather than accepting it from the manifest", () => {
     for (const field of ["owner_id", "entrant_id", "ownerId", "entrantId"] as const) {
       const candidate = { ...validManifest(), [field]: "client-controlled-identity" };
@@ -198,9 +221,10 @@ describe("entrant execution/rationale trace manifest v1", () => {
       errors: [{ code: "unexpected_field", path: "notes" }],
     });
 
-    const withArtifactExtension = validManifest({
+    const withArtifactExtension = {
+      ...validManifest(),
       artifacts: [{ ...validManifest().artifacts[0], encoding: "custom" }, validManifest().artifacts[1]],
-    });
+    };
     expect(validateEntrantTraceManifest(withArtifactExtension)).toEqual({
       ok: false,
       errors: [{ code: "unexpected_field", path: "artifacts[0].encoding" }],

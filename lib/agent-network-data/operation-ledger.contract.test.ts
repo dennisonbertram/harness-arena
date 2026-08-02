@@ -45,6 +45,47 @@ describe("agent-network data operation ledger contract", () => {
     expect(domainMutationCalls).toBe(1);
   });
 
+  it("coalesces concurrent matching requests and executes the domain mutation once", async () => {
+    const data = createInMemoryAgentNetworkData();
+    let releaseMutation!: () => void;
+    const mutationBlocked = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    let domainMutationCalls = 0;
+    const mutate = async () => {
+      domainMutationCalls += 1;
+      await mutationBlocked;
+      return { entryId: "entry-created-once" };
+    };
+
+    const first = data.execute({ ...operation, request }, mutate);
+    const concurrentReplay = data.execute({ ...operation, request: { ...request } }, mutate);
+    await Promise.resolve();
+
+    expect(domainMutationCalls).toBe(1);
+    releaseMutation();
+    await expect(Promise.all([first, concurrentReplay])).resolves.toEqual([
+      expect.objectContaining({ replayed: false, response: { entryId: "entry-created-once" } }),
+      expect.objectContaining({ replayed: true, response: { entryId: "entry-created-once" } }),
+    ]);
+  });
+
+  it("returns detached, deeply immutable responses on the first execution and every replay", async () => {
+    const data = createInMemoryAgentNetworkData();
+    const source = { entry: { id: "entry-1", tags: ["accepted"] } };
+
+    const first = await data.execute({ ...operation, request }, async () => source);
+    const replay = await data.execute({ ...operation, request }, async () => source);
+
+    expect(first.response).not.toBe(source);
+    expect(replay.response).not.toBe(first.response);
+    for (const response of [first.response, replay.response]) {
+      expect(Object.isFrozen(response)).toBe(true);
+      expect(Object.isFrozen(response.entry)).toBe(true);
+      expect(Object.isFrozen(response.entry.tags)).toBe(true);
+    }
+  });
+
   it("fails closed when an idempotency key is reused with a changed request hash", async () => {
     const data = createInMemoryAgentNetworkData();
     await data.execute({ ...operation, request }, async () => ({ entryId: "entry-created-once" }));
@@ -80,7 +121,8 @@ describe("agent-network data operation ledger contract", () => {
     ]);
 
     const recovered = await data.outbox.claimNext({ now: new Date("2026-08-02T12:05:02.000Z") });
-    await data.outbox.markDelivered(recovered.id, { now: new Date("2026-08-02T12:05:03.000Z") });
+    expect(recovered).toBeDefined();
+    await data.outbox.markDelivered(recovered!.id, { now: new Date("2026-08-02T12:05:03.000Z") });
     expect(await data.outbox.list({ operationId: created.operationId })).toEqual([
       expect.objectContaining({ state: "delivered", attempts: 2 }),
     ]);
