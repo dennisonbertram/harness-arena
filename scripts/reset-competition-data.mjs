@@ -13,6 +13,7 @@
 //     --yes
 
 import { copy, del, get, list, put } from "@vercel/blob";
+import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const DELETE_BATCH_SIZE = 100;
 
@@ -61,7 +62,7 @@ export async function resetCompetitionData({
 
   const resolvedArchivePrefix = (
     archivePrefix
-    ?? `archives/competition-resets/${competitionId}/${new Date().toISOString().replaceAll(":", "-")}`
+    ?? `${BLOB_PATHS.competitionResets}${competitionId}/${new Date().toISOString().replaceAll(":", "-")}`
   ).replace(/\/+$/, "");
   const competitionPath = `competitions/${competitionId}.json`;
   const competition = await readJson(competitionPath, token);

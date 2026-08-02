@@ -1,21 +1,22 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getOpsReadAdapter, type OpsReadAdapter, type OpsRecordMetadata } from "./ops-read-adapter";
+import { BLOB_PATHS } from "./blob-paths.mjs";
 
 export const OPS_SCHEMA_VERSION = "ops.v1";
 export const OPS_RECORD_KINDS = [
-  { kind: "submissions", prefix: "submissions/", format: "json" },
-  { kind: "runs", prefix: "runs/", format: "json" },
-  { kind: "competitions", prefix: "competitions/", format: "json" },
-  { kind: "events", prefix: "events/", format: "json" },
-  { kind: "traces", prefix: "traces/", format: "text" },
-  { kind: "voice_manifest", prefix: "voice/manifest.json", format: "json" },
-  { kind: "voice_judgments", prefix: "voice/judgments/", format: "json" },
-  { kind: "voice_audio_prompts", prefix: "voice/audio/prompts/", format: "binary" },
-  { kind: "voice_audio_responses", prefix: "voice/audio/responses/", format: "binary" },
-  { kind: "cleanup_operations", prefix: "archives/competition-cleanup-operations/", format: "json" },
-  { kind: "cleanup_archives", prefix: "archives/competition-cleanups/", format: "json" },
-  { kind: "competition_resets", prefix: "archives/competition-resets/", format: "json" },
-  { kind: "archives", prefix: "archives/", format: "json" },
+  { kind: "submissions", prefix: BLOB_PATHS.submissions, format: "json" },
+  { kind: "runs", prefix: BLOB_PATHS.runs, format: "json" },
+  { kind: "competitions", prefix: BLOB_PATHS.competitions, format: "json" },
+  { kind: "events", prefix: BLOB_PATHS.events, format: "json" },
+  { kind: "traces", prefix: BLOB_PATHS.traces, format: "text" },
+  { kind: "voice_manifest", prefix: BLOB_PATHS.voiceManifest, format: "json" },
+  { kind: "voice_judgments", prefix: BLOB_PATHS.voiceJudgments, format: "json" },
+  { kind: "voice_audio_prompts", prefix: BLOB_PATHS.voiceAudioPrompts, format: "binary" },
+  { kind: "voice_audio_responses", prefix: BLOB_PATHS.voiceAudioResponses, format: "binary" },
+  { kind: "cleanup_operations", prefix: BLOB_PATHS.cleanupOperations, format: "json" },
+  { kind: "cleanup_archives", prefix: BLOB_PATHS.cleanupArchives, format: "json" },
+  { kind: "competition_resets", prefix: BLOB_PATHS.competitionResets, format: "json" },
+  { kind: "archives", prefix: BLOB_PATHS.archives, format: "json" },
 ] as const;
 export type OpsKind = typeof OPS_RECORD_KINDS[number]["kind"];
 const MAX_LIMIT = 100, DEFAULT_LIMIT = 50, MAX_BYTES = 1_048_576, READ_TIMEOUT_MS = 3_000, MAX_SUMMARY_RECORDS = 2_000;

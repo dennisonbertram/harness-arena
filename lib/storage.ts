@@ -1,5 +1,6 @@
 import { get, list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
+import { BLOB_PATHS } from "./blob-paths.mjs";
 
 export interface Storage {
   getSubmission(id: string): Promise<Submission | undefined>;
@@ -106,14 +107,14 @@ export class MemoryStorage implements Storage {
   }
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
-    const key = `traces/${runId}/${taskId}/${name}`;
+    const key = `${BLOB_PATHS.traces}${runId}/${taskId}/${name}`;
     const url = `memory://${key}`;
     this.traces.set(key, Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8"));
     return url;
   }
 
   async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
-    return this.traces.get(`traces/${runId}/${taskId}/${name}`) ?? null;
+    return this.traces.get(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`) ?? null;
   }
 }
 
@@ -290,11 +291,11 @@ export class BlobStorage implements Storage {
   }
 
   async getSubmission(id: string): Promise<Submission | undefined> {
-    return this.readJson<Submission>(`submissions/${id}.json`);
+    return this.readJson<Submission>(`${BLOB_PATHS.submissions}${id}.json`);
   }
 
   async putSubmission(submission: Submission): Promise<void> {
-    await this.writeJson(`submissions/${submission.id}.json`, submission);
+    await this.writeJson(`${BLOB_PATHS.submissions}${submission.id}.json`, submission);
   }
 
   private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string; uploadedAt: string | Date }[]> {
@@ -308,7 +309,7 @@ export class BlobStorage implements Storage {
     return blobs;
   }
   async listSubmissions(): Promise<Submission[]> {
-    const blobs = await this.listAllBlobs("submissions/");
+    const blobs = await this.listAllBlobs(BLOB_PATHS.submissions);
     const results = await Promise.all(
       blobs.map((blob) =>
         this.readListedJson<Submission>(blob).catch(() => undefined),
@@ -325,15 +326,15 @@ export class BlobStorage implements Storage {
   }
 
   async getCompetition(id: string): Promise<Competition | undefined> {
-    return this.readJson<Competition>(`competitions/${id}.json`);
+    return this.readJson<Competition>(`${BLOB_PATHS.competitions}${id}.json`);
   }
 
   async putCompetition(competition: Competition): Promise<void> {
-    await this.writeJson(`competitions/${competition.id}.json`, competition);
+    await this.writeJson(`${BLOB_PATHS.competitions}${competition.id}.json`, competition);
   }
 
   async listCompetitions(): Promise<Competition[]> {
-    const blobs = await this.listAllBlobs("competitions/");
+    const blobs = await this.listAllBlobs(BLOB_PATHS.competitions);
     const results = await Promise.all(
       blobs.map((blob) =>
         this.readListedJson<Competition>(blob).catch(() => undefined),
@@ -349,15 +350,15 @@ export class BlobStorage implements Storage {
   }
 
   async getRun(id: string): Promise<Run | undefined> {
-    return this.readJson<Run>(`runs/${id}.json`);
+    return this.readJson<Run>(`${BLOB_PATHS.runs}${id}.json`);
   }
 
   async putRun(run: Run): Promise<void> {
-    await this.writeJson(`runs/${run.id}.json`, run);
+    await this.writeJson(`${BLOB_PATHS.runs}${run.id}.json`, run);
   }
 
   async listRuns(): Promise<Run[]> {
-    const blobs = await this.listAllBlobs("runs/");
+    const blobs = await this.listAllBlobs(BLOB_PATHS.runs);
     const results = await Promise.all(
       blobs.map((blob) => this.readListedJson<Run>(blob).catch(() => undefined)),
     );
@@ -377,7 +378,7 @@ export class BlobStorage implements Storage {
     // runner only ever calls appendRunEvents sequentially per run, so this
     // doesn't happen in practice — add per-run locking / a CAS if a second
     // concurrent writer per run is ever introduced.
-    const existing = await this.listAllBlobs(`events/${runId}/`);
+    const existing = await this.listAllBlobs(`${BLOB_PATHS.events}${runId}/`);
     let seq = existing.length;
     const appended: RunEvent[] = [];
     for (const event of newEvents) {
@@ -389,7 +390,7 @@ export class BlobStorage implements Storage {
       for (let tries = 0; tries < 50; tries++) {
         try {
           const full: RunEvent = { ...event, run_id: runId, seq };
-          await put(`events/${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
+          await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
             access: "public",
             addRandomSuffix: false,
             allowOverwrite: false,
@@ -410,7 +411,7 @@ export class BlobStorage implements Storage {
   }
 
   async listRunEventsSince(runId: string, sinceSeq: number): Promise<RunEvent[]> {
-    const blobs = await this.listAllBlobs(`events/${runId}/`);
+    const blobs = await this.listAllBlobs(`${BLOB_PATHS.events}${runId}/`);
     // The seq is encoded in the blob NAME (zero-padded, see appendRunEvents),
     // so filtering happens on list() metadata -- before any content fetch.
     // That's the whole point: a 16-task run emits ~90 event blobs, and a
@@ -459,7 +460,7 @@ export class BlobStorage implements Storage {
     // Cheap: list() metadata only (no per-event content fetch). Event blob
     // names are zero-padded seq, so the lexically-last name is the newest
     // event; its blob uploadedAt is a fine staleness proxy for the reaper.
-    const blobs = await this.listAllBlobs(`events/${runId}/`);
+    const blobs = await this.listAllBlobs(`${BLOB_PATHS.events}${runId}/`);
     if (blobs.length === 0) return undefined;
     return blobs.reduce<string>((latest, b) => {
       const ts = new Date(b.uploadedAt).toISOString();
@@ -469,7 +470,7 @@ export class BlobStorage implements Storage {
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const { url } = await withRetry(() =>
-      put(`traces/${runId}/${taskId}/${name}`, data, {
+      put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, {
         access: "public",
         addRandomSuffix: false,
         allowOverwrite: true,
@@ -481,7 +482,7 @@ export class BlobStorage implements Storage {
   async getTraceBytes(runId: string, taskId: string, name: string): Promise<Buffer | null> {
     try {
       return await withRetry(async () => {
-        const pathname = `traces/${runId}/${taskId}/${name}`;
+        const pathname = `${BLOB_PATHS.traces}${runId}/${taskId}/${name}`;
         const blobs = await this.listAllBlobs(pathname);
         const blob = blobs.find((candidate) => candidate.pathname === pathname);
         if (!blob) return null;

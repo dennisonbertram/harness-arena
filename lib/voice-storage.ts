@@ -2,9 +2,10 @@ import { list, put } from "@vercel/blob";
 import { fetchJson, withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
+import { BLOB_PATHS } from "./blob-paths.mjs";
 
-const MANIFEST_PATH = "voice/manifest.json";
-const JUDGMENTS_PREFIX = "voice/judgments/";
+const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
+const JUDGMENTS_PREFIX = BLOB_PATHS.voiceJudgments;
 const LIST_CONCURRENCY = 20;
 
 function judgmentPrefix(evaluatorId: string): string {
