@@ -34,15 +34,20 @@ function development(overrides = {}) {
 }
 
 describe("verifyDevelopmentEnvironment", () => {
-  it("keeps the checked-in bootstrap manifest non-secret and explicitly incomplete", async () => {
+  it("records the provisioned Development data plane without secrets", async () => {
     const manifest = JSON.parse(
       await readFile(new URL("../../config/development-environment.json", import.meta.url), "utf8"),
     );
 
     expect(verifyDevelopmentEnvironment({ development: manifest, live: manifest.live })).toEqual({
-      ok: false,
-      missing: ["host", "store.id", "callbackOrigin"],
+      ok: true,
+      missing: [],
       violations: [],
+    });
+    expect(manifest).toMatchObject({
+      host: "harness-arena-development.vercel.app",
+      store: { id: "store_9AIBHzkDp5mZ1SnM" },
+      callbackOrigin: "https://harness-arena-development.vercel.app",
     });
     expect(manifest.live).toEqual(live);
   });
