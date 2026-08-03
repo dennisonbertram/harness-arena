@@ -132,6 +132,33 @@ describe("observability logger contract", () => {
     expect(output.length).toBeLessThanOrEqual(2_048);
   });
 
+  it("redacts a long secret beginning within the final 63 retained characters", () => {
+    const marker = "...[Truncated]";
+    const retainedLimit = 2_048 - marker.length;
+    const visibleSecretPrefixLength = 37;
+    const longSecret = `edge-secret-${"q".repeat(3_000)}`;
+    const padding = "x".repeat(retainedLimit - visibleSecretPrefixLength);
+    const output = String(redactLogValue(`${padding}${longSecret}`, new Set([longSecret])));
+
+    expect(output).toContain("[REDACTED]");
+    expect(output).not.toContain(longSecret.slice(0, visibleSecretPrefixLength));
+    expect(output.length).toBeLessThanOrEqual(2_048);
+  });
+
+  it("uses a safe fallback for a Proxy that throws during instanceof", () => {
+    const hostile = new Proxy(new Error("must stay unread"), {
+      getPrototypeOf: () => { throw new Error("hostile getPrototypeOf"); },
+    });
+    expect(() => normalizeError(hostile, "request")).not.toThrow();
+    expect(normalizeError(hostile, "request")).toMatchObject({ error_class: "error", error_stage: "request" });
+  });
+
+  it("never emits a 2,049-character truncation result", () => {
+    const output = String(redactLogValue("x".repeat(10_000), new Set()));
+    expect(output).toHaveLength(2_048);
+    expect(output.endsWith("...[Truncated]")).toBe(true);
+  });
+
   it("normalizes an Error with a hostile name getter without throwing", () => {
     const hostile = new Error("payload must stay unread");
     Object.defineProperty(hostile, "name", { get: () => { throw new Error("hostile name getter"); } });
