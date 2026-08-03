@@ -41,7 +41,12 @@ describe("least-privilege access policy", () => {
         },
       },
     })).toThrow(/inventory/i);
-    expect(JSON.parse(await readFile(join(repo, "config", "agent-access-policy.schema.json"), "utf8")).$id).toContain("agent-access-policy.v1");
+    const schema = JSON.parse(await readFile(join(repo, "config", "agent-access-policy.schema.json"), "utf8"));
+    expect(schema.$id).toContain("agent-access-policy.v1");
+    expect(schema.$defs.environmentVariable.properties.safe_diagnostic.enum).toContain("metadata_presence_only");
+    expect(schema.$defs.environmentVariable.allOf).toContainEqual(expect.objectContaining({
+      then: { properties: { safe_diagnostic: { const: "metadata_presence_only" } } },
+    }));
   });
 
   it.each([

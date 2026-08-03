@@ -64,6 +64,10 @@ read-only `VERCEL_READ_TOKEN` in the Development project. The two ops tokens
 and Vercel token must be independently scoped GET-only credentials. All four
 secrets must be distinct; hashed constant-time comparisons fail closed before
 probes if any configured values collide.
+The route explicitly hands the collector only these four credentials plus the
+`VERCEL_PROJECT_ID` and `VERCEL_ENV` guard fields; it never passes the ambient
+environment object. Access inventory diagnostics report presence metadata only
+and never print, write, or retain any of the four secret values.
 Do not copy, print, rotate, or inspect a live write credential.
 
 After the separate Development deployment exists, invoke the route with its

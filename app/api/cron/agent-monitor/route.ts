@@ -12,7 +12,18 @@ function levelFor(event: Record<string, unknown>): LogLevel {
 }
 
 export async function GET(request: Request): Promise<Response> {
-  const result = await executePassiveMonitorCron({ request, env: process.env, fetchImpl: globalThis.fetch });
+  const result = await executePassiveMonitorCron({
+    request,
+    env: {
+      CRON_SECRET: process.env.CRON_SECRET,
+      DEVELOPMENT_OPS_READ_TOKEN: process.env.DEVELOPMENT_OPS_READ_TOKEN,
+      PRODUCTION_OPS_READ_TOKEN: process.env.PRODUCTION_OPS_READ_TOKEN,
+      VERCEL_READ_TOKEN: process.env.VERCEL_READ_TOKEN,
+      VERCEL_PROJECT_ID: process.env.VERCEL_PROJECT_ID,
+      VERCEL_ENV: process.env.VERCEL_ENV,
+    },
+    fetchImpl: globalThis.fetch,
+  });
   let retained = true;
   for (const event of result.events) {
     const {
