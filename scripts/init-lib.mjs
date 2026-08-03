@@ -377,7 +377,12 @@ export async function detachOwnedSupervisor(owned, { signal, beforeCommit, befor
     record.child.unref();
     return true;
   } catch (error) {
-    await cleanupAfterFailure();
+    try {
+      await cleanupAfterFailure();
+    } catch (cleanupError) {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error;
+      throw cleanupError;
+    }
     if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error;
     throw error;
   }
