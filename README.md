@@ -52,10 +52,59 @@ mutation is involved. Do not provision the caller with the Blob write token.
 ## Getting started
 
 ```bash
-cp .env.example .env.local   # fill in real values locally, never commit
-pnpm install
-pnpm dev
+./scripts/init.sh
 ```
+
+This is the supported safe local startup path. It installs the pinned lockfile,
+requires Node.js 20.9.0 or newer, creates a mode-`0600` `.env.local` containing
+only `STORAGE=file` and a worktree-local `.harness-arena/local-data` path, seeds a local development
+competition idempotently, starts one dev server on a deterministic free port,
+waits for `/api/ready`, and prints one secret-free JSON record. It never runs
+Vercel commands, reads a production env file, accepts a Blob token, or writes
+to Vercel Blob. Data, PID metadata, and logs are gitignored and isolated by
+worktree.
+
+The launched process receives a strict allowlist rather than the caller's
+environment. Keys found in Next's auto-loaded development `.env*` files are
+preempted and removed before application code runs, so a forgotten local Blob,
+gateway, runner, or unrelated value cannot leak into the server. File storage
+also refuses to start under `NODE_ENV=production` or Vercel.
+
+- `./scripts/init.sh --check` validates Node, pnpm, port ownership, and PID
+  metadata without installing or starting a persistent process. It is
+  read-only: it does not create state or lock files, create `.env.local`, or
+  repair/delete stale PID metadata. A read-only result reports
+  `stale_pid_detected`; use a normal start or explicit reset for recovery. A
+  live-instance check uses a nonce-authenticated local-only identity handshake,
+  not `/api/ready` or any storage probe. Ordinary filesystem reads may advance
+  access time; init does not write application state or change file content,
+  inode, mode, modification time, or change time during the check.
+- `./scripts/init.sh --no-install` is for a warm worktree.
+- A repeat start or `--check` reports the same healthy PID/nonce/port. Starts
+  serialize through a per-worktree immutable claim queue: owner metadata is
+  fsynced before atomic publication, unpublished temp files never own, and a
+  dead claim is removed only by its unique path. The selected claim must also
+  atomically hard-link its unique owner record into a stable owner fence before
+  entering; late lower claims therefore cannot overlap an existing owner.
+  Dead-fence recovery pins the old inode under a unique reclaimer path, never
+  reclaims a live PID, and blocks new publication until every live recovery pin
+  is gone. Stale PID metadata is recovered within a bounded wait. A
+  simultaneous cold start can wait up to 120 seconds for the owner to finish
+  installation and readiness.
+- The detached wrapper fsyncs `init.pid` and handshakes that ownership before
+  it launches Next. The init-managed `.env.local`, local seed, and write-once
+  voice judgments likewise publish complete fsynced temp files atomically
+  without replacing an existing final path.
+- Stop the printed PID/process group, then use `./scripts/init.sh --reset` to
+  explicitly remove only that worktree's local data. Reset refuses symlinked
+  state/data paths at any depth, refuses a live legacy numeric PID, and reports
+  stale PID recovery explicitly. File and voice storage apply the same
+  per-component symlink refusal before local reads or mutations. The script
+  refuses to overwrite an operator-owned `.env.local`.
+
+For a manually-managed environment, copy `.env.example`, populate only the
+credentials needed for that environment, then use `pnpm dev`; this is not the
+safe default path.
 
 ## GitHub login setup
 
