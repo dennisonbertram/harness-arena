@@ -37,9 +37,9 @@ jobs:
           HARNESS_ARENA_DEVELOPMENT_URL: ${{ vars.HARNESS_ARENA_DEVELOPMENT_URL }}
         run: |
           set +e
-          pnpm ops:status --env development --json > development-status.json
+          node scripts/ops/agent-status.mjs --env development --json > development-status.json
           development_exit=$?
-          env -u OPS_READ_TOKEN pnpm ops:status --env production --json > production-status.json
+          env -u OPS_READ_TOKEN node scripts/ops/agent-status.mjs --env production --json > production-status.json
           production_exit=$?
           test -s development-status.json || printf '{"verdict":"failed","findings":[{"code":"monitor_status_missing","severity":"failed"}]}' > development-status.json
           test -s production-status.json || printf '{"verdict":"access_blocked","blockers":[{"code":"production_access_blocked","severity":"access"}]}' > production-status.json

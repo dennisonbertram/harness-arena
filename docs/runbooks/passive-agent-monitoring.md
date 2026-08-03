@@ -13,7 +13,7 @@ The retained evidence contains timestamp, environment, deployment ID/SHA, findin
 Run the status collector against a fixture or controlled Development outage, save its JSON, then generate a plan without invoking GitHub:
 
 ```sh
-pnpm ops:status --env local --json > /tmp/monitor-status.json
+node scripts/ops/agent-status.mjs --env local --json > /tmp/monitor-status.json
 printf '[]' > /tmp/monitor-incidents.json
 node scripts/ops/passive-monitor.mjs --environment development --status /tmp/monitor-status.json --incidents /tmp/monitor-incidents.json --output /tmp/monitor-plan.json
 ```

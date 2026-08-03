@@ -17,8 +17,8 @@ for (const file of process.argv.slice(2)) {
   const plan = JSON.parse(await readFile(file, "utf8"));
   for (const action of plan.actions ?? []) {
     const body = issueBodyForAction(action, plan.observation);
-    if (action.action === "create") await run(["issue", "create", "--title", `[agent-monitor] ${plan.observation.environment}: ${action.failure.alert_class}/${action.failure.code}`, "--label", "agent-monitor", "--body-file", "-"], body);
-    else if (action.action === "reopen") { await run(["issue", "reopen", String(action.number)]); await run(["issue", "comment", String(action.number), "--body-file", "-"], body); }
+    if (action.action === "create") await run(["issue", "create", "--title", `[agent-monitor] ${plan.observation.environment}: ${action.failure.alert_class}/${action.failure.code}`, "--body-file", "-"], body);
+    else if (action.action === "reopen") { await run(["issue", "reopen", String(action.number)]); await run(["issue", "comment", String(action.number), "--body-file", "-"], body); await run(["issue", "edit", String(action.number), "--body-file", "-"], body); }
     else if (action.action === "comment") { await run(["issue", "comment", String(action.number), "--body-file", "-"], body); await run(["issue", "edit", String(action.number), "--body-file", "-"], body); }
     else if (action.action === "close") { await run(["issue", "comment", String(action.number), "--body-file", "-"], body); await run(["issue", "close", String(action.number)]); }
   }
