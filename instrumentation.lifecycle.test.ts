@@ -297,7 +297,7 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
-  it("caps retained ended ancestry and evicts the least-recently-ended root", async () => {
+  it("keeps lifecycle ownership after more requests than the former ancestry cap", async () => {
     const waitUntilTasks: Promise<unknown>[] = [];
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
       get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
@@ -318,15 +318,18 @@ describe("hosted request span lifecycle", () => {
     }
     expect(waitUntilTasks).toHaveLength(65);
 
-    tracer.startSpan("evicted-root-child", { kind: SpanKind.SERVER }, savedRootContexts[0]).end();
-    expect(waitUntilTasks).toHaveLength(65);
-    tracer.startSpan("retained-root-child", { kind: SpanKind.SERVER }, savedRootContexts.at(-1)).end();
+    const droppedBefore = structuredSpanReadiness().structured.dropped;
+    tracer.startSpan("oldest-root-child", { kind: SpanKind.SERVER }, savedRootContexts[0]).end();
     expect(waitUntilTasks).toHaveLength(66);
     await waitUntilTasks[65];
+    tracer.startSpan("retained-root-child", { kind: SpanKind.SERVER }, savedRootContexts.at(-1)).end();
+    expect(waitUntilTasks).toHaveLength(67);
+    await waitUntilTasks[66];
+    expect(structuredSpanReadiness().structured).toMatchObject({ ready: true, queued: 0, dropped: droppedBefore });
     await provider.shutdown();
   });
 
-  it("expires retained ended ancestry after the bounded lifecycle horizon", async () => {
+  it("keeps post-end lifecycle ownership beyond the former ancestry TTL", async () => {
     vi.useFakeTimers();
     const waitUntilTasks: Promise<unknown>[] = [];
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
@@ -345,9 +348,43 @@ describe("hosted request span lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
     await waitUntilTasks[0];
 
+    const droppedBefore = structuredSpanReadiness().structured.dropped;
     await vi.advanceTimersByTimeAsync(160_251);
     tracer.startSpan("expired-root-child", { kind: SpanKind.SERVER }, savedRootContext).end();
-    expect(waitUntilTasks).toHaveLength(1);
+    expect(waitUntilTasks).toHaveLength(2);
+    await waitUntilTasks[1];
+    expect(structuredSpanReadiness().structured).toMatchObject({ ready: true, queued: 0, dropped: droppedBefore });
+    await provider.shutdown();
+  });
+
+  it("keeps an active child's lifecycle ownership while unrelated roots churn", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exporter = {
+      export: (_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("active-child-root-churn");
+    const rootA = tracer.startSpan("request-root-a");
+    const rootAContext = trace.setSpan(context.active(), rootA);
+    const activeChild = tracer.startSpan("active-child-a", { kind: SpanKind.SERVER }, rootAContext);
+    rootA.end();
+    await waitUntilTasks[0];
+
+    for (let index = 0; index < 64; index += 1) {
+      tracer.startSpan(`churn-root-${index}`).end();
+      await waitUntilTasks.at(-1);
+    }
+    expect(waitUntilTasks).toHaveLength(65);
+
+    activeChild.end();
+    expect(waitUntilTasks).toHaveLength(66);
+    await waitUntilTasks[65];
+    expect(structuredSpanReadiness().structured).toMatchObject({ ready: true, queued: 0 });
     await provider.shutdown();
   });
 
