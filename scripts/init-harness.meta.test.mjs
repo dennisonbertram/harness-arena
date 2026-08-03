@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 const repositoryRoot = process.cwd();
 const vitestBin = join(repositoryRoot, "node_modules", "vitest", "vitest.mjs");
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+const fixturePublicationDeadlineMs = (schedulingDelayMs) => 10_000 + schedulingDelayMs;
 
 function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
@@ -58,7 +59,9 @@ function spawnFixture(mode, marker, preservationMarker) {
     ? "publishes a hung prerequisite"
     : mode.startsWith("phase-")
       ? "publishes an initializer blocked"
-    : mode === "setup"
+      : mode === "publication-delay"
+        ? "delays fixture publication"
+      : mode === "setup"
       ? "test-worker setup-failure cleanup fixture"
       : "publishes a fake server";
   const child = spawn(process.execPath, [
@@ -78,6 +81,7 @@ function spawnFixture(mode, marker, preservationMarker) {
       HARNESS_INIT_META_MODE: mode,
       HARNESS_INIT_META_MARKER: marker,
       HARNESS_INIT_META_PRESERVATION_MARKER: preservationMarker,
+      HARNESS_INIT_META_PUBLICATION_DELAY_MS: mode === "publication-delay" ? "10100" : undefined,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -103,6 +107,18 @@ async function waitForText(path, expected, timeoutMs = 5_000) {
 }
 
 describe.sequential("integration harness process cleanup", () => {
+  it("derives the fixture publication deadline from an allowed scheduling delay", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-publication-delay-"));
+    const marker = join(directory, "published.json");
+    const fixture = spawnFixture("publication-delay", marker, join(directory, "preserved.json"));
+    try {
+      expect(JSON.parse(await waitForFile(marker))).toEqual({ worker_pid: expect.any(Number) });
+    } finally {
+      await terminateGroup(fixture.child.pid);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, fixturePublicationDeadlineMs(10_100) + 5_000);
+
   it("SIGTERM of a forked test worker after publication leaves no fake-server descendant", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-signal-"));
     const marker = join(directory, "published.json");

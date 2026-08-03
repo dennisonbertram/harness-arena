@@ -5,9 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileStorage, LocalStorageReadError } from "./file-storage";
 import * as fileStorageModule from "./file-storage";
+import { appendRunEventsFile } from "./file-storage-lock.mjs";
 import type { Run, Submission } from "./types";
 
 const dirs: string[] = [];
+const concurrentAppendDeadlineMs = (writers: number, holdMs: number) => 1_000 + writers * (1_000 + holdMs);
+const delay = (ms: number) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 
 async function storage() {
   const dir = await mkdtemp(join(tmpdir(), "harness-arena-file-storage-"));
@@ -45,10 +48,23 @@ describe("FileStorage", () => {
 
   it("assigns strictly monotonic event sequences under concurrent appends", async () => {
     const local = await storage();
-    const appended = await Promise.all(Array.from({ length: 20 }, (_, n) => local.appendRunEvents("run-1", [{ ts: `2026-08-02T00:00:${String(n).padStart(2, "0")}.000Z`, type: "run.created", payload: { submission_id: String(n) } }])));
+    const writers = 20;
+    const holdMs = 25;
+    const deadlineMs = concurrentAppendDeadlineMs(writers, holdMs);
+    let acquisitions = 0;
+    const appended = await Promise.all(Array.from({ length: writers }, (_, n) => appendRunEventsFile(local.root, "run-1", [{ ts: `2026-08-02T00:00:${String(n).padStart(2, "0")}.000Z`, type: "run.created", payload: { submission_id: String(n) } }], {
+      lock: {
+        timeoutMs: deadlineMs,
+        afterFencePublished: async () => {
+          acquisitions += 1;
+          await delay(holdMs);
+        },
+      },
+    })));
+    expect(acquisitions).toBe(writers);
     expect(appended.flat().map((event) => event.seq).sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, n) => n + 1));
     expect((await local.listRunEvents("run-1")).map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, n) => n + 1));
-  });
+  }, concurrentAppendDeadlineMs(20, 25));
 
   it("persists a small latest-event index with each event append", async () => {
     const local = await storage();
@@ -103,16 +119,31 @@ describe("FileStorage", () => {
 
   it("preserves all events with unique monotonic sequence across 20 processes", async () => {
     const local = await storage();
-    await Promise.all(Array.from({ length: 20 }, (_, index) => new Promise<void>((resolve, reject) => {
-      const child = spawn(process.execPath, ["scripts/tests/file-storage-worker.mjs", local.root, "run-1", String(index)], { cwd: process.cwd(), stdio: "pipe" });
-      let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });
-      child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`worker ${index} failed (${code}): ${stderr}`)));
+    const workers = 20;
+    const holdMs = 25;
+    const deadlineMs = concurrentAppendDeadlineMs(workers, holdMs);
+    const workerOutput: string[] = [];
+    await Promise.all(Array.from({ length: workers }, (_, index) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["scripts/tests/file-storage-worker.mjs", local.root, "run-1", String(index)], {
+        cwd: process.cwd(),
+        env: { ...process.env, HARNESS_FILE_STORAGE_LOCK_HOLD_MS: String(holdMs), HARNESS_FILE_STORAGE_LOCK_TIMEOUT_MS: String(deadlineMs) },
+        stdio: "pipe",
+      });
+      let output = "";
+      child.stdout.on("data", (chunk) => { output += chunk; });
+      child.stderr.on("data", (chunk) => { output += chunk; });
+      child.once("error", (error) => reject(new Error(`worker ${index} failed to start: ${error.message}; output=${output}`)));
+      child.once("close", (code, signal) => {
+        workerOutput[index] = output;
+        code === 0 ? resolve() : reject(new Error(`worker ${index} failed (code=${code}, signal=${signal}): ${output}`));
+      });
     })));
     const events = await local.listRunEvents("run-1");
-    expect(events).toHaveLength(20);
-    expect(events.map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
-    expect(new Set(events.map((event) => event.payload.submission_id)).size).toBe(20);
-  }, 30000);
+    expect(workerOutput.filter((output) => output.includes("lock-acquired")).length).toBe(workers);
+    expect(events).toHaveLength(workers);
+    expect(events.map((event) => event.seq)).toEqual(Array.from({ length: workers }, (_, index) => index + 1));
+    expect(new Set(events.map((event) => event.payload.submission_id)).size).toBe(workers);
+  }, concurrentAppendDeadlineMs(20, 25));
 
   it.each([".", "..", "../escape", "a/b", "a\\b", "%2e%2e%2fescape", "a..b"])("rejects unsafe path segment %j", (part) => {
     expect(() => fileStorageModule.safeStoragePart(part)).toThrow(/path segment/);
