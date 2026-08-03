@@ -3,30 +3,90 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { configuredSecrets, redactOpsText } from "../lib/ops-redaction.mjs";
 
 const repositoryRoot = process.cwd();
 const vitestBin = join(repositoryRoot, "node_modules", "vitest", "vitest.mjs");
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
-const fixturePublicationDeadlineMs = (schedulingDelayMs) => 10_000 + schedulingDelayMs;
-const EXPECTED_FIXTURE_OUTPUT_MAX_BYTES = 16 * 1024;
-const EXPECTED_FIXTURE_PUBLICATION_MAX_MS = 25_000;
+const FIXTURE_OUTPUT_MAX_BYTES = 16 * 1024;
+const FIXTURE_OUTPUT_TRUNCATED = "\n[output truncated]";
+const FIXTURE_PUBLICATION_BASE_MS = 10_000;
+const FIXTURE_PUBLICATION_MAX_MS = 25_000;
+
+function fixturePublicationDeadlineMs(schedulingDelayMs, maximumMs = FIXTURE_PUBLICATION_MAX_MS) {
+  if (!Number.isFinite(schedulingDelayMs) || schedulingDelayMs < 0) throw new Error("fixture scheduling delay must be a non-negative finite number");
+  if (!Number.isFinite(maximumMs) || maximumMs <= 0) throw new Error("fixture publication cap must be a positive finite number");
+  return Math.min(FIXTURE_PUBLICATION_BASE_MS + schedulingDelayMs, maximumMs);
+}
 
 function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-function fixtureDiagnostic(fixture) {
-  const output = fixture?.output?.().trim() ?? "";
-  return `; fixture=${fixture?.mode ?? "unknown"}; child output=${JSON.stringify(output)}`;
+function truncateUtf8(value, maximumBytes) {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maximumBytes) return value;
+  let end = maximumBytes;
+  while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function createFixtureOutputCapture(secrets) {
+  const chunks = [];
+  let capturedBytes = 0;
+  let truncated = false;
+  return {
+    append(chunk) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = FIXTURE_OUTPUT_MAX_BYTES - capturedBytes;
+      if (remaining > 0) {
+        const retained = bytes.subarray(0, remaining);
+        chunks.push(retained);
+        capturedBytes += retained.length;
+      }
+      if (bytes.length > remaining) truncated = true;
+    },
+    read() {
+      let retained = Buffer.concat(chunks, capturedBytes);
+      if (truncated) {
+        // A configured secret may cross the byte cap. Drop enough retained
+        // tail bytes that no proper secret prefix can survive at the boundary;
+        // complete secrets in the remaining prefix are redacted below.
+        const boundaryBytes = secrets.reduce((maximum, secret) => Math.max(maximum, Buffer.byteLength(secret, "utf8") - 1), 0);
+        retained = retained.subarray(0, Math.max(0, retained.length - Math.min(boundaryBytes, retained.length)));
+      }
+      const raw = retained.toString("utf8");
+      let safe = redactOpsText(raw, secrets);
+      const needsMarker = truncated || Buffer.byteLength(safe, "utf8") > FIXTURE_OUTPUT_MAX_BYTES;
+      if (!needsMarker) return safe;
+      const budget = FIXTURE_OUTPUT_MAX_BYTES - Buffer.byteLength(FIXTURE_OUTPUT_TRUNCATED, "utf8");
+      safe = truncateUtf8(safe, budget);
+      return `${safe}${FIXTURE_OUTPUT_TRUNCATED}`;
+    },
+  };
+}
+
+function fixtureDiagnostic(fixture, result) {
+  const output = result?.output ?? fixture?.output?.().trim() ?? "";
+  const code = result ? result.code : "running";
+  const signal = result ? result.signal : null;
+  return `; fixture=${fixture?.mode ?? "unknown"}; code=${code}; signal=${signal}; child output=${JSON.stringify(output)}`;
 }
 
 async function waitForFile(path, timeoutMs = 10_000, fixture) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try { return await readFile(path, "utf8"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
-    await delay(20);
+    const remaining = Math.max(0, deadline - Date.now());
+    const outcome = await Promise.race([
+      fixture?.closed?.then((result) => ({ kind: "closed", result })),
+      delay(Math.min(20, remaining)).then(() => ({ kind: "poll" })),
+    ].filter(Boolean));
+    if (outcome?.kind !== "closed") continue;
+    try { return await readFile(path, "utf8"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    throw new Error(`fixture exited before publication blocker ${path}${fixtureDiagnostic(fixture, outcome.result)}`);
   }
-  throw new Error(`timed out waiting for publication blocker ${path}${fixtureDiagnostic(fixture)}`);
+  throw new Error(`publication deadline exceeded after ${timeoutMs}ms; blocker=${path}${fixtureDiagnostic(fixture)}`);
 }
 
 async function waitForGroupExit(pid, timeoutMs = 5_000) {
@@ -61,7 +121,7 @@ function processTree(rootPid) {
   return found;
 }
 
-function spawnFixture(mode, marker, preservationMarker) {
+function spawnFixture(mode, marker, preservationMarker, { env: configuredEnv = {}, outputBytes = 0 } = {}) {
   const testNamePattern = mode.startsWith("prerequisite-")
     ? "publishes a hung prerequisite"
     : mode.startsWith("phase-")
@@ -71,32 +131,47 @@ function spawnFixture(mode, marker, preservationMarker) {
       : mode === "setup"
       ? "test-worker setup-failure cleanup fixture"
       : "publishes a fake server";
-  const child = spawn(process.execPath, [
-    vitestBin,
-    "run",
-    "scripts/init.integration.test.mjs",
-    "--pool=forks",
-    "--maxWorkers=1",
-    "--no-file-parallelism",
-    "--testNamePattern",
-    testNamePattern,
-  ], {
+  const childEnv = {
+    ...process.env,
+    ...configuredEnv,
+    HARNESS_INIT_META_MODE: mode,
+    HARNESS_INIT_META_MARKER: marker,
+    HARNESS_INIT_META_PRESERVATION_MARKER: preservationMarker,
+  };
+  if (mode === "publication-delay") childEnv.HARNESS_INIT_META_PUBLICATION_DELAY_MS = "10100";
+  let childArgs = [
+    vitestBin, "run", "scripts/init.integration.test.mjs",
+    "--pool=forks", "--maxWorkers=1", "--no-file-parallelism", "--testNamePattern", testNamePattern,
+  ];
+  if (mode === "immediate-exit") {
+    childEnv.HARNESS_META_OUTPUT_BYTES = String(outputBytes);
+    childArgs = ["-e", [
+      "const outputBytes = Number(process.env.HARNESS_META_OUTPUT_BYTES || 0);",
+      "process.stderr.write(`${process.env.HARNESS_META_PARENT_SECRET || ''}\\n${process.env.HARNESS_META_CONFIG_TOKEN || ''}\\n${'x'.repeat(outputBytes)}`);",
+      "process.exit(17);",
+    ].join("\n")];
+  } else if (mode === "never-publish") {
+    childArgs = ["-e", "setInterval(() => {}, 1000)"];
+  }
+  const child = spawn(process.execPath, childArgs, {
     cwd: repositoryRoot,
     detached: true,
-    env: {
-      ...process.env,
-      HARNESS_INIT_META_MODE: mode,
-      HARNESS_INIT_META_MARKER: marker,
-      HARNESS_INIT_META_PRESERVATION_MARKER: preservationMarker,
-      HARNESS_INIT_META_PUBLICATION_DELAY_MS: mode === "publication-delay" ? "10100" : undefined,
-    },
+    env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { output += chunk; });
-  const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal, output })));
-  return { child, closed, mode, output: () => output };
+  const secrets = configuredSecrets(childEnv);
+  const output = createFixtureOutputCapture(secrets);
+  child.stdout.on("data", (chunk) => { output.append(chunk); });
+  child.stderr.on("data", (chunk) => { output.append(chunk); });
+  let spawnError;
+  child.once("error", (error) => { spawnError = error; });
+  const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({
+    code,
+    signal,
+    output: output.read(),
+    error: spawnError ? redactOpsText(spawnError.message, secrets) : undefined,
+  })));
+  return { child, closed, mode, output: () => output.read() };
 }
 
 async function waitForClose(closed, timeoutMs = 10_000, fixture) {
@@ -122,7 +197,7 @@ describe.sequential("integration harness process cleanup", () => {
     process.env.HARNESS_META_PARENT_SECRET = inheritedSecret;
     const fixture = spawnFixture("immediate-exit", marker, join(directory, "preserved.json"), {
       env: { HARNESS_META_CONFIG_TOKEN: configuredSecret },
-      outputBytes: EXPECTED_FIXTURE_OUTPUT_MAX_BYTES * 2,
+      outputBytes: FIXTURE_OUTPUT_MAX_BYTES * 2,
     });
     const started = Date.now();
     try {
@@ -132,7 +207,7 @@ describe.sequential("integration harness process cleanup", () => {
       expect(failure?.message).not.toContain(inheritedSecret);
       expect(failure?.message).not.toContain(configuredSecret);
       expect(failure?.message).toContain("[REDACTED]");
-      expect(Buffer.byteLength(fixture.output(), "utf8")).toBeLessThanOrEqual(EXPECTED_FIXTURE_OUTPUT_MAX_BYTES);
+      expect(Buffer.byteLength(fixture.output(), "utf8")).toBeLessThanOrEqual(FIXTURE_OUTPUT_MAX_BYTES);
       expect(fixture.output()).toContain("[output truncated]");
     } finally {
       delete process.env.HARNESS_META_PARENT_SECRET;
@@ -142,7 +217,7 @@ describe.sequential("integration harness process cleanup", () => {
   }, 5_000);
 
   it("caps a derived publication deadline and bounds a hung never-publisher", async () => {
-    expect(fixturePublicationDeadlineMs(100_000)).toBe(EXPECTED_FIXTURE_PUBLICATION_MAX_MS);
+    expect(fixturePublicationDeadlineMs(100_000)).toBe(FIXTURE_PUBLICATION_MAX_MS);
     const deadlineMs = fixturePublicationDeadlineMs(100_000, 200);
     expect(deadlineMs).toBe(200);
     const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-never-publish-"));
