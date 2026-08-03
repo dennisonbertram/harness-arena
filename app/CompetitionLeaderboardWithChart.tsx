@@ -55,7 +55,7 @@ export function CompetitionLeaderboardWithChart({
               <span style={{ color: modelColor(chartModel), marginRight: 5 }}>●</span>
               {modelLabel(chartModel)}
             </span>
-            {baselineRow ? <span style={{ color: "var(--gray-700)" }}>◌ dashed = baseline (vanilla prompt)</span> : null}
+            {baselineRow ? <span style={{ color: "var(--gray-700)" }}>◌ dashed = baseline (stock harness prompt)</span> : null}
           </div>
           <ScatterChart
             items={scatterItems}

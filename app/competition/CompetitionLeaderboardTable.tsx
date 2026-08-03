@@ -291,7 +291,7 @@ export function CompetitionLeaderboardTable({
               <span className="label">Below the baseline</span>{" "}
               <span style={{ color: "var(--gray-700)", fontSize: 12, fontWeight: 400 }}>· not ranked · ordered best-first</span>
               <p style={{ fontSize: 13, fontWeight: 400, color: "var(--gray-700)", marginTop: 6 }}>
-                These entries did not beat the vanilla harness, so they stay visible without a rank.
+                These entries did not beat the stock harness system prompt, so they stay visible without a rank.
               </p>
             </th>
           </tr>
