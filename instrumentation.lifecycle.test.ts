@@ -68,7 +68,7 @@ describe("hosted request span lifecycle", () => {
         otlp: { configured: true, queued: 0 },
       });
     });
-    expect(waitUntilTasks).toHaveLength(3);
+    expect(waitUntilTasks).toHaveLength(2);
   });
 
   it("coalesces retained children behind one post-root request-lifetime drain", async () => {

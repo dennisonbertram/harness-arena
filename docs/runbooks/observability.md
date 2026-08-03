@@ -47,9 +47,11 @@ dropped counts and an unready reason without collector headers or their values.
 The OTLP queue retains a failed batch until a later request or shutdown flush
 acknowledges it; it remains capped at 32 spans, records
 `export_unacknowledged`, and does not loop inside a single `forceFlush` call.
-Because `@vercel/otel`'s root-start lifecycle wait is short, a retained root
-also registers one coalesced post-enqueue drain through the public
-`@vercel/functions` `waitUntil` API. Retained children do not schedule drains.
+Because `@vercel/otel`'s root-start lifecycle wait is short, each retained root
+also registers one trace-scoped, post-enqueue aggregate drain through the
+public `@vercel/functions` `waitUntil` API in that root's request context. All
+configured sinks join the same task on the next microtask; concurrent trace IDs
+receive independent lifecycle tasks. Retained children do not schedule drains.
 The whole-drain deadline is derived from queue capacity, batch size, and the
 per-batch acknowledgement bound: two retained batches times five seconds plus
 a 250 ms settlement margin. Failures are consumed by the lifecycle task while

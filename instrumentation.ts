@@ -290,13 +290,53 @@ function spanPriority(span: ReadableSpan): number {
   return 0;
 }
 
+type RootDrainParticipant = { forceFlush(): Promise<void> };
+type RootDrainRegistration = { participants: Set<RootDrainParticipant> };
+const rootDrainRegistrations = new Map<string, RootDrainRegistration>();
+
+function registerPostRootDrain(traceId: string, participant: RootDrainParticipant): void {
+  const existing = rootDrainRegistrations.get(traceId);
+  if (existing) {
+    existing.participants.add(participant);
+    return;
+  }
+
+  const registration: RootDrainRegistration = { participants: new Set([participant]) };
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const aggregate = Promise.resolve().then(async () => {
+    // Composite processors call onEnd synchronously. Deferring one microtask
+    // lets every configured sink join this root's single lifecycle task.
+    await Promise.allSettled([...registration.participants].map((processor) => processor.forceFlush()));
+  });
+  const bounded = Promise.race([
+    aggregate,
+    new Promise<never>((_resolve, reject) => {
+      deadline = setTimeout(() => reject(new Error("post-root span drain deadline exceeded")), POST_ROOT_DRAIN_DEADLINE_MILLIS);
+    }),
+  ]).then(
+    () => undefined,
+    () => undefined,
+  ).finally(() => {
+    if (deadline) clearTimeout(deadline);
+    if (rootDrainRegistrations.get(traceId) === registration) rootDrainRegistrations.delete(traceId);
+  });
+  rootDrainRegistrations.set(traceId, registration);
+  try {
+    // This synchronous call binds the aggregate promise to the current root's
+    // Vercel request context. With no hosted context, the bounded task still
+    // runs locally as a catch-wrapped best-effort fallback.
+    waitUntil(bounded);
+  } catch {
+    // The local task is already running and cannot reject.
+  }
+}
+
 /** Bounded, flushable processor: automatic child spans never synchronously write logs. */
 export class BoundedSpanProcessor implements SpanProcessor {
   private queue: ReadableSpan[] = [];
   private dropped = 0;
   private closed = false;
   private flushInFlight?: Promise<void>;
-  private postRootDrain?: Promise<void>;
   private inFlightBatchLength = 0;
   constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
     if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
@@ -317,37 +357,7 @@ export class BoundedSpanProcessor implements SpanProcessor {
     }
     this.queue.push(span);
     updateSinkReadiness(this.sink, { queued: this.queue.length });
-    if (spanPriority(span) === 2) this.schedulePostRootDrain();
-  }
-  private schedulePostRootDrain(): void {
-    if (this.postRootDrain || this.closed) return;
-    let completed = false;
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    const drain = Promise.resolve().then(() => this.forceFlush());
-    const bounded = Promise.race([
-      drain,
-      new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("post-root span drain deadline exceeded")), POST_ROOT_DRAIN_DEADLINE_MILLIS);
-      }),
-    ]).then(
-      () => { completed = true; },
-      () => undefined,
-    ).finally(() => {
-      if (deadline) clearTimeout(deadline);
-      if (this.postRootDrain === bounded) this.postRootDrain = undefined;
-      // A root can arrive after drain() observes an empty queue but before this
-      // continuation clears the coalescing task. Re-arm only after a successful
-      // drain; failed batches stay queued for the next request or shutdown.
-      if (completed && this.queue.some((queued) => spanPriority(queued) === 2)) this.schedulePostRootDrain();
-    });
-    this.postRootDrain = bounded;
-    try {
-      // Public Vercel request-lifetime API. Outside a hosted request it is a
-      // no-op, while the same catch-wrapped bounded task still runs locally.
-      waitUntil(bounded);
-    } catch {
-      // The local best-effort task is already running and cannot reject.
-    }
+    if (spanPriority(span) === 2) registerPostRootDrain(span.spanContext().traceId, this);
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;
@@ -399,13 +409,18 @@ export class BoundedSpanProcessor implements SpanProcessor {
     }
   }
   async forceFlush(): Promise<void> {
-    if (this.flushInFlight) return this.flushInFlight;
+    if (this.flushInFlight) {
+      await this.flushInFlight;
+      if (this.queue.length) await this.forceFlush();
+      return;
+    }
     const flush = this.drain();
     this.flushInFlight = flush;
     try { await flush; }
     finally {
       if (this.flushInFlight === flush) this.flushInFlight = undefined;
     }
+    if (this.queue.length) await this.forceFlush();
   }
   async shutdown(): Promise<void> { this.closed = true; await this.forceFlush(); await this.exporter.shutdown(); }
 }
