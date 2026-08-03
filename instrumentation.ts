@@ -197,7 +197,10 @@ function shouldRetainSpan(span: ReadableSpan): boolean {
 }
 
 function spanPriority(span: ReadableSpan): number {
-  if (!span.parentSpanContext) return 2;
+  // A propagated remote parent has no local span to retain. Its direct local
+  // child is therefore this process's request root, even though it has a
+  // parentSpanContext.
+  if (!span.parentSpanContext || span.parentSpanContext.isRemote) return 2;
   if (span.kind === SpanKind.SERVER || span.status.code === SpanStatusCode.ERROR) return 1;
   return 0;
 }
