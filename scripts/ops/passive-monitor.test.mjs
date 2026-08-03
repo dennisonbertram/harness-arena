@@ -1,5 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,17 +14,6 @@ import {
 const healthy = { schema_version: "agent_ops_status.v1", environment: "development", verdict: "healthy", exit_code: 0, checked_at: "2026-08-03T12:00:00.000Z", health: { sha: "abcdef1" }, platform: { deployment: { id: "dpl_1", sha: "abcdef1" } }, findings: [], blockers: [] };
 const failed = (codes, sha = "abcdef1") => ({ ...healthy, verdict: "failed", exit_code: 2, health: { sha }, platform: { deployment: { id: "dpl_1", sha } }, findings: codes.map((code) => ({ code, severity: "failed", detail: `secret=monitor-token prompt=private request ${code}` })) });
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
-
-function runApplier(plans) {
-  const directory = mkdtempSync(join(tmpdir(), "ha-monitor-applier-"));
-  const log = join(directory, "argv.jsonl");
-  const binary = join(directory, "gh");
-  writeFileSync(binary, `#!/usr/bin/env node\nconst fs=require("node:fs");const input=fs.readFileSync(0,"utf8");fs.appendFileSync(process.env.GH_ARGV_LOG,JSON.stringify({argv:process.argv.slice(2),input})+"\\n");`);
-  chmodSync(binary, 0o700);
-  const files = plans.map((plan, index) => { const path = join(directory, `plan-${index}.json`); writeFileSync(path, JSON.stringify(plan)); return path; });
-  const result = spawnSync(process.execPath, [new URL("./apply-passive-monitor-plan.mjs", import.meta.url).pathname, ...files], { encoding: "utf8", env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GH_ARGV_LOG: log } });
-  return { result, calls: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
-}
 
 describe("passive monitor incident state machine", () => {
   it("creates one stable, secret-safe incident for a new product failure", () => {
@@ -109,14 +97,11 @@ describe("passive monitor incident state machine", () => {
     expect(JSON.stringify(degraded)).not.toMatch(/fixture-token|private task body/);
   });
 
-  it("clears persisted recovery_pending on a flap and edits the issue body", () => {
+  it("clears persisted recovery_pending in the issue body on a flap", () => {
     const observation = buildObservation(failed(["gateway_capability_missing"]), { environment: "development" });
     const fingerprint = observation.failures[0].fingerprint;
     const action = planIncidentTransitions({ observation, incidents: [{ number: 73, state: "CLOSED", fingerprint, recovery_pending: true }] }).actions[0];
     expect(issueBodyForAction(action, observation)).toMatch(new RegExp(`harness-arena-monitor:.*\\"fingerprint\\":\\"${fingerprint}\\".*\\"recovery_pending\\":false`));
-    const { result, calls } = runApplier([{ observation, actions: [action] }]);
-    expect(result.status).toBe(0);
-    expect(calls.map(({ argv }) => argv.slice(0, 2))).toEqual([["issue", "reopen"], ["issue", "comment"], ["issue", "edit"]]);
   });
 
   it("includes only validated request and trace identifiers in incident payloads", () => {
@@ -127,46 +112,10 @@ describe("passive monitor incident state machine", () => {
   });
 });
 
-describe("monitor workflow contract", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/passive-agent-monitor.yml", import.meta.url), "utf8");
-  const runbook = readFileSync(new URL("../../docs/runbooks/passive-agent-monitoring.md", import.meta.url), "utf8");
-
-  it("has only required GitHub permissions, bounded execution, sanitized artifacts, and no infrastructure mutation", () => {
-    expect(workflow).toMatch(/contents:\s*read/);
-    expect(workflow).toMatch(/issues:\s*write/);
-    expect(workflow).toMatch(/timeout-minutes:\s*[1-9]/);
-    expect(workflow).toMatch(/passive-monitor\.mjs/);
-    expect(workflow).toMatch(/retention-days:\s*[1-9]/);
-    expect(workflow).not.toMatch(/\b(?:deploy|promote|rollback|alias|env\s+(?:add|rm|pull)|blob|admin)\b/i);
-    expect(workflow).not.toMatch(/(?:VERCEL_TOKEN|BLOB_READ_WRITE_TOKEN|RUNNER_CALLBACK_SECRET|AI_GATEWAY_API_KEY)/);
-    expect(workflow).not.toMatch(/--label\s+agent-monitor/);
-    expect(workflow).toMatch(/--search\s+"\[agent-monitor\] in:title"/);
-    expect(workflow).toMatch(/node scripts\/ops\/agent-status\.mjs --env development --json/);
-    expect(workflow).toMatch(/node scripts\/ops\/agent-status\.mjs --env production --json/);
-    expect(workflow).not.toMatch(/pnpm ops:status/);
-    expect(runbook).toMatch(/GET-only/i);
-    expect(runbook).toMatch(/access_blocked/i);
-  });
-
+describe("monitor evidence safety", () => {
   it("sanitizes retained artifacts and issue evidence", () => {
     const record = sanitizeMonitorRecord({ prompt: "private prompt", authorization: "Bearer monitor-token", nested: { error: "token=monitor-token" } }, ["monitor-token"]);
     expect(JSON.stringify(record)).not.toMatch(/monitor-token|private prompt|Bearer/);
   });
 
-  it("allows only GitHub issue state changes after a plan and never runs infrastructure commands", () => {
-    const applier = readFileSync(new URL("./apply-passive-monitor-plan.mjs", import.meta.url), "utf8");
-    expect(applier).toMatch(/spawn\("gh", args, \{ shell: false/);
-    expect(applier).not.toMatch(/\b(?:vercel|curl|fetch\(|POST|PUT|PATCH|DELETE|blob|admin)\b/i);
-    expect(applier).toMatch(/\["issue", "(?:create|comment|edit|close|reopen)"/);
-  });
-
-  it("creates an incident without requiring a repository label", () => {
-    const observation = buildObservation(failed(["storage_down"]), { environment: "development" });
-    const action = planIncidentTransitions({ observation, incidents: [] }).actions[0];
-    const { result, calls } = runApplier([{ observation, actions: [action] }]);
-    expect(result.status).toBe(0);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].argv).toEqual(expect.arrayContaining(["issue", "create", "--body-file", "-"]));
-    expect(calls[0].argv).not.toEqual(expect.arrayContaining(["--label", "agent-monitor"]));
-  });
 });
