@@ -1,4 +1,4 @@
-import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import { context, diag, DiagLogLevel, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { createServer } from "node:http";
@@ -6,15 +6,19 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BoundedSpanProcessor, createSafeSpanProcessors, createSafeSpanProcessor, onRequestError, parseOtlpHeaders, StructuredSpanExporter, structuredSpanReadiness } from "./instrumentation";
 
-async function startOtlpCollector(statuses: number[]) {
+type CollectorResponse = number | { status: number; statusMessage?: string; body?: string; headers?: Record<string, string> };
+
+async function startOtlpCollector(responses: CollectorResponse[]) {
   const requests: number[] = [];
   const server = createServer((request, response) => {
     request.resume();
     request.once("end", () => {
-      const status = statuses.shift() ?? 200;
-      requests.push(status);
-      response.writeHead(status);
-      response.end();
+      const next = responses.shift() ?? 200;
+      const specification = typeof next === "number" ? { status: next } : next;
+      requests.push(specification.status);
+      if (specification.statusMessage) response.writeHead(specification.status, specification.statusMessage, specification.headers);
+      else response.writeHead(specification.status, specification.headers);
+      response.end(specification.body);
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -31,6 +35,7 @@ async function startOtlpCollector(statuses: number[]) {
 
 describe("onRequestError", () => {
   afterEach(() => {
+    diag.disable();
     vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
@@ -247,6 +252,48 @@ describe("onRequestError", () => {
       expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { ready: true, queued: 0 } });
       await provider.shutdown();
     } finally {
+      await collector.close();
+    }
+  });
+
+  it("never emits collector-controlled OTLP status, body, or partial-success diagnostics", async () => {
+    const collector = await startOtlpCollector([
+      { status: 401, statusMessage: "collector-status-secret", body: "collector-body-secret" },
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: 1, errorMessage: "partial-success-secret" } }),
+      },
+    ]);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.endpoint);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json");
+    vi.stubEnv("OTEL_LOG_LEVEL", "all");
+    const diagnostics: unknown[][] = [];
+    const capture = (...args: unknown[]) => { diagnostics.push(args); };
+    diag.setLogger({ error: capture, warn: capture, info: capture, debug: capture, verbose: capture }, {
+      logLevel: DiagLogLevel.ALL,
+      suppressOverrideMessage: true,
+    });
+    const sinkSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const processors = createSafeSpanProcessors();
+    const provider = new BasicTracerProvider({ spanProcessors: [processors[1]!] });
+    provider.getTracer("hosted-otlp-diagnostics").startSpan("request-root").end();
+
+    try {
+      await expect(provider.forceFlush()).rejects.toBeDefined();
+      await provider.forceFlush();
+      const renderedDiagnostics = diagnostics.flatMap((args) => args.map((value) => value instanceof Error
+        ? `${value.name}:${value.message}:${JSON.stringify(value)}`
+        : String(value))).join("\n");
+      const renderedSink = JSON.stringify(sinkSpy.mock.calls);
+      for (const forbidden of ["collector-status-secret", "collector-body-secret", "partial-success-secret"]) {
+        expect(renderedDiagnostics).not.toContain(forbidden);
+        expect(renderedSink).not.toContain(forbidden);
+      }
+      expect(collector.requests).toEqual([401, 200]);
+      await provider.shutdown();
+    } finally {
+      sinkSpy.mockRestore();
       await collector.close();
     }
   });
