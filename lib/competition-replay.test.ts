@@ -106,6 +106,11 @@ const invalidReplayCases: Array<[string, InvalidReplayChange]> = [
 describe("replayCompetition", () => {
   it("plans every completed source submission exactly once, including its single baseline, without writing in dry-run", async () => {
     const storage = await seededStorage();
+    await storage.putSubmission(submission("rejected-no-run", "", {
+      status: "rejected",
+      run_id: undefined,
+      run_ids: undefined,
+    }));
 
     const plan = await replayCompetition(storage, options());
 
