@@ -1,5 +1,4 @@
-import { OTLPTraceExporter as OTLPHttpJsonTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { OTLPTraceExporter as OTLPHttpProtoTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { JsonTraceSerializer, ProtobufTraceSerializer, type ISerializer } from "@opentelemetry/otlp-transformer";
 import { registerOTel } from "@vercel/otel";
 import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -13,6 +12,7 @@ const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
+const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
 type SinkReadiness = { configured: boolean; ready: boolean; queued: number; dropped: number; reason?: ReadinessReason };
@@ -120,6 +120,81 @@ export class SafeSpanExporter implements SpanExporter {
   }
   forceFlush(): Promise<void> { return this.delegate.forceFlush?.() ?? Promise.resolve(); }
   shutdown(): Promise<void> { return this.delegate.shutdown(); }
+}
+
+type TraceSerializer = ISerializer<ReadableSpan[], unknown>;
+
+/** Status-aware OTLP transport that never interprets or logs collector data. */
+export class SanitizedOtlpHttpExporter implements SpanExporter {
+  private readonly pending = new Set<Promise<void>>();
+  private closed = false;
+  private readonly serializer: TraceSerializer;
+  private readonly contentType: "application/json" | "application/x-protobuf";
+
+  constructor(
+    private readonly url: string,
+    private readonly headers: Record<string, string>,
+    protocol: "http/json" | "http/protobuf",
+  ) {
+    this.serializer = protocol === "http/json" ? JsonTraceSerializer : ProtobufTraceSerializer;
+    this.contentType = protocol === "http/json" ? "application/json" : "application/x-protobuf";
+  }
+
+  export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
+    let callbackCalled = false;
+    const complete = (result: Parameters<typeof callback>[0]) => {
+      if (callbackCalled) return;
+      callbackCalled = true;
+      callback(result);
+    };
+    if (this.closed) {
+      complete({ code: 1, error: new Error("OTLP collector did not acknowledge export") });
+      return;
+    }
+    const task = this.send(spans)
+      .then(
+        () => complete({ code: 0 }),
+        () => complete({ code: 1, error: new Error("OTLP collector did not acknowledge export") }),
+      )
+      .finally(() => this.pending.delete(task));
+    this.pending.add(task);
+  }
+
+  private async send(spans: ReadableSpan[]): Promise<void> {
+    const body = this.serializer.serializeRequest(spans);
+    if (!body) throw new Error("OTLP request serialization failed");
+    const controller = new AbortController();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const requestDeadline = new Promise<never>((_resolve, reject) => {
+      deadline = setTimeout(() => {
+        controller.abort();
+        reject(new Error("OTLP request deadline exceeded"));
+      }, OTLP_REQUEST_DEADLINE_MILLIS);
+    });
+    try {
+      const request = fetch(this.url, {
+        method: "POST",
+        body: body as BodyInit,
+        headers: { ...this.headers, accept: this.contentType, "content-type": this.contentType },
+        signal: controller.signal,
+        // Prevent this telemetry request from producing another traced request.
+        // @ts-expect-error Next.js extends RequestInit with this internal marker.
+        next: { internal: true },
+      });
+      const response = await Promise.race([request, requestDeadline]);
+      // Collector bodies can contain arbitrary provider-controlled data. Cancel
+      // and discard without parsing, retaining, or passing them to diagnostics.
+      void response.body?.cancel().catch(() => undefined);
+      if (response.status < 200 || response.status > 299) throw new Error("OTLP collector rejected export");
+    } catch {
+      throw new Error("OTLP collector did not acknowledge export");
+    } finally {
+      if (deadline) clearTimeout(deadline);
+    }
+  }
+
+  async forceFlush(): Promise<void> { await Promise.all([...this.pending]); }
+  async shutdown(): Promise<void> { this.closed = true; await this.forceFlush(); }
 }
 
 /** Durable, provider-neutral fallback: Vercel captures these JSON lines in runtime logs. */
@@ -314,9 +389,7 @@ export function createSafeSpanProcessors(): SpanProcessor[] {
   }
   if (collector) {
     updateSinkReadiness("otlp", { configured: true, ready: true, queued: 0, dropped: 0, reason: undefined });
-    const exporter = collector.protocol === "http/json"
-      ? new OTLPHttpJsonTraceExporter({ url: collector.url, headers: collector.headers })
-      : new OTLPHttpProtoTraceExporter({ url: collector.url, headers: collector.headers });
+    const exporter = new SanitizedOtlpHttpExporter(collector.url, collector.headers, collector.protocol);
     processors.push(createSafeSpanProcessor(exporter, "otlp"));
   } else {
     updateSinkReadiness("otlp", { configured: false, ready: true, queued: 0, dropped: 0, reason: undefined });
