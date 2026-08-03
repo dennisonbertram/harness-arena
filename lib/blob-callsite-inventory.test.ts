@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +11,12 @@ function isWithin(root: string, candidate: string): boolean {
   return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
+function refuseSymlink(root: string, linkPath: string): never {
+  const rel = relative(root, linkPath);
+  if (!isWithin(root, linkPath)) throw new Error("Blob inventory encountered an invalid symlink path");
+  throw new Error(`Blob inventory refuses symlink: ${rel.split(sep).join("/")}`);
+}
+
 export function findBlobSdkCallers(workspace = process.cwd()): string[] {
   const root = realpathSync(workspace);
   const matches: string[] = [];
@@ -19,8 +25,8 @@ export function findBlobSdkCallers(workspace = process.cwd()): string[] {
     const canonicalDirectory = realpathSync(directory);
     if (!isWithin(root, canonicalDirectory)) throw new Error(`inventory path escaped workspace: ${directory}`);
     for (const entry of readdirSync(canonicalDirectory, { withFileTypes: true }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
-      if (entry.isSymbolicLink()) continue;
       const absolute = resolve(canonicalDirectory, entry.name);
+      if (entry.isSymbolicLink()) refuseSymlink(root, absolute);
       if (!isWithin(root, absolute)) throw new Error(`inventory entry escaped workspace: ${absolute}`);
       if (entry.isDirectory()) {
         if (!EXCLUDED_DIRECTORIES.has(entry.name)) visit(absolute);
@@ -33,7 +39,11 @@ export function findBlobSdkCallers(workspace = process.cwd()): string[] {
     }
   }
 
-  for (const sourceRoot of SOURCE_ROOTS) visit(resolve(root, sourceRoot));
+  for (const sourceRoot of SOURCE_ROOTS) {
+    const sourcePath = resolve(root, sourceRoot);
+    if (lstatSync(sourcePath).isSymbolicLink()) refuseSymlink(root, sourcePath);
+    visit(sourcePath);
+  }
   return matches.sort();
 }
 
