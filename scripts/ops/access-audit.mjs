@@ -272,7 +272,12 @@ function auditOps(evidence) {
   }
   if (!/^[0-9a-f]{40}$/i.test(evidence.deployed_source?.sha ?? "")
     || evidence.deployed_source?.sha !== evidence.deployed_source?.source_sha
-    || evidence.deployed_source?.hostname !== evidence.target?.hostname) {
+    || evidence.deployed_source?.hostname !== evidence.target?.hostname
+    || evidence.deployed_source?.project_id !== evidence.target?.project_id
+    || !/^dpl_[A-Za-z0-9]+$/.test(evidence.deployed_source?.deployment_id ?? "")
+    || typeof evidence.deployed_source?.deployment_url !== "string"
+    || !evidence.deployed_source.deployment_url
+    || evidence.deployed_source.deployment_url === evidence.target?.hostname) {
     return capability("get_only_ops", "missing", ["ops_deployed_source_identity_unproven"]);
   }
   return capability("get_only_ops", "observable");
@@ -604,18 +609,41 @@ async function fetchOpsJson(fetchImpl, url, { origin, token }) {
   try { return JSON.parse(text); } catch { throw new Error("ops_get_probe_failed"); }
 }
 
-async function deployedOpsSourceIdentity({ commandRunner, env, target, cwd }) {
+function vercelDeploymentAliases(value) {
+  return [...(Array.isArray(value?.aliases) ? value.aliases : []), ...(Array.isArray(value?.alias) ? value.alias : [])]
+    .flatMap((item) => typeof item === "string" ? [item] : typeof item?.domain === "string" ? [item.domain] : []);
+}
+
+async function deployedOpsSourceIdentity({ commandRunner, fetchImpl, env, target, cwd }) {
   if (!env.VERCEL_TOKEN) throw new Error("ops_deployment_identity_missing");
   const commandOptions = { cwd, env: { PATH: env.PATH ?? process.env.PATH, VERCEL_TOKEN: env.VERCEL_TOKEN, VERCEL_ORG_ID: env.VERCEL_TEAM_ID ?? "", VERCEL_PROJECT_ID: target.project_id ?? "" } };
-  const deployment = await runJsonCommand(commandRunner, "vercel", ["inspect", target.hostname, "--json"], commandOptions);
-  const hostname = deployment?.url ?? deployment?.hostname ?? deployment?.alias?.[0] ?? null;
-  const projectId = deployment?.projectId ?? deployment?.project?.id ?? deployment?.meta?.projectId ?? null;
-  const sha = deployment?.gitSource?.sha ?? deployment?.meta?.githubCommitSha ?? deployment?.sha ?? null;
-  if (hostname !== target.hostname || projectId !== target.project_id || !/^[0-9a-f]{40}$/i.test(sha ?? "")) throw new Error("ops_deployment_identity_invalid");
+  const inspection = await runJsonCommand(commandRunner, "vercel", ["inspect", target.hostname, "--json"], commandOptions);
+  const deploymentId = inspection?.id ?? inspection?.uid ?? null;
+  const deploymentUrl = inspection?.url ?? null;
+  if (!/^dpl_[A-Za-z0-9]+$/.test(deploymentId ?? "")
+    || typeof deploymentUrl !== "string" || !/^[A-Za-z0-9.-]+$/.test(deploymentUrl)
+    || deploymentUrl === target.hostname
+    || !vercelDeploymentAliases(inspection).includes(target.hostname)) throw new Error("ops_deployment_resolution_invalid");
+  const headers = { authorization: `Bearer ${env.VERCEL_TOKEN}` };
+  const deployment = await safeGetJson(fetchImpl,
+    `https://api.vercel.com/v13/deployments/${encodeURIComponent(deploymentId)}?withGitRepoInfo=true&teamId=${encodeURIComponent(env.VERCEL_TEAM_ID ?? "")}`,
+    headers);
+  const projectId = deployment?.projectId ?? deployment?.project?.id ?? null;
+  const sha = deployment?.gitSource?.sha ?? null;
+  if (deployment?.id !== deploymentId || deployment?.url !== deploymentUrl
+    || !vercelDeploymentAliases(deployment).includes(target.hostname)
+    || projectId !== target.project_id || !/^[0-9a-f]{40}$/i.test(sha ?? "")) throw new Error("ops_deployment_identity_invalid");
   const local = await runReadCommand(commandRunner, "git", ["rev-parse", "HEAD"], { cwd });
   const sourceSha = local.trim();
   if (!/^[0-9a-f]{40}$/i.test(sourceSha) || sourceSha.toLowerCase() !== sha.toLowerCase()) throw new Error("ops_deployment_source_mismatch");
-  return { hostname, sha: sha.toLowerCase(), source_sha: sourceSha.toLowerCase() };
+  return {
+    hostname: target.hostname,
+    deployment_id: deploymentId,
+    deployment_url: deploymentUrl,
+    project_id: projectId,
+    sha: sha.toLowerCase(),
+    source_sha: sourceSha.toLowerCase(),
+  };
 }
 
 async function probeOpsMutationDenial(fetchImpl, target, token) {
@@ -710,7 +738,7 @@ async function probeOps(policy, env, commandRunner, fetchImpl, cwd) {
   if (!validSummary(summary)) throw new Error("ops_summary_schema_invalid");
   const mutation_route_coverage = await deriveOpsMutationRouteCoverage({ cwd });
   if (!mutation_route_coverage.complete) throw new Error("ops_mutation_route_coverage_unproven");
-  const deployed_source = await deployedOpsSourceIdentity({ commandRunner, env, target, cwd });
+  const deployed_source = await deployedOpsSourceIdentity({ commandRunner, fetchImpl, env, target, cwd });
   const mutation_denial = await probeOpsMutationDenial(fetchImpl, target, token);
   return {
     state: "authenticated",

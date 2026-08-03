@@ -135,8 +135,10 @@ Provider references: [GitHub fine-grained token permissions](https://docs.github
    it must classify `overprivileged`.
 3. Retain static coverage of every mutation method exported by the `/api/ops/v1`
    route family and a live `405 Allow: GET` denial using `OPS_READ_TOKEN` against
-   the isolated Development deployment only. The audit requires the inspected
-   deployment's Git SHA to equal the local source SHA; it reports `missing` when
+   the isolated Development deployment only. CLI inspection resolves the stable
+   alias to a deployment ID and unique URL; the documented Vercel deployment
+   REST response then supplies the authoritative project ID, alias set, and Git
+   SHA. That SHA must equal the local source SHA; the audit reports `missing` when
    either identity or denial evidence is unavailable. It never sends a write
    probe to Production. The same tests fail closed if the read token collides
    with an admin or runner callback credential.

@@ -500,7 +500,12 @@ describe("least-privilege access policy", () => {
     const raw = await evidence("viewer");
     raw.ops.mutation_route_coverage = coverage;
     raw.ops.target = { environment: "development", project_id: policy.capabilities.get_only_ops.targets.development.project_id, hostname: "harness-arena-development.vercel.app" };
-    raw.ops.deployed_source = { sha: "a".repeat(40), source_sha: "a".repeat(40), hostname: "harness-arena-development.vercel.app" };
+    raw.ops.deployed_source = {
+      deployment_id: "dpl_development",
+      deployment_url: "harness-arena-development-git-dev-unique.vercel.app",
+      project_id: policy.capabilities.get_only_ops.targets.development.project_id,
+      sha: "a".repeat(40), source_sha: "a".repeat(40), hostname: "harness-arena-development.vercel.app",
+    };
     raw.ops.mutation_denial = { environment: "development", status: 405, allow: "GET" };
     expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative" }).systems.find(({ name }) => name === "get_only_ops"))
       .toMatchObject({ state: "observable" });
@@ -548,7 +553,14 @@ describe("least-privilege access policy", () => {
     const fetchImpl = vi.fn(async (url, init) => {
       calls.push([String(url), init?.method, init?.headers?.authorization]);
       const address = String(url);
-      const body = address.endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 0, policy_size: policySize } }
+      const body = address.includes("/v13/deployments/dpl_development") ? {
+        id: "dpl_development",
+        url: "harness-arena-development-git-dev-unique.vercel.app",
+        alias: ["harness-arena-development.vercel.app"],
+        projectId: policy.capabilities.get_only_ops.targets.development.project_id,
+        gitSource: { type: "github", sha: "a".repeat(40), ref: "dev" },
+      }
+        : address.endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 0, policy_size: policySize } }
         : address.endsWith("/api/ops/v1") && init?.method === "GET" ? { schema_version: "ops.v1", credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 0, policy_size: policySize }, kinds: ["runs"], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
           : address.includes("/inventory?") ? { schema_version: "ops.v1", kind: "runs", items: [], has_more: false, next_cursor: null }
             : address.endsWith("/summary") ? { schema_version: "ops.v1", counts: {}, latest: {}, run_states: {}, integrity: {}, scan: {} }
@@ -561,13 +573,26 @@ describe("least-privilege access policy", () => {
       policy, role: "monitor", cwd: repo,
       env: { OPS_READ_TOKEN: "development-read-token", VERCEL_TOKEN: "development-vercel-viewer", VERCEL_TEAM_ID: "team-development", VERCEL_PROJECT_ID: policy.capabilities.get_only_ops.targets.development.project_id, HARNESS_ARENA_URL: "https://harness-arena-development.vercel.app" },
       commandRunner: vi.fn(async (binary, args) => {
-        if (binary === "vercel" && args[0] === "inspect") return { exitCode: 0, stdout: JSON.stringify({ url: "harness-arena-development.vercel.app", projectId: policy.capabilities.get_only_ops.targets.development.project_id, gitSource: { sha: "a".repeat(40) } }) };
+        if (binary === "vercel" && args[0] === "inspect") return { exitCode: 0, stdout: JSON.stringify({
+          id: "dpl_development",
+          url: "harness-arena-development-git-dev-unique.vercel.app",
+          aliases: ["harness-arena-development.vercel.app"],
+        }) };
         if (binary === "git" && args[0] === "rev-parse") return { exitCode: 0, stdout: `${"a".repeat(40)}\n` };
         return { exitCode: 1, stdout: "" };
       }), fetchImpl,
     });
 
     expect(collected.ops.mutation_denial).toMatchObject({ environment: "development", status: 405, allow: "GET" });
+    expect(collected.ops.deployed_source).toMatchObject({
+      deployment_id: "dpl_development",
+      deployment_url: "harness-arena-development-git-dev-unique.vercel.app",
+      project_id: policy.capabilities.get_only_ops.targets.development.project_id,
+      hostname: "harness-arena-development.vercel.app",
+      sha: "a".repeat(40),
+      source_sha: "a".repeat(40),
+    });
+    expect(calls.some(([url, method]) => url.includes("/v13/deployments/dpl_development") && url.includes("withGitRepoInfo=true") && method === "GET")).toBe(true);
     expect(calls.filter(([, method]) => method === "POST")).toEqual([["https://harness-arena-development.vercel.app/api/ops/v1", "POST", "Bearer development-read-token"]]);
   });
 
