@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -489,7 +489,12 @@ describe("least-privilege access policy", () => {
     const policy = await audit.loadPolicy(policyPath);
     const coverage = await audit.deriveOpsMutationRouteCoverage({ cwd: repo });
     expect(coverage).toMatchObject({ complete: true, routes: expect.arrayContaining([
-      expect.objectContaining({ pathname: "/api/ops/v1", methods: ["POST", "PUT", "PATCH", "DELETE"] }),
+      expect.objectContaining({ pathname: "/api/ops/v1", handlers: [
+        { method: "POST", source: "POST", canonical_denial: true },
+        { method: "PUT", source: "PUT", canonical_denial: true },
+        { method: "PATCH", source: "PATCH", canonical_denial: true },
+        { method: "DELETE", source: "DELETE", canonical_denial: true },
+      ] }),
     ]) });
 
     const raw = await evidence("viewer");
@@ -503,6 +508,36 @@ describe("least-privilege access policy", () => {
     raw.ops.target.environment = "production";
     expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative" }).systems.find(({ name }) => name === "get_only_ops"))
       .toMatchObject({ state: "missing", reasons: ["ops_development_mutation_denial_unproven"] });
+  });
+
+  it("derives ops mutation safety from canonical exports, including aliases and GET-only routes", async () => {
+    const audit = await subject();
+    const directory = await mkdtemp(join(tmpdir(), "ops-route-coverage-"));
+    try {
+      await mkdir(join(directory, "app/api/ops/v1/get-only"), { recursive: true });
+      await mkdir(join(directory, "app/api/ops/v1/aliased"), { recursive: true });
+      await mkdir(join(directory, "app/api/ops/v1/custom"), { recursive: true });
+      await mkdir(join(directory, "lib"), { recursive: true });
+      await writeFile(join(directory, "lib/ops-route.ts"), "export const methodNotAllowed = () => new Response(null, { status: 405 });\nexport const POST=methodNotAllowed,PUT=methodNotAllowed,PATCH=methodNotAllowed,DELETE=methodNotAllowed;\n");
+      await writeFile(join(directory, "app/api/ops/v1/get-only/route.ts"), "export async function GET() { return new Response('ok'); }\n");
+      await writeFile(join(directory, "app/api/ops/v1/aliased/route.ts"), "export { methodNotAllowed as POST, DELETE as PATCH } from '@/lib/ops-route';\n");
+      await writeFile(join(directory, "app/api/ops/v1/custom/route.ts"), "export const PUT = () => new Response('write');\n");
+
+      const coverage = await audit.deriveOpsMutationRouteCoverage({ cwd: directory });
+      expect(coverage.routes.find(({ pathname }) => pathname.endsWith("/get-only"))).toMatchObject({ handlers: [], complete: true });
+      expect(coverage.routes.find(({ pathname }) => pathname.endsWith("/aliased"))).toMatchObject({
+        handlers: [
+          { method: "POST", source: "methodNotAllowed", canonical_denial: true },
+          { method: "PATCH", source: "DELETE", canonical_denial: true },
+        ],
+        complete: true,
+      });
+      expect(coverage.routes.find(({ pathname }) => pathname.endsWith("/custom"))).toMatchObject({
+        handlers: [{ method: "PUT", source: "PUT", canonical_denial: false }],
+        complete: false,
+      });
+      expect(coverage.complete).toBe(false);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("sends the live mutation denial probe only to the isolated Development target", async () => {

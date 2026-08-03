@@ -342,21 +342,44 @@ export async function deriveProtectedMutationRoutes({ cwd }) {
 
 const OPS_MUTATION_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
 
-function exportedMutationMethods(source) {
-  const methods = new Set();
-  for (const match of source.matchAll(/export\s+(?:async\s+function|const)\s+(POST|PUT|PATCH|DELETE)\b/g)) methods.add(match[1]);
-  for (const match of source.matchAll(/export\s*{([^}]+)}/g)) {
-    for (const entry of match[1].split(",")) {
-      const name = entry.trim().split(/\s+as\s+/i, 1)[0];
-      if (OPS_MUTATION_METHODS.includes(name)) methods.add(name);
+function canonicalOpsDenials(source) {
+  if (!/export\s+const\s+methodNotAllowed\s*=/.test(source)) return new Set();
+  const names = new Set(["methodNotAllowed"]);
+  for (const declaration of source.matchAll(/export\s+const\s+([^;]+);/g)) {
+    for (const entry of declaration[1].split(",")) {
+      const match = /^\s*([A-Za-z_$][\w$]*)\s*=\s*methodNotAllowed\s*$/.exec(entry);
+      if (match) names.add(match[1]);
     }
   }
-  return OPS_MUTATION_METHODS.filter((method) => methods.has(method));
+  return names;
+}
+
+function exportedMutationHandlers(source, canonicalDenials) {
+  const handlers = [];
+  for (const match of source.matchAll(/export\s+(?:async\s+function|const)\s+(POST|PUT|PATCH|DELETE)\b/g)) {
+    handlers.push({ method: match[1], source: match[1], canonical_denial: false });
+  }
+  for (const match of source.matchAll(/export\s*{([^}]+)}(?:\s+from\s+(["'])([^"']+)\2)?/g)) {
+    const moduleSpecifier = match[3] ?? null;
+    for (const raw of match[1].split(",")) {
+      const parts = raw.trim().split(/\s+as\s+/i);
+      const sourceName = parts[0];
+      const exportedName = parts[1] ?? sourceName;
+      if (!OPS_MUTATION_METHODS.includes(exportedName)) continue;
+      handlers.push({
+        method: exportedName,
+        source: sourceName,
+        canonical_denial: moduleSpecifier === "@/lib/ops-route" && canonicalDenials.has(sourceName),
+      });
+    }
+  }
+  return handlers.sort((left, right) => OPS_MUTATION_METHODS.indexOf(left.method) - OPS_MUTATION_METHODS.indexOf(right.method));
 }
 
 export async function deriveOpsMutationRouteCoverage({ cwd }) {
   const routes = [];
   const root = resolve(cwd, "app/api/ops");
+  const canonicalDenials = canonicalOpsDenials(await readFile(resolve(cwd, "lib/ops-route.ts"), "utf8"));
   const visit = async (directory) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const absolute = join(directory, entry.name);
@@ -364,8 +387,8 @@ export async function deriveOpsMutationRouteCoverage({ cwd }) {
       if (entry.name !== "route.ts") continue;
       const file = relative(cwd, absolute).replaceAll("\\", "/");
       const pathname = `/${file.replace(/^app\//, "").replace(/\/route\.ts$/, "")}`;
-      const methods = exportedMutationMethods(await readFile(absolute, "utf8"));
-      routes.push({ file, pathname, methods, missing_methods: OPS_MUTATION_METHODS.filter((method) => !methods.includes(method)) });
+      const handlers = exportedMutationHandlers(await readFile(absolute, "utf8"), canonicalDenials);
+      routes.push({ file, pathname, handlers, complete: handlers.every((handler) => handler.canonical_denial) });
     }
   };
   await visit(root);
@@ -373,7 +396,7 @@ export async function deriveOpsMutationRouteCoverage({ cwd }) {
   return {
     source_files: routes.map(({ file }) => file),
     routes,
-    complete: routes.length > 0 && routes.every((route) => route.missing_methods.length === 0),
+    complete: routes.length > 0 && routes.every((route) => route.complete),
   };
 }
 
