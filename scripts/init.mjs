@@ -13,6 +13,7 @@ import {
   probeInstance,
   probeLocalInstance,
   readInstanceMetadata,
+  readCurrentBranch,
   readManagedLocalConfig,
   removeInstanceMetadataIfOwned,
   resetLocalData,
@@ -24,7 +25,7 @@ import {
 
 const worktree = resolve(process.cwd());
 const args = new Set(process.argv.slice(2));
-const validArgs = new Set(["--check", "--no-install", "--reset"]);
+const validArgs = new Set(["--check", "--no-install", "--reset", "--smoke", "--real-sandbox-smoke"]);
 const json = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const exists = async (path) => access(path).then(() => true).catch(() => false);
 const prerequisiteTimeoutMs = positiveTimeout(process.env.HARNESS_INIT_PREREQUISITE_TIMEOUT_MS, 120_000);
@@ -48,10 +49,21 @@ try {
 if (shutdownSignal) await exitForSignal();
 
 async function main() {
-  if ([...args].some((arg) => !validArgs.has(arg)) || (args.has("--reset") && args.size > 1)) {
-    throw new Error("usage: ./scripts/init.sh [--check] [--no-install] [--reset]");
+  if ([...args].some((arg) => !validArgs.has(arg))
+    || (args.has("--reset") && args.size > 1)
+    || (args.has("--real-sandbox-smoke") && args.size > 1)
+    || (args.has("--check") && args.has("--smoke"))) {
+    throw new Error("usage: ./scripts/init.sh [--check] [--no-install] [--smoke] [--reset] [--real-sandbox-smoke]");
   }
   assertNodeVersion(process.versions.node);
+
+  if (args.has("--real-sandbox-smoke")) {
+    const branch = await readCurrentBranch(worktree);
+    const { Sandbox } = await import("@vercel/sandbox");
+    const { runRealSandboxSmoke } = await import("./real-sandbox-smoke-lib.mjs");
+    json(await runRealSandboxSmoke({ env: { ...process.env, HARNESS_GIT_BRANCH: branch }, create: (options) => Sandbox.create(options) }));
+    return;
+  }
 
   if (args.has("--reset")) {
     const result = await resetLocalData(worktree);
@@ -119,7 +131,8 @@ async function initialize(state) {
     if (isProcessAlive(metadata.pid)) {
       const ready = await probeInstance(metadata, 1_000, shutdownController.signal);
       if (!ready) throw new Error(`local PID ${metadata.pid} is alive but readiness ownership did not match; refusing a second server`);
-      json(instanceOutput("existing", metadata, { stale_pid_recovered: false }, state));
+      const smoke = args.has("--smoke") ? await runSmoke(metadata, state) : undefined;
+      json(instanceOutput("existing", metadata, { stale_pid_recovered: false, ...(smoke ? { smoke } : {}) }, state));
       return;
     }
     await rm(pidPath, { force: true });
@@ -134,7 +147,9 @@ async function initialize(state) {
   const port = await chooseAvailablePort(worktree);
 
   const localConfig = await readManagedLocalConfig(worktree);
-  const installEnv = await safeChildEnv(worktree, process.env, localConfig);
+  const gitBranch = await readCurrentBranch(worktree);
+  const guardedLocalConfig = { ...localConfig, HARNESS_GIT_BRANCH: gitBranch };
+  const installEnv = await safeChildEnv(worktree, process.env, guardedLocalConfig);
   if (!args.has("--no-install")) await run("pnpm", ["install", "--frozen-lockfile"], { cwd: worktree, env: installEnv, stdio: "inherit" }, "pnpm install");
 
   await run(process.execPath, ["scripts/seed-local.mjs"], { cwd: worktree, env: installEnv, stdio: "inherit" }, "local seed");
@@ -144,7 +159,7 @@ async function initialize(state) {
   shutdownController.signal.throwIfAborted();
 
   const nonce = randomUUID();
-  const serverEnv = await safeChildEnv(worktree, process.env, { ...localConfig, LOCAL_INSTANCE_NONCE: nonce });
+  const serverEnv = await safeChildEnv(worktree, process.env, { ...guardedLocalConfig, LOCAL_INSTANCE_NONCE: nonce });
   serverEnv.HARNESS_INIT_STATE = state;
   serverEnv.LOCAL_INSTANCE_PORT = String(port);
   const logHandle = await open(logPath, "a", 0o600);
@@ -177,6 +192,7 @@ async function initialize(state) {
       await rm(join(state, "init-failure.json"), { force: true });
       await phaseBarrier("server_lifecycle");
       shutdownController.signal.throwIfAborted();
+      const smoke = args.has("--smoke") ? await runSmoke(instance, state) : undefined;
       if (!await detachOwnedSupervisor(serverOwned, {
         signal: shutdownController.signal,
         beforeDisconnect: () => phaseBarrier("durable_detach"),
@@ -184,7 +200,7 @@ async function initialize(state) {
       shutdownController.signal.throwIfAborted();
       serverDetached = true;
       activeServer = undefined;
-      json(instanceOutput("start", instance, { stale_pid_recovered: stalePidRecovered }, state));
+      json(instanceOutput("start", instance, { stale_pid_recovered: stalePidRecovered, ...(smoke ? { smoke } : {}) }, state));
       return;
     }
     if (!isProcessAlive(instance.pid)) break;
@@ -199,6 +215,14 @@ async function initialize(state) {
    if (activeServer === serverOwned) activeServer = undefined;
    await releaseLock();
  }
+}
+
+async function runSmoke(instance, state) {
+  const { runLocalSandboxSmoke } = await import("./local-sandbox-smoke.mjs");
+  return runLocalSandboxSmoke({
+    baseUrl: `http://127.0.0.1:${instance.port}`,
+    storageRoot: join(state, "local-data"),
+  });
 }
 
 function commandExists(command) {
