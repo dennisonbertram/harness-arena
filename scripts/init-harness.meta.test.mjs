@@ -8,6 +8,8 @@ const repositoryRoot = process.cwd();
 const vitestBin = join(repositoryRoot, "node_modules", "vitest", "vitest.mjs");
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 const fixturePublicationDeadlineMs = (schedulingDelayMs) => 10_000 + schedulingDelayMs;
+const EXPECTED_FIXTURE_OUTPUT_MAX_BYTES = 16 * 1024;
+const EXPECTED_FIXTURE_PUBLICATION_MAX_MS = 25_000;
 
 function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
@@ -112,6 +114,52 @@ async function waitForText(path, expected, timeoutMs = 5_000, fixture) {
 }
 
 describe.sequential("integration harness process cleanup", () => {
+  it("fails promptly on immediate fixture exit with redacted, capped child output", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-immediate-exit-"));
+    const marker = join(directory, "published.json");
+    const inheritedSecret = "meta-inherited-secret-sentinel";
+    const configuredSecret = "meta-configured-token-sentinel";
+    process.env.HARNESS_META_PARENT_SECRET = inheritedSecret;
+    const fixture = spawnFixture("immediate-exit", marker, join(directory, "preserved.json"), {
+      env: { HARNESS_META_CONFIG_TOKEN: configuredSecret },
+      outputBytes: EXPECTED_FIXTURE_OUTPUT_MAX_BYTES * 2,
+    });
+    const started = Date.now();
+    try {
+      const failure = await waitForFile(marker, 1_000, fixture).then(() => null, (error) => error);
+      expect(Date.now() - started).toBeLessThan(750);
+      expect(failure?.message).toMatch(/code=17.*signal=null/);
+      expect(failure?.message).not.toContain(inheritedSecret);
+      expect(failure?.message).not.toContain(configuredSecret);
+      expect(failure?.message).toContain("[REDACTED]");
+      expect(Buffer.byteLength(fixture.output(), "utf8")).toBeLessThanOrEqual(EXPECTED_FIXTURE_OUTPUT_MAX_BYTES);
+      expect(fixture.output()).toContain("[output truncated]");
+    } finally {
+      delete process.env.HARNESS_META_PARENT_SECRET;
+      await terminateGroup(fixture.child.pid);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 5_000);
+
+  it("caps a derived publication deadline and bounds a hung never-publisher", async () => {
+    expect(fixturePublicationDeadlineMs(100_000)).toBe(EXPECTED_FIXTURE_PUBLICATION_MAX_MS);
+    const deadlineMs = fixturePublicationDeadlineMs(100_000, 200);
+    expect(deadlineMs).toBe(200);
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-never-publish-"));
+    const marker = join(directory, "published.json");
+    const fixture = spawnFixture("never-publish", marker, join(directory, "preserved.json"));
+    const started = Date.now();
+    try {
+      const failure = await waitForFile(marker, deadlineMs, fixture).then(() => null, (error) => error);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(failure?.message).toMatch(/publication deadline.*never-publish/);
+    } finally {
+      await terminateGroup(fixture.child.pid);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 5_000);
+
   it("derives the fixture publication deadline from an allowed scheduling delay", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-arena-init-meta-publication-delay-"));
     const marker = join(directory, "published.json");
