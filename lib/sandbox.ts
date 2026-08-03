@@ -183,7 +183,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     });
 
     const storage = getStorage();
-    const withSandboxId: Run = { ...run, sandbox_id: sandbox.name };
+    const withSandboxId: Run = { ...run, sandbox_id: sandbox.name, selected_task_ids: runnerTasks.map((task) => task.id) };
     await storage.putRun(withSandboxId);
     await storage.appendRunEvents(run.id, [
       { ts: new Date().toISOString(), type: "run.sandbox_creating", payload: { sandbox_id: sandbox.name } },

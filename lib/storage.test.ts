@@ -631,8 +631,9 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     expect(await storage.getRun("run-1")).toEqual(run);
     expect(await storage.getSubmission("missing")).toBeUndefined();
     expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", {
+    expect(get).toHaveBeenCalledWith(url, {
       access: "public",
+      useCache: false,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -651,8 +652,9 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", {
+    expect(get).toHaveBeenCalledWith(url, {
       access: "public",
+      useCache: false,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -715,8 +717,9 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     } as never);
 
     await expect(storage.getRun("run-1")).resolves.toEqual(run);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", {
+    expect(get).toHaveBeenCalledWith(url, {
       access: "public",
+      useCache: false,
     });
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -748,7 +751,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       hasMore: false,
     } as never);
     vi.mocked(get).mockImplementation(async (identifier) => {
-      const run = String(identifier) === "runs/run-1.json" ? completedRun : staleRun;
+      const run = String(identifier) === url ? completedRun : staleRun;
       return {
         statusCode: 200,
         stream: new ReadableStream({
@@ -773,10 +776,10 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     });
 
     await expect(storage.getRun("run-1")).resolves.toEqual(completedRun);
-    expect(get).toHaveBeenCalledWith("runs/run-1.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith(url, { access: "public", useCache: false });
   });
 
-  it("listRuns reads each entity through its authenticated pathname", async () => {
+  it("listRuns reads each listed version through the authenticated SDK", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
     const url = "https://store-id.public.blob.vercel-storage.com/runs/run-1.json";
@@ -793,7 +796,8 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(storage.listRuns()).resolves.toEqual([run]);
-    expect(fetchSpy).toHaveBeenCalledWith("https://blob.example/runs/run-1.json");
+    expect(get).toHaveBeenCalledWith(url, { access: "public", useCache: false });
+    expect(fetchSpy).toHaveBeenCalledWith(url);
   });
 
   it("bounds concurrent entity reads so a list page cannot rate-limit its own Blob store", async () => {
@@ -863,7 +867,7 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     );
     await expect(storage.getTraceBytes("run-1", "task-1", "output.log")).resolves.toEqual(Buffer.from("trace output"));
     await expect(storage.getTraceBytes("run-1", "task-1", "missing.log")).resolves.toBeNull();
-    expect(get).toHaveBeenCalledWith("traces/run-1/task-1/output.log", { access: "public" });
+    expect(get).toHaveBeenCalledWith(url, { access: "public", useCache: false });
     expect(put).toHaveBeenCalledWith("traces/run-1/task-1/output.log", "trace output", {
       access: "public",
       addRandomSuffix: false,

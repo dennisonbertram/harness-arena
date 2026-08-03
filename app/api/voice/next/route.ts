@@ -5,10 +5,10 @@ import type { NextComparison, Progress } from "@/lib/voice-session";
 import { enumerateComparisons, pickNext, progress } from "@/lib/voice-session";
 import type { VoiceManifest } from "@/lib/voice-types";
 import { getVoiceStorage } from "@/lib/voice-storage";
-import { mintVoiceCapability, verifyVoiceCapability, VOICE_CAPABILITY_LIFETIME_SECONDS } from "@/lib/voice-capability";
+import { verifyVoiceCapability } from "@/lib/voice-capability";
+import { setVoiceCapabilityCookie, VOICE_CAPABILITY_COOKIE_NAME } from "@/lib/voice-capability-cookie";
 
-const COOKIE_NAME = "voice_evaluator";
-const COOKIE_MAX_AGE_SECONDS = VOICE_CAPABILITY_LIFETIME_SECONDS;
+const COOKIE_NAME = VOICE_CAPABILITY_COOKIE_NAME;
 const EXCLUDE_CAP = 25;
 
 const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;
@@ -50,16 +50,6 @@ function parseExclude(request: NextRequest): string[] {
   // Client is asked to send at most 25; a longer list is trimmed to the most
   // recent (last) 25 rather than rejected outright.
   return ids.length > EXCLUDE_CAP ? ids.slice(-EXCLUDE_CAP) : ids;
-}
-
-function setEvaluatorCookie(response: NextResponse, evaluatorId: string): void {
-  response.cookies.set(COOKIE_NAME, mintVoiceCapability(evaluatorId), {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: COOKIE_MAX_AGE_SECONDS,
-    secure: true,
-  });
 }
 
 // Never include model_id/name here -- this payload is the blinding boundary.
@@ -104,7 +94,7 @@ export async function GET(request: NextRequest) {
   const manifest = await storage.getManifest();
   if (!manifest) {
     const response = NextResponse.json({ not_seeded: true });
-    if (minted) setEvaluatorCookie(response, evaluatorId);
+    if (minted) setVoiceCapabilityCookie(response, evaluatorId);
     return response;
   }
 
@@ -125,6 +115,6 @@ export async function GET(request: NextRequest) {
     : buildComparisonPayload(manifest, result, currentProgress);
 
   const response = NextResponse.json(body);
-  if (minted) setEvaluatorCookie(response, evaluatorId);
+  if (minted) setVoiceCapabilityCookie(response, evaluatorId);
   return response;
 }

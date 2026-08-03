@@ -38,8 +38,8 @@ async function listAll(prefix, token) {
   return blobs;
 }
 
-async function readJson(pathname, token) {
-  return readBlobJson(pathname, { token, required: true });
+async function readJson(identifier, token, { listed = false } = {}) {
+  return readBlobJson(identifier, { token, required: true, ...(listed ? { useCache: false } : {}) });
 }
 
 function uniqueSorted(values) {
@@ -71,7 +71,7 @@ export async function resetCompetitionData({
   const submissions = await Promise.all(
     submissionBlobs.map(async (blob) => ({
       blob,
-      value: await readJson(blob.pathname, token),
+      value: await readJson(blob.url, token, { listed: true }),
     })),
   );
   const targetSubmissions = submissions.filter(({ value }) => value.competition_id === competitionId);
@@ -88,7 +88,7 @@ export async function resetCompetitionData({
   const runs = await Promise.all(
     runBlobs.map(async (blob) => ({
       blob,
-      value: await readJson(blob.pathname, token),
+      value: await readJson(blob.url, token, { listed: true }),
     })),
   );
   const targetRuns = runs.filter(

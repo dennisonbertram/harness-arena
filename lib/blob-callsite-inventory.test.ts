@@ -135,4 +135,14 @@ describe("Blob call-site inventory", () => {
       expect(source, file).not.toMatch(/method\s*:\s*["']HEAD["']/);
     }
   });
+
+  it("allows versioned listed URLs only through the authenticated Blob SDK", () => {
+    const source = `
+      import { get } from "@vercel/blob";
+      import { blobCommandOptions } from "./blob-access";
+      await get(blob.url, blobCommandOptions({ useCache: false }));
+    `;
+    expect(source).not.toMatch(/fetch\s*\([^)]*\.\s*url\b/);
+    expect(source).toMatch(/get\(blob\.url, blobCommandOptions\(\{ useCache: false \}\)\)/);
+  });
 });

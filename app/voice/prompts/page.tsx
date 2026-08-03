@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { countJudgmentsByPrompt } from "@/lib/voice-results";
+import VoicePromptCapabilityGate from "./VoicePromptCapabilityGate";
 
 // Mirrors app/voice/results/page.tsx: shared storage means a build-time-cached
 // page would never show new judgments, so ISR re-renders it at most every 15s.
@@ -55,7 +56,7 @@ export default async function VoicePromptsPage() {
           No prompts yet.
         </div>
       ) : (
-        <>
+        <VoicePromptCapabilityGate>
           <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 24 }}>
             Comparing {pairLabel} · {manifest.prompts.length} prompt
             {manifest.prompts.length === 1 ? "" : "s"} · {matchedJudgments} judgment
@@ -105,7 +106,7 @@ export default async function VoicePromptsPage() {
               );
             })}
           </section>
-        </>
+        </VoicePromptCapabilityGate>
       )}
     </div>
   );

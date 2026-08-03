@@ -28,7 +28,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const run = await storage.getRun(id);
   if (!run) return NextResponse.json({ error: "run not found" }, { status: 404 });
   const taskResult = run.task_results.find((result) => result.task_id === taskId);
-  if ((taskId === "_run" && name !== "runner-log.txt") || (taskId !== "_run" && !taskResult)) {
+  const selectedTask = run.selected_task_ids?.includes(taskId) === true;
+  if ((taskId === "_run" && name !== "runner-log.txt") || (taskId !== "_run" && !taskResult && !selectedTask)) {
     return NextResponse.json({ error: "trace task does not belong to run" }, { status: 400 });
   }
 

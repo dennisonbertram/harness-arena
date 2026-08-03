@@ -130,17 +130,17 @@ async function listAll(prefix, token) {
   return blobs;
 }
 
-async function readJson(pathname, token) {
-  return readBlobJson(pathname, { token });
+async function readJson(identifier, token, { listed = false } = {}) {
+  return readBlobJson(identifier, { token, ...(listed ? { useCache: false } : {}) });
 }
 
 function blobStorage(token) {
   return {
     getCompetition: (id) => readJson(`competitions/${id}.json`, token),
     async putCompetition(value) { await put(`competitions/${value.id}.json`, JSON.stringify(value), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token })); },
-    async listSubmissions() { return Promise.all((await listAll("submissions/", token)).map((blob) => readJson(blob.pathname, token))); },
-    async listRuns() { return Promise.all((await listAll("runs/", token)).map((blob) => readJson(blob.pathname, token))); },
-    async listRunEvents(runId) { return Promise.all((await listAll(`events/${runId}/`, token)).map((blob) => readJson(blob.pathname, token))); },
+    async listSubmissions() { return Promise.all((await listAll("submissions/", token)).map((blob) => readJson(blob.url, token, { listed: true }))); },
+    async listRuns() { return Promise.all((await listAll("runs/", token)).map((blob) => readJson(blob.url, token, { listed: true }))); },
+    async listRunEvents(runId) { return Promise.all((await listAll(`events/${runId}/`, token)).map((blob) => readJson(blob.url, token, { listed: true }))); },
     async putRun(value) { await put(`runs/${value.id}.json`, JSON.stringify(value), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token })); },
   };
 }

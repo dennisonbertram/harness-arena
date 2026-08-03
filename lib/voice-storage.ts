@@ -150,8 +150,8 @@ export class FileVoiceStorage implements VoiceStorage {
 }
 
 export class BlobVoiceStorage implements VoiceStorage {
-  private async listAllBlobs(prefix: string): Promise<{ pathname: string }[]> {
-    const blobs: { pathname: string }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ pathname: string; url: string }[]> {
+    const blobs: { pathname: string; url: string }[] = [];
     let cursor: string | undefined;
     do {
       const page = await list(blobCommandOptions({ prefix, cursor }));
@@ -165,7 +165,7 @@ export class BlobVoiceStorage implements VoiceStorage {
     const blobs = await withRetry(() => list(blobCommandOptions({ prefix: MANIFEST_PATH, limit: 1 })));
     const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
     if (!blob) return undefined;
-    const raw = await withRetry(() => readBlobJson(blob.pathname));
+    const raw = await withRetry(() => readBlobJson(blob.url, { useCache: false }));
     if (raw === undefined) return undefined;
     const parsed = VoiceManifestSchema.safeParse(raw);
     return parsed.success ? parsed.data : undefined;
@@ -221,7 +221,7 @@ export class BlobVoiceStorage implements VoiceStorage {
       const results = await Promise.all(
         chunk.map(async (blob) => {
           try {
-            const raw = await withRetry(() => readBlobJson(blob.pathname, { required: true }), 3);
+            const raw = await withRetry(() => readBlobJson(blob.url, { required: true, useCache: false }), 3);
             const parsed = VoiceJudgmentSchema.safeParse(raw);
             return parsed.success ? parsed.data : undefined;
           } catch {

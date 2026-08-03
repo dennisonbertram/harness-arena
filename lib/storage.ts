@@ -187,8 +187,8 @@ export function seqFromEventPathname(pathname: string | undefined): number | nul
   return Number.isSafeInteger(seq) ? seq : null;
 }
 
-async function getJson<T>(identifier: string): Promise<T> {
-  return await readBlobJson<T>(identifier, { required: true }) as T;
+async function getJson<T>(identifier: string, options: { useCache?: boolean } = {}): Promise<T> {
+  return await readBlobJson<T>(identifier, { required: true, ...options }) as T;
 }
 
 export class BlobStorage implements Storage {
@@ -218,7 +218,7 @@ export class BlobStorage implements Storage {
     // listRuns/listSubmissions/listCompetitions are often requested together.
     // Keep one instance-wide semaphore across all three so Promise.all cannot
     // turn a 90-object page read into 90 simultaneous Blob requests.
-    return this.withReadSlot(() => withRetry(() => getJson<T>(blob.pathname), 2));
+    return this.withReadSlot(() => withRetry(() => getJson<T>(blob.url, { useCache: false }), 2));
   }
 
   private async readJson<T>(pathname: string): Promise<T | undefined> {
@@ -439,7 +439,7 @@ export class BlobStorage implements Storage {
         const blobs = await this.listAllBlobs(pathname);
         const blob = blobs.find((candidate) => candidate.pathname === pathname);
         if (!blob) return null;
-        const response = await get(blob.pathname, blobCommandOptions());
+        const response = await get(blob.url, blobCommandOptions({ useCache: false }));
         if (!response || response.statusCode !== 200 || !response.stream) throw new Error("blob get failed");
         return readBoundedStream(response.stream, BlobStorage.TRACE_LIMIT);
       });

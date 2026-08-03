@@ -277,7 +277,7 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
     const manifest = await storage.getManifest();
 
     expect(manifest?.version).toBe("1");
-    expect(vi.mocked(get)).toHaveBeenCalledWith("voice/manifest.json", { access: "public" });
+    expect(vi.mocked(get)).toHaveBeenCalledWith("https://blob.example/voice/manifest.json", { access: "public", useCache: false });
   });
 
   it("rejects a valid manifest JSON response whose observed chunks exceed the ceiling", async () => {

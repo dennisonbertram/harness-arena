@@ -126,7 +126,7 @@ function blobStorage() {
     putCompetition: (c) => writeJson(`competitions/${c.id}.json`, c),
     async listSubmissions() {
       const blobs = await listAll("submissions/");
-      const subs = await Promise.all(blobs.map((blob) => readBlobJson(blob.pathname, { required: true })));
+      const subs = await Promise.all(blobs.map((blob) => readBlobJson(blob.url, { required: true, useCache: false })));
       return subs;
     },
     putSubmission: (s) => writeJson(`submissions/${s.id}.json`, s),

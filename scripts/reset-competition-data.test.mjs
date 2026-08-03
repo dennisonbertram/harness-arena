@@ -88,7 +88,9 @@ function arrangeStore() {
     };
     return { blobs: byPrefix[prefix] ?? [], hasMore: false, cursor: undefined };
   });
-  vi.mocked(get).mockImplementation(async (pathname) => {
+  vi.mocked(get).mockImplementation(async (identifier) => {
+    const raw = String(identifier);
+    const pathname = raw.startsWith("https://") ? new URL(raw).pathname.slice(1) : raw;
     const value = values.get(pathname);
     return value ? { stream: jsonStream(value) } : null;
   });

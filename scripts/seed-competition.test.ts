@@ -156,8 +156,8 @@ describe("seed-competition CLI Blob adapter", () => {
     expect(get).toHaveBeenCalledWith(`competitions/${id}.json`, { access: "public" });
     expect(list).toHaveBeenNthCalledWith(1, { prefix: "submissions/", cursor: undefined, access: "public" });
     expect(list).toHaveBeenNthCalledWith(2, { prefix: "submissions/", cursor: "page-2", access: "public" });
-    expect(get).toHaveBeenCalledWith("submissions/legacy.json", { access: "public" });
-    expect(get).toHaveBeenCalledWith("submissions/current.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith("https://blob.example/submissions/legacy.json", { access: "public", useCache: false });
+    expect(get).toHaveBeenCalledWith("https://blob.example/submissions/current.json", { access: "public", useCache: false });
     expect(put).toHaveBeenCalledTimes(2);
     expect(put).toHaveBeenCalledWith(`competitions/${id}.json`, expect.stringContaining(`\"id\":\"${id}\"`), {
       access: "public",
