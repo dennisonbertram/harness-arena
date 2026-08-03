@@ -20,7 +20,14 @@ Redirects are rejected. The reused status collector bounds each request to five
 seconds, bounds response bodies, inventory pages, advertised kinds, and run
 correlations, and redacts read tokens. There is no configurable URL, GitHub
 credential, Blob/admin/deployment credential, write API, or mutation path.
-The full two-environment collection has a twelve-second route-wide deadline,
+When `VERCEL_READ_TOKEN` is configured, the monitor uses only authenticated
+GETs to Vercel deployment metadata, project environment metadata (never with
+decryption), and deployment runtime-log endpoints. It retains variable names
+and error counts only; it never retains environment values, log text, or the
+token. Missing credentials, 401/403 responses, malformed metadata, and
+unavailable endpoints are `access_blocked`, with unknown cron and missing-env
+evidence rather than a fabricated ready deployment. The full two-environment
+collection has a twelve-second route-wide deadline,
 below the route's fifteen-second `maxDuration`. The inventory work is bounded to
 20 advertised kinds, 10 pages per kind, 100 records per page, and 20 correlated
 runs; the global deadline aborts outstanding probes before those worst-case
@@ -41,11 +48,12 @@ retained evidence stream. If the logger cannot acknowledge emission, the route
 returns 503 because logs and their OpenTelemetry correlation are the sole
 retained monitor evidence.
 
-Before enabling the isolated schedule, provision only `CRON_SECRET`,
-`DEVELOPMENT_OPS_READ_TOKEN`, and `PRODUCTION_OPS_READ_TOKEN` in the Development
-project. The two ops tokens must be independently scoped GET-only credentials.
-All three secrets must be distinct; hashed constant-time comparisons fail closed
-before probes if any configured values collide.
+Before enabling the isolated schedule, provision `CRON_SECRET`,
+`DEVELOPMENT_OPS_READ_TOKEN`, `PRODUCTION_OPS_READ_TOKEN`, and a distinct
+read-only `VERCEL_READ_TOKEN` in the Development project. The two ops tokens
+and Vercel token must be independently scoped GET-only credentials. All four
+secrets must be distinct; hashed constant-time comparisons fail closed before
+probes if any configured values collide.
 Do not copy, print, rotate, or inspect a live write credential.
 
 After the separate Development deployment exists, invoke the route with its
