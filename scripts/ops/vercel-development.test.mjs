@@ -116,7 +116,7 @@ function productionDomain(overrides = {}) {
   };
 }
 
-function verifierApiFetch({ aliases, domains, domainsAfter, envs }) {
+function verifierApiFetch({ aliases, domains, domainsAfter, pagination, envs }) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
     accountId: TEAM_ID,
@@ -130,9 +130,11 @@ function verifierApiFetch({ aliases, domains, domainsAfter, envs }) {
     if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
     if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
       domainReads += 1;
-      return jsonResponse({
+      const inventory = {
         domains: domainReads === 1 ? (domains ?? [productionDomain()]) : (domainsAfter ?? domains ?? [productionDomain()]),
-      });
+      };
+      inventory.pagination = pagination ?? { count: inventory.domains.length, next: null, prev: null };
+      return jsonResponse(inventory);
     }
     if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
       return jsonResponse({ envs: envs ?? [
@@ -286,6 +288,19 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the complete final-page domain inventory metadata", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ pagination: { count: 1, next: null, prev: 1785709088100 } }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
   it("uses the verified stable domain inventory when project aliases are empty", async () => {
     const fetchImpl = verifierApiFetch({ aliases: [] });
     const api = subject.createReadOnlyVercelApi({ fetchImpl });
@@ -298,6 +313,21 @@ describe("bounded read-only Vercel adapter", () => {
     })).resolves.toEqual(inspection());
 
     expect(fetchImpl.mock.calls.filter(([input]) => new URL(input).pathname.endsWith("/domains"))).toHaveLength(2);
+  });
+
+  it.each([
+    ["non-matching count", { count: 2, next: null, prev: null }],
+    ["unsafe cursor", { count: 1, next: 1785709088100, prev: null }],
+    ["malformed cursor", { count: 1, next: null, prev: -1 }],
+  ])("rejects incomplete or malformed domain pagination: %s", async (_name, pagination) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ pagination }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
   });
 
   it.each([
@@ -401,7 +431,7 @@ describe("bounded read-only Vercel adapter", () => {
       requests.push({ url, options });
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
-        return jsonResponse({ domains: [productionDomain()] });
+        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
       }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [
@@ -436,6 +466,10 @@ describe("bounded read-only Vercel adapter", () => {
     expect(requests.every(({ options }) => options.redirect === "error")).toBe(true);
     expect(requests.filter(({ url }) => url.searchParams.get("decrypt") === "true"))
       .toHaveLength(1);
+    expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")))
+      .toHaveLength(2);
+    expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")).every(({ url }) => url.searchParams.get("limit") === "100"))
+      .toBe(true);
     expect(requests.find(({ url }) => url.searchParams.get("decrypt") === "true").url.pathname)
       .toMatch(/env_callback$/);
   });
@@ -473,7 +507,7 @@ describe("bounded read-only Vercel adapter", () => {
         });
       }
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
-        return jsonResponse({ domains: [productionDomain()] });
+        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
       }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [

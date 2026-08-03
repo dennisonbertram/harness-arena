@@ -163,7 +163,15 @@ function normalizeProject(value) {
 }
 
 function normalizeProductionDomains(value, projectId) {
-  if (!exactKeys(value, ["domains"]) || !Array.isArray(value.domains)) throw denied();
+  if (
+    !exactKeys(value, ["domains", "pagination"])
+    || !Array.isArray(value.domains)
+    || !exactKeys(value.pagination, ["count", "next", "prev"])
+    || !Number.isSafeInteger(value.pagination.count)
+    || value.pagination.count !== value.domains.length
+    || value.pagination.next !== null
+    || (value.pagination.prev !== null && (!Number.isSafeInteger(value.pagination.prev) || value.pagination.prev < 0))
+  ) throw denied();
   const domains = value.domains.map((domain) => {
     const allowed = [
       "name",
@@ -205,7 +213,14 @@ function normalizeProductionDomains(value, projectId) {
   });
   domains.sort((left, right) => left.domain.localeCompare(right.domain));
   if (domains.some((domain, index) => index > 0 && domain.domain === domains[index - 1].domain)) throw denied();
-  return domains;
+  return {
+    aliases: domains,
+    pagination: {
+      count: value.pagination.count,
+      next: value.pagination.next,
+      prev: value.pagination.prev,
+    },
+  };
 }
 
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
@@ -240,8 +255,8 @@ export function createReadOnlyVercelApi({
       try {
         const projectUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}`, { teamId });
         const projectBefore = normalizeProject(await get(token, projectUrl));
-        const domainsUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}/domains`, { teamId });
-        const domainsBefore = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const domainsUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}/domains`, { teamId, limit: "100" });
+        const domainInventoryBefore = normalizeProductionDomains(await get(token, domainsUrl), projectId);
         const environments = await get(
           token,
           requestUrl(`/v10/projects/${encodeURIComponent(projectId)}/env`, { teamId }),
@@ -277,10 +292,10 @@ export function createReadOnlyVercelApi({
           requestUrl(`/v1/storage/stores/${encodeURIComponent(storeId)}`, { teamId }),
         );
         const projectAfter = normalizeProject(await get(token, projectUrl));
-        const domainsAfter = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const domainInventoryAfter = normalizeProductionDomains(await get(token, domainsUrl), projectId);
         if (
           JSON.stringify(projectBefore) !== JSON.stringify(projectAfter)
-          || JSON.stringify(domainsBefore) !== JSON.stringify(domainsAfter)
+          || JSON.stringify(domainInventoryBefore) !== JSON.stringify(domainInventoryAfter)
         ) throw denied();
         const projectConnections = Array.isArray(store?.projects) ? store.projects : [];
         const connection = projectConnections.find((item) => item?.projectId === projectId);
@@ -289,7 +304,7 @@ export function createReadOnlyVercelApi({
           return typeof id === "string" && id ? [id] : [];
         }))];
         return {
-          project: { ...projectAfter, aliases: domainsAfter },
+          project: { ...projectAfter, aliases: domainInventoryAfter.aliases },
           environment: {
             callbackBase: callback?.value,
             networkModeConfigured: entries.some((entry) => entry?.key === "RUNNER_NETWORK_MODE"),
