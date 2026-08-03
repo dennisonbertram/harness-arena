@@ -15,7 +15,12 @@ const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
 const MAX_RETAINED_EXPORT_BATCHES = Math.ceil(MAX_BUFFERED_SPANS / MAX_EXPORT_BATCH);
-const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_RETAINED_EXPORT_BATCHES * EXPORT_ACK_DEADLINE_MILLIS + 250;
+// A full retained queue can begin draining while the request is still ending.
+// Once its first batch is acknowledged, one more full batch can arrive before
+// the next acknowledgement frees the in-flight slots. Keep that late batch in
+// the request lifetime too, but retain a fixed derived upper bound.
+const MAX_POST_ROOT_DRAIN_BATCHES = MAX_RETAINED_EXPORT_BATCHES + 1;
+const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_POST_ROOT_DRAIN_BATCHES * EXPORT_ACK_DEADLINE_MILLIS + 250;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
