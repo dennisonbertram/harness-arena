@@ -6,6 +6,7 @@ import { BoundedSpanProcessor, createSafeSpanProcessors, createSafeSpanProcessor
 
 describe("onRequestError", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
@@ -161,6 +162,30 @@ describe("onRequestError", () => {
     expect(structuredSpanReadiness().structured).toMatchObject({ ready: true, queued: 0 });
     await provider.shutdown();
     logSpy.mockRestore();
+  });
+
+  it("fails closed when an exporter never acknowledges a bounded batch", async () => {
+    vi.useFakeTimers();
+    const exporter = {
+      export: vi.fn(() => {}),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "otlp");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    provider.getTracer("unacknowledged-export").startSpan("request-root").end();
+
+    const flush = provider.forceFlush();
+    let rejected = false;
+    void flush.catch(() => { rejected = true; });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(rejected).toBe(true);
+    await expect(flush).rejects.toBeDefined();
+    expect(structuredSpanReadiness()).toMatchObject({
+      ready: false,
+      otlp: { configured: true, ready: false, queued: 1, reason: "export_unacknowledged" },
+    });
   });
 
   it.each([401, 429, 500, 503])("does not acknowledge a resolved hosted OTLP HTTP %i response and retries it", async (status) => {
