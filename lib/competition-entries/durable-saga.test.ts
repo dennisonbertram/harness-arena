@@ -223,11 +223,12 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
     expect(f.ledger.complete).not.toHaveBeenCalled();
   });
 
-  it("commits the submission-to-competition binding and active membership with the durable outcome", async () => {
+  it("delegates binding and membership creation to the durable completion transaction", async () => {
     const f = fixture();
     await f.saga.submit({ actor, request });
 
-    expect(f.memberships.activate).toHaveBeenCalledWith({ competition_id: "comp-live", entrant_id: actor.entrantId });
+    expect(f.memberships.activate).not.toHaveBeenCalled();
+    expect(f.ledger.complete).toHaveBeenCalledWith(expect.objectContaining({ operation_id: f.reservation.operation_id }));
     expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ competition: true, competition_id: "comp-live", status: "queued" });
     expect(f.completed()).toMatchObject({ submission_id: f.reservation.submission_id, run_id: f.reservation.run_id, status: "queued" });
   });

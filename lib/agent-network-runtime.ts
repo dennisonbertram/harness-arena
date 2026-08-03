@@ -609,15 +609,6 @@ export function getAgentNetworkRuntime() {
   const storage = getStorage();
   const entrySaga = createDurableCompetitionEntrySaga({
     ledger: services.entries,
-    memberships: {
-      activate: async ({ competition_id, entrant_id }) => {
-        const membership = await services.repositories.memberships.activate({
-          competitionId: competition_id,
-          entrantId: entrant_id,
-        });
-        return { state: membership.state === "active" ? "active" as const : "banned" as const };
-      },
-    },
     storage: {
       getSubmission: (id) => storage.getSubmission(id),
       getRun: (id) => storage.getRun(id),

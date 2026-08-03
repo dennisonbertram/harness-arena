@@ -233,7 +233,8 @@ export function createPostgresCompetitionEntryLedger(
       const expiresAt = new Date(at.getTime() + lease_ms);
       const result = await db.query<{ operation_id: string }>(
         `UPDATE competition_entry_sagas
-         SET lease_expires_at=$3::timestamptz, updated_at=$4::timestamptz
+         SET lease_expires_at=GREATEST(lease_expires_at, $3::timestamptz),
+             updated_at=GREATEST(updated_at, $4::timestamptz)
          WHERE operation_id=$1 AND state='pending' AND lease_token=$2
            AND lease_expires_at > $4::timestamptz
          RETURNING operation_id`,

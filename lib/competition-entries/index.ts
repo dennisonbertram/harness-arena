@@ -41,7 +41,7 @@ export type PublicCompetition = {
 
 export type PublicCompetitionRow = Pick<
   CompetitionRow,
-  "submissionId" | "runId" | "rank" | "tied" | "tasksPassed" | "totalTasks" | "totalCostUsd" | "submittedAt" | "githubLogin"
+  "submissionId" | "runId" | "rank" | "tied" | "tasksPassed" | "totalTasks" | "totalCostUsd" | "billedCostUsd" | "pricingVersion" | "submittedAt" | "githubLogin"
 >;
 
 export type PublicCompetitionResults = {
@@ -51,6 +51,7 @@ export type PublicCompetitionResults = {
   baselineRejectionReason?: string;
   ranked: PublicCompetitionRow[];
   belowBaseline: PublicCompetitionRow[];
+  unpriced: number;
   pending: number;
   pendingRunIds: string[];
 };
@@ -79,6 +80,8 @@ function projectRow(row: CompetitionRow): PublicCompetitionRow {
     tasksPassed: row.tasksPassed,
     totalTasks: row.totalTasks,
     totalCostUsd: row.totalCostUsd,
+    billedCostUsd: row.billedCostUsd,
+    pricingVersion: row.pricingVersion,
     submittedAt: row.submittedAt,
     githubLogin: row.githubLogin,
   };
@@ -108,6 +111,7 @@ export function projectCompetitionResults({
     ...(board.baselineRejectionReason === undefined ? {} : { baselineRejectionReason: board.baselineRejectionReason }),
     ranked: board.ranked.map(projectRow),
     belowBaseline: board.belowBaseline.map(projectRow),
+    unpriced: board.unpriced,
     pending: board.pending,
     pendingRunIds: [...board.pendingRunIds],
   };
@@ -202,7 +206,6 @@ type DurableStorage = {
 
 type DurableDependencies = {
   ledger: DurableLedger;
-  memberships: { activate(input: { competition_id: string; entrant_id: string }): Promise<{ state: "active" | "banned" }> };
   storage: DurableStorage;
   judge: (input: { submission_id: string; prompt: string }) => Promise<DurableVerdict>;
   getCompetition(id: string): Promise<{ id: string; status: "live" | "closed"; model: string; gateway_provider?: string } | undefined>;
@@ -247,7 +250,7 @@ function persistedSubmissionVerdict(value: unknown): DurableVerdict {
  * The ledger is responsible for short Postgres reservations/checkpoints; Blob
  * writes and the chargeable judge call happen after those transactions close.
  */
-export function createDurableCompetitionEntrySaga({ ledger, memberships, storage, judge, getCompetition }: DurableDependencies) {
+export function createDurableCompetitionEntrySaga({ ledger, storage, judge, getCompetition }: DurableDependencies) {
   const leaseMs = 60_000;
   const read = async (value: Promise<unknown>) => {
     try {
@@ -314,9 +317,6 @@ export function createDurableCompetitionEntrySaga({ ledger, memberships, storage
       prompt: state.request.entry.prompt,
     });
     const runExists = assertSameOrAbsent(existingRun, { id: state.run_id, submission_id: state.submission_id });
-
-    const membership = await external(() => memberships.activate({ competition_id: competition.id, entrant_id: state.actor.entrantId }));
-    if (membership.state !== "active") throw new CompetitionEntryError("COMPETITION_MEMBERSHIP_FORBIDDEN");
 
     let phase = state.phase;
     let verdict: DurableVerdict;

@@ -30,6 +30,8 @@ const board = {
       tasksPassed: 8,
       totalTasks: 10,
       totalCostUsd: 0.42,
+      billedCostUsd: 0.37,
+      pricingVersion: "pricing-v1",
       submittedAt: "2026-08-02T00:00:00.000Z",
       githubLogin: "octo",
       // Deliberately hostile extra fields: neither prompts nor traces can
@@ -77,6 +79,7 @@ describe("competition entries contract", () => {
     });
     expect(result.ranked[0]).not.toHaveProperty("prompt");
     expect(result.ranked[0]).not.toHaveProperty("trace_blob_url");
+    expect(result.ranked[0]).toMatchObject({ totalCostUsd: 0.42, billedCostUsd: 0.37, pricingVersion: "pricing-v1" });
     expect(JSON.stringify(result)).not.toContain("private entrant strategy");
     expect(JSON.stringify(result)).not.toContain("private.example/trace.jsonl");
   });
