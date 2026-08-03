@@ -10,12 +10,14 @@ type CollectorResponse = number | { status: number; statusMessage?: string; body
 
 async function startOtlpCollector(responses: CollectorResponse[]) {
   const requests: number[] = [];
+  const receivedHeaders: Array<Record<string, string | string[] | undefined>> = [];
   const server = createServer((request, response) => {
     request.resume();
     request.once("end", () => {
       const next = responses.shift() ?? 200;
       const specification = typeof next === "number" ? { status: next } : next;
       requests.push(specification.status);
+      receivedHeaders.push({ ...request.headers });
       if (specification.statusMessage) response.writeHead(specification.status, specification.statusMessage, specification.headers);
       else response.writeHead(specification.status, specification.headers);
       response.end(specification.body);
@@ -29,6 +31,7 @@ async function startOtlpCollector(responses: CollectorResponse[]) {
   return {
     endpoint: `http://127.0.0.1:${address.port}/v1/traces`,
     requests,
+    receivedHeaders,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }
@@ -242,6 +245,38 @@ describe("onRequestError", () => {
       expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { ready: true, queued: 0 } });
       await provider.shutdown();
     } finally {
+      await collector.close();
+    }
+  });
+
+  it.each([
+    ["http/json", "application/json"],
+    ["http/protobuf", "application/x-protobuf"],
+  ] as const)("merges configured OTLP headers case-insensitively and owns protocol headers for %s", async (protocol, contentType) => {
+    const collector = await startOtlpCollector([200]);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.endpoint);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", protocol);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=old-secret,Content-Type=text%2Fplain,ACCEPT=text%2Fplain");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "Authorization=new-secret,content-TYPE=application%2Fconfigured,Accept=application%2Fconfigured");
+    const sinkSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const processors = createSafeSpanProcessors();
+    const provider = new BasicTracerProvider({ spanProcessors: [processors[1]!] });
+    provider.getTracer("hosted-otlp-headers").startSpan("request-root").end();
+
+    try {
+      await provider.forceFlush();
+      expect(collector.receivedHeaders).toHaveLength(1);
+      expect(collector.receivedHeaders[0]).toMatchObject({
+        authorization: "new-secret",
+        accept: contentType,
+        "content-type": contentType,
+      });
+      expect(JSON.stringify(collector.receivedHeaders)).not.toContain("old-secret");
+      expect(JSON.stringify(sinkSpy.mock.calls)).not.toContain("old-secret");
+      expect(JSON.stringify(sinkSpy.mock.calls)).not.toContain("new-secret");
+      await provider.shutdown();
+    } finally {
+      sinkSpy.mockRestore();
       await collector.close();
     }
   });
