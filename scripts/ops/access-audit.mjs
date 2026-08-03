@@ -183,6 +183,8 @@ function grantStrings(value) {
 export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {}, projectMembers = [], accessGroups = [], accessGroupProjects = [], accessGroupMemberships = [], extendedPermissionsComplete = true }) {
   const tokenProjectId = token.projectId ?? token.project_id ?? token.scope?.projectId ?? null;
   const membership = team.membership ?? {};
+  const matchingProjectMembers = (Array.isArray(projectMembers) ? projectMembers : [])
+    .filter((item) => [item.uid, item.userId, item.id].includes(userId));
   const matchingGroupMemberships = (Array.isArray(accessGroupMemberships) ? accessGroupMemberships : [])
     .filter((item) => [item.uid, item.userId, item.id, item.user?.id].includes(userId));
   const groupIds = new Set(matchingGroupMemberships.map((item) => item.accessGroupId ?? item.access_group_id).filter(Boolean));
@@ -190,10 +192,10 @@ export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}
     .filter((item) => groupIds.has(item.accessGroupId ?? item.access_group_id ?? item.id ?? item.uid));
   const groupTeamRoles = matchingGroupMemberships.flatMap((item) => [item.teamRole, ...(Array.isArray(item.teamRoles) ? item.teamRoles : [])]);
   const accessGroupTeamRoles = matchingGroups.flatMap((item) => Array.isArray(item.teamRoles) ? item.teamRoles : []);
-  const teamRoles = [...(Array.isArray(membership.teamRoles) ? membership.teamRoles : []), ...groupTeamRoles, ...accessGroupTeamRoles, membership.role, team.currentUserRole, team.role].filter(Boolean);
+  const projectMemberTeamRoles = matchingProjectMembers.map((item) => item.teamRole);
+  const teamRoles = [...(Array.isArray(membership.teamRoles) ? membership.teamRoles : []), ...projectMemberTeamRoles, ...groupTeamRoles, ...accessGroupTeamRoles, membership.role, team.currentUserRole, team.role].filter(Boolean);
   const teamRole = strongestVercelRole(teamRoles);
-  const directRoles = (Array.isArray(projectMembers) ? projectMembers : [])
-    .filter((item) => [item.uid, item.userId, item.id].includes(userId)).flatMap((item) => [item.computedProjectRole, item.role]).filter(Boolean);
+  const directRoles = matchingProjectMembers.flatMap((item) => [item.computedProjectRole, item.role]).filter(Boolean);
   const groupRoles = (Array.isArray(accessGroupProjects) ? accessGroupProjects : [])
     .filter((item) => groupIds.has(item.accessGroupId ?? item.access_group_id))
     .filter((item) => (item.projectId ?? item.project_id) === projectId).map((item) => item.role);
@@ -350,13 +352,22 @@ async function probeGitHub(policy, env, commandRunner) {
   if (!env.GH_TOKEN) throw new Error("github_explicit_identity_missing");
   const commandOptions = { env: { PATH: env.PATH ?? process.env.PATH, GH_TOKEN: env.GH_TOKEN } };
   const repository = policy.capabilities.github.repository;
-  let identity, identityKind;
+  let identity, identityKind, installationRepositoryRole = null;
   try {
     identity = await runJsonCommand(commandRunner, "gh", ["api", "user"], commandOptions);
     identityKind = "authenticated_user";
   } catch {
     const installation = await runJsonCommand(commandRunner, "gh", ["api", "installation/repositories"], commandOptions);
-    identity = { login: installation?.repositories?.[0]?.owner?.login ?? "github-app" };
+    if (!Number.isInteger(installation?.total_count) || installation.total_count < 0
+      || !Array.isArray(installation?.repositories) || installation.total_count < installation.repositories.length
+      || !["all", "selected"].includes(installation.repository_selection)) throw new Error("github_app_repository_scope_invalid");
+    const installationRepository = installation.repositories.find((item) => item?.full_name === repository);
+    const repositoryPermissions = installationRepository?.permissions;
+    if (!installationRepository || !plainObject(repositoryPermissions)
+      || typeof repositoryPermissions.pull !== "boolean" || typeof repositoryPermissions.push !== "boolean"
+      || typeof repositoryPermissions.admin !== "boolean") throw new Error("github_app_repository_permissions_invalid");
+    identity = { login: installationRepository.owner?.login ?? "github-app" };
+    installationRepositoryRole = githubRepositoryRole(repositoryPermissions);
     identityKind = "github_app";
   }
   const endpoints = {
@@ -367,13 +378,17 @@ async function probeGitHub(policy, env, commandRunner) {
   };
   const responses = {};
   for (const [name, endpoint] of Object.entries(endpoints)) responses[name] = await runJsonCommand(commandRunner, "gh", ["api", endpoint], commandOptions);
+  const repositoryRole = githubRepositoryRole(responses.repository.permissions);
   return {
     state: "authenticated",
     identity_kind: identityKind,
     identity: identity.login ?? identity.slug ?? null,
-    repository_role: githubRepositoryRole(responses.repository.permissions),
+    repository_role: levelIsWrite(installationRepositoryRole) ? installationRepositoryRole : repositoryRole,
     expires_at: null,
-    permissions: { metadata: "read", contents: "read", actions: "read", issues: "read", pull_requests: "read" },
+    // GitHub's GET-only installation-token endpoint proves repository scope and
+    // coarse repository access, but does not expose the token's App permission
+    // map. Successful GET probes cannot substitute for that map.
+    permissions: identityKind === "github_app" ? {} : { metadata: "read", contents: "read", actions: "read", issues: "read", pull_requests: "read" },
   };
 }
 
@@ -399,10 +414,12 @@ function projectMemberNext(page) {
 }
 
 function accessGroupNext(page, collection) {
-  if (!Array.isArray(page?.[collection]) || !plainObject(page?.pagination) || !Object.hasOwn(page.pagination, "next")) throw new Error("vercel_access_group_schema_invalid");
+  if (!Array.isArray(page?.[collection]) || !plainObject(page?.pagination)
+    || !Object.hasOwn(page.pagination, "count") || !Object.hasOwn(page.pagination, "next")) throw new Error("vercel_access_group_schema_invalid");
+  if (!Number.isInteger(page.pagination.count) || page.pagination.count < 0 || page.pagination.count !== page[collection].length) throw new Error("vercel_access_group_count_invalid");
   const next = page.pagination.next;
   if (next === null) return null;
-  if ((typeof next !== "string" && typeof next !== "number") || !String(next)) throw new Error("vercel_access_group_pagination_invalid");
+  if (typeof next !== "string" || !next) throw new Error("vercel_access_group_pagination_invalid");
   return next;
 }
 
