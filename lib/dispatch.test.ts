@@ -15,6 +15,11 @@ function run(id: string, over: Partial<Run> = {}): Run {
 }
 
 describe("selectRunsToStart", () => {
+  it("does not dispatch an uncommitted replay reservation", () => {
+    const pendingReplay = run("00", { replay_operation_id: "7d9437f6-02fe-4da6-8d84-791b0ecf4690", replay_ready: false });
+    const normal = run("01");
+    expect(selectRunsToStart([pendingReplay, normal]).map((candidate) => candidate.id)).toEqual(["01"]);
+  });
   it("returns nothing when there are no unclaimed queued runs", () => {
     expect(selectRunsToStart([run("1", { status: "running" })], 3, 2)).toEqual([]);
     expect(selectRunsToStart([], 3, 2)).toEqual([]);

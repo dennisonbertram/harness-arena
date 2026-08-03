@@ -34,6 +34,19 @@ function makeRun(id: string, createdAt: string): Run {
 }
 
 describe("MemoryStorage", () => {
+  it("reserves exactly one replay operation per competition", async () => {
+    const storage = new MemoryStorage();
+    expect(await storage.reserveCompetitionReplay("competition-1", "operation-1")).toBe("created");
+    expect(await storage.reserveCompetitionReplay("competition-1", "operation-1")).toBe("reused");
+    expect(await storage.reserveCompetitionReplay("competition-1", "operation-2")).toBe("conflict");
+  });
+  it("creates a run exactly once without overwriting an existing reservation", async () => {
+    const storage = new MemoryStorage();
+    const original = makeRun("reserved", "2026-07-21T00:00:00.000Z");
+    expect(await storage.createRun(original)).toBe(true);
+    expect(await storage.createRun({ ...original, status: "running" })).toBe(false);
+    expect((await storage.getRun("reserved"))?.status).toBe("queued");
+  });
   it("round-trips a Submission with every field intact", async () => {
     const storage = new MemoryStorage();
     const submission: Submission = {
@@ -272,6 +285,50 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("reserves a run with a create-only Blob write", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("reserved", "2026-07-21T00:00:00.000Z");
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/runs/reserved.json" } as never);
+
+    expect(await storage.createRun(run)).toBe(true);
+    expect(put).toHaveBeenCalledWith(
+      "runs/reserved.json",
+      JSON.stringify(run),
+      expect.objectContaining({ allowOverwrite: false, addRandomSuffix: false }),
+    );
+  });
+
+  it("reserves a competition replay with a create-only operation blob", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/operations/replay/c1.json" } as never);
+    expect(await storage.reserveCompetitionReplay("c1", "op1")).toBe("created");
+    expect(put).toHaveBeenCalledWith(
+      "operations/competition-replay/c1.json",
+      expect.any(String),
+      expect.objectContaining({ allowOverwrite: false, addRandomSuffix: false }),
+    );
+  });
+
+  it("treats a create-only collision as reuse only when the reserved run is readable", async () => {
+    const storage = new BlobStorage();
+    const run = makeRun("reserved", "2026-07-21T00:00:00.000Z");
+    vi.mocked(put).mockRejectedValueOnce(new Error("already exists"));
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{
+        url: "https://blob.example/runs/reserved.json",
+        pathname: "runs/reserved.json",
+        uploadedAt: "2026-07-21T00:00:00.000Z",
+      }],
+      hasMore: false,
+    } as never);
+    vi.mocked(get).mockResolvedValueOnce({
+      statusCode: 200,
+      stream: new Blob([JSON.stringify(run)]).stream(),
+    } as never);
+
+    expect(await storage.createRun(run)).toBe(false);
   });
 
   it("appendRunEvents writes ONE immutable blob per event, not a single rewritten events file", async () => {

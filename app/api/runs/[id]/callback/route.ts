@@ -111,7 +111,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   if (transitioned) {
     const submission = await storage.getSubmission(run.submission_id);
-    if (submission) {
+    if (submission?.run_id === run.id) {
       if (run.status === "running") submission.status = "running";
       else if (run.status === "completed") submission.status = "scored";
       else if (run.status === "failed") submission.status = "failed";

@@ -25,7 +25,7 @@ function holdsSlot(r: Run): boolean {
 }
 
 function isUnclaimed(r: Run): boolean {
-  return r.status === "queued" && !r.dispatched_at;
+  return r.status === "queued" && !r.dispatched_at && r.replay_ready !== false;
 }
 
 /**

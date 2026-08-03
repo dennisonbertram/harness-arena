@@ -8,14 +8,15 @@ import {
   resolveDefaultCompetition,
   type CompetitionBoard,
   type CompetitionPendingRow,
+  type CompetitionRow,
 } from "@/lib/competition-leaderboard";
 import { scaleScatterPoints } from "@/lib/format";
 import { modelLabel, runModel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
 import type { Competition } from "@/lib/types";
 import { CompetitionAutoRefresh } from "./CompetitionAutoRefresh";
-import { CompetitionBrowser } from "./CompetitionBrowser";
 import { CompetitionLeaderboardWithChart } from "./CompetitionLeaderboardWithChart";
+import { ModelLogo } from "./ModelLogo";
 import type { ScatterItem } from "./ScatterChart";
 import { CompetitionSubmitModal } from "./competition/CompetitionSubmitModal";
 import { SubmitCompetitionForm } from "./competition/SubmitCompetitionForm";
@@ -121,17 +122,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
     <div style={{ maxWidth: 1200, margin: "0 auto", padding: "48px 24px" }}>
       <CompetitionAutoRefresh runIds={board.pendingRunIds} />
       <section style={{ marginBottom: 40 }}>
-        <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Find the best prompt</h1>
-        <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>
-          Submit a system prompt for this harness, model, and provider. Every prompt gets one run.
-        </p>
-        <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660, marginBottom: 8 }}>
-          Start with a prompt that tells the agent how to solve the tasks, then submit it to see its result on the
-          leaderboard.
-        </p>
-        <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660 }}>
-          Highest task score wins; ties use a fixed-table normalized cost so provider price changes cannot move the ranking.
-        </p>
+        <CompetitionPerformanceTakeaway competition={competition} baseline={board.baseline} record={board.ranked[0]} />
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
           {competition?.status === "closed" ? (
             // A closed competition rejects submissions with 409, and the form
@@ -160,10 +151,6 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
 
       <CompetitionDetails competition={competition} />
 
-      {competitions.length > 1 ? (
-        <CompetitionBrowser key={competition?.id} competitions={competitions} selectedCompetition={competition} />
-      ) : null}
-
       <CompetitionLeaderboardWithChart
         scatterItems={competitionScatterItems}
         scatterScale={competitionChartScale}
@@ -180,6 +167,60 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
 
       {board.pendingRows.length > 0 && <PendingCompetitionTable rows={board.pendingRows} />}
     </div>
+  );
+}
+
+function CompetitionPerformanceTakeaway({
+  competition,
+  baseline,
+  record,
+}: {
+  competition: Competition | undefined;
+  baseline: CompetitionRow | null;
+  record: CompetitionRow | undefined;
+}) {
+  if (!competition || !baseline || !record || baseline.tasksPassed <= 0 || record.tasksPassed <= baseline.tasksPassed) return <PromptIntroduction />;
+
+  const baselineCostPerTask = baseline.totalCostUsd / baseline.tasksPassed;
+  const recordCostPerTask = record.totalCostUsd / record.tasksPassed;
+  if (!Number.isFinite(baselineCostPerTask) || baselineCostPerTask <= 0 || recordCostPerTask >= baselineCostPerTask) return <PromptIntroduction />;
+
+  const workIncrease = Math.round(((record.tasksPassed - baseline.tasksPassed) / baseline.tasksPassed) * 100);
+  const costReduction = Math.round(((baselineCostPerTask - recordCostPerTask) / baselineCostPerTask) * 100);
+  const summary = `Harness Arena · ${titleCase(competition.harness)} × ${modelLabel(competition.model)} · ${titleCase(competition.status)}. Now completes ${workIncrease}% more work at ${costReduction}% less cost per task. Current best prompt compared with the stock harness system prompt.`;
+
+  return (
+    <div role="region" aria-label={summary}>
+      <p className="label" style={{ marginBottom: 10 }}>
+        {titleCase(competition.arena)} · {titleCase(competition.harness)} × {modelLabel(competition.model)} ·{" "}
+        <span style={{ color: competition.status === "live" ? "var(--green-700)" : "var(--gray-700)" }}>{titleCase(competition.status)}</span>
+      </p>
+      <h1 style={{ maxWidth: 900, fontSize: "clamp(36px, 6vw, 64px)", fontWeight: 600, lineHeight: 1, letterSpacing: "-0.05em" }}>
+        Now completes <span style={{ color: "var(--blue-700)" }}>{workIncrease}% more work</span>
+        <br />
+        at <span style={{ color: "var(--blue-700)" }}>{costReduction}% less cost per task.</span>
+      </h1>
+      <p style={{ marginTop: 16, color: "var(--gray-700)", fontSize: 15 }}>
+        Current best prompt compared with the stock harness system prompt.
+      </p>
+    </div>
+  );
+}
+
+function PromptIntroduction() {
+  return (
+    <>
+      <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>Find the best prompt</h1>
+      <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 8 }}>
+        Submit a system prompt for this harness, model, and provider. Every prompt gets one run.
+      </p>
+      <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660, marginBottom: 8 }}>
+        Start with a prompt that tells the agent how to solve the tasks, then submit it to see its result on the leaderboard.
+      </p>
+      <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660 }}>
+        Highest task score wins; ties use a fixed-table normalized cost so provider price changes cannot move the ranking.
+      </p>
+    </>
   );
 }
 
@@ -217,13 +258,19 @@ function CompetitionDetails({ competition }: { competition: Competition | undefi
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 24, flexWrap: "wrap" }}>
         <div>
-          <div className="label" style={{ marginBottom: 8 }}>Current competition</div>
-          <h2 id="competition-details-heading" style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 6 }}>
-            {titleCase(competition.arena)}
+          <div className="label" style={{ marginBottom: 8 }}>Current configuration</div>
+          <h2
+            id="competition-details-heading"
+            style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 28, fontWeight: 600, letterSpacing: "-0.02em", margin: 0 }}
+          >
+            <span aria-hidden="true" style={{ width: 28, height: 28, border: "1px solid var(--gray-alpha-400)", borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", fontFamily: "Georgia, serif", fontSize: 15 }}>
+              π
+            </span>
+            <span className="mono">{titleCase(competition.harness)}</span>
+            <span aria-hidden="true" style={{ color: "var(--gray-700)", fontSize: 20 }}>×</span>
+            <ModelLogo model={competition.model} size={28} />
+            <span className="mono">{modelLabel(competition.model)}</span>
           </h2>
-          <p className="mono" style={{ fontSize: 14, color: "var(--gray-700)" }}>
-            {titleCase(competition.harness)} · {modelLabel(competition.model)}
-          </p>
         </div>
         <span
           className="competition-status"
@@ -302,9 +349,6 @@ function formatPrize(amountUsd: number): string {
 function CompetitionMeta({ competition }: { competition: Competition | undefined }) {
   if (!competition) return null;
   const items: Array<[string, string]> = [
-    ["Arena", titleCase(competition.arena)],
-    ["Harness", titleCase(competition.harness)],
-    ["Model", modelLabel(competition.model)],
     ["Provider", competition.gateway_provider ?? "not recorded"],
     ["Intermediary", ARENA_ENDPOINT],
   ];
