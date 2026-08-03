@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "prebuild": "node scripts/build-runner-bundle.mjs",
-    "build": "next build",
+    "build": "node scripts/build-with-nft-guard.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",

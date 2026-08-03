@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { comparisonIdFor, progress } from "@/lib/voice-session";
 import { resetVoiceStorage, voiceStorageRef } from "@/lib/test-support/voice-storage-ref";
+import { installVoiceCapabilityTestSecret, voiceCapabilityCookie } from "@/lib/test-support/voice-capability";
 import type { VoiceJudgment, VoiceManifest } from "@/lib/voice-types";
 
 vi.mock("@/lib/voice-storage", async (importOriginal) => {
@@ -84,7 +85,7 @@ function getRequest(opts: { evaluatorId?: string; exclude?: string; ip?: string 
   const url = new URL("http://localhost/api/voice/next");
   if (opts.exclude) url.searchParams.set("exclude", opts.exclude);
   const headers: Record<string, string> = { "x-forwarded-for": opts.ip ?? "1.1.1.1" };
-  if (opts.evaluatorId) headers.cookie = `voice_evaluator=${opts.evaluatorId}`;
+  if (opts.evaluatorId) headers.cookie = `voice_evaluator=${opts.evaluatorId === "not-a-uuid" ? opts.evaluatorId : voiceCapabilityCookie(opts.evaluatorId)}`;
   return new NextRequest(url, { headers });
 }
 
@@ -109,6 +110,7 @@ async function judgeAll(manifest: VoiceManifest, evaluatorId: string): Promise<v
 
 describe("GET /api/voice/next", () => {
   beforeEach(() => {
+    installVoiceCapabilityTestSecret();
     resetVoiceStorage();
   });
 
@@ -124,12 +126,12 @@ describe("GET /api/voice/next", () => {
 
       const cookie = response.cookies.get("voice_evaluator");
       expect(cookie).toBeDefined();
-      expect(cookie?.value).toMatch(/^[0-9a-f-]{36}$/);
+      expect(cookie?.value).toMatch(/^v1\.[0-9a-f-]{36}\.\d+\.\d+\.[A-Za-z0-9_-]+$/);
       expect(cookie?.httpOnly).toBe(true);
       expect(cookie?.sameSite).toBe("lax");
       expect(cookie?.path).toBe("/");
       expect(cookie?.secure).toBe(true);
-      expect(cookie?.maxAge).toBe(31536000);
+      expect(cookie?.maxAge).toBe(86400);
     });
 
     it("does not re-mint when a valid cookie is already present", async () => {
@@ -149,7 +151,7 @@ describe("GET /api/voice/next", () => {
       const cookie = response.cookies.get("voice_evaluator");
       expect(cookie).toBeDefined();
       expect(cookie?.value).not.toBe("not-a-uuid");
-      expect(cookie?.value).toMatch(/^[0-9a-f-]{36}$/);
+      expect(cookie?.value).toMatch(/^v1\.[0-9a-f-]{36}\.\d+\.\d+\.[A-Za-z0-9_-]+$/);
     });
   });
 
@@ -287,11 +289,11 @@ describe("GET /api/voice/next", () => {
       const body = await response.json();
 
       expect(body.prompt).toEqual({
-        audioUrl: "https://blob.example/voice/audio/prompts/prompt-2.wav",
+        audioUrl: "/api/voice/audio/prompts/prompt-2",
         text: undefined,
       });
-      expect(body.clipA.audioUrl).toBe("https://blob.example/voice/audio/responses/resp-2a.wav");
-      expect(body.clipB.audioUrl).toBe("https://blob.example/voice/audio/responses/resp-2b.wav");
+      expect(body.clipA.audioUrl).toBe("/api/voice/audio/responses/resp-2a");
+      expect(body.clipB.audioUrl).toBe("/api/voice/audio/responses/resp-2b");
     });
   });
 });

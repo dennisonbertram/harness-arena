@@ -80,6 +80,12 @@
           ]
         }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "secret": { "const": true } }, "required": ["secret"] },
+          "then": { "properties": { "safe_diagnostic": { "const": "metadata_presence_only" } } }
+        }
+      ],
       "additionalProperties": false
     }
   }

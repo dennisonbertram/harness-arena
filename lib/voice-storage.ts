@@ -1,9 +1,12 @@
-import { list, put } from "@vercel/blob";
-import { mkdir, readFile } from "node:fs/promises";
+import { get, list, put } from "@vercel/blob";
+import { blobCommandOptions } from "./blob-access";
+import { readBlobJson } from "./blob-read.mjs";
+import { readBoundedStream } from "./bounded-stream";
+import { mkdir as nodeMkdir, readFile as nodeReadFile, readdir as nodeReaddir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertLocalFileStorageAllowed, LocalStorageReadError, safeStoragePart } from "./file-storage";
 import { assertSafeStoragePath, atomicCreateFile, atomicWriteFile } from "./file-storage-lock.mjs";
-import { fetchJson, withRetry } from "./storage";
+import { withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
 import { BLOB_PATHS } from "./blob-paths.mjs";
@@ -11,6 +14,20 @@ import { BLOB_PATHS } from "./blob-paths.mjs";
 const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
 const JUDGMENTS_PREFIX = BLOB_PATHS.voiceJudgments;
 const LIST_CONCURRENCY = 20;
+const mkdir = (path: string, options: Parameters<typeof nodeMkdir>[1]) => nodeMkdir(/* turbopackIgnore: true */ path, options);
+function readFile(path: string): Promise<Buffer>;
+function readFile(path: string, encoding: "utf8"): Promise<string>;
+function readFile(path: string, encoding?: "utf8"): Promise<string | Buffer> {
+  return encoding
+    ? nodeReadFile(/* turbopackIgnore: true */ path, encoding)
+    : nodeReadFile(/* turbopackIgnore: true */ path) as Promise<Buffer>;
+}
+const readdir = (path: string) => nodeReaddir(/* turbopackIgnore: true */ path);
+export type VoiceAudioKind = "prompts" | "responses";
+
+function audioPath(kind: VoiceAudioKind, id: string): string {
+  return `${kind === "prompts" ? BLOB_PATHS.voiceAudioPrompts : BLOB_PATHS.voiceAudioResponses}${id}.wav`;
+}
 
 function judgmentPrefix(evaluatorId: string): string {
   return `${JUDGMENTS_PREFIX}${evaluatorId}/`;
@@ -35,11 +52,13 @@ export interface VoiceStorage {
   listJudgmentKeys(evaluatorId: string): Promise<string[]>;
   /** Best-effort: judgments that can't be fetched or fail schema validation are skipped and counted, not thrown. */
   listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }>;
+  getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null>;
 }
 
 export class MemoryVoiceStorage implements VoiceStorage {
   private manifest: VoiceManifest | undefined;
   private judgments = new Map<string, VoiceJudgment>();
+  private audio = new Map<string, Buffer>();
 
   async getManifest(): Promise<VoiceManifest | undefined> {
     return this.manifest;
@@ -66,6 +85,7 @@ export class MemoryVoiceStorage implements VoiceStorage {
   async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
     return { judgments: [...this.judgments.values()], unreadable: 0 };
   }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> { return this.audio.get(audioPath(kind, id)) ?? null; }
 }
 
 /** Local-only durable implementation used exclusively with STORAGE=file. */
@@ -104,11 +124,10 @@ export class FileVoiceStorage implements VoiceStorage {
     const evaluator = safeStoragePart(evaluatorId);
     const directory = this.path("judgments", evaluator);
     await assertSafeStoragePath(this.storageRoot, directory);
-    try { const { readdir } = await import("node:fs/promises"); return (await readdir(directory)).filter((name) => name.endsWith(".json")).map((name) => safeStoragePart(name.slice(0, -5))); }
+    try { return (await readdir(directory)).filter((name) => name.endsWith(".json")).map((name) => safeStoragePart(name.slice(0, -5))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   }
   async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
-    const { readdir } = await import("node:fs/promises");
     const judgmentsRoot = this.path("judgments");
     await assertSafeStoragePath(this.storageRoot, judgmentsRoot);
     let evaluators: string[] = []; try { evaluators = await readdir(judgmentsRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -123,14 +142,19 @@ export class FileVoiceStorage implements VoiceStorage {
     }
     return { judgments, unreadable };
   }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
+    const path = this.path("audio", kind, `${safeStoragePart(id)}.wav`); await assertSafeStoragePath(this.storageRoot, path);
+    try { return await readFile(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  }
 }
 
 export class BlobVoiceStorage implements VoiceStorage {
-  private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string }[]> {
-    const blobs: { url: string; pathname: string }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ pathname: string; url: string }[]> {
+    const blobs: { pathname: string; url: string }[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
@@ -138,38 +162,33 @@ export class BlobVoiceStorage implements VoiceStorage {
   }
 
   async getManifest(): Promise<VoiceManifest | undefined> {
-    // list() + public-URL fetch, NOT get(): the authenticated get() endpoint
-    // has been observed 403-blocking a valid token (2026-07-24 incident,
-    // list() and public URLs unaffected), and the rest of this layer already
-    // reads via list+fetch for exactly this class of reason.
-    const blobs = await withRetry(() => list({ prefix: MANIFEST_PATH, limit: 1 }));
+    const blobs = await withRetry(() => list(blobCommandOptions({ prefix: MANIFEST_PATH, limit: 1 })));
     const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
     if (!blob) return undefined;
-    const raw = await withRetry(() => fetchJson<unknown>(blob.url));
+    const raw = await withRetry(() => readBlobJson(blob.url, { useCache: false }));
+    if (raw === undefined) return undefined;
     const parsed = VoiceManifestSchema.safeParse(raw);
     return parsed.success ? parsed.data : undefined;
   }
 
   async putManifest(manifest: VoiceManifest): Promise<void> {
     await withRetry(() =>
-      put(MANIFEST_PATH, JSON.stringify(manifest), {
-        access: "public",
+      put(MANIFEST_PATH, JSON.stringify(manifest), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",
-      }),
+      })),
     );
   }
 
   async putJudgment(judgment: VoiceJudgment): Promise<{ created: boolean }> {
     const pathname = judgmentPath(judgment.evaluator_id, judgment.comparison_id);
     const write = () =>
-      put(pathname, JSON.stringify(judgment), {
-        access: "public",
+      put(pathname, JSON.stringify(judgment), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: false,
         contentType: "application/json",
-      });
+      }));
     try {
       await write();
       return { created: true };
@@ -202,7 +221,7 @@ export class BlobVoiceStorage implements VoiceStorage {
       const results = await Promise.all(
         chunk.map(async (blob) => {
           try {
-            const raw = await withRetry(() => fetchJson<unknown>(blob.url), 3);
+            const raw = await withRetry(() => readBlobJson(blob.url, { required: true, useCache: false }), 3);
             const parsed = VoiceJudgmentSchema.safeParse(raw);
             return parsed.success ? parsed.data : undefined;
           } catch {
@@ -217,11 +236,16 @@ export class BlobVoiceStorage implements VoiceStorage {
     }
     return { judgments, unreadable };
   }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
+    const response = await get(audioPath(kind, id), blobCommandOptions());
+    if (!response || response.statusCode !== 200 || !response.stream) return null;
+    return readBoundedStream(response.stream, 12 * 1024 * 1024);
+  }
 }
 
 export function getVoiceStorage(): VoiceStorage {
   if (process.env.STORAGE === "file") return new FileVoiceStorage(process.env.LOCAL_STORAGE_DIR ?? "");
   if (process.env.STORAGE === "memory") return new MemoryVoiceStorage();
-  if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobVoiceStorage();
+  if (process.env.BLOB_READ_WRITE_TOKEN || process.env.VERCEL_OIDC_TOKEN) { blobCommandOptions(); return new BlobVoiceStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

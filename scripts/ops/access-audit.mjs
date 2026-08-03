@@ -54,7 +54,8 @@ export function validatePolicy(policy) {
       || typeof record.secret !== "boolean"
       || typeof record.owner !== "string" || !record.owner
       || typeof record.required !== "string" || !record.required
-      || typeof record.safe_diagnostic !== "string" || !record.safe_diagnostic) throw new Error(`invalid_environment_inventory:${name}`);
+      || typeof record.safe_diagnostic !== "string" || !record.safe_diagnostic
+      || (record.secret && record.safe_diagnostic !== "metadata_presence_only")) throw new Error(`invalid_environment_inventory:${name}`);
   }
   if (!Array.isArray(policy.environment_inventory.source_paths)
     || !Array.isArray(policy.environment_inventory.exclude_directories)

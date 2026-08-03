@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { get, list, put } from "@vercel/blob";
@@ -11,6 +11,8 @@ vi.mock("@vercel/blob", () => ({
   put: vi.fn(),
   list: vi.fn(),
 }));
+
+beforeEach(() => vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret"));
 
 function makeJudgment(overrides: Partial<VoiceJudgment> = {}): VoiceJudgment {
   return {
@@ -109,6 +111,15 @@ describe("FileVoiceStorage", () => {
     await expect(storage.putJudgment(makeJudgment({ evaluator_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.putJudgment(makeJudgment({ comparison_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.listJudgmentKeys(part)).rejects.toThrow(/path segment/);
+  });
+
+  it("rejects audio symlinks escaping the local storage root", async () => {
+    const outside = join(root, "..", "outside-audio.wav");
+    await writeFile(outside, "secret");
+    await mkdir(join(root, "voice", "audio", "prompts"), { recursive: true });
+    await symlink(outside, join(root, "voice", "audio", "prompts", "prompt-1.wav"));
+    try { await expect(new FileVoiceStorage(root).getAudioBytes("prompts", "prompt-1")).rejects.toThrow(/path|symlink|storage/i); }
+    finally { await rm(outside, { force: true }); }
   });
 
   it("rejects a symlink component before manifest reads or atomic writes and preserves the external target", async () => {
@@ -218,20 +229,15 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
       ],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify(makeJudgment({ comparison_id: "c1" })) })
-        .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ not: "a judgment" }) }),
-    );
+    vi.mocked(get)
+      .mockResolvedValueOnce({ statusCode: 200, stream: new Response(JSON.stringify(makeJudgment({ comparison_id: "c1" }))).body } as never)
+      .mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify({ not: "a judgment" })).body } as never);
 
     const { judgments, unreadable } = await storage.listAllJudgments();
 
     expect(judgments.map((j) => j.comparison_id)).toEqual(["c1"]);
     expect(unreadable).toBe(1);
 
-    vi.unstubAllGlobals();
   });
 
   it("getManifest returns undefined when the stored content fails manifest schema validation", async () => {
@@ -240,15 +246,11 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
       blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify({ not: "a manifest" }), { status: 200 })),
-    );
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify({ not: "a manifest" })).body } as never);
 
     const manifest = await storage.getManifest();
 
     expect(manifest).toBeUndefined();
-    vi.unstubAllGlobals();
   });
 
   it("getManifest returns undefined (without fetching) when no manifest blob exists", async () => {
@@ -264,22 +266,40 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("getManifest reads via list + public URL fetch, never the authenticated get() endpoint", async () => {
+  it("getManifest reads via the configured authenticated Blob access mode", async () => {
     const storage = new BlobVoiceStorage();
     vi.mocked(list).mockResolvedValueOnce({
       blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify(makeManifest()), { status: 200 })),
-    );
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify(makeManifest())).body } as never);
 
     const manifest = await storage.getManifest();
 
     expect(manifest?.version).toBe("1");
-    expect(vi.mocked(get)).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    expect(vi.mocked(get)).toHaveBeenCalledWith("https://blob.example/voice/manifest.json", { access: "public", useCache: false });
+  });
+
+  it("rejects a valid manifest JSON response whose observed chunks exceed the ceiling", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
+      hasMore: false,
+    } as never);
+    const oversized = JSON.stringify({ ...makeManifest(), ignored_padding: "x".repeat(1024 * 1024 + 1) });
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(oversized).body } as never);
+    await expect(storage.getManifest()).rejects.toThrow(/limit|large|bytes/i);
+  });
+
+  it("counts an oversized judgment Blob JSON response as unreadable", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/judgments/eval-1/c1.json", url: "https://blob.example/c1.json" }],
+      hasMore: false,
+    } as never);
+    const oversized = JSON.stringify({ ...makeJudgment(), ignored_padding: "x".repeat(1024 * 1024 + 1) });
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(oversized).body } as never);
+    await expect(storage.listAllJudgments()).resolves.toEqual({ judgments: [], unreadable: 1 });
   });
 
   it("putManifest writes voice/manifest.json with allowOverwrite:true", async () => {
@@ -302,6 +322,7 @@ describe("getVoiceStorage factory", () => {
   const originalStorage = process.env.STORAGE;
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalToken === undefined) {
       delete process.env.BLOB_READ_WRITE_TOKEN;
     } else {
@@ -324,6 +345,12 @@ describe("getVoiceStorage factory", () => {
     delete process.env.STORAGE;
     process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";
     expect(getVoiceStorage()).toBeInstanceOf(BlobVoiceStorage);
+  });
+
+  it("eagerly rejects mixed isolated Development store identity", () => {
+    delete process.env.STORAGE; process.env.BLOB_READ_WRITE_TOKEN = "rw";
+    vi.stubEnv("VERCEL_PROJECT_ID", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA"); vi.stubEnv("HARNESS_BLOB_STORE_ID", "store_dev"); vi.stubEnv("BLOB_STORE_ID", "store_other");
+    expect(() => getVoiceStorage()).toThrow("Blob store identity mismatch");
   });
 
   it("throws when neither STORAGE=memory nor BLOB_READ_WRITE_TOKEN is set", () => {

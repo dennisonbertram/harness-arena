@@ -22,7 +22,7 @@
       "methods": ["GET"],
       "write_methods": ["POST", "PUT", "PATCH", "DELETE"],
       "write_expected_status": 405,
-      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"],
+      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "VERCEL_OIDC_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"],
       "targets": {
         "production": {
           "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
@@ -72,6 +72,8 @@
       "COMPETITION_ADMIN_TOKEN": { "purpose": "Competition administration credential", "environments": ["production", "development"], "secret": true, "owner": "application", "required": "admin_only", "safe_diagnostic": "metadata_presence_only" },
       "COMPETITION_GATEWAY_PROVIDER": { "purpose": "Competition model provider pin", "environments": ["production", "development", "ops"], "secret": false, "owner": "application", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "COMPETITION_MODEL": { "purpose": "Competition model selection", "environments": ["production", "development", "ops"], "secret": false, "owner": "application", "required": "optional", "safe_diagnostic": "value_non_secret" },
+      "CRON_SECRET": { "purpose": "Passive monitor Vercel Cron authentication secret", "environments": ["development"], "secret": true, "owner": "application", "required": "monitor", "safe_diagnostic": "metadata_presence_only" },
+      "DEVELOPMENT_OPS_READ_TOKEN": { "purpose": "Passive monitor GET-only Development operations bearer token", "environments": ["development"], "secret": true, "owner": "application", "required": "monitor", "safe_diagnostic": "metadata_presence_only" },
       "DOCKER_CMD": { "purpose": "Runner Docker executable override", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "GATEWAY_ONLY": { "purpose": "Gateway upstream provider allowlist", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "GATEWAY_PROXY_PORT": { "purpose": "Runner gateway proxy port", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
@@ -118,6 +120,7 @@
       "PINNED_PROVIDER": { "purpose": "Runner upstream provider pin", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "PI_INSTALL_MODE": { "purpose": "Runner Pi installation mode", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "PI_INVOKE_OVERRIDE": { "purpose": "Runner Pi invocation override", "environments": ["runner"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "path_basename_only" },
+      "PRODUCTION_OPS_READ_TOKEN": { "purpose": "Passive monitor GET-only Production operations bearer token", "environments": ["development"], "secret": true, "owner": "application", "required": "monitor", "safe_diagnostic": "metadata_presence_only" },
       "REAP_STALE_MINUTES": { "purpose": "Stale-run reaping threshold", "environments": ["production", "development"], "secret": false, "owner": "application", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "RERUN_OPERATOR_LOGIN": { "purpose": "Authorized rerun operator login", "environments": ["production", "development"], "secret": false, "owner": "application", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "RUNNER_AGENT_TIMEOUT_CAP": { "purpose": "Per-task agent timeout cap", "environments": ["production", "development"], "secret": false, "owner": "runner", "required": "optional", "safe_diagnostic": "value_non_secret" },
@@ -152,7 +155,9 @@
       "VERCEL_OTEL_ENDPOINTS": { "purpose": "Vercel OpenTelemetry collector availability metadata", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_OTEL_ENDPOINTS_PORT": { "purpose": "Vercel OpenTelemetry collector port metadata", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_OTEL_ENDPOINTS_PROTOCOL": { "purpose": "Vercel OpenTelemetry collector protocol metadata", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "metadata_presence_only" },
+      "VERCEL_OIDC_TOKEN": { "purpose": "Vercel runtime workload identity credential", "environments": ["production", "development"], "secret": true, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_PROJECT_ID": { "purpose": "Vercel project identity", "environments": ["production", "development", "local"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "value_non_secret" },
+      "VERCEL_READ_TOKEN": { "purpose": "Passive monitor read-only Vercel evidence credential", "environments": ["development"], "secret": true, "owner": "vercel-platform", "required": "monitor", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_TEAM_ID": { "purpose": "Vercel team identity", "environments": ["production", "development", "local"], "secret": false, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "value_non_secret" },
       "VERCEL_TOKEN": { "purpose": "Vercel API and local Sandbox credential", "environments": ["local", "ops"], "secret": true, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_URL": { "purpose": "Vercel deployment hostname", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "sanitized_origin" }

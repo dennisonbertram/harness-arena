@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { log } from "@/lib/log";
 import { verifyRunnerSecret } from "@/lib/runner-auth";
 import { getStorage } from "@/lib/storage";
+import { readBoundedStream } from "@/lib/bounded-stream";
 
 const VALID_NAMES = new Set(["session.jsonl", "pi-stdout.txt", "runner-log.txt", "verifier.txt"]);
+const MAX_TRACE_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -11,17 +13,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (!verifyRunnerSecret(request)) {
     return new NextResponse(null, { status: 401 });
   }
-
-  const storage = getStorage();
-  const run = await storage.getRun(id);
-  if (!run) {
-    return NextResponse.json({ error: "run not found" }, { status: 404 });
-  }
-
-  // ponytail: read-modify-write on the run doc (task_result.trace_blob_url
-  // below) assumes the single sequential runner is the only writer during a
-  // run (reaper only acts after inactivity). CAS/locking when concurrent
-  // writers appear.
 
   const taskId = request.nextUrl.searchParams.get("task_id");
   const name = request.nextUrl.searchParams.get("name");
@@ -31,18 +22,33 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (!VALID_NAMES.has(name)) {
     return NextResponse.json({ error: `invalid trace name "${name}"` }, { status: 400 });
   }
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(id) || !/^[A-Za-z0-9._-]{1,128}$/.test(taskId)) return NextResponse.json({ error: "invalid identifier" }, { status: 400 });
+
+  const storage = getStorage();
+  const run = await storage.getRun(id);
+  if (!run) return NextResponse.json({ error: "run not found" }, { status: 404 });
+  const taskResult = run.task_results.find((result) => result.task_id === taskId);
+  const selectedTask = run.selected_task_ids?.includes(taskId) === true;
+  if ((taskId === "_run" && name !== "runner-log.txt") || (taskId !== "_run" && !taskResult && !selectedTask)) {
+    return NextResponse.json({ error: "trace task does not belong to run" }, { status: 400 });
+  }
+
+  // ponytail: read-modify-write on the run doc assumes the single sequential
+  // runner is the only writer during a run.
 
   // The runner uploads traces gzip-compressed (so the full, untruncated trace
   // fits under the function body limit). We store the bytes as-is and expose a
   // view route that decompresses on read, so the linked URL stays readable.
-  const buffer = Buffer.from(await request.arrayBuffer());
+  if (!request.body) return NextResponse.json({ error: "trace body is required" }, { status: 400 });
+  let buffer: Buffer;
+  try { buffer = await readBoundedStream(request.body, MAX_TRACE_UPLOAD_BYTES); }
+  catch { return NextResponse.json({ error: "trace too large" }, { status: 413 }); }
   await storage.putTraceBlob(id, taskId, name, buffer);
   const viewUrl = `${request.nextUrl.origin}/api/runs/${id}/trace-view?task_id=${encodeURIComponent(
     taskId,
   )}&name=${encodeURIComponent(name)}`;
 
   if (name === "session.jsonl") {
-    const taskResult = run.task_results.find((tr) => tr.task_id === taskId);
     if (taskResult) {
       taskResult.trace_blob_url = viewUrl;
       await storage.putRun(run);

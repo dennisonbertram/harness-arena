@@ -436,6 +436,7 @@ describe("createRunSandbox", () => {
     expect(result.sandbox_id).toBe("sbx-abc123");
     const stored = await storageRef.current.getRun(run.id);
     expect(stored?.sandbox_id).toBe("sbx-abc123");
+    expect(stored?.selected_task_ids).toEqual(buildRunnerTasks().map((task) => task.id));
 
     const events = await storageRef.current.listRunEvents(run.id);
     expect(

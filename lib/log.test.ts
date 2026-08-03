@@ -32,6 +32,46 @@ describe("log", () => {
     expect(log("error", "trace.span", { retained: false })).toBe(false);
     spy.mockRestore();
   });
+
+  it("retains monitor target identity separately from the runtime envelope", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "runtime-sha");
+
+    log("info", "monitor.observation", {
+      environment: "spoofed-runtime",
+      deployment_sha: "spoofed-runtime-sha",
+      target_environment: "development",
+      target_deployment_sha: "target-sha",
+    });
+
+    expect(JSON.parse(spy.mock.calls[0]?.[0] as string)).toMatchObject({
+      environment: "production",
+      deployment_sha: "runtime-sha",
+      target_environment: "development",
+      target_deployment_sha: "target-sha",
+    });
+    vi.unstubAllEnvs();
+    spy.mockRestore();
+  });
+
+  it("acknowledges successful emission and reports console failure", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(log("info", "monitor.observation", { verdict: "healthy" })).toBe(true);
+    spy.mockImplementation(() => { throw new Error("stdout unavailable"); });
+    expect(log("error", "monitor.observation", { verdict: "failed" })).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("reports serialization failure even when its bounded fallback is emitted", () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const original = JSON.stringify;
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementationOnce(() => { throw new Error("serialization failed"); }).mockImplementation(original);
+    expect(log("error", "monitor.observation", { verdict: "failed" })).toBe(false);
+    expect(consoleSpy).toHaveBeenCalledOnce();
+    stringify.mockRestore();
+    consoleSpy.mockRestore();
+  });
 });
 
 describe("observability logger contract", () => {

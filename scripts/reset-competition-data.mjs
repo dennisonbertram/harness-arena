@@ -12,7 +12,9 @@
 //     --delete-competition \
 //     --yes
 
-import { copy, del, get, list, put } from "@vercel/blob";
+import { copy, del, list, put } from "@vercel/blob";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
+import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const DELETE_BATCH_SIZE = 100;
@@ -29,17 +31,15 @@ async function listAll(prefix, token) {
   const blobs = [];
   let cursor;
   do {
-    const page = await list({ prefix, cursor, token });
+    const page = await list(blobCommandOptions({ prefix, cursor, token }));
     blobs.push(...page.blobs);
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
   return blobs;
 }
 
-async function readJson(pathname, token) {
-  const result = await get(pathname, { access: "public", token });
-  if (!result) throw new Error(`required blob not found: ${pathname}`);
-  return JSON.parse(await new Response(result.stream).text());
+async function readJson(identifier, token, { listed = false } = {}) {
+  return readBlobJson(identifier, { token, required: true, ...(listed ? { useCache: false } : {}) });
 }
 
 function uniqueSorted(values) {
@@ -71,7 +71,7 @@ export async function resetCompetitionData({
   const submissions = await Promise.all(
     submissionBlobs.map(async (blob) => ({
       blob,
-      value: await readJson(blob.pathname, token),
+      value: await readJson(blob.url, token, { listed: true }),
     })),
   );
   const targetSubmissions = submissions.filter(({ value }) => value.competition_id === competitionId);
@@ -88,7 +88,7 @@ export async function resetCompetitionData({
   const runs = await Promise.all(
     runBlobs.map(async (blob) => ({
       blob,
-      value: await readJson(blob.pathname, token),
+      value: await readJson(blob.url, token, { listed: true }),
     })),
   );
   const targetRuns = runs.filter(
@@ -137,12 +137,11 @@ export async function resetCompetitionData({
   // Nothing is removed until every live object and the retained competition
   // definition have been copied successfully.
   for (const pathname of archiveSources) {
-    await copy(pathname, `${resolvedArchivePrefix}/${pathname}`, {
-      access: "public",
+    await copy(pathname, `${resolvedArchivePrefix}/${pathname}`, blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       token,
-    });
+    }));
   }
 
   // Children first, then their run and submission parents. Each group is
@@ -150,25 +149,24 @@ export async function resetCompetitionData({
   // unbounded delete request.
   for (const group of groups) {
     for (const batch of chunks(group, DELETE_BATCH_SIZE)) {
-      await del(batch, { token });
+      await del(batch, blobCommandOptions({ token }));
     }
   }
 
   if (deleteCompetition) {
     // The retained definition was archived with the children above, so the
     // obsolete board can now be removed without losing recoverability.
-    await del(competitionPath, { token });
+    await del(competitionPath, blobCommandOptions({ token }));
   } else {
     await put(
       competitionPath,
       JSON.stringify({ ...competition, gateway_provider: gatewayProvider }),
-      {
-        access: "public",
+      blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",
         token,
-      },
+      }),
     );
   }
 

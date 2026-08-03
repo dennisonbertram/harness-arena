@@ -1,4 +1,7 @@
 import { get, list, put } from "@vercel/blob";
+import { blobCommandOptions } from "./blob-access";
+import { readBlobJson } from "./blob-read.mjs";
+import { readBoundedStream } from "./bounded-stream";
 import { FileStorage } from "./file-storage";
 import { log, normalizeError } from "./log";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
@@ -141,6 +144,7 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
       return await fn();
     } catch (err) {
       lastErr = err;
+      if (err instanceof Error && err.name === "PayloadTooLargeError") throw err;
       await new Promise((r) => setTimeout(r, 150 * (i + 1)));
     }
   }
@@ -183,44 +187,12 @@ export function seqFromEventPathname(pathname: string | undefined): number | nul
   return Number.isSafeInteger(seq) ? seq : null;
 }
 
-export async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: "no-store" });
-  // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
-  // must throw BEFORE parsing (a bare JSON.parse on "<!DOCTYPE..." is the
-  // exact crash this replaces). res.ok may be undefined in unit mocks; only
-  // a strictly-false ok is treated as a failure.
-  if (res.ok === false) throw new Error(`blob fetch ${res.status}`);
-  return JSON.parse(await res.text()) as T;
-}
-
-async function getJson<T>(identifier: string): Promise<T> {
-  const result = await get(identifier, { access: "public" });
-  // The caller derived this identifier from list(), so a null/304 here is a
-  // transiently unreadable object rather than a legitimate missing entity.
-  // Throw so withRetry can make another authenticated attempt.
-  if (!result || result.statusCode !== 200 || !result.stream) {
-    throw new Error(`blob get ${result?.statusCode ?? 404}`);
-  }
-  return JSON.parse(await new Response(result.stream).text()) as T;
-}
-
-function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
-  // `uploadedAt` is present on real Blob list results. Keep the helper
-  // tolerant of older/custom storage adapters that only provide a URL rather
-  // than turning a readable entity into a partial-read failure.
-  if (!blob.uploadedAt) return blob.url;
-  let url: URL;
-  try {
-    url = new URL(blob.url);
-  } catch {
-    return blob.url;
-  }
-  const uploadedAt = new Date(blob.uploadedAt).getTime();
-  url.searchParams.set("v", Number.isFinite(uploadedAt) ? String(uploadedAt) : String(blob.uploadedAt));
-  return url.toString();
+async function getJson<T>(identifier: string, options: { useCache?: boolean } = {}): Promise<T> {
+  return await readBlobJson<T>(identifier, { required: true, ...options }) as T;
 }
 
 export class BlobStorage implements Storage {
+  private static readonly TRACE_LIMIT = 4 * 1024 * 1024;
   private readonly readConcurrency = 8;
   private activeReads = 0;
   private readonly readWaiters: Array<() => void> = [];
@@ -246,26 +218,7 @@ export class BlobStorage implements Storage {
     // listRuns/listSubmissions/listCompetitions are often requested together.
     // Keep one instance-wide semaphore across all three so Promise.all cannot
     // turn a 90-object page read into 90 simultaneous Blob requests.
-    return this.withReadSlot(async () => {
-      try {
-        // Prefer the authenticated read plane. The production app was
-        // receiving persistent 403s from public URLs while get(pathname)
-        // stayed healthy; trying the failing public edge first added ~300 ms
-        // per blob and pushed /status static generation past 60 seconds.
-        //
-        // Authenticate the uploadedAt-versioned URL, not the bare pathname.
-        // Production proved the bare get can return a pre-overwrite "running"
-        // document for minutes after list() already reports the completed
-        // upload. The version keeps authenticated reads on the current object
-        // while retaining the reliable SDK data plane.
-        return await withRetry(() => getJson<T>(versionedBlobUrl(blob)), 2);
-      } catch {
-        // Keep the uploadedAt-versioned public URL as a fallback: a prior Blob
-        // incident had the inverse failure shape (SDK get 403, public URL
-        // healthy), and the version avoids a stale overwritten entity.
-        return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
-      }
-    });
+    return this.withReadSlot(() => withRetry(() => getJson<T>(blob.url, { useCache: false }), 2));
   }
 
   private async readJson<T>(pathname: string): Promise<T | undefined> {
@@ -283,13 +236,12 @@ export class BlobStorage implements Storage {
     // emits ~90 event blobs + ~32 trace blobs), and an un-retried put failure
     // there 500'd the callback route and lost the run's totals.
     await withRetry(() =>
-      put(pathname, JSON.stringify(value), {
-        access: "public",
+      put(pathname, JSON.stringify(value), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         cacheControlMaxAge: 60,
         contentType: "application/json",
-      }),
+      })),
     );
   }
 
@@ -305,7 +257,7 @@ export class BlobStorage implements Storage {
     const blobs: { url: string; pathname: string; uploadedAt: string | Date }[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
@@ -393,12 +345,11 @@ export class BlobStorage implements Storage {
       for (let tries = 0; tries < 50; tries++) {
         try {
           const full: RunEvent = { ...event, run_id: runId, seq };
-          await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
-            access: "public",
+          await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), blobCommandOptions({
             addRandomSuffix: false,
             allowOverwrite: false,
             contentType: "application/json",
-          });
+          }));
           appended.push(full);
           break;
         } catch {
@@ -473,11 +424,10 @@ export class BlobStorage implements Storage {
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const { url } = await withRetry(() =>
-      put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, {
-        access: "public",
+      put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
-      }),
+      })),
     );
     return url;
   }
@@ -489,9 +439,9 @@ export class BlobStorage implements Storage {
         const blobs = await this.listAllBlobs(pathname);
         const blob = blobs.find((candidate) => candidate.pathname === pathname);
         if (!blob) return null;
-        const response = await fetch(versionedBlobUrl(blob), { cache: "no-store" });
-        if (!response.ok) throw new Error(`blob fetch ${response.status}`);
-        return Buffer.from(await response.arrayBuffer());
+        const response = await get(blob.url, blobCommandOptions({ useCache: false }));
+        if (!response || response.statusCode !== 200 || !response.stream) throw new Error("blob get failed");
+        return readBoundedStream(response.stream, BlobStorage.TRACE_LIMIT);
       });
     } catch {
       return null;
@@ -514,6 +464,6 @@ export function getStorage(): Storage {
     g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();
     return g[MEMORY_STORAGE_KEY];
   }
-  if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
+  if (process.env.BLOB_READ_WRITE_TOKEN || process.env.VERCEL_OIDC_TOKEN) { blobCommandOptions(); return new BlobStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

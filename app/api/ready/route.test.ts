@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const readiness = vi.fn();
-const listRuns = vi.fn();
-const listSubmissions = vi.fn();
-const getManifest = vi.fn();
+const { readiness, listRuns, listSubmissions, getManifest, getVoiceStorage, listBlobs } = vi.hoisted(() => ({
+  readiness: vi.fn(), listRuns: vi.fn(), listSubmissions: vi.fn(), getManifest: vi.fn(),
+  getVoiceStorage: vi.fn(() => ({ getManifest: vi.fn() })),
+  listBlobs: vi.fn(),
+}));
+vi.mock("@vercel/blob", () => ({ list: listBlobs }));
 vi.mock("@/lib/storage", () => ({ getStorage: () => ({ listRuns, listSubmissions, checkReady: readiness }) }));
-vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => ({ getManifest }) }));
+vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => { getVoiceStorage(); return { getManifest }; } }));
 import { GET } from "./route";
 
 describe("GET /api/ready", () => {
@@ -15,8 +17,34 @@ describe("GET /api/ready", () => {
     listRuns.mockReset().mockResolvedValue([]);
     listSubmissions.mockReset().mockResolvedValue([]);
     getManifest.mockReset().mockResolvedValue(undefined);
+    listBlobs.mockReset().mockResolvedValue({ blobs: [], hasMore: false });
     vi.stubEnv("LOCAL_INSTANCE_NONCE", "nonce-1");
     vi.stubEnv("LOCAL_INSTANCE_PID", String(process.pid));
+    vi.stubEnv("VERCEL_PROJECT_ID", "");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "");
+    vi.stubEnv("BLOB_STORE_ID", "");
+    vi.stubEnv("BLOB_ACCESS", "public");
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
+    getVoiceStorage.mockClear();
+  });
+
+  it("fails hosted readiness when Vercel rejects a forged but well-shaped OIDC token", async () => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "e30.eyJleHAiOjQxMDI0NDQ4MDB9.forged");
+    vi.stubEnv("BLOB_STORE_ID", "store_test");
+    listBlobs.mockRejectedValueOnce(new Error("OIDC signature verification failed"));
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    expect(listBlobs).toHaveBeenCalledWith(expect.objectContaining({
+      limit: 1,
+      oidcToken: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.forged",
+      storeId: "store_test",
+      abortSignal: expect.any(AbortSignal),
+    }));
   });
   it("binds readiness to the current process instance and verifies seed/writeability", async () => {
     vi.stubEnv("HARNESS_LOCAL_INIT", "1");
@@ -34,6 +62,8 @@ describe("GET /api/ready", () => {
   });
   it("keeps hosted readiness bounded and never enumerates production storage", async () => {
     vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, storage: "ready" });
@@ -41,6 +71,25 @@ describe("GET /api/ready", () => {
     expect(listRuns).not.toHaveBeenCalled();
     expect(listSubmissions).not.toHaveBeenCalled();
     expect(getManifest).not.toHaveBeenCalled();
+    expect(listBlobs).toHaveBeenCalledWith(expect.objectContaining({ limit: 1, abortSignal: expect.any(AbortSignal) }));
+    expect(getVoiceStorage).toHaveBeenCalledOnce();
+  });
+
+  it.each(["AUTH_SECRET", "OPS_READ_TOKEN"])("returns 503 when hosted %s capability is missing", async (key) => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
+    vi.stubEnv(key, "");
+    expect((await GET()).status).toBe(503);
+  });
+
+  it("returns 503 when hosted credentials overlap and never exposes their values", async () => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "shared-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "shared-secret");
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain("shared-secret");
   });
   it("refuses a local-init marker unless the file-backed local storage mode is selected", async () => {
     vi.stubEnv("HARNESS_LOCAL_INIT", "1");

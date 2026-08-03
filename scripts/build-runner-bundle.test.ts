@@ -43,6 +43,15 @@ describe("build-runner-bundle", () => {
 
     expect(entries).toContain("scripts/runner/runner.mjs");
   }, BUNDLE_TEST_TIMEOUT_MS);
+
+  it("never traces application storage or secrets into the public runner artifact", () => {
+    workDir = mkdtempSync(path.join(tmpdir(), "runner-bundle-storage-guard-"));
+    const outFile = path.join(workDir, "runner-bundle.tgz");
+    buildBundle({ outFile });
+    const entries = listEntries(outFile);
+    expect(entries.filter((entry) => !entry.endsWith("/")).every((entry) => entry.startsWith("scripts/runner/"))).toBe(true);
+    expect(entries.join("\n")).not.toMatch(/blob-access|voice-storage|AUTH_SECRET|BLOB_READ_WRITE_TOKEN/);
+  }, BUNDLE_TEST_TIMEOUT_MS);
 });
 
 describe("findRunnerModuleClosure", () => {

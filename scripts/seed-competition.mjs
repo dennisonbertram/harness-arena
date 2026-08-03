@@ -24,7 +24,9 @@
 // constructor (PartialReadError) that Node's built-in type-stripping can't
 // parse, so a plain `node scripts/seed-competition.mjs` can't import it.
 
-import { get, list, put } from "@vercel/blob";
+import { list, put } from "@vercel/blob";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
+import { readBlobJson } from "../lib/blob-read.mjs";
 
 const ARENA = "harness-arena";
 const HARNESS = "pi";
@@ -99,23 +101,20 @@ export async function backfillCompetition(
 // so this writes to exactly the entities the running app reads.
 function blobStorage() {
   async function readJson(pathname) {
-    const result = await get(pathname, { access: "public" });
-    if (!result) return undefined;
-    return JSON.parse(await new Response(result.stream).text());
+    return readBlobJson(pathname);
   }
   async function writeJson(pathname, value) {
-    await put(pathname, JSON.stringify(value), {
-      access: "public",
+    await put(pathname, JSON.stringify(value), blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
-    });
+    }));
   }
   async function listAll(prefix) {
     const blobs = [];
     let cursor;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
@@ -127,7 +126,7 @@ function blobStorage() {
     putCompetition: (c) => writeJson(`competitions/${c.id}.json`, c),
     async listSubmissions() {
       const blobs = await listAll("submissions/");
-      const subs = await Promise.all(blobs.map((b) => fetch(b.url).then((r) => r.json())));
+      const subs = await Promise.all(blobs.map((blob) => readBlobJson(blob.url, { required: true, useCache: false })));
       return subs;
     },
     putSubmission: (s) => writeJson(`submissions/${s.id}.json`, s),
