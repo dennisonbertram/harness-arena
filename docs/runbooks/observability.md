@@ -50,10 +50,12 @@ acknowledges it; it remains capped at 32 spans, records
 Because `@vercel/otel`'s root-start lifecycle wait is short, a retained root
 also registers one coalesced post-enqueue drain through the public
 `@vercel/functions` `waitUntil` API. Retained children do not schedule drains.
-The whole drain has a 5.25-second lifetime deadline; failures are consumed by
-the lifecycle task while the unacknowledged batch remains queued for a later
-request or shutdown retry. Without a hosted request context, the same bounded,
-catch-wrapped task runs locally as a best-effort fallback.
+The whole-drain deadline is derived from queue capacity, batch size, and the
+per-batch acknowledgement bound: two retained batches times five seconds plus
+a 250 ms settlement margin. Failures are consumed by the lifecycle task while
+the unacknowledged batch remains queued for a later request or shutdown retry.
+Without a hosted request context, the same bounded, catch-wrapped task runs
+locally as a best-effort fallback.
 
 `structuredSpanReadiness()` is process-local diagnostic state, not evidence of
 cross-instance or cross-lambda health. Establish hosted health from the

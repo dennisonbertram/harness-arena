@@ -14,7 +14,8 @@ const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
-const POST_ROOT_DRAIN_DEADLINE_MILLIS = 5_250;
+const MAX_RETAINED_EXPORT_BATCHES = Math.ceil(MAX_BUFFERED_SPANS / MAX_EXPORT_BATCH);
+const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_RETAINED_EXPORT_BATCHES * EXPORT_ACK_DEADLINE_MILLIS + 250;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
