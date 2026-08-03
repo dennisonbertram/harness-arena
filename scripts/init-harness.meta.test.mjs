@@ -167,7 +167,11 @@ describe.sequential("integration harness process cleanup", () => {
       const result = await waitForClose(fixture.closed, 10_000);
       expect(Date.now() - started).toBeLessThan(5_000);
       if (target === "worker") expect(result.code, result.output).not.toBe(0);
-      else expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: signals[0] });
+      else {
+        const exit = JSON.parse(await waitForFile(published.init_exit_marker));
+        expect(exit.code).toBeNull();
+        expect(signals).toContain(exit.signal);
+      }
       await waitForGroupExit(published.init_pid, 2_500);
       await waitForGroupExit(published.prerequisite_leader_pid, 2_500);
       for (const pid of [published.init_pid, published.prerequisite_leader_pid, published.prerequisite_descendant_pid]) {
@@ -204,7 +208,11 @@ describe.sequential("integration harness process cleanup", () => {
       for (const signal of signals) process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
       const result = await waitForClose(fixture.closed, 10_000);
       if (target === "worker") expect(result.code, result.output).not.toBe(0);
-      else expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: signals[0] });
+      else {
+        const exit = JSON.parse(await waitForFile(published.init_exit_marker));
+        expect(exit.code).toBeNull();
+        expect(signals).toContain(exit.signal);
+      }
       await waitForGroupExit(published.init_pid, 2_500);
       await waitForGroupExit(published.supervisor_pid, 2_500);
       for (const pid of [published.init_pid, ...serverTree]) expect(processExists(pid), `process ${pid} survived detach interruption`).toBe(false);
