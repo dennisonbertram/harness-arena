@@ -255,7 +255,13 @@ function normalizeLiveDeployment(value, live) {
 }
 
 function normalizeLiveStoreIds(value) {
-  if (!exactKeys(value, ["envs"]) || !Array.isArray(value.envs)) throw denied();
+  const allowedTargets = new Set(["production", "preview", "development"]);
+  if (
+    !exactKeys(value, ["envs", "hiddenProductionEnvCount"])
+    || !Array.isArray(value.envs)
+    || !Number.isSafeInteger(value.hiddenProductionEnvCount)
+    || value.hiddenProductionEnvCount !== 0
+  ) throw denied();
   const storeIds = [];
   for (const entry of value.envs) {
     const storeId = entry?.contentHint?.storeId;
@@ -264,10 +270,11 @@ function normalizeLiveStoreIds(value) {
       typeof storeId !== "string"
       || !storeId
       || !Array.isArray(entry.target)
-      || entry.target.length !== 1
-      || entry.target[0] !== "production"
+      || entry.target.length === 0
+      || entry.target.some((target) => typeof target !== "string" || !allowedTargets.has(target))
+      || new Set(entry.target).size !== entry.target.length
     ) throw denied();
-    storeIds.push(storeId);
+    if (entry.target.includes("production")) storeIds.push(storeId);
   }
   return sortedUniqueStrings(storeIds);
 }

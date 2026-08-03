@@ -126,6 +126,7 @@ function verifierApiFetch({
   liveAliasesAfter = liveAliases,
   liveStoreIds = manifest().live.storeIds,
   liveStoreIdsAfter = liveStoreIds,
+  liveStoreTargets = ["production"],
   liveDeployment = {},
   liveEnvironment = {},
 }) {
@@ -164,7 +165,8 @@ function verifierApiFetch({
       liveEnvironmentReads += 1;
       const storeIds = liveEnvironmentReads === 1 ? liveStoreIds : liveStoreIdsAfter;
       return jsonResponse({
-        envs: storeIds.map((storeId) => ({ target: ["production"], contentHint: { storeId } })),
+        envs: storeIds.map((storeId) => ({ target: liveStoreTargets, contentHint: { storeId } })),
+        hiddenProductionEnvCount: 0,
         ...liveEnvironment,
       });
     }
@@ -320,6 +322,23 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the real live environment shape and multi-target Blob binding", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        liveStoreTargets: ["production", "preview", "development"],
+        liveEnvironment: { hiddenProductionEnvCount: 0 },
+      }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).resolves.toEqual(inspection());
+  });
+
   it("rejects live aliases that are absent from the manifest inventory", async () => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({ liveAliases: [...manifest().live.aliases, "unrecorded-live.vercel.app"] }),
@@ -369,6 +388,23 @@ describe("bounded read-only Vercel adapter", () => {
     ],
     ["unstable alias inventory", { liveAliasesAfter: [manifest().live.aliases[0]] }],
   ])("rejects unsafe live inventory evidence: %s", async (_name, options) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch(options) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it.each([
+    ["hidden production metadata", { liveEnvironment: { hiddenProductionEnvCount: 1 } }],
+    ["malformed target", { liveStoreTargets: ["production", "unknown"] }],
+    ["duplicate target", { liveStoreTargets: ["production", "production"] }],
+    ["production absent", { liveStoreTargets: ["preview"] }],
+  ])("rejects incomplete live store targeting evidence: %s", async (_name, options) => {
     const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch(options) });
 
     await expect(api.inspect({
