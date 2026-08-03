@@ -29,9 +29,14 @@ also refuses to start under `NODE_ENV=production` or Vercel.
 - A repeat start or `--check` reports the same healthy PID/nonce/port. Starts
   serialize through a per-worktree immutable claim queue: owner metadata is
   fsynced before atomic publication, unpublished temp files never own, and a
-  dead claim is removed only by its unique path. Stale PID metadata is
-  recovered within a bounded wait. A simultaneous cold start can wait up to
-  120 seconds for the owner to finish installation and readiness.
+  dead claim is removed only by its unique path. The selected claim must also
+  atomically hard-link its unique owner record into a stable owner fence before
+  entering; late lower claims therefore cannot overlap an existing owner.
+  Dead-fence recovery pins the old inode under a unique reclaimer path, never
+  reclaims a live PID, and blocks new publication until every live recovery pin
+  is gone. Stale PID metadata is recovered within a bounded wait. A
+  simultaneous cold start can wait up to 120 seconds for the owner to finish
+  installation and readiness.
 - The detached wrapper fsyncs `init.pid` and handshakes that ownership before
   it launches Next. The init-managed `.env.local`, local seed, and write-once
   voice judgments likewise publish complete fsynced temp files atomically

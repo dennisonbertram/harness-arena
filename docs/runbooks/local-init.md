@@ -9,7 +9,13 @@ write, so an open port alone is not ready. Concurrent or repeat invocations
 wait on the same immutable claim queue and report the existing healthy
 instance. Each contender fsyncs a unique owner record before atomically
 publishing its `.claim`; unpublished temp records do not participate, and
-dead owners are reclaimed only through their never-reused claim pathname.
+dead claims are removed only through their never-reused claim pathname.
+Queue selection is advisory until the contender atomically hard-links its
+unique immutable owner record into the stable owner fence. A late lower claim
+cannot enter while that fence is owned. Recovery first hard-links the dead
+fence inode to a unique, PID-scoped pin, revalidates token and inode, and
+refuses live owners; new ownership stays blocked until all live recovery pins
+have finished, while dead pins are removed only by their exact unique paths.
 Cold-start contenders wait at most 120 seconds for installation, seed, and
 readiness before emitting the queue's bounded blocker diagnostics. The
 detached wrapper fsyncs its `init.pid` ownership and handshakes it to the
