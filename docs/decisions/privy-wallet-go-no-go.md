@@ -25,4 +25,3 @@ Until all items pass, no provider request is made by the wallet ensure API and
 no Privy identifier is stored. The payout profile supports one verified
 user-controlled Ethereum-mainnet external address, and MCP cannot transfer or
 sign funds.
-
