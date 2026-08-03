@@ -76,7 +76,11 @@ describe("least-privilege access policy", () => {
     const requests = [];
     const fetchImpl = vi.fn(async (url, init) => {
       requests.push([String(url), init?.method]);
-      const body = String(url).includes("/v2/user") ? { id: "viewer-user" }
+      const body = String(url).endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10 } }
+        : String(url).endsWith("/api/ops/v1") ? { schema_version: "ops.v1", kinds: [{ kind: "runs", prefix: "runs/", format: "json" }], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
+          : String(url).includes("/api/ops/v1/inventory?kind=runs&limit=1") ? { schema_version: "ops.v1", kind: "runs", items: [], has_more: false, next_cursor: null }
+            : String(url).endsWith("/api/ops/v1/summary") ? { schema_version: "ops.v1", counts: {}, latest: {}, run_states: {}, integrity: {}, scan: { records: 0, complete: true, truncated: false } }
+              : String(url).includes("/v2/user") ? { id: "viewer-user" }
         : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER" } }] }
           : String(url).includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [] }
             : String(url).includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
@@ -88,12 +92,62 @@ describe("least-privilege access policy", () => {
       VERCEL_TOKEN: "viewer-token",
       VERCEL_TEAM_ID: "team-one",
       VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0],
-      HARNESS_ARENA_URL: "https://development.example.test",
+      HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app",
     };
     const collected = await audit.collectActiveAccessEvidence({ policy, role: "monitor", cwd: repo, env, commandRunner, fetchImpl, now: "2026-08-03T10:00:00.000Z" });
     expect(audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).overall).toBe("observable");
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
+    expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
+  });
+
+  it("rejects arbitrary 200 responses instead of treating them as ops.v1 proof", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const env = { OPS_READ_TOKEN: "read-token", VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0], HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app" };
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, redirected: false, text: async () => JSON.stringify({ ok: true }) }));
+    const collected = await audit.collectActiveAccessEvidence({ policy, role: "monitor", cwd: repo, env, commandRunner: vi.fn(async () => ({ exitCode: 1, stdout: "" })), fetchImpl });
+    expect(collected.ops.state).toBe("missing");
+  });
+
+  it("validates host, TLS, and project binding before sending OPS_READ_TOKEN", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const projectId = policy.capabilities.vercel.project_ids[0];
+    expect(audit.resolveOpsTarget(policy, { url: "https://harness-arena-psi.vercel.app", projectId })).toMatchObject({ environment: "production" });
+    expect(audit.resolveOpsTarget(policy, { url: "http://127.0.0.1:3000", projectId: undefined })).toMatchObject({ environment: "local" });
+    for (const input of [
+      { url: "http://harness-arena-psi.vercel.app", projectId },
+      { url: "https://attacker.example", projectId },
+      { url: "https://harness-arena-psi.vercel.app", projectId: policy.capabilities.vercel.project_ids[1] },
+      { url: "http://localhost.evil:3000", projectId: undefined },
+    ]) expect(() => audit.resolveOpsTarget(policy, input)).toThrow(/target/i);
+
+    const fetchImpl = vi.fn();
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: { OPS_READ_TOKEN: "never-send-me", VERCEL_PROJECT_ID: projectId, HARNESS_ARENA_URL: "https://attacker.example" },
+      commandRunner: vi.fn(async () => ({ exitCode: 1, stdout: "" })), fetchImpl,
+    });
+    expect(collected.ops.state).toBe("missing");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects redirects before an ops token can follow them", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      calls.push({ url: String(url), authorization: init?.headers?.authorization });
+      return { ok: true, status: 200, redirected: true, url: "https://attacker.example/api/health", text: async () => "{}" };
+    });
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: { OPS_READ_TOKEN: "never-follow-me", VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0], HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app" },
+      commandRunner: vi.fn(async () => ({ exitCode: 1, stdout: "" })), fetchImpl,
+    });
+    expect(collected.ops.state).toBe("missing");
+    expect(calls).toEqual([{ url: "https://harness-arena-psi.vercel.app/api/health", authorization: undefined }]);
   });
 
   it("normalizes a project-scoped Vercel token with the inherited Viewer role", async () => {
@@ -105,6 +159,29 @@ describe("least-privilege access policy", () => {
       team: { membership: { role: "VIEWER" } },
       project: { members: [] },
     })).toMatchObject({ token_project_id: "project-one", team_role: "VIEWER", project_role: "VIEWER", role_source: "team_inherited" });
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }] } }).project_role).toBe("VIEWER");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_DEVELOPER" }] } }).project_role).toBe("DEVELOPER");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "ADMIN" }] } }).project_role).toBe("ADMIN");
+  });
+
+  it("derives every runtime credential-separation class from one central policy", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const separation = await import("../../lib/credential-separation.mjs");
+    expect(policy.capabilities.get_only_ops.separate_from).toEqual(separation.OPS_READ_SEPARATE_FROM);
+    for (const name of separation.OPS_READ_SEPARATE_FROM) {
+      const attestation = separation.credentialSeparationAttestation({ OPS_READ_TOKEN: "collision", [name]: "collision" });
+      expect(attestation, name).toMatchObject({ schema_version: "credential_separation.v1", state: "invalid", checked_count: 1 });
+      expect(JSON.stringify(attestation)).not.toContain("collision");
+    }
+  });
+
+  it("fails closed when AUTH_SECRET collides with OPS_READ_TOKEN", async () => {
+    vi.stubEnv("OPS_READ_TOKEN", "auth-collision");
+    vi.stubEnv("AUTH_SECRET", "auth-collision");
+    const { mintAgentToken } = await import("../../lib/agent-token");
+    await expect(mintAgentToken({ githubId: 1, githubLogin: "agent" })).rejects.toThrow(/credential_separation_invalid/);
+    vi.unstubAllEnvs();
   });
 
   it("enforces role-specific secret value access", async () => {
