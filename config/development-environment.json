@@ -1,6 +1,11 @@
 {
   "environment": "development",
   "branch": "dev",
+  "git": {
+    "provider": "github",
+    "repository": "dennisonbertram/harness-arena",
+    "productionBranch": "dev"
+  },
   "vercelProject": {
     "id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
     "name": "harness-arena-development"

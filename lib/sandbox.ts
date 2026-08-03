@@ -74,7 +74,11 @@ const NETWORK_BASE_ALLOWLIST = [
 ];
 
 function networkPolicy(callbackBase: string): NetworkPolicy {
-  if (process.env.RUNNER_NETWORK_MODE === "allow-all") return "allow-all";
+  if (process.env.RUNNER_NETWORK_MODE === "allow-all") {
+    const vercelContext = process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
+    if (vercelContext) throw new Error("sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel");
+    return "allow-all";
+  }
   return { allow: [new URL(callbackBase).hostname, ...NETWORK_BASE_ALLOWLIST] };
 }
 

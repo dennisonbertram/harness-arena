@@ -5,6 +5,7 @@ const CREDENTIAL_KEY = /(?:token|secret|password|credential|api[_-]?key)/i;
 const DEVELOPMENT_KEYS = new Set([
   "environment",
   "branch",
+  "git",
   "vercelProject",
   "host",
   "store",
@@ -12,6 +13,7 @@ const DEVELOPMENT_KEYS = new Set([
   "live",
 ]);
 const VERCEL_PROJECT_KEYS = new Set(["id", "name"]);
+const GIT_KEYS = new Set(["provider", "repository", "productionBranch"]);
 const STORE_KEYS = new Set(["id"]);
 const LIVE_KEYS = new Set(["projectId", "aliases", "storeIds"]);
 
@@ -176,6 +178,7 @@ export function verifyDevelopmentEnvironment({ development, live }) {
   for (const path of unknownKeyPaths(development.vercelProject, VERCEL_PROJECT_KEYS, "vercelProject")) {
     addOnce(violations, path);
   }
+  for (const path of unknownKeyPaths(development.git, GIT_KEYS, "git")) addOnce(violations, path);
   for (const path of unknownKeyPaths(development.store, STORE_KEYS, "store")) addOnce(violations, path);
   for (const path of unknownKeyPaths(live, LIVE_KEYS, "live")) addOnce(violations, path);
   if (Object.hasOwn(development, "live")) {
@@ -187,6 +190,23 @@ export function verifyDevelopmentEnvironment({ development, live }) {
   if (environment !== null && environment !== "development") addOnce(violations, "environment");
   const branch = requiredString(development.branch, "branch", missing, violations);
   if (branch !== null && branch !== "dev") addOnce(violations, "branch");
+
+  if (!isObject(development.git)) {
+    if (development.git === null || development.git === undefined) addOnce(missing, "git");
+    else addOnce(violations, "git");
+  } else {
+    const provider = requiredString(development.git.provider, "git.provider", missing, violations);
+    const repository = requiredString(development.git.repository, "git.repository", missing, violations);
+    const productionBranch = requiredString(
+      development.git.productionBranch,
+      "git.productionBranch",
+      missing,
+      violations,
+    );
+    if (provider !== null && provider !== "github") addOnce(violations, "git.provider");
+    if (repository !== null && repository !== "dennisonbertram/harness-arena") addOnce(violations, "git.repository");
+    if (productionBranch !== null && productionBranch !== "dev") addOnce(violations, "git.productionBranch");
+  }
 
   let developmentProjectId = null;
   if (!isObject(development.vercelProject)) {

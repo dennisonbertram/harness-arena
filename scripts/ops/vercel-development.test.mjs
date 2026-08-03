@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -172,6 +172,8 @@ describe("trusted remote Git provenance", () => {
       await execFileAsync("/usr/bin/git", ["init", "--quiet"], { cwd: repo });
       await execFileAsync("/usr/bin/git", ["config", "url.https://attacker.invalid/.insteadOf", UPSTREAM_URL], { cwd: repo });
       await execFileAsync("/usr/bin/git", ["config", "core.useReplaceRefs", "true"], { cwd: repo });
+      await mkdir(path.join(repo, ".git", "refs", "replace"), { recursive: true });
+      await writeFile(path.join(repo, ".git", "refs", "replace", REVIEWED_SHA), `${OTHER_SHA}\n`);
 
       const sha = await subject.readTrustedRemoteDevSha({
         cwd: repo,
@@ -226,7 +228,7 @@ describe("bounded read-only Vercel adapter", () => {
       accountId: TEAM_ID,
       name: DEVELOPMENT_PROJECT_NAME,
       link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-      alias: ["harness-arena-development.vercel.app"],
+      alias: [{ domain: "harness-arena-development.vercel.app", environment: "production", target: "PRODUCTION" }],
     };
     const fetchImpl = vi.fn(async (input, options) => {
       const url = new URL(input);
@@ -280,6 +282,54 @@ describe("bounded read-only Vercel adapter", () => {
       storeId: DEVELOPMENT_STORE_ID,
       token: TOKEN,
     })).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it("fails closed when project linkage changes during inspection", async () => {
+    let projectReads = 0;
+    const fetchImpl = vi.fn(async (input) => {
+      const url = new URL(input);
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) {
+        projectReads += 1;
+        return jsonResponse({
+          id: DEVELOPMENT_PROJECT_ID,
+          accountId: TEAM_ID,
+          name: DEVELOPMENT_PROJECT_NAME,
+          link: {
+            type: "github",
+            org: "dennisonbertram",
+            repo: "harness-arena",
+            productionBranch: projectReads === 1 ? "dev" : "main",
+          },
+          alias: [{ domain: "harness-arena-development.vercel.app" }],
+        });
+      }
+      if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
+        return jsonResponse({ envs: [
+          { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
+          { key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        ] });
+      }
+      if (url.pathname.endsWith("/env/env_callback")) {
+        return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
+      }
+      if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
+        return jsonResponse({
+          id: DEVELOPMENT_STORE_ID,
+          ownerId: TEAM_ID,
+          type: "blob",
+          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
+        });
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/read-only preflight denied/i);
+    expect(projectReads).toBe(2);
   });
 
   it("bounds request time", async () => {

@@ -17,6 +17,11 @@ function development(overrides = {}) {
   return {
     environment: "development",
     branch: "dev",
+    git: {
+      provider: "github",
+      repository: "dennisonbertram/harness-arena",
+      productionBranch: "dev",
+    },
     vercelProject: {
       id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
       name: "harness-arena-development",
@@ -111,6 +116,9 @@ describe("verifyDevelopmentEnvironment", () => {
   it.each([
     ["environment", { environment: 7 }],
     ["branch", { branch: { name: "dev" } }],
+    ["git.provider", { git: { provider: 7, repository: "dennisonbertram/harness-arena", productionBranch: "dev" } }],
+    ["git.repository", { git: { provider: "github", repository: "other/repo", productionBranch: "dev" } }],
+    ["git.productionBranch", { git: { provider: "github", repository: "dennisonbertram/harness-arena", productionBranch: "main" } }],
     ["vercelProject.id", { vercelProject: { id: null, name: "harness-arena-development" } }],
     ["vercelProject.name", { vercelProject: { id: "dev-project", name: 9 } }],
     ["host", { host: { hostname: "dev.example" } }],

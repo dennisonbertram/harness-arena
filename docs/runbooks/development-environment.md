@@ -35,64 +35,61 @@ review are complete.
    and have native parent Epic `#139`.
 2. Inspect `config/development-environment.json`. It identifies the reserved
    project `harness-arena-development` / `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`.
-3. Keep the missing development `host`, `store.id`, and `callbackOrigin`
+3. Confirm that Vercel native Git integration links only
+   `dennisonbertram/harness-arena` to that isolated project. The Vercel
+   Production Branch for this project is `dev`. “Production” here is Vercel's
+   routing label inside the Development project; it is not the live project,
+   live environment, or production approval.
+4. Keep the missing development `host`, `store.id`, and `callbackOrigin`
    entries missing until the infrastructure owner provisions and independently
    confirms each value. The known live Blob store identifier is recorded only
    as an identifier; the manifest contains no token or other secret.
-4. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
+5. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
    with read-only Vercel inventory access. Compare it with the manifest and stop
    on any omitted or changed identifier. Never retrieve or print Blob
    credentials during this preflight.
-5. Run the verifier; it reports missing infrastructure and policy violations
-   without printing secret values.
+6. Run the verifier with a read-only-scoped token. It reports missing
+   infrastructure and policy violations without printing secret values:
 
-## Development-only integration and deploy
+   ```sh
+   VERCEL_TOKEN='<read-only-token>' node scripts/ops/vercel-development.mjs verify <exact-reviewed-origin-dev-sha>
+   ```
+
+## Native Git deployment ownership
 
 The infrastructure owner may create a distinct development host, Blob store,
-and callback origin in the reserved project. Before any development deploy,
-record the assigned non-production identifiers in the manifest and prove they
-are distinct from every value under `live`. Do not copy tokens, callback
-origins, aliases, or Blob values from production.
+and callback origin in the reserved project. Record those identifiers in the
+manifest and prove they are distinct from every value under `live`. Do not copy
+tokens, callback origins, aliases, environment values, or Blob resources from
+the live project.
 
-Deploy only from `dev` into the reserved project after review. A successful
-development deployment does not constitute production approval or authorize a
-production deployment.
+After a reviewed change reaches protected `dev`, Vercel native Git integration
+is the only deployment owner for the Development project. The repository has
+no deploy wrapper and no postflight mutation path. The verifier resolves the
+fixed GitHub URL outside the repository with user/system/repository Git config
+and replacement objects disabled, checks the remote `dev` SHA before and after
+Vercel inspection, and requires both observations to equal the explicit
+reviewed SHA.
 
-The sole approved mutation entry point is:
+Vercel inspection is GET-only, bounded by request deadlines and response-size
+limits, and fixed to the Development project and team. It checks GitHub repo
+linkage, the `dev` Production Branch, Development alias/callback/store
+identities, and separation from the complete live inventory. It never decrypts
+credential values; the only decrypted value is the non-secret `CALLBACK_BASE`
+needed to prove isolation. `RUNNER_NETWORK_MODE` must not be configured in the
+Vercel project, and runtime code rejects `RUNNER_NETWORK_MODE=allow-all` in
+Production, Preview, and Development Vercel contexts.
 
-```sh
-VERCEL_TOKEN='<development-token>' node scripts/ops/vercel-development.mjs deploy <exact-reviewed-origin-dev-sha>
-```
-
-It queries the protected `origin/dev` ref read-only and requires the explicit
-reviewed SHA to equal that exact remote tip with valid local ancestry. Branch
-names and worktree cleanliness are not provenance. The wrapper uploads only a
-validated temporary `git archive` of that SHA, never the mutable or ignored
-working tree, and always removes the temporary snapshot.
-
-Before upload it reads the actual project, Preview callback, and Blob-store
-metadata and compares their non-secret identities with the manifest. It then
-uses the pinned local Vercel CLI version `56.5.0` through the absolute Node
-executable, with a minimal environment fixed to project
-`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`, team
-`team_cwyLpng8LCwWgINdiQ27hHYa`, scope `dennisons-projects`, and the supplied
-token. Preview is Vercel's built-in non-production deploy mode. The option
-`--target development` is forbidden. A read-only postflight must prove the
-deployment's project, owner, Preview target, URL, and reviewed SHA before
-success is reported.
-
-The repository manifest must fully verify before any mutation. The CLI accepts
-no extra options.
-Raw write-capable Vercel CLI commands are forbidden in this runbook. This
-includes deploys with production targets, promote/rollback, alias/domain,
-environment, and store mutation. Read-only production `inspect`, `ls`, `logs`,
-`activity`, alias-identity, and environment-metadata checks remain permitted.
+Do not run write-capable Vercel commands from this repository. Do not manually
+upload, promote, roll back, or change aliases, domains, environments, stores,
+or Git linkage. A successful Development deployment is not production
+approval and never authorizes mutation of the live project.
 
 ## Rollback and stop rules
 
-Rollback is not an approved wrapper operation. Stop and obtain a separately
-reviewed development-only policy rather than changing a live project, alias,
-or data.
+Rollback is not an approved repository operation. Stop and obtain a separately
+reviewed development-only policy rather than changing any project, alias, or
+data.
 
 Stop immediately if an operation goes beyond read-only inspection of live
 identifiers, routing, or deployment metadata, or if it could read credential
