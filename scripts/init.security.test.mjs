@@ -26,15 +26,35 @@ describe("init security and lifecycle", () => {
       BLOB_READ_WRITE_TOKEN: "inherited-blob-sentinel",
       VERCEL: "1",
       RANDOM_PARENT_SECRET: "parent-sentinel",
-    }, { AUTH_SECRET: "local-auth", LOCAL_STORAGE_DIR: join(root, "data"), LOCAL_INSTANCE_NONCE: "nonce" });
+    }, {
+      AUTH_SECRET: "local-auth", LOCAL_STORAGE_DIR: join(root, "data"), LOCAL_INSTANCE_NONCE: "nonce",
+      HARNESS_GIT_BRANCH: "codex/test",
+    });
 
-    expect(child).toMatchObject({ STORAGE: "file", AUTH_SECRET: "local-auth", LOCAL_INSTANCE_NONCE: "nonce" });
+    expect(child).toMatchObject({
+      STORAGE: "file",
+      AUTH_SECRET: "local-auth",
+      LOCAL_INSTANCE_NONCE: "nonce",
+      HARNESS_GIT_BRANCH: "codex/test",
+      HARNESS_EXECUTION_MODE: "deterministic-success",
+      HARNESS_DEVELOPMENT_IDENTITY: "seeded",
+      RUNS_PER_SUBMISSION: "1",
+    });
     expect(Object.values(child).join(" ")).not.toMatch(/sentinel/);
     expect(child.BLOB_READ_WRITE_TOKEN).toBe("");
     expect(child.AI_GATEWAY_API_KEY).toBe("");
     expect(child.HARMLESS_SENTINEL).toBe("");
     expect(child.VERCEL).toBeUndefined();
     expect(child.RANDOM_PARENT_SECRET).toBeUndefined();
+  });
+
+  it("fails deterministic init closed on main and on an unknown scenario", async () => {
+    const root = await temp();
+    const config = { AUTH_SECRET: "local-auth", LOCAL_STORAGE_DIR: join(root, "data"), HARNESS_GIT_BRANCH: "main" };
+    await expect(init.safeChildEnv(root, {}, config)).rejects.toThrow(/main/);
+    await expect(init.safeChildEnv(root, { HARNESS_DETERMINISTIC_SCENARIO: "surprise" }, {
+      ...config, HARNESS_GIT_BRANCH: "dev",
+    })).rejects.toThrow(/unknown deterministic scenario/);
   });
 
   it("enforces Next 16.2.11's complete Node >=20.9.0 semver floor and probes the selected port", async () => {

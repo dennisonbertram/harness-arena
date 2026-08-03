@@ -1,9 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateRunSandbox = vi.fn().mockResolvedValue({ sandbox_id: "sbx-1" });
+const mockExecuteDeterministicRun = vi.fn().mockResolvedValue({ sandbox_id: "local-run-1" });
 vi.mock("./sandbox", () => ({
   createRunSandbox: (...args: unknown[]) => mockCreateRunSandbox(...args),
 }));
+vi.mock("./deterministic-execution", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./deterministic-execution")>();
+  return { ...actual, executeDeterministicRun: (...args: unknown[]) => mockExecuteDeterministicRun(...args) };
+});
 
 import { startRun } from "./run-trigger";
 import type { Run } from "./types";
@@ -19,6 +24,12 @@ function makeRun(): Run {
 }
 
 describe("startRun", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    mockCreateRunSandbox.mockReset().mockResolvedValue({ sandbox_id: "sbx-1" });
+    mockExecuteDeterministicRun.mockReset().mockResolvedValue({ sandbox_id: "local-run-1" });
+  });
+
   it("delegates to createRunSandbox with the run and the submitted prompt", async () => {
     const run = makeRun();
 
@@ -31,5 +42,20 @@ describe("startRun", () => {
     mockCreateRunSandbox.mockRejectedValueOnce(new Error("sandbox down"));
 
     await expect(startRun(makeRun(), "be careful")).rejects.toThrow("sandbox down");
+  });
+
+  it("does not take the hard-coded Vercel Sandbox path in explicit deterministic local mode", async () => {
+    vi.stubEnv("HARNESS_EXECUTION_MODE", "deterministic-success");
+    vi.stubEnv("HARNESS_LOCAL_INIT", "1");
+    vi.stubEnv("HARNESS_GIT_BRANCH", "codex/deterministic-local-sandbox");
+    vi.stubEnv("STORAGE", "file");
+
+    await startRun(makeRun(), "be careful");
+
+    expect(mockCreateRunSandbox).not.toHaveBeenCalled();
+    expect(mockExecuteDeterministicRun).toHaveBeenCalledWith(makeRun(), {
+      prompt: "be careful",
+      scenario: "success",
+    });
   });
 });
