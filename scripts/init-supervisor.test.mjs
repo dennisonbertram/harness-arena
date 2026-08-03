@@ -387,6 +387,51 @@ describe("authenticated prerequisite supervisor", () => {
     }
   });
 
+  it("reaps a stubborn orphan when the supervisor dies after emitting the held final commit ACK", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-supervisor-dies-after-final-ack.json");
+    const descendantScript = [
+      "const { writeFileSync } = require('node:fs');",
+      "process.on('SIGTERM', () => {});",
+      "writeFileSync(process.argv[1], JSON.stringify({ descendant: process.pid }));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      `const descendantScript = ${JSON.stringify(descendantScript)};`,
+      "spawn(process.execPath, ['-e', descendantScript, process.argv[1]], { stdio: 'ignore' }).unref();",
+    ].join("\n");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", script, marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const anchorPid = processGroupId(tree.descendant);
+    const observed = deferred();
+    const emit = owned.child.emit;
+    owned.child.emit = function holdFinalCommitAck(event, ...args) {
+      if (event === "message" && args[0]?.type === "detach-committed") {
+        observed.resolve();
+        return false;
+      }
+      return emit.call(this, event, ...args);
+    };
+    try {
+      await expect(owned.outcome).resolves.toMatchObject({ code: 0, signal: null });
+      expect(processAlive(tree.descendant)).toBe(true);
+      process.kill(tree.descendant, "SIGTERM");
+      await delay(100);
+      expect(processAlive(tree.descendant)).toBe(true);
+      const detaching = init.detachOwnedSupervisor(owned);
+      await Promise.race([observed.promise, delay(1_000).then(() => { throw new Error("final commit acknowledgement was not emitted"); })]);
+      owned.child.kill("SIGKILL");
+      await waitForExit(owned.child);
+      await expect(detaching).resolves.toBe(false);
+      await waitForGone([anchorPid]);
+      await waitForGone([tree.descendant], 5_500);
+    } finally {
+      owned.child.emit = emit;
+      await forceCleanup(owned, [tree.descendant]);
+    }
+  });
+
   it("chains repeated cleanup after final commit ACK when cancellation wins before disconnect", async () => {
     const root = await temp();
     const marker = join(root, "detach-after-ack.json");
