@@ -48,7 +48,7 @@ jobs:
         id: incidents
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh issue list --state all --label agent-monitor --limit 100 --json number,state,body > incidents.json
+        run: gh issue list --state all --search "[agent-monitor] in:title" --limit 100 --json number,state,body > incidents.json
       - name: Build sanitized incident plans
         run: |
           node scripts/ops/passive-monitor.mjs --environment development --status development-status.json --incidents incidents.json --output development-plan.json || true
