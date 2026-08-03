@@ -34,8 +34,13 @@ and search only with an approved Vercel access path.
 
 `instrumentation.ts` disables `@vercel/otel`'s automatic exporters so every
 retained span crosses the safe-clone boundary. A flushable queue retains only
-root/server/error spans, caps the pending queue at 32 spans and batches at 16;
-automatic child spans therefore cannot synchronously flood runtime logs.
+root/server/error spans, caps the pending queue at 32 spans and batches at 16.
+Roots have higher admission priority than retained server/error children, so a
+root that ends last evicts one lower-priority, non-exporting child from a full
+queue. The in-flight export prefix is never mutated. If every eligible entry is
+equal or higher priority, the arriving span can still be dropped; the queue
+never exceeds 32 and every rejection or eviction increments drop accounting.
+Automatic child spans therefore cannot synchronously flood runtime logs.
 `trace.span_dropped` is rate-limited and the safe `structuredSpanReadiness()`
 surface exposes aggregate and sink-specific (`structured` and `otlp`) queued/
 dropped counts and an unready reason without collector headers or their values.
@@ -51,6 +56,13 @@ redacted structured runtime logs and the collector's own receipt/metrics across
 the deployment being investigated. A successful structured log sink cannot
 clear an invalid or failed optional OTLP sink; OTLP is truthfully degraded while
 the structured source-of-truth remains available.
+
+Configuration/export degradation and recovery transitions also emit sanitized
+`trace.sink_state` runtime-log events. They contain only `sink`, `state`, a safe
+enumerated `reason` when degraded, and numeric `queued`/`dropped` counts. Queue
+count changes do not emit events, and an unchanged state/reason is deduplicated.
+These events are process-local hosted clues to correlate across deployment logs,
+not proof that another lambda or the whole deployment is healthy.
 
 OTLP is enabled only for an explicit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_ENDPOINT`, or Vercel's discovered HTTP/protobuf collector.

@@ -161,9 +161,8 @@ describe("onRequestError", () => {
     const rootSpanId = root.spanContext().spanId;
     const droppedBefore = structuredSpanReadiness().structured.dropped;
 
-    context.with(trace.setSpan(context.active(), root), () => {
-      for (let index = 0; index < 32; index += 1) tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }).end();
-    });
+    const rootContext = trace.setSpan(context.active(), root);
+    for (let index = 0; index < 32; index += 1) tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
     root.end();
     await provider.forceFlush();
 
@@ -306,6 +305,9 @@ describe("onRequestError", () => {
   });
 
   it("emits an invalid OTLP configuration transition once without endpoint or header values", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "");
+    expect(createSafeSpanProcessors()).toHaveLength(2);
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces?secret=endpoint-value");
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=Bearer%ZZheader-value");
