@@ -25,6 +25,14 @@ describe("log", () => {
     spy.mockRestore();
   });
 
+  it("acknowledges successful emission and reports console failure", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(log("info", "trace.span", { retained: true })).toBe(true);
+    spy.mockImplementation(() => { throw new Error("stdout unavailable"); });
+    expect(log("error", "trace.span", { retained: false })).toBe(false);
+    spy.mockRestore();
+  });
+
   it("retains monitor target identity separately from the runtime envelope", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubEnv("VERCEL_ENV", "production");
