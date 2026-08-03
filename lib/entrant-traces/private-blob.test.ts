@@ -123,4 +123,33 @@ describe("private entrant artifact blob boundary", () => {
     }));
     await expect(api.prepareUpload({ object_key: KEY, compression: "gzip", compressed_bytes: 128, state: "verified" })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
   });
+
+  it("fails closed when private Blob signing, reads, streams, or writes fail", async () => {
+    const blob = service();
+    const api = createPrivateArtifactBlob(blob, { privateWriteToken: "write", privateReadToken: "read", now: () => 0 });
+
+    blob.issueSignedToken.mockRejectedValueOnce(new Error("signer unavailable"));
+    await expect(api.prepareUpload({ object_key: KEY, compression: "gzip", compressed_bytes: 128, state: "pending_upload" }))
+      .resolves.toEqual({ ok: false, error: { code: "storage_error" } });
+
+    blob.get.mockRejectedValueOnce(new Error("private read unavailable"));
+    await expect(api.readVerified({ object_key: KEY, sha256: SHA, max_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "storage_error" } });
+
+    blob.get.mockResolvedValueOnce({
+      statusCode: 200,
+      stream: {
+        getReader: () => ({
+          read: vi.fn().mockRejectedValue(new Error("stream interrupted")),
+          releaseLock: vi.fn(),
+        }),
+      },
+    });
+    await expect(api.readVerified({ object_key: KEY, sha256: SHA, max_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "storage_error" } });
+
+    blob.put.mockRejectedValueOnce(new Error("private write unavailable"));
+    await expect(api.serverPut({ object_key: KEY, bytes: Buffer.from("gzip"), compression: "gzip", max_bytes: 128, state: "pending_upload" }))
+      .resolves.toEqual({ ok: false, error: { code: "storage_error" } });
+  });
 });

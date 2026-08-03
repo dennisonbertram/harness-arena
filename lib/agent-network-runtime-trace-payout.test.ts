@@ -219,4 +219,114 @@ describe("agent network runtime trace and payout orchestration", () => {
     expect(profile).toEqual({ ok: true, profile: null });
     expect(privateBlob.readVerified).not.toHaveBeenCalled();
   });
+
+  it("fails closed for unavailable payout and trace seams, and does not persist a trace when the private upload capability is denied", async () => {
+    const actor = ALICE;
+    const baseServices = {
+      repositories: {
+        entrants: { upsert: vi.fn() },
+        sessions: { create: vi.fn(), isAuthenticated: vi.fn(), touch: vi.fn() },
+        memberships: { set: vi.fn() },
+      },
+      chat: { list: vi.fn(), post: vi.fn() },
+    };
+    const noSeams = (createAgentNetworkRuntime as any)({
+      services: baseServices,
+      storage: { getCompetition: vi.fn() },
+      tokenConfiguration: { issuer: "harness-arena", audience: "harness-arena-mcp", keyId: "key-1" },
+    });
+    await expect(noSeams.prepareExternalPayoutAddress({ actor, address: "0x000000000000000000000000000000000000dEaD" }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+    await expect(noSeams.verifyExternalPayoutAddress({ actor, challenge_id: "challenge-1", signature: "0xsigned", consent_version: "payout-address.v1", idempotency_key: "verify-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+    await expect(noSeams.getPayoutProfile({ actor })).resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+    await expect(noSeams.getSubmissionTraceStatus({ actor, submission_id: "submission-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+
+    const denied = fixture();
+    (denied.privateBlob.prepareUpload as any).mockResolvedValueOnce({ ok: false, error: { code: "forbidden" } });
+    await expect(denied.runtime.prepareSubmissionTrace({ actor, submission_id: "submission-1", manifest, idempotency_key: "denied-upload" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    expect(denied.traces.prepare).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps every trace preparation failure without exposing storage internals", async () => {
+    const malformed = fixture();
+    await expect(malformed.runtime.prepareSubmissionTrace({
+      actor: ALICE,
+      submission_id: "submission-1",
+      manifest: { ...manifest, artifacts: [] },
+      idempotency_key: "malformed",
+    })).resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    const unavailable = fixture();
+    (unavailable.traces.prepare as any).mockResolvedValueOnce({ ok: false, error: { code: "database_unavailable" } });
+    await expect(unavailable.runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "db-down" }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+
+    const conflict = fixture();
+    (conflict.traces.prepare as any).mockResolvedValueOnce({ ok: false, error: { code: "checksum_mismatch" } });
+    await expect(conflict.runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "checksum" }))
+      .resolves.toEqual({ ok: false, error: { code: "conflict" } });
+
+    const noBlob = fixture();
+    const noBlobRuntime = (createAgentNetworkRuntime as any)({
+      services: {
+        repositories: {
+          entrants: { upsert: vi.fn() },
+          sessions: { create: vi.fn(), isAuthenticated: vi.fn(), touch: vi.fn() },
+          memberships: { set: vi.fn() },
+        },
+        chat: { list: vi.fn(), post: vi.fn() },
+        traces: noBlob.traces,
+      },
+      storage: noBlob.storage,
+      tokenConfiguration: { issuer: "harness-arena", audience: "harness-arena-mcp", keyId: "key-1" },
+    });
+    await expect(noBlobRuntime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "no-blob" }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+    expect(noBlob.traces.prepare).not.toHaveBeenCalled();
+  });
+
+  it("fails closed at every finalize boundary and replays an already verified artifact safely", async () => {
+    const subject = fixture();
+    await subject.runtime.prepareSubmissionTrace({ actor: ALICE, submission_id: "submission-1", manifest, idempotency_key: "finalize-edges" });
+
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: sha256(Buffer.from("wrong")) }))
+      .resolves.toEqual({ ok: false, error: { code: "conflict" } });
+
+    const artifact = subject.records.values().next().value;
+    artifact.state = "rejected";
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: artifact.sha256 }))
+      .resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+
+    artifact.state = "pending_upload";
+    subject.privateBlob.readVerified.mockResolvedValueOnce({ ok: false, error: { code: "checksum_mismatch" } } as any);
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: artifact.sha256 }))
+      .resolves.toEqual({ ok: false, error: { code: "conflict" } });
+
+    subject.traces.recordUpload.mockResolvedValueOnce({ ok: false, error: { code: "invalid_state" } } as any);
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: artifact.sha256 }))
+      .resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+
+    artifact.state = "uploaded";
+    subject.traces.finalize.mockResolvedValueOnce({ ok: false, error: { code: "database_unavailable" } } as any);
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: artifact.sha256 }))
+      .resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+    expect(subject.traces.recordUpload).toHaveBeenCalledTimes(1);
+
+    artifact.state = "verified";
+    await expect(subject.runtime.finalizeSubmissionTrace({ actor: ALICE, artifact_id: "artifact-execution", sha256: artifact.sha256 }))
+      .resolves.toMatchObject({ ok: true, artifact: { id: "artifact-execution", state: "verified" } });
+  });
+
+  it("contains trace-status repository errors and normalizes malformed successful payloads", async () => {
+    const subject = fixture();
+    subject.traces.listForOwner.mockResolvedValueOnce({ ok: false, error: { code: "forbidden" } } as any);
+    await expect(subject.runtime.getSubmissionTraceStatus({ actor: ALICE, submission_id: "submission-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    subject.traces.listForOwner.mockResolvedValueOnce({ ok: true, traces: null } as any);
+    await expect(subject.runtime.getSubmissionTraceStatus({ actor: ALICE, submission_id: "submission-1" }))
+      .resolves.toEqual({ ok: true, traces: [] });
+  });
 });

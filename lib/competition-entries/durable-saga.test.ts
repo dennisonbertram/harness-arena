@@ -107,7 +107,10 @@ function fixture(failAt?: Phase) {
       events.set(run_id, [{ type: "run.created", payload: { submission_id } }]);
     }),
   };
-  const judge = vi.fn(async () => { externalEffects.push("judge-charge"); return { verdict: "approved" as const, reason: "safe" }; });
+  const judge = vi.fn(async (): Promise<{ verdict: "approved" | "rejected"; reason: string }> => {
+    externalEffects.push("judge-charge");
+    return { verdict: "approved", reason: "safe" };
+  });
   const memberships = { activate: vi.fn(async () => ({ state: "active" as const })) };
   const saga = durableFactory()({ ledger, memberships, storage, judge, getCompetition: async () => ({ id: "comp-live", status: "live", model: "zai/glm-5.2" }) });
   return { saga, ledger, memberships, storage, judge, submissions, runs, events, phases, externalEffects, reservation, expireLease: () => { enforceLeaseExpiry = true; leaseExpired = true; }, completed: () => completed, setReplay: (value: unknown) => { replay = value; } };
@@ -175,6 +178,34 @@ describe("durable submit_entry prompt.v1 saga contract", () => {
       submission_id: f.reservation.submission_id,
     });
     expect(f.storage.appendRunEvents).not.toHaveBeenCalled();
+  });
+
+  it("fences a worker that loses its lease before any judge or Blob effect and still releases its stale claim", async () => {
+    const f = fixture();
+    f.ledger.renew.mockResolvedValueOnce(false);
+
+    await expect(f.saga.submit({ actor, request })).rejects.toMatchObject({ code: "ENTRY_SAGA_BUSY" });
+    expect(f.judge).not.toHaveBeenCalled();
+    expect(f.storage.putSubmission).not.toHaveBeenCalled();
+    expect(f.ledger.release).toHaveBeenCalledWith({ operation_id: f.reservation.operation_id, lease_token: "lease-op-001" });
+  });
+
+  it("persists and completes a rejected verdict without creating a run or run-created event", async () => {
+    const f = fixture();
+    f.judge.mockResolvedValueOnce({ verdict: "rejected", reason: "unsafe prompt" });
+
+    await expect(f.saga.submit({ actor, request })).resolves.toEqual({
+      replayed: false,
+      response: { submission_id: f.reservation.submission_id, status: "rejected" },
+    });
+    expect(f.submissions.get(f.reservation.submission_id)).toMatchObject({ status: "rejected", judge_verdict: "rejected" });
+    expect(f.storage.putRun).not.toHaveBeenCalled();
+    expect(f.storage.ensureRunCreatedEvent).not.toHaveBeenCalled();
+    expect(f.ledger.complete).toHaveBeenCalledWith({
+      operation_id: f.reservation.operation_id,
+      lease_token: "lease-op-001",
+      response: { submission_id: f.reservation.submission_id, status: "rejected" },
+    });
   });
 
   it("defers membership creation to the lifecycle-gated ledger completion transaction", async () => {

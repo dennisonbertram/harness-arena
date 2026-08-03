@@ -44,6 +44,9 @@ const headers = { authorization: "Bearer scoped-session", "content-type": "appli
 const post = (path: string, body: unknown, extraHeaders: HeadersInit = {}) => new NextRequest(`http://localhost${path}`, {
   method: "POST", headers: { ...headers, ...extraHeaders }, body: JSON.stringify(body),
 });
+const rawPost = (path: string, body: BodyInit | null, extraHeaders: HeadersInit = {}) => new NextRequest(`http://localhost${path}`, {
+  method: "POST", headers: { ...headers, ...extraHeaders }, body,
+});
 const get = () => new NextRequest("http://localhost/api/agent/payout-profile", { headers: { authorization: "Bearer scoped-session" } });
 
 describe("external Ethereum payout-profile HTTP contracts", () => {
@@ -83,6 +86,27 @@ describe("external Ethereum payout-profile HTTP contracts", () => {
     });
     expect(profile).toEqual(expect.objectContaining({ provider: "external", chain_id: 1, verification_method: "eip191" }));
     expect(JSON.stringify(profile)).not.toMatch(/private.?key|database|entrant_id/i);
+  });
+
+  it("whitelists verify-profile output and rejects raw-body and field-level proof malformations", async () => {
+    runtime.verifyExternalPayoutAddress.mockResolvedValueOnce({ ok: true, profile: { ...profile, entrant_id: actor.id, signature: "internal" } });
+    const safeResponse = await verify(post("/api/agent/payout-profile/verify", {
+      challenge_id: challenge.id, signature, consent_version: "payout-address.v1", idempotency_key: "safe-output",
+    }));
+    await expect(safeResponse.json()).resolves.toEqual({ profile });
+
+    for (const body of [null, [], { challenge_id: challenge.id, signature: "0xbad", consent_version: "payout-address.v1", idempotency_key: "bad-signature" },
+      { challenge_id: challenge.id, signature, consent_version: "x".repeat(129), idempotency_key: "long-consent" },
+      { challenge_id: challenge.id, signature, consent_version: "payout-address.v1", idempotency_key: "x".repeat(257) }]) {
+      const response = await verify(post("/api/agent/payout-profile/verify", body));
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: { code: "invalid_body" } });
+    }
+    const missing = await verify(rawPost("/api/agent/payout-profile/verify", null));
+    expect(missing.status).toBe(400);
+    const malformed = await verify(rawPost("/api/agent/payout-profile/verify", "{"));
+    expect(malformed.status).toBe(400);
+    expect(runtime.verifyExternalPayoutAddress).toHaveBeenCalledTimes(1);
   });
 
   it("reads only the signed caller's payout profile with the payouts read scope", async () => {
@@ -134,6 +158,43 @@ describe("external Ethereum payout-profile HTTP contracts", () => {
     spy.mockRestore();
   });
 
+  it.each([
+    ["challenge", "content-length", "01"], ["challenge", "content-length", "not-a-number"],
+    ["challenge", "content-length", "9007199254740992"], ["verify", "content-length", "1.5"],
+  ] as const)("rejects malformed %s request lengths before reading or invoking a capability", async (endpoint, header, value) => {
+    const handler = endpoint === "challenge" ? prepare : verify;
+    const path = endpoint === "challenge" ? "/api/agent/payout-profile/challenge" : "/api/agent/payout-profile/verify";
+    const response = await handler(rawPost(path, "{", { [header]: value }));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: { code: "invalid_body" } });
+    expect(runtime.prepareExternalPayoutAddress).not.toHaveBeenCalled();
+    expect(runtime.verifyExternalPayoutAddress).not.toHaveBeenCalled();
+  });
+
+  it("rejects absent or malformed challenge JSON and sanitizes challenge runtime failures", async () => {
+    const missing = await prepare(rawPost("/api/agent/payout-profile/challenge", null));
+    expect(missing.status).toBe(400);
+    const malformed = await prepare(rawPost("/api/agent/payout-profile/challenge", "{"));
+    expect(malformed.status).toBe(400);
+    expect(runtime.prepareExternalPayoutAddress).not.toHaveBeenCalled();
+
+    const privateDetail = "postgres://private-payout-address";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    runtime.prepareExternalPayoutAddress.mockRejectedValueOnce(new Error(privateDetail));
+    const unavailable = await prepare(post("/api/agent/payout-profile/challenge", { address }));
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: { code: "payout_profile_unavailable" } });
+    expect(spy.mock.calls.flat().join(" ")).not.toContain(privateDetail);
+    spy.mockRestore();
+  });
+
+  it("returns only whitelisted challenge fields when a runtime object contains internal state", async () => {
+    runtime.prepareExternalPayoutAddress.mockResolvedValueOnce({ ok: true, challenge: { ...challenge, nonce_hash: "internal", entrant_id: actor.id } });
+    const response = await prepare(post("/api/agent/payout-profile/challenge", { address }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ challenge });
+  });
+
   it("maps stable authentication, replay, conflict, recent-auth, rate, and unavailable errors", async () => {
     runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: "unauthenticated" } });
     expect((await prepare(post("/api/agent/payout-profile/challenge", { address }))).status).toBe(401);
@@ -149,5 +210,34 @@ describe("external Ethereum payout-profile HTTP contracts", () => {
       expect(response.status).toBe(status);
       await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
     }
+  });
+
+  it.each([
+    ["challenge", "unauthenticated", 401], ["challenge", "forbidden", 403], ["challenge", "session_unavailable", 503],
+    ["verify", "unauthenticated", 401], ["verify", "forbidden", 403], ["verify", "session_unavailable", 503],
+    ["profile", "unauthenticated", 401], ["profile", "forbidden", 403], ["profile", "session_unavailable", 503],
+  ] as const)("fails closed when %s authentication is %s", async (endpoint, reason, status) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: reason } });
+    const response = endpoint === "challenge"
+      ? await prepare(post("/api/agent/payout-profile/challenge", { address }))
+      : endpoint === "verify"
+        ? await verify(post("/api/agent/payout-profile/verify", { challenge_id: challenge.id, signature, consent_version: "payout-address.v1", idempotency_key: "auth-failure" }))
+        : await GET(get());
+
+    expect(response.status).toBe(status);
+    expect(runtime.prepareExternalPayoutAddress).not.toHaveBeenCalled();
+    expect(runtime.verifyExternalPayoutAddress).not.toHaveBeenCalled();
+    expect(runtime.getPayoutProfile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["recent_authentication_required", 403, "recent_authentication_required"],
+    ["rate_limited", 429, "rate_limited"],
+    ["unavailable", 503, "payout_profile_unavailable"],
+  ])("maps challenge service %s without exposing details", async (serviceCode, status, publicCode) => {
+    runtime.prepareExternalPayoutAddress.mockResolvedValueOnce({ ok: false, error: { code: serviceCode } });
+    const response = await prepare(post("/api/agent/payout-profile/challenge", { address }));
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
   });
 });

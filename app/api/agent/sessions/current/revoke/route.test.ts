@@ -53,4 +53,36 @@ describe("POST /api/agent/sessions/current/revoke", () => {
     await expect(response.json()).resolves.toEqual({ error: { code } });
     expect(runtime.revokeCurrentAgentSession).not.toHaveBeenCalled();
   });
+
+  it("maps malformed JSON and a revocation backend failure to stable errors", async () => {
+    const malformed = await POST(new NextRequest("http://localhost/api/agent/sessions/current/revoke", {
+      method: "POST", headers: { authorization: "Bearer scoped-session", "content-type": "application/json" }, body: "{",
+    }));
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ error: { code: "invalid_body" } });
+
+    runtime.revokeCurrentAgentSession.mockRejectedValueOnce(new Error("database unavailable"));
+    const unavailable = await POST(post());
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: { code: "sessions_unavailable" } });
+  });
+
+  it("bounds malformed, absent, and streamed bodies before revoking the current session", async () => {
+    const request = (headers: Record<string, string>, body?: string) => new NextRequest("http://localhost/api/agent/sessions/current/revoke", {
+      method: "POST",
+      headers: { authorization: "Bearer scoped-session", "content-type": "application/json", ...headers },
+      ...(body === undefined ? {} : { body }),
+    });
+    for (const [candidate, status, code] of [
+      [request({ "content-length": "01" }, "{}"), 400, "invalid_body"],
+      [request({ "content-length": "999999999999999999999999999999" }, "{}"), 400, "invalid_body"],
+      [request({}), 400, "invalid_body"],
+      [request({}, "x".repeat(1_048_577)), 413, "body_too_large"],
+    ] as const) {
+      const response = await POST(candidate);
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toEqual({ error: { code } });
+    }
+    expect(runtime.revokeCurrentAgentSession).not.toHaveBeenCalled();
+  });
 });

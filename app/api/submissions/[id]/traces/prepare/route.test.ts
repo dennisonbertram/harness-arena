@@ -93,4 +93,24 @@ describe("POST /api/submissions/[id]/traces/prepare", () => {
     expect(log.mock.calls.flat().join(" ")).not.toContain("NEVER-LOG-");
     log.mockRestore();
   });
+
+  it.each([
+    ["unauthenticated", 401, "unauthenticated"],
+    ["session_unavailable", 503, "session_unavailable"],
+    ["insufficient_scope", 403, "insufficient_scope"],
+  ])("fails closed before parsing or preparing when authentication is %s", async (code, status, publicCode) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code } });
+    const response = await POST(post({ manifest, idempotency_key: "prepare-auth" }), context());
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
+    expect(runtime.prepareSubmissionTrace).not.toHaveBeenCalled();
+  });
+
+  it("contains runtime failures and invalid route identifiers", async () => {
+    runtime.prepareSubmissionTrace.mockRejectedValueOnce(new Error("database unavailable"));
+    await expect(POST(post({ manifest, idempotency_key: "prepare-failure" }), context()))
+      .resolves.toMatchObject({ status: 503 });
+    await expect(POST(post({ manifest, idempotency_key: "prepare-empty" }), context("")))
+      .resolves.toMatchObject({ status: 400 });
+  });
 });

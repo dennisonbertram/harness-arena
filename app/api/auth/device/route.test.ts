@@ -121,4 +121,56 @@ describe("GitHub device flow", () => {
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({ error: "GitHub Device Flow is not configured: set AUTH_GITHUB_ID on the server" });
   });
+
+  it.each([
+    [jsonResponse({ error: "unsupported_client" }, 400), 503, "GitHub Device Flow is not enabled for this OAuth app. Enable Device Flow in the GitHub OAuth App settings."],
+    [jsonResponse({ device_code: "device", user_code: "USER", verification_uri: "https://github.com/login/device", expires_in: "900", interval: 5 }), 502, "GitHub returned an invalid Device Flow response"],
+  ])("fails closed for invalid device-start provider responses", async (upstream, status, error) => {
+    fetchMock.mockResolvedValueOnce(upstream);
+    const response = await start(new NextRequest("http://localhost/api/auth/device/start", { method: "POST", headers: { "x-forwarded-for": `10.0.4.${status}` } }));
+
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error });
+  });
+
+  it("contains malformed provider JSON and rate-limits repeated device starts", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }));
+    const malformed = await start(new NextRequest("http://localhost/api/auth/device/start", { method: "POST", headers: { "x-forwarded-for": "10.0.6.1" } }));
+    expect(malformed.status).toBe(503);
+    await expect(malformed.json()).resolves.toEqual({
+      error: "GitHub Device Flow is not enabled for this OAuth app. Enable Device Flow in the GitHub OAuth App settings.",
+    });
+
+    fetchMock.mockImplementation(async () => jsonResponse({
+      device_code: "device",
+      user_code: "USER-CODE",
+      verification_uri: "https://github.com/login/device",
+      expires_in: 900,
+      interval: 5,
+    }));
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await start(new NextRequest("http://localhost/api/auth/device/start", { method: "POST", headers: { "x-forwarded-for": "10.0.6.2" } }));
+      expect(response.status).toBe(200);
+    }
+    const limited = await start(new NextRequest("http://localhost/api/auth/device/start", { method: "POST", headers: { "x-forwarded-for": "10.0.6.2" } }));
+    expect(limited.status).toBe(429);
+    await expect(limited.json()).resolves.toEqual({ error: "rate limit exceeded" });
+  });
+
+  it("rejects malformed polling input and unverified GitHub users before minting a session", async () => {
+    const malformed = await poll(new NextRequest("http://localhost/api/auth/device/poll", {
+      method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.5.1" }, body: "{",
+    }));
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ error: "invalid device_code" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ access_token: "github-token" }))
+      .mockResolvedValueOnce(jsonResponse({ message: "bad credentials" }, 401));
+    const unverified = await poll(pollRequest("unverified-user", "10.0.5.2"));
+    expect(unverified.status).toBe(502);
+    await expect(unverified.json()).resolves.toEqual({ error: "GitHub could not verify the authorized user" });
+    expect(issueScopedAgentSessionMock).not.toHaveBeenCalled();
+  });
 });

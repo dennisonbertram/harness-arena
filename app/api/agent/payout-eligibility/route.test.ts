@@ -51,4 +51,24 @@ describe("GET /api/agent/payout-eligibility", () => {
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({ error: { code: "snapshot_unavailable" } });
   });
+
+  it.each([
+    ["unauthenticated", 401, "unauthenticated"], ["forbidden", 403, "insufficient_scope"], ["session_unavailable", 503, "session_unavailable"],
+  ])("fails closed when session authentication is %s", async (code, status, publicCode) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code } });
+    const response = await GET(request());
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
+    expect(runtime.getOwnPayoutEligibility).not.toHaveBeenCalled();
+  });
+
+  it("maps runtime failures and overlong identifiers to safe, bounded errors", async () => {
+    runtime.getOwnPayoutEligibility.mockRejectedValueOnce(new Error("database details"));
+    const unavailable = await GET(request());
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: { code: "snapshot_unavailable" } });
+    const tooLong = await GET(request(`competition_id=${"c".repeat(257)}&submission_id=submission-1`));
+    expect(tooLong.status).toBe(400);
+    expect(runtime.getOwnPayoutEligibility).toHaveBeenCalledTimes(1);
+  });
 });

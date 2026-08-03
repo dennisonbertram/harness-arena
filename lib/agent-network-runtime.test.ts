@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSessionTokenError } from "./agent-token";
 import { createAgentNetworkRuntime } from "./agent-network-runtime";
 
 const NOW = new Date("2026-08-02T12:00:00.000Z");
@@ -94,6 +95,16 @@ describe("agent network runtime facade", () => {
     tokens.verify.mockRejectedValueOnce(new Error("postgres://user:secret@host/db"));
     const unavailable = await runtime.authenticateAgentSession(new NextRequest("http://localhost", { headers: { authorization: "Bearer token" } }), { requiredScopes: ["chat:read"] });
     expect(unavailable).toEqual({ ok: false, error: { code: "session_unavailable" } });
+
+    tokens.verify.mockRejectedValueOnce(Object.assign(new Error("repository down"), { code: "session_unavailable" }));
+    await expect(runtime.authenticateAgentSession(new NextRequest("http://localhost", { headers: { authorization: "Bearer token" } }), { requiredScopes: [] }))
+      .resolves.toEqual({ ok: false, error: { code: "session_unavailable" } });
+    tokens.verify.mockRejectedValueOnce(new AgentSessionTokenError("expired"));
+    await expect(runtime.authenticateAgentSession(new NextRequest("http://localhost", { headers: { authorization: "Bearer token" } }), { requiredScopes: [] }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    tokens.verify.mockRejectedValueOnce("non-error verifier failure");
+    await expect(runtime.authenticateAgentSession(new NextRequest("http://localhost", { headers: { authorization: "Bearer token" } }), { requiredScopes: [] }))
+      .resolves.toEqual({ ok: false, error: { code: "session_unavailable" } });
   });
 
   it("projects only the internal actor needed by services and derives recent authentication from the signed session", async () => {
@@ -126,5 +137,50 @@ describe("agent network runtime facade", () => {
     expect(chat.list).toHaveBeenCalledWith({ actor: { id: ACTOR.entrantId, github_id: 101, github_login: "alice" }, competition_id: "live-cup", cursor: "cursor", limit: 25 });
     await runtime.postCompetitionMessage({ actor, competition_id: "live-cup", body: "hello", reply_to_id: "parent", idempotency_key: "op-1" });
     expect(chat.post).toHaveBeenCalledWith({ actor: { id: ACTOR.entrantId, github_id: 101, github_login: "alice" }, competition_id: "live-cup", body: "hello", reply_to_id: "parent", operation_id: "op-1" });
+  });
+
+  it("lists and revokes only sessions owned by the signed actor, with stable unavailable and not-found boundaries", async () => {
+    const { runtime, sessions } = fixture();
+    const actor = { id: ACTOR.entrantId, github_id: 101, github_login: "alice", authenticated_at: NOW.toISOString(), session_id: ACTOR.sessionId };
+    (sessions as any).list = vi.fn().mockResolvedValue([
+      { jti: ACTOR.sessionId, authenticatedAt: NOW.toISOString(), expiresAt: EXPIRES_AT, lastUsedAt: null },
+      { jti: "00000000-0000-0000-0000-000000000502", authenticatedAt: NOW.toISOString(), expiresAt: EXPIRES_AT, lastUsedAt: NOW.toISOString() },
+    ]);
+    (sessions as any).revokeForEntrant = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+    await expect(runtime.listAgentSessions({ actor })).resolves.toEqual({
+      sessions: [
+        { session_id: ACTOR.sessionId, authenticated_at: NOW.toISOString(), expires_at: EXPIRES_AT, last_active_at: null, current: true },
+        { session_id: "00000000-0000-0000-0000-000000000502", authenticated_at: NOW.toISOString(), expires_at: EXPIRES_AT, last_active_at: NOW.toISOString(), current: false },
+      ],
+    });
+    await expect(runtime.revokeAgentSession({ actor, session_id: "00000000-0000-0000-0000-000000000502" }))
+      .resolves.toEqual({ ok: true, revoked: true });
+    await expect(runtime.revokeAgentSession({ actor, session_id: "00000000-0000-0000-0000-000000000503" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(runtime.revokeCurrentAgentSession({ actor })).resolves.toEqual({ revoked: true });
+    expect((sessions as any).revokeForEntrant.mock.calls).toEqual([
+      [{ jti: "00000000-0000-0000-0000-000000000502", entrantId: ACTOR.entrantId }],
+      [{ jti: "00000000-0000-0000-0000-000000000503", entrantId: ACTOR.entrantId }],
+      [{ jti: ACTOR.sessionId, entrantId: ACTOR.entrantId }],
+    ]);
+
+    const unavailable = fixture();
+    await expect(unavailable.runtime.listAgentSessions({ actor })).rejects.toThrow("agent session repository is unavailable");
+    await expect(unavailable.runtime.revokeCurrentAgentSession({ actor })).rejects.toThrow("agent session repository is unavailable");
+    await expect(unavailable.runtime.revokeAgentSession({ actor, session_id: "missing" })).rejects.toThrow("agent session repository is unavailable");
+  });
+
+  it("keeps chat join fail-closed when its optional repository is absent or rejects the caller", async () => {
+    const { runtime, chat } = fixture();
+    const actor = { id: ACTOR.entrantId, github_id: 101, github_login: "alice", authenticated_at: NOW.toISOString(), session_id: ACTOR.sessionId };
+
+    chat.join.mockResolvedValueOnce({ ok: false, error: { code: "forbidden" } }).mockResolvedValueOnce({ ok: false, error: { code: "conflict" } });
+    await expect(runtime.joinCompetitionChat({ actor, competition_id: "live-cup" })).resolves.toEqual({ ok: false, error: { code: "forbidden" } });
+    await expect(runtime.joinCompetitionChat({ actor, competition_id: "live-cup" })).resolves.toEqual({ ok: false, error: { code: "unavailable" } });
+
+    const absent = fixture();
+    delete (absent.chat as { join?: unknown }).join;
+    await expect(absent.runtime.joinCompetitionChat({ actor, competition_id: "live-cup" })).resolves.toEqual({ ok: false, error: { code: "unavailable" } });
   });
 });

@@ -70,6 +70,42 @@ describe("agent-network data operation ledger contract", () => {
     ]);
   });
 
+  it("rejects a conflicting concurrent retry before it can run a second mutation", async () => {
+    const data = createInMemoryAgentNetworkData();
+    let releaseMutation!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    const first = data.execute({ ...operation, request }, async () => {
+      await blocked;
+      return { entryId: "entry-created-once" };
+    });
+
+    let conflictingMutationCalls = 0;
+    await expect(data.execute(
+      { ...operation, request: { ...request, visibility: "public" } },
+      async () => { conflictingMutationCalls += 1; return { entryId: "must-not-be-created" }; },
+    )).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST" });
+    expect(conflictingMutationCalls).toBe(0);
+
+    releaseMutation();
+    await expect(first).resolves.toMatchObject({ replayed: false, response: { entryId: "entry-created-once" } });
+  });
+
+  it("removes a failed reservation and its outbox row so a later retry can execute safely", async () => {
+    const data = createInMemoryAgentNetworkData();
+    await expect(data.execute(
+      { ...operation, request },
+      async () => { throw new Error("domain mutation failed"); },
+    )).rejects.toThrow("domain mutation failed");
+
+    const operationId = (await reservedEntityId({ ...operation, request })).replace("entity_", "operation_");
+    await expect(data.outbox.list({ operationId })).resolves.toEqual([]);
+
+    await expect(data.execute(
+      { ...operation, request },
+      async () => ({ entryId: "entry-created-after-retry" }),
+    )).resolves.toMatchObject({ replayed: false, response: { entryId: "entry-created-after-retry" } });
+  });
+
   it("returns detached, deeply immutable responses on the first execution and every replay", async () => {
     const data = createInMemoryAgentNetworkData();
     const source = { entry: { id: "entry-1", tags: ["accepted"] } };

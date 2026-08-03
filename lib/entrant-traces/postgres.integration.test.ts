@@ -173,6 +173,33 @@ describe("0003 durable submission artifact metadata", () => {
     expect(transactionCount).toBe(1);
   });
 
+  it("recovers a committed prepare when the caller loses the transaction result", async () => {
+    // A network failure can arrive after PostgreSQL has committed.  The retry
+    // must return the durable idempotency response rather than create another
+    // private object key or report a false failure.
+    let loseFirstResult = true;
+    const uncertainDb = {
+      query: db.query.bind(db),
+      transaction: async <Result>(work: (tx: typeof db) => Promise<Result>): Promise<Result> => {
+        const committed = await db.transaction((tx) => work(tx as unknown as typeof db));
+        if (loseFirstResult) {
+          loseFirstResult = false;
+          throw new Error("connection lost after commit");
+        }
+        return committed;
+      },
+    };
+    const repo = createPostgresEntrantTraces(uncertainDb as never, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+
+    const result = await repo.prepare({ actor: ALICE, operation_id: "prepare-lost-result", artifact: execution });
+    expect(result).toMatchObject({ ok: true, artifact: { state: "pending_upload" } });
+    await expect(db.query("SELECT id FROM submission_artifacts WHERE submission_id = 'sub-a'"))
+      .resolves.toMatchObject({ rows: [expect.anything()] });
+  });
+
   it("records upload, verifies the final checksum, rejects mismatches, and exposes due reconciliation work", async () => {
     const repo = traces();
     const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-finalize", artifact: execution });
@@ -205,6 +232,34 @@ describe("0003 durable submission artifact metadata", () => {
     });
     await expect(repo.recordUpload({ actor: BOB, artifact_id: mismatch.artifact.id, sha256: "b".repeat(64), compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
     await expect(repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("fails closed for missing actors, cross-owner writes, and incomplete policy evidence", async () => {
+    const repo = traces();
+    await expect(repo.prepare({ actor: null, operation_id: "prepare-anonymous", artifact: execution }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(repo.prepare({ actor: BOB, operation_id: "prepare-foreign", artifact: execution }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-ownership", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(repo.recordUpload({ actor: null, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(repo.recordUpload({ actor: BOB, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.finalize({ actor: BOB, artifact_id: prepared.artifact.id, sha256: SHA }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    await repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy: { verified_sha256: "b".repeat(64), scan_revision: "trace-policy.v1" } }))
+      .resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy: { verified_sha256: SHA, scan_revision: "INVALID REVISION" } }))
+      .resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+
+    await expect(repo.settleReconciliation({ artifact_id: "00000000-0000-0000-0000-000000000999", state: "verified", verified_sha256: SHA }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: "b".repeat(64) }))
+      .resolves.toEqual({ ok: false, error: { code: "conflict" } });
   });
 
   it("derives storage keys only from server IDs, never owner-controlled submission text", async () => {
@@ -308,5 +363,22 @@ describe("0003 durable submission artifact metadata", () => {
       expect.objectContaining({ action: "entrant.trace.submission_closed" }),
     ]));
     expect(JSON.stringify(audit.rows)).not.toContain("object_key");
+  });
+
+  it("refuses mismatched close snapshots and treats a durable repeated close as a replay", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "close-mismatch", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await repo.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+
+    await expect(repo.closeSubmission({ submission_id: "missing-submission", artifact_shas: [SHA] }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: ["b".repeat(64)] }))
+      .resolves.toEqual({ ok: false, error: { code: "traces_not_eligible" } });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA, SHA] }))
+      .resolves.toEqual({ ok: true });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] }))
+      .resolves.toEqual({ ok: true, already_closed: true });
   });
 });

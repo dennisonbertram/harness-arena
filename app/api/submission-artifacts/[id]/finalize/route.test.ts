@@ -43,4 +43,26 @@ describe("POST /api/submission-artifacts/[id]/finalize", () => {
     expect(log.mock.calls.flat().join(" ")).not.toContain(sha256);
     log.mockRestore();
   });
+
+  it.each([
+    ["unauthenticated", 401, "unauthenticated"],
+    ["session_unavailable", 503, "session_unavailable"],
+    ["insufficient_scope", 403, "insufficient_scope"],
+  ])("fails closed before finalization when authentication is %s", async (code, status, publicCode) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code } });
+    const response = await POST(post({ sha256 }), context());
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
+    expect(runtime.finalizeSubmissionTrace).not.toHaveBeenCalled();
+  });
+
+  it("contains runtime failures and rejects invalid artifact identifiers", async () => {
+    runtime.finalizeSubmissionTrace.mockRejectedValueOnce(new Error("policy unavailable"));
+    const failed = await POST(post({ sha256 }), context());
+    expect(failed.status).toBe(503);
+    await expect(failed.json()).resolves.toEqual({ error: { code: "trace_unavailable" } });
+
+    const invalid = await POST(post({ sha256 }), context(""));
+    expect(invalid.status).toBe(400);
+  });
 });

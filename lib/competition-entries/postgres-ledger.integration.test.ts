@@ -96,6 +96,18 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
     })).rejects.toMatchObject({ code: "COMPETITION_CLOSED" });
     await expect(db.query("SELECT count(*)::int AS count FROM submission_bindings WHERE submission_id=$1", [reserved.submission_id]))
       .resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM competition_memberships WHERE competition_id=$1 AND entrant_id=$2", [request.competition_id, entrant.entrant_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it.each([
+    { competition_id: "", closed_at: "2026-08-03T00:00:00.000Z" },
+    { competition_id: "competition-1", closed_at: "not-a-date" },
+    { competition_id: "competition-1", closed_at: "2026-08-03T00:00:00Z" },
+  ])("rejects malformed immutable close markers before opening a lifecycle transaction", async (input) => {
+    await expect(ledger().markCompetitionClosed(input)).rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    await expect(db.query("SELECT count(*)::int AS count FROM competition_lifecycle_gates WHERE competition_id=$1", [input.competition_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
   it("is a readiness migration and reserves one short-lived saga transaction with private canonical request state and deterministic UUID entity IDs", async () => {
@@ -127,6 +139,22 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
     expect(one.operation_id).toBe(two.operation_id);
     await expect(db.query("SELECT count(*)::int AS count FROM competition_entry_sagas WHERE idempotency_key = $1", [concurrentRequest.idempotency_key]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
+  });
+
+  it("rejects non-JSON request values and fails closed when a lone idempotency reservation has no saga winner", async () => {
+    const subject = ledger();
+    await expect(subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-non-finite", attempt: Infinity } as any }))
+      .rejects.toThrow("canonical request JSON cannot contain non-finite numbers");
+    await expect(subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-number", attempt: 2 } as any }))
+      .resolves.toMatchObject({ phase: "reserved" });
+
+    await db.query(
+      `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, state)
+       VALUES ('00000000-0000-0000-0000-000000000888', $1, $2, 'competition.entry.submit.v1', 'entry-key-orphan-reservation', repeat('a', 64), 'orphan', 'pending')`,
+      [entrant.entrant_id, request.competition_id],
+    );
+    await expect(subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-orphan-reservation" } }))
+      .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
   });
 
   it("loads the immutable actor and private request only at the private seam, preserves the verdict across monotonic CAS checkpoints, and rejects an ambiguous in-flight judge", async () => {
@@ -206,6 +234,14 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
     await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: first.lease_token, lease_ms: 30_000 })).resolves.toBe(false);
   });
 
+  it("rejects invalid lease durations before they can create or extend a claim", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-invalid-lease" } });
+    await expect(subject.claim({ operation_id: reserved.operation_id, lease_ms: 999 })).rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    const lease = await acquire(subject, reserved.operation_id);
+    await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: lease, lease_ms: 300_001 })).rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+  });
+
   it("completes atomically with submission binding, active membership, audit and outbox records without accepting an external callback", async () => {
     const subject = ledger();
     const reserved = await subject.reserve({ actor: entrant, request });
@@ -228,10 +264,30 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
     await expect(db.query("SELECT count(*)::int AS count FROM domain_outbox WHERE operation_id = $1", [reserved.operation_id]))
       .resolves.toMatchObject({ rows: [{ count: expect.any(Number) }] });
+    await expect(subject.complete({
+      operation_id: reserved.operation_id,
+      lease_token: lease,
+      response: { submission_id: reserved.submission_id, status: "rejected" },
+    })).rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
     await expect(subject.reserve({ actor: entrant, request })).resolves.toMatchObject({
       operation_id: reserved.operation_id,
       replay: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" },
     });
+  });
+
+  it("commits the terminal rejected path without creating a run binding", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-rejected" } });
+    const lease = await acquire(subject, reserved.operation_id);
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "rejected", reason: "unsafe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "verdict_persisted", phase: "submission_written" });
+
+    await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: reserved.submission_id, status: "rejected" } })).resolves.toBeUndefined();
+    await expect(db.query("SELECT state, response_json FROM competition_entry_sagas WHERE operation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ state: "completed", response_json: { submission_id: reserved.submission_id, status: "rejected" } }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM submission_bindings WHERE submission_id=$1", [reserved.submission_id]))
+      .resolves.toMatchObject({ rows: [{ count: 1 }] });
   });
 
   it("refuses final commit after an operator ban and emits no binding, audit, or outbox", async () => {
@@ -290,6 +346,8 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
 
     await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
       .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: "00000000-0000-0000-0000-000000009999", response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
+      .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
     await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: "different", run_id: reserved.run_id, status: "queued" } }))
       .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
     await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
@@ -307,5 +365,28 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
     await expect(db.query("SELECT count(*)::int AS count FROM domain_outbox WHERE operation_id=$1", [reserved.operation_id]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
+  });
+
+  it("rolls back a terminal commit when a hostile pre-existing binding has a different immutable owner", async () => {
+    const subject = ledger();
+    const reserved = await subject.reserve({ actor: entrant, request: { ...request, idempotency_key: "entry-key-binding-collision" } });
+    const lease = await acquire(subject, reserved.operation_id);
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "reserved", phase: "judge_started" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "judge_started", phase: "verdict_persisted", value: { verdict: "approved", reason: "safe" } });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "verdict_persisted", phase: "submission_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "submission_written", phase: "run_written" });
+    await subject.checkpoint({ operation_id: reserved.operation_id, lease_token: lease, expected_phase: "run_written", phase: "run_created_appended" });
+    await db.query(
+      `INSERT INTO submission_bindings (submission_id, competition_id, entrant_id, entry_kind, entry_schema_version)
+       VALUES ($1, 'other-competition', $2, 'prompt', 'submit_entry.v1')`,
+      [reserved.submission_id, entrant.entrant_id],
+    );
+
+    await expect(subject.complete({ operation_id: reserved.operation_id, lease_token: lease, response: { submission_id: reserved.submission_id, run_id: reserved.run_id, status: "queued" } }))
+      .rejects.toMatchObject({ code: "ENTRY_SAGA_PHASE_CONFLICT" });
+    await expect(db.query("SELECT state FROM competition_entry_sagas WHERE operation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ state: "pending" }] });
+    await expect(db.query("SELECT count(*)::int AS count FROM domain_audit_events WHERE correlation_id=$1", [reserved.operation_id]))
+      .resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 });

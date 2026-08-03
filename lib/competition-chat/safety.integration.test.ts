@@ -116,4 +116,45 @@ describe("0009 durable competition-chat safety", () => {
     await ban;
     await expect(post).resolves.toEqual({ ok: false, error: { code: "forbidden" } });
   });
+
+  it("fails closed for invalid quota configuration and unauthenticated moderation", async () => {
+    const invalidQuota = createPostgresCompetitionChat(db, {
+      cursorSecret: "safety-test-cursor-secret",
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-03T12:00:00.000Z"),
+      quotas: { posts: { limit: 0, windowMs: 60_000 } },
+    });
+    await expect(invalidQuota.post({ actor: ALICE, competition_id: "comp-a", body: "blocked", operation_id: "invalid-quota" }))
+      .resolves.toEqual({ ok: false, error: { code: "rate_limited" } });
+
+    const client = chat() as any;
+    await expect(client.ban({ actor: null, competition_id: "comp-a", entrant_id: BOB.id, operation_id: "anonymous-ban" }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(client.tombstone({ actor: null, competition_id: "comp-a", message_id: "missing", operation_id: "anonymous-tombstone" }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+  });
+
+  it("makes moderation idempotent and reports missing or ineligible moderation targets", async () => {
+    const client = chat();
+    await expect(client.ban({ actor: OPERATOR, competition_id: "comp-a", entrant_id: BOB.id, operation_id: "ban-idempotent" }))
+      .resolves.toEqual({ ok: true });
+    await expect(client.ban({ actor: OPERATOR, competition_id: "comp-a", entrant_id: BOB.id, operation_id: "ban-idempotent" }))
+      .resolves.toEqual({ ok: true });
+    await expect(client.ban({ actor: OPERATOR, competition_id: "comp-a", entrant_id: "00000000-0000-0000-0000-000000000999", operation_id: "ban-missing" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    await db.exec(`UPDATE competition_memberships SET state='left' WHERE competition_id='comp-a' AND entrant_id='${ALICE.id}'`);
+    await expect(client.ban({ actor: OPERATOR, competition_id: "comp-a", entrant_id: BOB.id, operation_id: "operator-left" }))
+      .resolves.toEqual({ ok: false, error: { code: "forbidden" } });
+    await db.exec(`UPDATE competition_memberships SET state='active' WHERE competition_id='comp-a' AND entrant_id='${ALICE.id}'`);
+
+    await expect(client.tombstone({ actor: OPERATOR, competition_id: "comp-a", message_id: "00000000-0000-0000-0000-000000000999", operation_id: "missing-message" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    const posted = await client.post({ actor: ALICE, competition_id: "comp-a", body: "remove me", operation_id: "post-for-repeat-tombstone" });
+    if (!posted.ok) throw new Error("fixture post failed");
+    await expect(client.tombstone({ actor: OPERATOR, competition_id: "comp-a", message_id: posted.message.id, operation_id: "tombstone-idempotent" }))
+      .resolves.toEqual({ ok: true });
+    await expect(client.tombstone({ actor: OPERATOR, competition_id: "comp-a", message_id: posted.message.id, operation_id: "tombstone-idempotent" }))
+      .resolves.toEqual({ ok: true });
+  });
 });

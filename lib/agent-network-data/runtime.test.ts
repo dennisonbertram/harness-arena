@@ -92,6 +92,18 @@ describe("runtime SQL adapter", () => {
     expect(pool.client.release).toHaveBeenCalledTimes(1);
   });
 
+  it("releases an acquired client when BEGIN fails and sanitizes driver diagnostics", async () => {
+    const connectionString = "postgres://user:very-secret@db.example/app";
+    const pool = poolFixture();
+    const runtime = createRuntimeSqlAdapter({ pool, databaseUrl: connectionString });
+    pool.client.query.mockRejectedValueOnce(new Error(`BEGIN failed for ${connectionString}`));
+
+    const failure = await runtime.transaction(async () => "must-not-run").then(() => null, (error: Error) => error);
+    expect(failure?.message).toBe("database transaction failed");
+    expect(failure?.message).not.toContain(connectionString);
+    expect(pool.client.release).toHaveBeenCalledOnce();
+  });
+
   it("fails closed when DATABASE_URL is absent and never exposes a supplied connection string", () => {
     const pool = poolFixture();
     expect(() => createRuntimeSqlAdapter({ pool, databaseUrl: undefined })).toThrow("DATABASE_URL is required");

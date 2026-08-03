@@ -54,4 +54,37 @@ describe("POST /api/agent/sessions/[id]/revoke", () => {
     await expect(response.json()).resolves.toEqual({ error: { code } });
     expect(runtime.revokeAgentSession).not.toHaveBeenCalled();
   });
+
+  it("rejects malformed JSON and hides revocation backend errors", async () => {
+    const malformed = await POST(new NextRequest("http://localhost/api/agent/sessions/session-other/revoke", {
+      method: "POST", headers: { authorization: "Bearer scoped-session", "content-type": "application/json" }, body: "{",
+    }), context());
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ error: { code: "invalid_body" } });
+
+    runtime.revokeAgentSession.mockRejectedValueOnce(new Error("database unavailable"));
+    const unavailable = await POST(post(), context());
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: { code: "sessions_unavailable" } });
+  });
+
+  it("bounds declared and streamed request bodies before resolving the target session", async () => {
+    const request = (headers: Record<string, string>, body?: string) => new NextRequest("http://localhost/api/agent/sessions/session-other/revoke", {
+      method: "POST",
+      headers: { authorization: "Bearer scoped-session", "content-type": "application/json", ...headers },
+      ...(body === undefined ? {} : { body }),
+    });
+    for (const [candidate, status, code] of [
+      [request({ "content-length": "01" }, "{}"), 400, "invalid_body"],
+      [request({ "content-length": "999999999999999999999999999999" }, "{}"), 400, "invalid_body"],
+      [request({ "content-length": String(1_048_577) }, "{}"), 413, "body_too_large"],
+      [request({}), 400, "invalid_body"],
+      [request({}, "x".repeat(1_048_577)), 413, "body_too_large"],
+    ] as const) {
+      const response = await POST(candidate, context());
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toEqual({ error: { code } });
+    }
+    expect(runtime.revokeAgentSession).not.toHaveBeenCalled();
+  });
 });

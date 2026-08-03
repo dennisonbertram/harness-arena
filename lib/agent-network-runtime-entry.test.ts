@@ -65,8 +65,10 @@ describe("agent network durable entry runtime boundary", () => {
     for (const [source, code] of [
       ["COMPETITION_NOT_FOUND", "competition_not_found"],
       ["COMPETITION_CLOSED", "competition_closed"],
+      ["COMPETITION_MEMBERSHIP_FORBIDDEN", "forbidden"],
       ["IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST", "idempotency_conflict"],
       ["ENTRY_RECONCILIATION_REQUIRED", "reconciliation_required"],
+      ["ENTRY_SAGA_PHASE_CONFLICT", "reconciliation_required"],
       ["ENTRY_SAGA_BUSY", "entry_in_progress"],
       ["ENTRY_AUTHORIZATION_REVOKED", "forbidden"],
     ] as const) {

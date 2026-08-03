@@ -30,4 +30,25 @@ describe("POST /api/agent/payout-wallet/ensure", () => {
     await expect(response.json()).resolves.toEqual({ error: { code: "invalid_body" } });
     expect(runtime.ensurePayoutWallet).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["unauthenticated", 401, "unauthenticated"],
+    ["forbidden", 403, "insufficient_scope"],
+    ["session_unavailable", 503, "session_unavailable"],
+  ])("fails closed for %s authentication before parsing or provisioning", async (reason, status, code) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code: reason } });
+    const response = await POST(request());
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code } });
+    expect(runtime.ensurePayoutWallet).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed JSON without invoking any wallet provider seam", async () => {
+    const response = await POST(new NextRequest("http://localhost/api/agent/payout-wallet/ensure", {
+      method: "POST", headers: { authorization: "Bearer scoped-session", "content-type": "application/json" }, body: "{",
+    }));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: { code: "invalid_body" } });
+    expect(runtime.ensurePayoutWallet).not.toHaveBeenCalled();
+  });
 });

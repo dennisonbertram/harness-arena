@@ -1,3 +1,4 @@
+import { SignJWT } from "jose";
 import { describe, expect, it, vi } from "vitest";
 
 vi.stubEnv("AUTH_SECRET", "scoped-agent-session-test-secret");
@@ -22,6 +23,26 @@ const session = {
 
 function sessions(authenticated = true) {
   return { isAuthenticated: vi.fn().mockResolvedValue(authenticated), touch: vi.fn().mockResolvedValue(undefined) };
+}
+
+async function signedSession(overrides: Record<string, unknown> = {}, options: { jti?: string | null; lifetime?: number; setIssuedAt?: boolean; setExpiration?: boolean } = {}) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  let token = new SignJWT({
+    entrantId: identity.entrantId,
+    githubId: identity.githubId,
+    githubLogin: identity.githubLogin,
+    tokenVersion: 1,
+    scopes: ["competitions:read"],
+    authenticatedAt: new Date(issuedAt * 1000).toISOString(),
+    ...overrides,
+  })
+    .setProtectedHeader({ alg: "HS256", kid: "agent-key-1" })
+    .setIssuer("https://harness-arena.example")
+    .setAudience("harness-arena-mcp");
+  if (options.jti !== null) token = token.setJti(options.jti ?? session.jti);
+  if (options.setIssuedAt !== false) token = token.setIssuedAt(issuedAt);
+  if (options.setExpiration !== false) token = token.setExpirationTime(issuedAt + (options.lifetime ?? 600));
+  return token.sign(new TextEncoder().encode("scoped-agent-session-test-secret"));
 }
 
 describe("revocable scoped agent session tokens", () => {
@@ -52,6 +73,23 @@ describe("revocable scoped agent session tokens", () => {
       .rejects.toMatchObject({ code: "malformed" });
     await expect(mintAgentSessionToken(identity, { ...session, authenticatedAt: "not-a-date" }))
       .rejects.toMatchObject({ code: "malformed" });
+  });
+
+  it("rejects every malformed mint boundary before signing", async () => {
+    for (const value of [0, -1, 1.5]) {
+      await expect(mintAgentSessionToken(identity, { ...session, expiresInSeconds: value }))
+        .rejects.toMatchObject({ code: "malformed" });
+    }
+    for (const invalid of [
+      { tokenVersion: 0 },
+      { tokenVersion: 1.5 },
+      { scopes: [] },
+      { scopes: [""] },
+      { scopes: ["chat:read", 1] },
+    ]) {
+      await expect(mintAgentSessionToken(identity, { ...session, ...invalid } as never))
+        .rejects.toMatchObject({ code: "malformed" });
+    }
   });
 
   it("checks durable session state, exact token metadata, and required scopes before returning identity", async () => {
@@ -87,6 +125,49 @@ describe("revocable scoped agent session tokens", () => {
     store.isAuthenticated.mockRejectedValueOnce(new Error("database unavailable at postgres://secret"));
     await expect(verifyAgentSessionToken(token, { sessions: store, requiredScopes: [] }))
       .rejects.toMatchObject({ code: "session_unavailable", message: "session_unavailable" });
+
+    const touchFailure = sessions();
+    touchFailure.touch.mockRejectedValueOnce(new Error("database unavailable at postgres://secret"));
+    await expect(verifyAgentSessionToken(token, { sessions: touchFailure, requiredScopes: [] }))
+      .rejects.toMatchObject({ code: "session_unavailable", message: "session_unavailable" });
+  });
+
+  it("rejects malformed compact tokens and every required scoped-session claim", async () => {
+    await expect(verifyAgentSessionToken("x.y.z", { sessions: sessions(), requiredScopes: [] }))
+      .rejects.toMatchObject({ code: "malformed" });
+
+    const invalidClaims: Array<[Record<string, unknown>, { jti?: string | null; lifetime?: number; setIssuedAt?: boolean; setExpiration?: boolean }?]> = [
+      [{ entrantId: 1 }],
+      [{ githubId: "101" }],
+      [{ githubLogin: 101 }],
+      [{ tokenVersion: "1" }],
+      [{ tokenVersion: 1.5 }],
+      [{ tokenVersion: 0 }],
+      [{ scopes: "competitions:read" }],
+      [{ scopes: [] }],
+      [{ scopes: [1] }],
+      [{ scopes: [""] }],
+      [{ authenticatedAt: 1 }],
+      [{ iat: "now" }, { setIssuedAt: false }],
+      [{ exp: "later" }, { setExpiration: false }],
+      [{}, { jti: null }],
+      [{}, { lifetime: 30 * 24 * 60 * 60 + 1 }],
+    ];
+    for (const [claims, options] of invalidClaims) {
+      const token = await signedSession(claims, options);
+      await expect(verifyAgentSessionToken(token, { sessions: sessions(), requiredScopes: [] }))
+        .rejects.toMatchObject({ code: "malformed" });
+    }
+  });
+
+  it("fails before cryptography when server token configuration or signing secret is missing", async () => {
+    vi.stubEnv("AGENT_TOKEN_ISSUER", "");
+    await expect(mintAgentSessionToken(identity, session)).rejects.toThrow("agent session token configuration is incomplete");
+    vi.stubEnv("AGENT_TOKEN_ISSUER", "https://harness-arena.example");
+
+    vi.stubEnv("AUTH_SECRET", "");
+    await expect(mintAgentSessionToken(identity, session)).rejects.toThrow("AUTH_SECRET is not configured on the server");
+    vi.stubEnv("AUTH_SECRET", "scoped-agent-session-test-secret");
   });
 
   it("rejects legacy, wrong-scope, wrong-audience, wrong-key, and wrong-version tokens on the scoped path", async () => {

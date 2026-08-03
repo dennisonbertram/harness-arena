@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
@@ -8,6 +9,7 @@ const migration = (name: string) => readFileSync(path.join(process.cwd(), "db", 
 const ALICE = { id: "00000000-0000-0000-0000-000000000101", github_id: 101, github_login: "alice" };
 const BOB = { id: "00000000-0000-0000-0000-000000000202", github_id: 202, github_login: "bob" };
 const CAROL = { id: "00000000-0000-0000-0000-000000000303", github_id: 303, github_login: "carol" };
+const CURSOR_SECRET = "test-only-32-byte-cursor-secret-value";
 
 let db: PGlite;
 let id = 400;
@@ -26,10 +28,16 @@ afterEach(async () => {
 
 function chat() {
   return createPostgresCompetitionChat(db, {
-    cursorSecret: "test-only-32-byte-cursor-secret-value",
+    cursorSecret: CURSOR_SECRET,
     ids: { next: () => `00000000-0000-0000-0000-${String(id++).padStart(12, "0")}` },
     now: () => new Date("2026-08-02T12:00:00.000Z"),
   });
+}
+
+function signedCursor(payload: unknown) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = createHmac("sha256", CURSOR_SECRET).update(`cursor.v1:${encoded}`).digest("base64url");
+  return `chat.v1.${encoded}.${signature}`;
 }
 
 async function seed(...entrants: Array<typeof ALICE>) {
@@ -184,5 +192,66 @@ describe("0002 durable competition chat", () => {
     for (const field of ["prompt", "token", "trace", "github_token", "operation_id"] as const) {
       expect(result.message).not.toHaveProperty(field);
     }
+  });
+
+  it("fails closed for unauthenticated room operations, invalid bodies, pagination, and every malformed cursor shape", async () => {
+    await seed(ALICE);
+    await active("comp-a", ALICE);
+    const client = chat();
+
+    await expect(client.join({ actor: null, competition_id: "comp-a" })).resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(client.subscribe({ actor: null, competition_id: "comp-a" })).resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(client.list({ actor: null, competition_id: "comp-a" })).resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(client.post({ actor: ALICE, competition_id: "comp-a", body: "", operation_id: "empty" })).resolves.toEqual({ ok: false, error: { code: "invalid_body" } });
+    await expect(client.post({ actor: ALICE, competition_id: "comp-a", body: "x".repeat(4001), operation_id: "large" })).resolves.toEqual({ ok: false, error: { code: "invalid_body" } });
+
+    for (const limit of [0, 101, 1.5]) {
+      await expect(client.list({ actor: ALICE, competition_id: "comp-a", limit })).resolves.toEqual({ ok: false, error: { code: "invalid_pagination" } });
+    }
+    for (const cursor of [
+      "not-a-cursor",
+      "chat.v1.e30.invalid-signature-with-correctly-shaped-characters",
+      signedCursor(null),
+      signedCursor([]),
+      signedCursor({ a: -1, r: "wrong" }),
+      signedCursor({ a: 1.5, r: "wrong" }),
+      signedCursor({ a: 0, r: "wrong" }),
+      signedCursor("not-json-object"),
+    ]) {
+      await expect(client.list({ actor: ALICE, competition_id: "comp-a", cursor })).resolves.toEqual({ ok: false, error: { code: "invalid_cursor" } });
+    }
+  });
+
+  it("returns active membership metadata and recovers a committed post when the transaction result is lost", async () => {
+    await seed(ALICE);
+    await active("comp-a", ALICE);
+    const client = chat();
+    await expect(client.join({ actor: ALICE, competition_id: "comp-a" })).resolves.toMatchObject({
+      ok: true,
+      membership: { competition_id: "comp-a", state: "active", joined_at: expect.any(String) },
+    });
+    await expect(client.subscribe({ actor: ALICE, competition_id: "comp-a" })).resolves.toEqual({ ok: true });
+
+    let loseResult = true;
+    const uncertainDb = {
+      query: db.query.bind(db),
+      transaction: async <Result>(work: (tx: typeof db) => Promise<Result>): Promise<Result> => {
+        const result = await db.transaction((tx) => work(tx as unknown as typeof db));
+        if (loseResult) {
+          loseResult = false;
+          throw new Error("connection lost after commit");
+        }
+        return result;
+      },
+    };
+    const uncertain = createPostgresCompetitionChat(uncertainDb as never, {
+      cursorSecret: CURSOR_SECRET,
+      ids: { next: () => `00000000-0000-0000-0000-${String(id++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+    const posted = await uncertain.post({ actor: ALICE, competition_id: "comp-a", body: "committed", operation_id: "lost-result" });
+    expect(posted).toMatchObject({ ok: true, message: { body: "committed", sequence: 1 } });
+    await expect(db.query("SELECT count(*)::int AS count FROM competition_messages WHERE competition_id='comp-a'"))
+      .resolves.toMatchObject({ rows: [{ count: 1 }] });
   });
 });

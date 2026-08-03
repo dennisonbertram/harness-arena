@@ -32,4 +32,27 @@ describe("GET /api/submissions/[id]/traces", () => {
     expect(response.status).toBe(status);
     await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
   });
+
+  it.each([
+    ["unauthenticated", 401, "unauthenticated"],
+    ["session_unavailable", 503, "session_unavailable"],
+    ["insufficient_scope", 403, "insufficient_scope"],
+  ])("fails closed before looking up traces when authentication is %s", async (code, status, publicCode) => {
+    runtime.authenticateAgentSession.mockResolvedValueOnce({ ok: false, error: { code } });
+    const response = await GET(get(), context());
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code: publicCode } });
+    expect(runtime.getSubmissionTraceStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed identifiers and contains lookup failures", async () => {
+    const missing = await GET(get(), context(""));
+    expect(missing.status).toBe(404);
+    expect(runtime.getSubmissionTraceStatus).not.toHaveBeenCalled();
+
+    runtime.getSubmissionTraceStatus.mockRejectedValueOnce(new Error("store unavailable"));
+    const failed = await GET(get(), context());
+    expect(failed.status).toBe(503);
+    await expect(failed.json()).resolves.toEqual({ error: { code: "trace_unavailable" } });
+  });
 });

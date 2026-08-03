@@ -79,6 +79,13 @@ describe("lazy Neon runtime factory", () => {
     expect(() => createNeonRuntime({ databaseUrl: secretUrl, Pool: ThrowingPool })).not.toThrow(secretUrl);
   });
 
+  it.each([0, -1, 1.5, Number.NaN])("rejects unsafe pool size %s before constructing a Pool", (maxPoolSize) => {
+    const Pool = vi.fn(() => poolFixture());
+    expect(() => createNeonRuntime({ databaseUrl: "postgres://user:secret@neon.example/app", Pool, maxPoolSize }))
+      .toThrow("database runtime unavailable");
+    expect(Pool).not.toHaveBeenCalled();
+  });
+
   it("exposes close/reset only through test helpers", async () => {
     const pool = poolFixture();
     const Pool = vi.fn(() => pool);
@@ -118,5 +125,13 @@ describe("agent-network service composition", () => {
     }
     expect(sql.query).not.toHaveBeenCalled();
     expect(sql.transaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses to compose services with a weak cursor secret before creating repositories", () => {
+    const sql = { query: vi.fn(), transaction: vi.fn() };
+    expect(() => createAgentNetworkServices(sql, { cursorSecret: "too-short" })).toThrow("agent network cursor configuration is incomplete");
+    for (const factory of [factories.repositories, factories.chat, factories.traces, factories.payouts, factories.eligibility, factories.entries]) {
+      expect(factory).not.toHaveBeenCalled();
+    }
   });
 });

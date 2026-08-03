@@ -130,6 +130,21 @@ describe("payout eligibility freeze service", () => {
     expect(writes).toEqual([]);
   });
 
+  it.each([
+    ["a mismatched competition", { ...ready(), competition_id: "competition-other" }],
+    ["a malformed close generation", { ...ready(), close_generation: "not-a-generation" }],
+    ["an invalid close timestamp", { ...ready(), closed_at: "not-a-date" }],
+    ["a snapshot from another competition", ready([{ ...completeReconciledSnapshot(), competition_id: "competition-other" }])],
+  ])("fails closed before persistence for %s", async (_label, source) => {
+    const writes: string[] = [];
+    const service = createPayoutEligibilityService({ insert: async () => writes.push("write") } as never, {
+      loadCompetitionSnapshot: async () => source as never,
+    });
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "snapshot_unavailable" } });
+    expect(writes).toEqual([]);
+  });
+
   it("fails closed without writing when a SQL freeze client cannot provide a transaction", async () => {
     const writes: unknown[] = [];
     const sql = { query: async <Row>(statement: string): Promise<{ rows: Row[] }> => {
@@ -156,6 +171,32 @@ describe("payout eligibility freeze service", () => {
     expect(Object.keys(service)).not.toEqual(expect.arrayContaining([
       "transfer", "pay", "sendPayment", "createSettlement", "signTransaction",
     ]));
+  });
+
+  it("does not leak an injected or stale freeze record owned by another entrant", async () => {
+    const service = createPayoutEligibilityService({} as never, {
+      loadOwnFreeze: async () => ({ ...completeReconciledSnapshot(), entrant_id: OWNER.id, status: "eligible", reason_code: "eligible" }),
+    });
+    await expect(service.getOwnEligibility({ actor: ENTRANT, competition_id: "competition-1", submission_id: "submission-1" }))
+      .resolves.toEqual({ ok: true, eligibility: null });
+  });
+
+  it.each(["live", "missing"]) ("rejects a %s lifecycle marker before creating a close batch", async (markerState) => {
+    const writes: string[] = [];
+    const sql: SqlFake = {
+      transaction: async <Value>(work: (tx: SqlFake) => Promise<Value>) => work(sql),
+      async query<Row>(statement: string): Promise<{ rows: Row[] }> {
+        if (statement.includes("FROM competition_lifecycle_gates")) {
+          return { rows: (markerState === "missing" ? [] : [{ state: markerState, close_generation: CLOSE_GENERATION, closed_at: CLOSED_AT }]) as Row[] };
+        }
+        if (statement.startsWith("INSERT")) writes.push(statement);
+        return { rows: [] };
+      },
+    };
+    const service = createPayoutEligibilityService(sql, { loadCompetitionSnapshot: async () => ready() });
+    await expect(service.freezeCompetition({ actor: OWNER, competition_id: "competition-1" }))
+      .resolves.toEqual({ ok: false, error: { code: "snapshot_unavailable" } });
+    expect(writes).toEqual([]);
   });
 
   it("persists a versioned complete evidence snapshot, not only denormalized columns", async () => {

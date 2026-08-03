@@ -100,6 +100,10 @@ describe("0004 external Ethereum payout address", () => {
       .resolves.toEqual({ ok: false, error: { code: "invalid_address" } });
     await expect(payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: "2026-08-02T11:00:00.000Z" }))
       .resolves.toEqual({ ok: false, error: { code: "recent_authentication_required" } });
+    await expect(payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: "2026-08-02T12:01:00.000Z" }))
+      .resolves.toEqual({ ok: false, error: { code: "recent_authentication_required" } });
+    await expect(payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: "not-a-date" }))
+      .resolves.toEqual({ ok: false, error: { code: "recent_authentication_required" } });
   });
 
   it("verifies ownership once, replays the exact operation, and rejects cross-user, invalid, and consumed proofs", async () => {
@@ -155,6 +159,120 @@ describe("0004 external Ethereum payout address", () => {
     verifier.mockRejectedValueOnce(new Error("rpc failed with postgres://secret"));
     await expect(payouts.verify({ actor: BOB, challenge_id: third.challenge.id, signature: "0xthrows", consent_version: "payout-address.v1", idempotency_key: "verifier-error" }))
       .resolves.toEqual({ ok: false, error: { code: "invalid_signature" } });
+  });
+
+  it("rechecks expiry under the challenge lock and rejects malformed consent before a remote proof call", async () => {
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const verifier = vi.fn(async () => true);
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>) => db.transaction(async (tx) => {
+      // The proof was checked while the challenge was fresh; time moves before
+      // its lock is acquired, exactly as a slow real request can behave.
+      clock = new Date("2026-08-02T12:10:00.000Z");
+      return callback(tx as unknown as TransactionSql);
+    });
+    const payouts = createExternalPayoutAddressService({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      nonce: { next: () => `nonce-${serial++}-${"x".repeat(32)}` }, now: () => clock,
+      domain: "harness-arena.example", verifyMessage: verifier,
+    });
+    const prepared = await payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    clock = new Date("2026-08-02T12:09:59.000Z");
+    await expect(payouts.verify({ actor: ALICE, challenge_id: prepared.challenge.id, signature: "0xvalid", consent_version: "payout-address.v1", idempotency_key: "expires-under-lock" }))
+      .resolves.toEqual({ ok: false, error: { code: "challenge_expired" } });
+    expect(verifier).toHaveBeenCalledOnce();
+    await expect(payouts.verify({ actor: ALICE, challenge_id: prepared.challenge.id, signature: "0xignored", consent_version: "", idempotency_key: "bad-consent" }))
+      .resolves.toEqual({ ok: false, error: { code: "invalid_consent_version" } });
+    expect(verifier).toHaveBeenCalledOnce();
+    await expect(db.query("SELECT * FROM payout_profiles")).resolves.toMatchObject({ rows: [] });
+  });
+
+  it("fails closed when a proof challenge disappears after preflight but before its lock", async () => {
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const verifier = vi.fn(async () => true);
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>) => {
+      await db.query("DELETE FROM address_challenges");
+      return db.transaction(async (tx) => callback(tx as unknown as TransactionSql));
+    };
+    const payouts = createExternalPayoutAddressService({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      nonce: { next: () => `nonce-${serial++}-${"x".repeat(32)}` }, now: () => clock,
+      domain: "harness-arena.example", verifyMessage: verifier,
+    });
+    const prepared = await payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(payouts.verify({ actor: ALICE, challenge_id: prepared.challenge.id, signature: "0xvalid", consent_version: "payout-address.v1", idempotency_key: "deleted-under-lock" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    expect(verifier).toHaveBeenCalledOnce();
+    await expect(db.query("SELECT * FROM payout_profiles")).resolves.toMatchObject({ rows: [] });
+  });
+
+  it("returns stored completed replays and refuses pending idempotency operations found under the lock", async () => {
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const replayed = { ok: true as const, profile: {
+      provider: "external" as const, address: ADDRESS, chain_id: 1 as const, verification_method: "eip191" as const,
+      consent_version: "payout-address.v1", verified_at: clock.toISOString(), change_effective_at: clock.toISOString(), effective: true,
+    } };
+    const requestHash = (input: { challenge_id: string; consent_version: string; signature: string }) =>
+      createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    let state: "completed" | "pending" = "completed";
+    let preparedId = "";
+    let key = "";
+    let proof = "";
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>) => {
+      await db.query(
+        `INSERT INTO idempotency_operations (id, actor_id, competition_id, operation, idempotency_key, request_hash, entity_id, state, response_json, created_at, updated_at, completed_at)
+         VALUES ($1, $2, NULL, 'payout.address.verify', $3, $4, $5, $6, $7::jsonb, $8::timestamptz, $8::timestamptz, $8::timestamptz)`,
+        [`00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}`, ALICE.id, key,
+          requestHash({ challenge_id: preparedId, consent_version: "payout-address.v1", signature: proof }), preparedId, state,
+          JSON.stringify(replayed), clock.toISOString()],
+      );
+      return db.transaction(async (tx) => callback(tx as unknown as TransactionSql));
+    };
+    const payouts = createExternalPayoutAddressService({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      nonce: { next: () => `nonce-${serial++}-${"x".repeat(32)}` }, now: () => clock,
+      domain: "harness-arena.example", verifyMessage: async () => true,
+    });
+    const completed = await payouts.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!completed.ok) throw new Error("fixture prepare failed");
+    preparedId = completed.challenge.id; key = "completed-under-lock"; proof = "0xcompleted";
+    await expect(payouts.verify({ actor: ALICE, challenge_id: preparedId, signature: proof, consent_version: "payout-address.v1", idempotency_key: key }))
+      .resolves.toEqual(replayed);
+
+    state = "pending";
+    const pending = await payouts.prepare({ actor: ALICE, address: SECOND_ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!pending.ok) throw new Error("fixture prepare failed");
+    preparedId = pending.challenge.id; key = "pending-under-lock"; proof = "0xpending";
+    await expect(payouts.verify({ actor: ALICE, challenge_id: preparedId, signature: proof, consent_version: "payout-address.v1", idempotency_key: key }))
+      .resolves.toEqual({ ok: false, error: { code: "idempotency_conflict" } });
+  });
+
+  it("rejects an already-expired proof before verification and refuses a lost idempotency reservation", async () => {
+    const expired = service();
+    const prepared = await expired.prepare({ actor: ALICE, address: ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    clock = new Date("2026-08-02T12:10:00.000Z");
+    await expect(expired.verify({ actor: ALICE, challenge_id: prepared.challenge.id, signature: "0xignored", consent_version: "payout-address.v1", idempotency_key: "expired-before-proof" }))
+      .resolves.toEqual({ ok: false, error: { code: "challenge_expired" } });
+
+    clock = new Date("2026-08-02T12:00:00.000Z");
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>) => db.transaction(async (tx) => callback({
+      query: async <Row>(statement: string, params?: unknown[]) => statement.startsWith("INSERT INTO idempotency_operations")
+        ? { rows: [] as Row[] }
+        : tx.query<Row>(statement, params),
+    }));
+    const reserved = createExternalPayoutAddressService({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      nonce: { next: () => `nonce-${serial++}-${"x".repeat(32)}` }, now: () => clock,
+      domain: "harness-arena.example", verifyMessage: async () => true,
+    });
+    const challenge = await reserved.prepare({ actor: BOB, address: SECOND_ADDRESS, reauthenticated_at: clock.toISOString() });
+    if (!challenge.ok) throw new Error("fixture prepare failed");
+    await expect(reserved.verify({ actor: BOB, challenge_id: challenge.challenge.id, signature: "0xvalid", consent_version: "payout-address.v1", idempotency_key: "lost-reservation" }))
+      .resolves.toEqual({ ok: false, error: { code: "idempotency_conflict" } });
+    await expect(db.query("SELECT * FROM payout_profiles WHERE entrant_id = $1", [BOB.id])).resolves.toMatchObject({ rows: [] });
   });
 
   it("puts address changes through a cooldown, audits them, and returns only safe owner DTOs", async () => {
