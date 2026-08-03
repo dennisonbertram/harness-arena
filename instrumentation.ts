@@ -20,6 +20,8 @@ const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
 // from distinct generations can be combined.
 const MAX_SNAPSHOT_ACK_WINDOWS = MAX_BUFFERED_SPANS;
 const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_SNAPSHOT_ACK_WINDOWS * EXPORT_ACK_DEADLINE_MILLIS + 250;
+const MAX_RETAINED_ENDED_ANCESTRY = MAX_BUFFERED_SPANS * 2;
+const ENDED_ANCESTRY_RETENTION_MILLIS = POST_ROOT_DRAIN_DEADLINE_MILLIS;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
@@ -359,17 +361,19 @@ export class BoundedSpanProcessor implements SpanProcessor {
   private nextQueueSequence = 0;
   private readonly rootKeyBySpan = new Map<string, string>();
   private readonly activeSpanCountByRoot = new Map<string, number>();
-  private readonly endedRoots = new Set<string>();
+  private readonly endedSpanRootKeys = new Map<string, { rootKey: string; expiresAt: number }>();
+  private readonly endedRootExpirations = new Map<string, number>();
   constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
     if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
   }
   onStart(span: Span, parentContext: Context): void {
     if (this.closed) return;
+    this.pruneEndedAncestry();
     const currentKey = spanIdentity(span.spanContext());
     const parentSpanContext = trace.getSpanContext(parentContext);
     const rootKey = !parentSpanContext || parentSpanContext.isRemote
       ? currentKey
-      : this.rootKeyBySpan.get(spanIdentity(parentSpanContext));
+      : this.lookupRootKey(spanIdentity(parentSpanContext));
     if (!rootKey) return;
     this.rootKeyBySpan.set(currentKey, rootKey);
     this.activeSpanCountByRoot.set(rootKey, (this.activeSpanCountByRoot.get(rootKey) ?? 0) + 1);
@@ -378,7 +382,7 @@ export class BoundedSpanProcessor implements SpanProcessor {
     const currentKey = spanIdentity(span.spanContext());
     const isRoot = spanPriority(span) === 2;
     const rootKey = this.rootKeyBySpan.get(currentKey) ?? (isRoot ? currentKey : undefined);
-    if (isRoot && rootKey) this.endedRoots.add(rootKey);
+    if (isRoot && rootKey) this.rememberEndedRoot(rootKey);
     try {
       if (this.closed || !shouldRetainSpan(span)) return;
       if (this.queue.length >= MAX_BUFFERED_SPANS) {
@@ -394,20 +398,62 @@ export class BoundedSpanProcessor implements SpanProcessor {
       }
       this.queue.push({ sequence: ++this.nextQueueSequence, span });
       updateSinkReadiness(this.sink, { queued: this.queue.length });
-      if (rootKey && (isRoot || this.endedRoots.has(rootKey))) registerPostRootDrain(rootKey, this);
+      if (rootKey && (isRoot || this.isEndedRoot(rootKey))) registerPostRootDrain(rootKey, this);
     } finally {
       this.releaseSpan(currentKey, rootKey);
     }
   }
   private releaseSpan(currentKey: string, rootKey: string | undefined): void {
-    if (!rootKey || !this.rootKeyBySpan.delete(currentKey)) return;
+    if (!rootKey) return;
+    const wasTracked = this.rootKeyBySpan.delete(currentKey);
+    this.rememberEndedSpan(currentKey, rootKey);
+    if (!wasTracked) return;
     const remaining = (this.activeSpanCountByRoot.get(rootKey) ?? 1) - 1;
     if (remaining > 0) {
       this.activeSpanCountByRoot.set(rootKey, remaining);
       return;
     }
     this.activeSpanCountByRoot.delete(rootKey);
-    this.endedRoots.delete(rootKey);
+  }
+  private lookupRootKey(spanKey: string): string | undefined {
+    const liveRootKey = this.rootKeyBySpan.get(spanKey);
+    if (liveRootKey) return liveRootKey;
+    const retained = this.endedSpanRootKeys.get(spanKey);
+    if (!retained) return undefined;
+    this.endedSpanRootKeys.delete(spanKey);
+    this.endedSpanRootKeys.set(spanKey, retained);
+    return retained.rootKey;
+  }
+  private rememberEndedSpan(spanKey: string, rootKey: string): void {
+    this.pruneEndedAncestry();
+    this.endedSpanRootKeys.delete(spanKey);
+    this.endedSpanRootKeys.set(spanKey, { rootKey, expiresAt: Date.now() + ENDED_ANCESTRY_RETENTION_MILLIS });
+    this.trimEndedAncestry(this.endedSpanRootKeys);
+  }
+  private rememberEndedRoot(rootKey: string): void {
+    this.pruneEndedAncestry();
+    this.endedRootExpirations.delete(rootKey);
+    this.endedRootExpirations.set(rootKey, Date.now() + ENDED_ANCESTRY_RETENTION_MILLIS);
+    this.trimEndedAncestry(this.endedRootExpirations);
+  }
+  private isEndedRoot(rootKey: string): boolean {
+    this.pruneEndedAncestry();
+    return this.endedRootExpirations.has(rootKey);
+  }
+  private pruneEndedAncestry(now = Date.now()): void {
+    for (const [spanKey, retained] of this.endedSpanRootKeys) {
+      if (retained.expiresAt <= now) this.endedSpanRootKeys.delete(spanKey);
+    }
+    for (const [rootKey, expiresAt] of this.endedRootExpirations) {
+      if (expiresAt <= now) this.endedRootExpirations.delete(rootKey);
+    }
+  }
+  private trimEndedAncestry<T>(retained: Map<string, T>): void {
+    while (retained.size > MAX_RETAINED_ENDED_ANCESTRY) {
+      const oldestKey = retained.keys().next().value;
+      if (oldestKey === undefined) return;
+      retained.delete(oldestKey);
+    }
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;

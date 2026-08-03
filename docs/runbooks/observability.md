@@ -63,6 +63,13 @@ window for each of the 32 bounded queue slots, plus a 250 ms settlement margin.
 New arrivals never extend an existing generation or create an unbounded
 recursive drain. Failures are consumed by the lifecycle task while
 the unacknowledged batch remains queued for a later request or shutdown retry.
+Saved ended-parent contexts remain attributable through a bounded ancestry
+cache so direct children, nested descendants, and siblings that start after a
+fully drained root still register their own request-context generation. Each
+sink retains at most 64 ended span-to-root entries and 64 ended-root markers;
+both expire after the same 160.25-second lifecycle horizon, with oldest entries
+evicted first at capacity. Root keys remain `trace_id:span_id`, so this bounded
+retention cannot conflate distinct requests that continue one incoming trace.
 Without a hosted request context, the same bounded, catch-wrapped task runs
 locally as a best-effort fallback.
 

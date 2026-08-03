@@ -379,6 +379,8 @@ describe("hosted request span lifecycle", () => {
     }));
     const rootA = tracer.startSpan("request-a-root", undefined, incomingParent);
     const rootB = tracer.startSpan("request-b-root", undefined, incomingParent);
+    const rootAContext = trace.setSpan(context.active(), rootA);
+    const rootBContext = trace.setSpan(context.active(), rootB);
     expect(rootA.spanContext().traceId).toBe(rootB.spanContext().traceId);
     expect(rootA.spanContext().spanId).not.toBe(rootB.spanContext().spanId);
     const rootIds = [rootA.spanContext().spanId, rootB.spanContext().spanId].sort();
@@ -393,6 +395,16 @@ describe("hosted request span lifecycle", () => {
     await Promise.all([...tasksByRequest.values()].flat());
     expect(structuredSpans.map((span) => span.spanContext().spanId).sort()).toEqual(rootIds);
     expect(otlpSpans.map((span) => span.spanContext().spanId).sort()).toEqual(rootIds);
+
+    activeRequest = "request-a";
+    tracer.startSpan("request-a-late-child", { kind: SpanKind.SERVER }, rootAContext).end();
+    activeRequest = "request-b";
+    tracer.startSpan("request-b-late-child", { kind: SpanKind.SERVER }, rootBContext).end();
+    expect(tasksByRequest.get("request-a")).toHaveLength(2);
+    expect(tasksByRequest.get("request-b")).toHaveLength(2);
+    await Promise.all([...tasksByRequest.values()].flat());
+    expect(structuredSpans).toHaveLength(4);
+    expect(otlpSpans).toHaveLength(4);
     await provider.shutdown();
   });
 });
