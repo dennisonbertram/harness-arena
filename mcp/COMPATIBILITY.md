@@ -6,10 +6,10 @@
 | Stable protocol | `2025-11-25` over stdio | Required conformance target |
 | Protocol fallback | `2025-06-18` is an SDK-supported negotiated fallback | Tools remain usable; do not depend on resource subscriptions |
 | Durable updates | `get_run_events` cursor tool | Mandatory fallback |
-| Resource subscription | `resources/subscribe` / `resources/unsubscribe` and update notification | Go for SDK POC only; no-go for production chat until its design issue |
-| Progress and cancellation | `notifications/progress` and request `AbortSignal` | Go for SDK POC only |
+| Resource subscription | Shipped `resources/subscribe` / `resources/unsubscribe`, canonical chat URIs, cursor polling, and update notifications | Locally and package-contract proven; development-environment rollout remains gated |
+| Progress and cancellation | Shipped request `AbortSignal` reaches HTTP fetch and outstanding chat long-polls | Locally and package-contract proven; progress notifications remain optional |
 
 `mcp/test-fixtures/stdio-compatibility-server.mjs` is an executable, stdio-only
 SDK conformance probe. It emits no application data to stdout beyond JSON-RPC.
-The production MCP package remains tool-oriented: resources are optional hints,
+The MCP package remains tool-oriented: resources are optional hints,
 never a replacement for cursor polling or a commitment to chat storage.
