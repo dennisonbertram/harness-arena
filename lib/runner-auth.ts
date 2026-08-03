@@ -9,7 +9,7 @@ import { log } from "./log";
 // so this also avoids leaking secret length via a raw-string length check).
 export function verifyRunnerSecret(request: NextRequest): boolean {
   const secret = process.env.RUNNER_CALLBACK_SECRET;
-  if (!secret) {
+  if (!secret || secret === process.env.OPS_READ_TOKEN) {
     log("error", "runner_secret.unconfigured");
     return false;
   }

@@ -5,7 +5,8 @@
   "default_role": "monitor",
   "capabilities": {
     "github": {
-      "allowed_identity_kinds": ["fine_grained_pat", "github_app"],
+      "repository": "dennisonbertram/harness-arena",
+      "allowed_identity_kinds": ["fine_grained_pat", "github_app", "authenticated_user"],
       "required_read_permissions": ["metadata", "contents", "actions", "issues", "pull_requests"],
       "write_permissions_allowed": false
     },
@@ -16,7 +17,13 @@
       "static_project_scoped_viewer_token_available": false,
       "decrypted_environment_values_allowed": false
     },
-    "get_only_ops": { "credential": "OPS_READ_TOKEN", "methods": ["GET"], "write_methods": ["POST", "PUT", "PATCH", "DELETE"], "write_expected_status": 405 },
+    "get_only_ops": {
+      "credential": "OPS_READ_TOKEN",
+      "methods": ["GET"],
+      "write_methods": ["POST", "PUT", "PATCH", "DELETE"],
+      "write_expected_status": 405,
+      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "VERCEL_TOKEN"]
+    },
     "blob": { "direct_credential_allowed": false, "read_via": "get_only_ops" },
     "sandbox": { "direct_credential_allowed": false, "read_via": "get_only_ops" },
     "ai_gateway": { "spend_credential_allowed": false, "read_via": "vercel_logs" },
@@ -27,7 +34,7 @@
     "diagnostic": { "purpose": "Read-only incident diagnosis with protected ephemeral secret-value access only when separately authorized", "capabilities": ["github", "vercel", "get_only_ops", "blob", "sandbox", "ai_gateway", "secrets"], "standing_credentials": ["OPS_READ_TOKEN"], "secret_value_access": "protected_ephemeral_only" }
   },
   "environment_inventory": {
-    "source_paths": ["app", "lib", "scripts", "next.config.ts", "instrumentation.ts"],
+    "source_paths": ["app", "lib", "mcp/src", "scripts", "next.config.ts", "instrumentation.ts"],
     "exclude_directories": ["node_modules", ".next", "coverage", "fixtures", "tests"],
     "exclude_suffixes": [".test.", ".spec.", "scripts/tests/"],
     "approved_dynamic_access": [
@@ -67,6 +74,7 @@
       "HARNESS_INIT_TEST_PHASE": { "purpose": "Local init fault-injection phase", "environments": ["test"], "secret": false, "owner": "tests", "required": "test_only", "safe_diagnostic": "value_non_secret" },
       "HARNESS_INIT_TEST_PHASE_GATE": { "purpose": "Local init fault-injection gate", "environments": ["test"], "secret": false, "owner": "tests", "required": "test_only", "safe_diagnostic": "path_basename_only" },
       "HARNESS_INIT_TEST_PHASE_MARKER": { "purpose": "Local init fault-injection marker", "environments": ["test"], "secret": false, "owner": "tests", "required": "test_only", "safe_diagnostic": "path_basename_only" },
+      "HARNESS_ARENA_URL": { "purpose": "Read-only operations audit target origin", "environments": ["ops", "local"], "secret": false, "owner": "operator", "required": "ops", "safe_diagnostic": "sanitized_origin" },
       "HARNESS_LOCAL_INIT": { "purpose": "Verified local init mode marker", "environments": ["local"], "secret": false, "owner": "local-init", "required": "runtime", "safe_diagnostic": "boolean_presence" },
       "LOCAL_INSTANCE_NONCE": { "purpose": "Local instance readiness nonce", "environments": ["local"], "secret": true, "owner": "local-init", "required": "runtime", "safe_diagnostic": "metadata_presence_only" },
       "LOCAL_INSTANCE_PID": { "purpose": "Local instance supervisor PID", "environments": ["local"], "secret": false, "owner": "local-init", "required": "runtime", "safe_diagnostic": "value_non_secret" },

@@ -15,26 +15,47 @@ Blob read-write token, create or control Sandboxes, or spend through AI Gateway.
 | Blob | Full inventory and object reads brokered through the bounded GET-only operations API | `BLOB_READ_WRITE_TOKEN` in the agent environment |
 | Sandbox | Run/sandbox state brokered through the GET-only operations API | Vercel/Sandbox control token in the agent environment |
 | AI Gateway | Provider/error/cost evidence from Vercel logs and operations events | `AI_GATEWAY_API_KEY` or any provider-spend credential |
-| Secrets | `OPS_READ_TOKEN` is the sole standing application credential; other values are metadata-only or use a separately authorized 0600 ephemeral file | Printing, logging, committing, attaching, retaining, or standing access to other values |
+| Secrets | Monitor: metadata only. Diagnostic: metadata plus separately authorized values through a 0600 ephemeral file | Monitor value access; printing, logging, committing, attaching, retaining, or standing access to other values |
 
 Owner-capable evidence is always `overprivileged`; it can never produce a green
 audit. Missing and expired identities are reported as `missing`.
 
 ## Run the audit
 
-Create a metadata-only evidence document matching
-`agent_access_evidence.v1`. Do not put credential values in it. Then run:
+The default command actively probes the authenticated GitHub and Vercel
+identities and the application operations API. It uses only documented
+read-only `gh api`, Vercel CLI/API, and HTTP GET operations:
 
 ```bash
-pnpm ops:access-audit -- --evidence /protected/path/access-evidence.json --json
+HARNESS_ARENA_URL=https://development.example \
+VERCEL_TEAM_ID=team_id VERCEL_PROJECT_ID=project_id \
+pnpm ops:access-audit -- --role monitor --json
 ```
+
+GitHub CLI and Vercel CLI must already be authenticated as the identity being
+audited. Tokens are never accepted as CLI arguments. The audit checks the
+active GitHub repository permissions, Vercel team role plus explicit or
+inherited project role, deployment/log/environment-metadata reads, and three
+authenticated operations GET endpoints. It does not issue POST, PUT, PATCH, or
+DELETE probes.
+
+Fixtures or previously captured metadata may be checked only with the explicit
+non-authoritative mode:
+
+```bash
+pnpm ops:access-audit -- --offline-evidence /protected/path/access-evidence.json --json
+```
+
+Offline evidence can expose missing or overprivileged access, but can never
+produce exit 0 or final `observable` proof.
 
 Exit codes are 0 observable, 2 missing, 3 overprivileged, and 64 invalid input.
 The command also scans app, library, and operational source for `process.env`
 references. A newly referenced variable or unapproved dynamic lookup makes the
 audit non-green until the versioned inventory is reviewed.
 
-Secret values, when a later separately authorized diagnostic requires one,
+Monitor audits are green from metadata alone and classify any secret-value
+access as overprivileged. Secret values, when a later separately authorized diagnostic requires one,
 must be passed through `withEphemeralSecretFile`. It creates a 0600 file in a
 0700 temporary directory, redacts returned stdout/stderr, and removes the
 directory on normal completion, error, SIGINT, and SIGTERM. `.agent-access-secrets/`
@@ -61,12 +82,14 @@ Provider references: [GitHub fine-grained token permissions](https://docs.github
 
 ## Operational proof still required
 
-1. Run the audit with the intended GitHub read identity and dedicated Vercel
+1. Run the authoritative audit with the intended GitHub read identity and dedicated Vercel
    Viewer identity for each project.
 2. Run it with the current owner identity and retain only the redacted report;
    it must classify `overprivileged`.
-3. Exercise every operations write probe with `OPS_READ_TOKEN`; all must return
-   405 with `Allow: GET`.
+3. Retain the test evidence that derives every credential-protected mutation
+   route and invokes each handler with `OPS_READ_TOKEN`; every handler must
+   reject it before mutation. The same tests fail closed if the read token
+   collides with an admin or runner callback credential.
 4. Record the invitation/role assignment and short-lived secret broker setup in
    the Epic evidence. These are external configuration changes and are not made
    by this code change.

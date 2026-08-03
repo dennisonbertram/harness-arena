@@ -15,5 +15,6 @@ if (!isAllowedModel(COMPETITION_MODEL)) {
 
 /** Reads the configured admin token, or undefined if unset. */
 export function competitionAdminToken(): string | undefined {
-  return process.env.COMPETITION_ADMIN_TOKEN;
+  const token = process.env.COMPETITION_ADMIN_TOKEN;
+  return token && token !== process.env.OPS_READ_TOKEN ? token : undefined;
 }

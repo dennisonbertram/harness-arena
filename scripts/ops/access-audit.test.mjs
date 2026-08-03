@@ -59,12 +59,49 @@ describe("least-privilege access policy", () => {
     expect(JSON.parse(writeOut.mock.calls[0][0])).toMatchObject({ authority: "authoritative", overall: "observable" });
   });
 
+  it("collects authoritative evidence with read-only GitHub, Vercel, and app probes", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const commands = [];
+    const commandRunner = vi.fn(async (binary, args) => {
+      commands.push([binary, ...args]);
+      if (binary === "gh" && args[1] === "user") return { exitCode: 0, stdout: JSON.stringify({ login: "monitor-bot" }) };
+      if (binary === "gh" && args[1]?.startsWith("repos/") && args[1].split("/").length === 3) return { exitCode: 0, stdout: JSON.stringify({ permissions: { pull: true, push: false, admin: false } }) };
+      if (binary === "gh") return { exitCode: 0, stdout: "[]" };
+      if (binary === "vercel" && args[0] === "env") return { exitCode: 0, stdout: JSON.stringify({ envs: [] }) };
+      if (binary === "vercel" && args[0] === "ls") return { exitCode: 0, stdout: JSON.stringify({ deployments: [{ url: "monitor-deployment.vercel.app" }] }) };
+      if (binary === "vercel" && args[0] === "logs") return { exitCode: 0, stdout: '{"level":"info"}\n' };
+      throw new Error("unexpected command");
+    });
+    const requests = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      requests.push([String(url), init?.method]);
+      const body = String(url).includes("/v2/user") ? { id: "viewer-user" }
+        : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER" } }] }
+          : String(url).includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [] }
+            : String(url).includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
+            : {};
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    });
+    const env = {
+      OPS_READ_TOKEN: "read-token",
+      VERCEL_TOKEN: "viewer-token",
+      VERCEL_TEAM_ID: "team-one",
+      VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0],
+      HARNESS_ARENA_URL: "https://development.example.test",
+    };
+    const collected = await audit.collectActiveAccessEvidence({ policy, role: "monitor", cwd: repo, env, commandRunner, fetchImpl, now: "2026-08-03T10:00:00.000Z" });
+    expect(audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).overall).toBe("observable");
+    expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
+    expect(requests.every(([, method]) => method === "GET")).toBe(true);
+  });
+
   it("normalizes a project-scoped Vercel token with the inherited Viewer role", async () => {
     const audit = await subject();
     expect(audit.normalizeVercelAccess({
       projectId: "project-one",
       userId: "user-one",
-      token: { projectId: "project-one" },
+      token: audit.selectActiveVercelToken({ tokens: [{ prefix: "vcp_", suffix: "tail", scopes: [{ type: "project", projectId: "project-one" }] }] }, "vcp_secret-tail"),
       team: { membership: { role: "VIEWER" } },
       project: { members: [] },
     })).toMatchObject({ token_project_id: "project-one", team_role: "VIEWER", project_role: "VIEWER", role_source: "team_inherited" });
@@ -80,6 +117,12 @@ describe("least-privilege access policy", () => {
     monitor.secrets.ephemeral_file_mode = "0600";
     monitor.secrets.cleanup_verified = true;
     expect(audit.auditAccessEvidence(policy, monitor, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "secrets")?.state).toBe("overprivileged");
+    const diagnostic = await evidence("viewer");
+    diagnostic.secrets = { forbidden_static_values_present: false, metadata_readable: true, secret_values_accessed: true };
+    expect(audit.auditAccessEvidence(policy, diagnostic, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "secrets")?.state).toBe("missing");
+    diagnostic.secrets.ephemeral_file_mode = "0600";
+    diagnostic.secrets.cleanup_verified = true;
+    expect(audit.auditAccessEvidence(policy, diagnostic, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "secrets")?.state).toBe("observable");
   });
 
   it("rejects an empty methods list as no GET proof", async () => {
@@ -146,8 +189,8 @@ describe("least-privilege access policy", () => {
     for (const route of routes) {
       const loader = routeModules[`../../${route.file}`];
       expect(loader, route.file).toBeTypeOf("function");
-      const module = await loader();
-      const handler = module[route.method];
+      const routeModule = await loader();
+      const handler = routeModule[route.method];
       const request = new Request(`http://localhost/${route.file.replace(/^app\//, "").replace(/\/route\.ts$/, "")}`, {
         method: route.method,
         headers: {

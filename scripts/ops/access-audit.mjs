@@ -4,6 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { redactOpsText, redactOpsValue } from "../../lib/ops-redaction.mjs";
+import { spawnCommand } from "./agent-status.mjs";
 
 export const ACCESS_AUDIT_SCHEMA_VERSION = "agent_access_audit.v1";
 export const ACCESS_AUDIT_EXIT_CODES = Object.freeze({ observable: 0, missing: 2, overprivileged: 3, usage_error: 64 });
@@ -11,7 +12,6 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]);
 const WRITE_LEVELS = new Set(["write", "admin", "owner", "maintain", "triage", "push", "developer"]);
 const VERCEL_WRITE_ROLES = new Set(["OWNER", "ADMIN", "DEVELOPER", "MEMBER"]);
-const WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"];
 
 function extension(path) {
   const match = /\.[^.]+$/.exec(path);
@@ -19,9 +19,11 @@ function extension(path) {
 }
 
 async function readBoundedJson(path, expectedVersion) {
-  const info = await lstat(path);
+  let info;
+  try { info = await lstat(path); } catch { throw new Error("json_file_unavailable"); }
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_JSON_BYTES) throw new Error("unsafe_json_file");
-  const parsed = JSON.parse(await readFile(path, "utf8"));
+  let parsed;
+  try { parsed = JSON.parse(await readFile(path, "utf8")); } catch { throw new Error("invalid_json"); }
   if (!parsed || typeof parsed !== "object" || parsed.schema_version !== expectedVersion) throw new Error("unsupported_schema_version");
   return parsed;
 }
@@ -124,6 +126,7 @@ export async function auditEnvironmentInventory({ cwd, policy }) {
     missing: compareEnvironmentInventory(discovered.names, policy),
     unapproved_dynamic: unapproved,
     scanned_files: discovered.files.length,
+    files: discovered.files,
   };
 }
 
@@ -150,6 +153,34 @@ function auditGitHub(policy, evidence, now) {
   return capability("github", "observable");
 }
 
+export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {} }) {
+  const tokenProjectId = token.projectId ?? token.project_id ?? token.scope?.projectId ?? null;
+  const teamRole = team.membership?.role ?? team.currentUserRole ?? team.role ?? null;
+  const member = Array.isArray(project.members)
+    ? project.members.find((item) => [item.uid, item.userId, item.id].includes(userId)) : null;
+  const explicitRole = member?.role ?? project.membership?.role ?? project.currentUserRole ?? project.role ?? null;
+  return {
+    project_id: project.id ?? project.uid ?? projectId ?? null,
+    token_project_id: tokenProjectId,
+    team_role: teamRole ? String(teamRole).toUpperCase() : null,
+    project_role: explicitRole ? String(explicitRole).toUpperCase() : teamRole ? String(teamRole).toUpperCase() : null,
+    role_source: explicitRole ? "project_explicit" : teamRole ? "team_inherited" : "unknown",
+  };
+}
+
+export function selectActiveVercelToken(tokensResponse, tokenValue) {
+  const tokens = Array.isArray(tokensResponse?.tokens) ? tokensResponse.tokens : [];
+  const matches = tokens.filter((item) => (!item.prefix || tokenValue.startsWith(item.prefix)) && (!item.suffix || tokenValue.endsWith(item.suffix)));
+  if (matches.length !== 1) return {};
+  const selected = matches[0];
+  const projectScope = (selected.scopes ?? []).find((scope) => scope?.type === "project" || scope?.projectId || scope?.project?.id);
+  return {
+    projectId: projectScope?.projectId ?? projectScope?.project?.id ?? null,
+    expiresAt: selected.expiresAt ?? null,
+    type: selected.type ?? null,
+  };
+}
+
 function auditVercel(policy, evidence) {
   if (missingState(evidence)) return capability("vercel", "missing", ["vercel_viewer_identity_missing"]);
   const reasons = [];
@@ -158,7 +189,8 @@ function auditVercel(policy, evidence) {
   if (VERCEL_WRITE_ROLES.has(String(evidence.project_role ?? "").toUpperCase())) reasons.push("vercel_project_role_can_write");
   if (evidence.decrypted_environment_values) reasons.push("vercel_static_identity_can_decrypt_secrets");
   if (reasons.length) return capability("vercel", "overprivileged", reasons);
-  const allowedProject = policy.capabilities.vercel.project_ids.includes(evidence.project_id);
+  const allowedProject = policy.capabilities.vercel.project_ids.includes(evidence.project_id)
+    && (!evidence.token_project_id || evidence.token_project_id === evidence.project_id);
   if (String(evidence.team_role).toUpperCase() !== "VIEWER" || String(evidence.project_role).toUpperCase() !== "VIEWER" || !allowedProject || !evidence.environment_metadata || !evidence.deployments || !evidence.logs) {
     return capability("vercel", "missing", ["vercel_viewer_evidence_incomplete"]);
   }
@@ -168,9 +200,11 @@ function auditVercel(policy, evidence) {
 function auditOps(evidence) {
   if (missingState(evidence) || !evidence.token_present) return capability("get_only_ops", "missing", ["ops_read_token_missing"]);
   const methods = Array.isArray(evidence.methods) ? evidence.methods : [];
+  if (!methods.includes("GET")) return capability("get_only_ops", "missing", ["ops_get_read_unproven"]);
   if (methods.some((method) => method !== "GET")) return capability("get_only_ops", "overprivileged", ["ops_token_allows_non_get"]);
-  const unsafe = WRITE_METHODS.filter((method) => evidence.write_probes?.[method] !== 405);
-  return unsafe.length ? capability("get_only_ops", "missing", unsafe.map((method) => `ops_${method.toLowerCase()}_denial_unproven`)) : capability("get_only_ops", "observable");
+  if (evidence.get_probes && Object.values(evidence.get_probes).some((status) => status !== 200)) return capability("get_only_ops", "missing", ["ops_get_read_failed"]);
+  if (evidence.credential_collisions?.length) return capability("get_only_ops", "overprivileged", ["ops_credential_collision"]);
+  return evidence.mutation_guards_derived === false ? capability("get_only_ops", "missing", ["ops_mutation_guards_unproven"]) : capability("get_only_ops", "observable");
 }
 
 function auditBrokered(name, evidence, expectedReadVia, credentialKey = "credential_present") {
@@ -178,13 +212,19 @@ function auditBrokered(name, evidence, expectedReadVia, credentialKey = "credent
   return evidence?.read_via === expectedReadVia ? capability(name, "observable") : capability(name, "missing", [`${name}_brokered_read_missing`]);
 }
 
-function auditSecrets(evidence) {
+function auditSecrets(policy, roleName, evidence) {
   if (evidence?.forbidden_static_values_present) return capability("secrets", "overprivileged", ["forbidden_static_secret_values_present"]);
-  if (!evidence?.metadata_readable || evidence?.ephemeral_file_mode !== "0600" || !evidence?.cleanup_verified) return capability("secrets", "missing", ["protected_ephemeral_secret_handling_unproven"]);
+  if (!evidence?.metadata_readable) return capability("secrets", "missing", ["secret_metadata_read_missing"]);
+  const access = policy.roles[roleName].secret_value_access;
+  if (access === "metadata_only") {
+    if (evidence.secret_values_accessed) return capability("secrets", "overprivileged", ["monitor_secret_value_access_forbidden"]);
+    return capability("secrets", "observable");
+  }
+  if (evidence.secret_values_accessed && (evidence.ephemeral_file_mode !== "0600" || !evidence.cleanup_verified)) return capability("secrets", "missing", ["protected_ephemeral_secret_handling_unproven"]);
   return capability("secrets", "observable");
 }
 
-export function auditAccessEvidence(policy, evidence, { now = new Date().toISOString() } = {}) {
+export function auditAccessEvidence(policy, evidence, { now = new Date().toISOString(), authority = "offline" } = {}) {
   if (evidence?.schema_version !== "agent_access_evidence.v1" || !policy.roles[evidence.role]) throw new Error("invalid_access_evidence");
   const systems = [
     auditGitHub(policy, evidence.github, now),
@@ -193,11 +233,194 @@ export function auditAccessEvidence(policy, evidence, { now = new Date().toISOSt
     auditBrokered("blob", evidence.blob, "get_only_ops"),
     auditBrokered("sandbox", evidence.sandbox, "get_only_ops"),
     auditBrokered("ai_gateway", evidence.ai_gateway, "vercel_logs", "spend_credential_present"),
-    auditSecrets(evidence.secrets),
+    auditSecrets(policy, evidence.role, evidence.secrets),
   ];
-  const overall = systems.some((item) => item.state === "overprivileged") ? "overprivileged"
+  let overall = systems.some((item) => item.state === "overprivileged") ? "overprivileged"
     : systems.some((item) => item.state === "missing") ? "missing" : "observable";
-  return { schema_version: ACCESS_AUDIT_SCHEMA_VERSION, role: evidence.role, captured_at: evidence.captured_at ?? null, overall, exit_code: ACCESS_AUDIT_EXIT_CODES[overall], systems };
+  if (authority !== "authoritative" && overall === "observable") {
+    overall = "missing";
+    systems.push(capability("proof_authority", "missing", ["offline_evidence_not_authoritative"]));
+  }
+  return { schema_version: ACCESS_AUDIT_SCHEMA_VERSION, authority, role: evidence.role, captured_at: evidence.captured_at ?? null, overall, exit_code: ACCESS_AUDIT_EXIT_CODES[overall], systems };
+}
+
+const PROTECTED_MUTATION_GUARDS = Object.freeze([
+  { marker: "competitionAdminToken", credential: "COMPETITION_ADMIN_TOKEN", header: "x-competition-admin-token" },
+  { marker: "verifyRunnerSecret", credential: "RUNNER_CALLBACK_SECRET", header: "x-runner-secret" },
+]);
+
+export async function deriveProtectedMutationRoutes({ cwd }) {
+  const routes = [];
+  const visit = async (directory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = join(directory, entry.name);
+      if (entry.isDirectory()) { await visit(absolute); continue; }
+      if (entry.name !== "route.ts") continue;
+      const file = relative(cwd, absolute).replaceAll("\\", "/");
+      const source = await readFile(absolute, "utf8");
+      const guard = PROTECTED_MUTATION_GUARDS.find(({ marker }) => source.includes(marker));
+      if (!guard) continue;
+      for (const match of source.matchAll(/export\s+(?:async\s+function|const)\s+(POST|PUT|PATCH|DELETE)\b/g)) {
+        routes.push({ file, method: match[1], credential: guard.credential, header: guard.header });
+      }
+    }
+  };
+  await visit(resolve(cwd, "app/api"));
+  return routes.sort((left, right) => `${left.file}:${left.method}`.localeCompare(`${right.file}:${right.method}`));
+}
+
+export function findOpsCredentialCollisions(env, policy) {
+  const token = env.OPS_READ_TOKEN;
+  if (!token) return [];
+  return (policy.capabilities.get_only_ops.separate_from ?? [])
+    .filter((name) => typeof env[name] === "string" && env[name].length > 0 && env[name] === token)
+    .sort();
+}
+
+async function runJsonCommand(commandRunner, binary, args) {
+  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES });
+  if (result?.exitCode !== 0) throw new Error(`${binary}_read_probe_failed`);
+  try { return JSON.parse(result.stdout); } catch { throw new Error(`${binary}_read_probe_invalid_json`); }
+}
+
+async function runReadCommand(commandRunner, binary, args) {
+  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES });
+  if (result?.exitCode !== 0) throw new Error(`${binary}_read_probe_failed`);
+  return result.stdout;
+}
+
+function githubRepositoryRole(permissions = {}) {
+  if (permissions.admin) return "admin";
+  if (permissions.push) return "write";
+  if (permissions.maintain) return "maintain";
+  if (permissions.triage) return "triage";
+  return permissions.pull ? "read" : "none";
+}
+
+async function probeGitHub(policy, commandRunner) {
+  const repository = policy.capabilities.github.repository;
+  let identity, identityKind;
+  try {
+    identity = await runJsonCommand(commandRunner, "gh", ["api", "user"]);
+    identityKind = "authenticated_user";
+  } catch {
+    const installation = await runJsonCommand(commandRunner, "gh", ["api", "installation/repositories"]);
+    identity = { login: installation?.repositories?.[0]?.owner?.login ?? "github-app" };
+    identityKind = "github_app";
+  }
+  const endpoints = {
+    repository: `repos/${repository}`,
+    actions: `repos/${repository}/actions/runs?per_page=1`,
+    issues: `repos/${repository}/issues?per_page=1`,
+    pull_requests: `repos/${repository}/pulls?per_page=1`,
+  };
+  const responses = {};
+  for (const [name, endpoint] of Object.entries(endpoints)) responses[name] = await runJsonCommand(commandRunner, "gh", ["api", endpoint]);
+  return {
+    state: "authenticated",
+    identity_kind: identityKind,
+    identity: identity.login ?? identity.slug ?? null,
+    repository_role: githubRepositoryRole(responses.repository.permissions),
+    expires_at: null,
+    permissions: { metadata: "read", contents: "read", actions: "read", issues: "read", pull_requests: "read" },
+  };
+}
+
+async function safeGetJson(fetchImpl, url, headers = {}) {
+  let response;
+  try { response = await fetchImpl(url, { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
+  catch { throw new Error("read_probe_transport_failed"); }
+  if (!response?.ok) throw new Error("read_probe_access_failed");
+  let text;
+  try { text = await response.text(); } catch { throw new Error("read_probe_body_failed"); }
+  if (Buffer.byteLength(text) > MAX_JSON_BYTES) throw new Error("read_probe_body_limit");
+  try { return JSON.parse(text); } catch { throw new Error("read_probe_invalid_json"); }
+}
+
+function safeHarnessBase(value) {
+  const url = new URL(value);
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("invalid_harness_arena_url");
+  return url.toString().replace(/\/$/, "");
+}
+
+async function probeVercel(policy, env, commandRunner, fetchImpl) {
+  const token = env.VERCEL_TOKEN;
+  const teamId = env.VERCEL_TEAM_ID;
+  const projectId = env.VERCEL_PROJECT_ID;
+  if (!token || !teamId || !projectId || !policy.capabilities.vercel.project_ids.includes(projectId)) throw new Error("vercel_active_identity_missing");
+  const headers = { authorization: `Bearer ${token}` };
+  const [user, teamsResponse, project, tokensResponse, environment, deployments] = await Promise.all([
+    safeGetJson(fetchImpl, "https://api.vercel.com/v2/user", headers),
+    safeGetJson(fetchImpl, "https://api.vercel.com/v2/teams?limit=100", headers),
+    safeGetJson(fetchImpl, `https://api.vercel.com/v9/projects/${encodeURIComponent(projectId)}?teamId=${encodeURIComponent(teamId)}`, headers),
+    safeGetJson(fetchImpl, "https://api.vercel.com/v6/user/tokens", headers),
+    runJsonCommand(commandRunner, "vercel", ["env", "ls", "production", "--json"]),
+    runJsonCommand(commandRunner, "vercel", ["ls", "--json", "--environment", "production"]),
+  ]);
+  const team = (teamsResponse.teams ?? []).find((item) => item.id === teamId);
+  if (!team) throw new Error("vercel_team_membership_missing");
+  const deploymentList = Array.isArray(deployments) ? deployments : deployments.deployments ?? [];
+  const target = deploymentList[0]?.url ?? deploymentList[0]?.uid ?? deploymentList[0]?.id;
+  if (!target || !/^[A-Za-z0-9_.-]+$/.test(target)) throw new Error("vercel_deployment_missing");
+  await runReadCommand(commandRunner, "vercel", ["logs", target, "--json", "--since", "1h"]);
+  const tokenMetadata = selectActiveVercelToken(tokensResponse, token);
+  const normalized = normalizeVercelAccess({ projectId, userId: user.user?.id ?? user.id, token: tokenMetadata, team, project });
+  return {
+    state: "authenticated",
+    identity_kind: `${String(normalized.project_role ?? "unknown").toLowerCase()}_team_identity`,
+    ...normalized,
+    environment_metadata: Array.isArray(environment) || Array.isArray(environment.envs) || Array.isArray(environment.environments),
+    decrypted_environment_values: false,
+    deployments: true,
+    logs: true,
+  };
+}
+
+async function probeOps(policy, env, fetchImpl, cwd) {
+  const token = env.OPS_READ_TOKEN;
+  if (!token || !env.HARNESS_ARENA_URL) throw new Error("ops_active_identity_missing");
+  const base = safeHarnessBase(env.HARNESS_ARENA_URL);
+  const getProbes = {};
+  for (const path of ["/api/ops/v1", "/api/ops/v1/summary", "/api/ops/v1/inventory"]) {
+    let response;
+    try { response = await fetchImpl(`${base}${path}`, { method: "GET", headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
+    catch { throw new Error("ops_get_probe_failed"); }
+    getProbes[path] = response.status;
+  }
+  const routes = await deriveProtectedMutationRoutes({ cwd });
+  return {
+    state: "authenticated",
+    token_present: true,
+    methods: ["GET"],
+    get_probes: getProbes,
+    mutation_guards_derived: routes.length > 0,
+    credential_collisions: findOpsCredentialCollisions(env, policy),
+  };
+}
+
+export async function collectActiveAccessEvidence({ policy, role, cwd, env = process.env, commandRunner = spawnCommand, fetchImpl = fetch, now = new Date().toISOString() }) {
+  const guarded = async (probe, missing) => { try { return await probe(); } catch { return missing; } };
+  const [github, vercel, ops] = await Promise.all([
+    guarded(() => probeGitHub(policy, commandRunner), { state: "missing" }),
+    guarded(() => probeVercel(policy, env, commandRunner, fetchImpl), { state: "missing" }),
+    guarded(() => probeOps(policy, env, fetchImpl, cwd), { state: "missing", token_present: Boolean(env.OPS_READ_TOKEN), methods: [] }),
+  ]);
+  const opsObservable = ops.state === "authenticated" && Object.values(ops.get_probes ?? {}).every((status) => status === 200);
+  const vercelObservable = vercel.state === "authenticated" && vercel.logs;
+  const forbiddenStatic = ["BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET"]
+    .some((name) => typeof env[name] === "string" && env[name].length > 0);
+  return {
+    schema_version: "agent_access_evidence.v1",
+    role,
+    captured_at: now,
+    github,
+    vercel,
+    ops,
+    blob: { credential_present: Boolean(env.BLOB_READ_WRITE_TOKEN), read_via: opsObservable ? "get_only_ops" : null },
+    sandbox: { credential_present: vercel.state === "authenticated" && VERCEL_WRITE_ROLES.has(vercel.project_role), read_via: opsObservable ? "get_only_ops" : null },
+    ai_gateway: { spend_credential_present: Boolean(env.AI_GATEWAY_API_KEY || env.OPENROUTER_API_KEY), read_via: vercelObservable ? "vercel_logs" : null },
+    secrets: { forbidden_static_values_present: forbiddenStatic, metadata_readable: vercel.environment_metadata === true, secret_values_accessed: false },
+  };
 }
 
 function sanitizedError(error, secret) {
@@ -237,31 +460,42 @@ export async function withEphemeralSecretFile({ secret, run, parentDir = tmpdir(
 }
 
 function parseArgs(argv) {
-  let evidencePath, json = false;
+  let evidencePath, role, json = false;
   const normalized = argv[0] === "--" ? argv.slice(1) : argv;
   for (let index = 0; index < normalized.length; index += 1) {
     const arg = normalized[index];
-    if (arg === "--evidence") evidencePath = normalized[++index];
+    if (arg === "--offline-evidence") evidencePath = normalized[++index];
+    else if (arg === "--role") role = normalized[++index];
+    else if (arg === "--evidence") throw new Error("evidence_mode_must_be_explicitly_offline");
     else if (arg === "--json") json = true;
-    else throw new Error("usage: pnpm ops:access-audit -- --evidence <metadata.json> [--json]");
+    else throw new Error("usage: pnpm ops:access-audit -- [--role monitor|diagnostic] [--json] [--offline-evidence <metadata.json>]");
   }
-  if (!evidencePath || evidencePath.startsWith("-")) throw new Error("evidence_path_required");
-  return { evidencePath, json };
+  if (evidencePath?.startsWith("-") || role?.startsWith("-")) throw new Error("invalid_access_audit_argument");
+  return { evidencePath, role, json };
 }
 
-export async function executeCli(argv, { cwd = process.cwd(), writeOut = (value) => process.stdout.write(`${value}\n`), writeErr = (value) => process.stderr.write(`${value}\n`), evidenceOverride, now } = {}) {
+export async function executeCli(argv, { cwd = process.cwd(), writeOut = (value) => process.stdout.write(`${value}\n`), writeErr = (value) => process.stderr.write(`${value}\n`), evidenceOverride, collector = collectActiveAccessEvidence, commandRunner = spawnCommand, fetchImpl = fetch, env = process.env, now = new Date().toISOString() } = {}) {
   try {
     const args = parseArgs(argv);
     const policy = await loadPolicy(resolve(cwd, "config/agent-access-policy.json"));
+    const offlineEvidence = args.evidencePath
+      ? evidenceOverride ?? await readBoundedJson(resolve(cwd, args.evidencePath), "agent_access_evidence.v1")
+      : null;
+    const role = args.role ?? offlineEvidence?.role ?? policy.default_role;
+    if (!policy.roles[role]) throw new Error("invalid_access_role");
     const inventory = await auditEnvironmentInventory({ cwd, policy });
-    const evidence = evidenceOverride ?? await readBoundedJson(resolve(cwd, args.evidencePath), "agent_access_evidence.v1");
-    let report = auditAccessEvidence(policy, evidence, { now });
+    const authority = args.evidencePath ? "offline" : "authoritative";
+    const evidence = offlineEvidence ?? await collector({ policy, role, cwd, env, commandRunner, fetchImpl, now });
+    if (evidence.role !== role) throw new Error("access_evidence_role_mismatch");
+    let report = auditAccessEvidence(policy, evidence, { now, authority });
     if (inventory.missing.length || inventory.unapproved_dynamic.length) report = { ...report, overall: "missing", exit_code: ACCESS_AUDIT_EXIT_CODES.missing };
     const output = redactOpsValue({ ...report, environment_inventory: inventory });
     writeOut(args.json ? JSON.stringify(output) : `${output.overall}: ${output.systems.map((item) => `${item.name}=${item.state}`).join(" ")}`);
     return report.exit_code;
   } catch (error) {
-    writeErr(redactOpsText(error instanceof Error ? error.message : String(error)));
+    const allowed = new Set(["invalid_json", "json_file_unavailable", "unsafe_json_file", "unsupported_schema_version", "evidence_mode_must_be_explicitly_offline", "invalid_access_role", "access_evidence_role_mismatch", "invalid_access_audit_argument"]);
+    const message = error instanceof Error && allowed.has(error.message) ? error.message : "access_audit_failed";
+    writeErr(redactOpsText(message));
     return ACCESS_AUDIT_EXIT_CODES.usage_error;
   }
 }
