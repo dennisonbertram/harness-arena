@@ -330,6 +330,63 @@ describe("authenticated prerequisite supervisor", () => {
     } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
+  it("reaps when the anchor dies after the commit request and before its final acknowledgement", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-anchor-dies-during-commit.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const anchorPid = processGroupId(tree.command);
+    const originalSend = owned.child.send;
+    let killed = false;
+    owned.child.send = function killAnchorBeforeCommitDelivery(message, ...args) {
+      if (message?.type === "commit-detach" && !killed) {
+        killed = true;
+        process.kill(anchorPid, "SIGKILL");
+      }
+      return originalSend.call(this, message, ...args);
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(false);
+      expect(killed).toBe(true);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.send = originalSend;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("reaps when cancellation wins after commit but before the final commit acknowledgement", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-before-final-ack.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const controller = new AbortController();
+    const observed = deferred();
+    let held;
+    const emit = owned.child.emit;
+    owned.child.emit = function holdFinalCommitAck(event, ...args) {
+      if (event === "message" && args[0]?.type === "detach-committed") {
+        held = args;
+        observed.resolve();
+        return false;
+      }
+      return emit.call(this, event, ...args);
+    };
+    try {
+      const detaching = init.detachOwnedSupervisor(owned, { signal: controller.signal });
+      await Promise.race([observed.promise, delay(1_000).then(() => { throw new Error("final commit acknowledgement was not observed"); })]);
+      controller.abort(new Error("cancel before final commit ack"));
+      emit.call(owned.child, "message", ...held);
+      await expect(detaching).rejects.toThrow(/cancel before final commit ack/);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.emit = emit;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
   it("chains repeated cleanup after final commit ACK when cancellation wins before disconnect", async () => {
     const root = await temp();
     const marker = join(root, "detach-after-ack.json");
