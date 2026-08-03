@@ -12,7 +12,7 @@ Blob read-write token, create or control Sandboxes, or spend through AI Gateway.
 | GitHub | Fine-grained PAT or GitHub App with metadata, contents, Actions, issues, and pull requests at `read` | Repository write/admin/owner/maintain/triage permissions |
 | Vercel | Team and project `VIEWER`; deployment, logs, and environment-name/scope metadata | Owner, admin, developer/member, deploy, env mutation, or decrypted values from the standing identity |
 | App operations | `OPS_READ_TOKEN` against `/api/ops/v1*`, GET only | Callback, admin, competition, trace upload, or any POST/PUT/PATCH/DELETE |
-| Blob | Full inventory and object reads brokered through the bounded GET-only operations API | `BLOB_READ_WRITE_TOKEN` in the agent environment |
+| Blob | Full inventory and object reads brokered through the bounded GET-only operations API using `OPS_READ_TOKEN` | `BLOB_READ_WRITE_TOKEN` in the agent environment |
 | Sandbox | Run/sandbox state brokered through the GET-only operations API | Vercel/Sandbox control token in the agent environment |
 | AI Gateway | Provider/error/cost evidence from Vercel logs and operations events | `AI_GATEWAY_API_KEY` or any provider-spend credential |
 | Secrets | Monitor: metadata only. Diagnostic: metadata plus separately authorized values through a 0600 ephemeral file | Monitor value access; printing, logging, committing, attaching, retaining, or standing access to other values |

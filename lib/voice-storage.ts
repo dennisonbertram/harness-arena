@@ -1,9 +1,10 @@
-import { list, put } from "@vercel/blob";
+import { get, list, put } from "@vercel/blob";
+import { blobAccess } from "./blob-access";
 import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertLocalFileStorageAllowed, LocalStorageReadError, safeStoragePart } from "./file-storage";
 import { assertSafeStoragePath, atomicCreateFile, atomicWriteFile } from "./file-storage-lock.mjs";
-import { fetchJson, withRetry } from "./storage";
+import { withRetry } from "./storage";
 import { VoiceJudgmentSchema, VoiceManifestSchema } from "./voice-types";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
 import { BLOB_PATHS } from "./blob-paths.mjs";
@@ -11,6 +12,11 @@ import { BLOB_PATHS } from "./blob-paths.mjs";
 const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
 const JUDGMENTS_PREFIX = BLOB_PATHS.voiceJudgments;
 const LIST_CONCURRENCY = 20;
+export type VoiceAudioKind = "prompts" | "responses";
+
+function audioPath(kind: VoiceAudioKind, id: string): string {
+  return `${kind === "prompts" ? BLOB_PATHS.voiceAudioPrompts : BLOB_PATHS.voiceAudioResponses}${id}.wav`;
+}
 
 function judgmentPrefix(evaluatorId: string): string {
   return `${JUDGMENTS_PREFIX}${evaluatorId}/`;
@@ -35,11 +41,13 @@ export interface VoiceStorage {
   listJudgmentKeys(evaluatorId: string): Promise<string[]>;
   /** Best-effort: judgments that can't be fetched or fail schema validation are skipped and counted, not thrown. */
   listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }>;
+  getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null>;
 }
 
 export class MemoryVoiceStorage implements VoiceStorage {
   private manifest: VoiceManifest | undefined;
   private judgments = new Map<string, VoiceJudgment>();
+  private audio = new Map<string, Buffer>();
 
   async getManifest(): Promise<VoiceManifest | undefined> {
     return this.manifest;
@@ -66,6 +74,7 @@ export class MemoryVoiceStorage implements VoiceStorage {
   async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
     return { judgments: [...this.judgments.values()], unreadable: 0 };
   }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> { return this.audio.get(audioPath(kind, id)) ?? null; }
 }
 
 /** Local-only durable implementation used exclusively with STORAGE=file. */
@@ -123,11 +132,15 @@ export class FileVoiceStorage implements VoiceStorage {
     }
     return { judgments, unreadable };
   }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
+    try { return await readFile(this.path("audio", kind, `${safeStoragePart(id)}.wav`)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  }
 }
 
 export class BlobVoiceStorage implements VoiceStorage {
-  private async listAllBlobs(prefix: string): Promise<{ url: string; pathname: string }[]> {
-    const blobs: { url: string; pathname: string }[] = [];
+  private async listAllBlobs(prefix: string): Promise<{ pathname: string }[]> {
+    const blobs: { pathname: string }[] = [];
     let cursor: string | undefined;
     do {
       const page = await list({ prefix, cursor });
@@ -138,14 +151,12 @@ export class BlobVoiceStorage implements VoiceStorage {
   }
 
   async getManifest(): Promise<VoiceManifest | undefined> {
-    // list() + public-URL fetch, NOT get(): the authenticated get() endpoint
-    // has been observed 403-blocking a valid token (2026-07-24 incident,
-    // list() and public URLs unaffected), and the rest of this layer already
-    // reads via list+fetch for exactly this class of reason.
     const blobs = await withRetry(() => list({ prefix: MANIFEST_PATH, limit: 1 }));
     const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
     if (!blob) return undefined;
-    const raw = await withRetry(() => fetchJson<unknown>(blob.url));
+    const response = await withRetry(() => get(blob.pathname, { access: blobAccess() }));
+    if (!response || response.statusCode !== 200 || !response.stream) return undefined;
+    const raw = JSON.parse(await new Response(response.stream).text()) as unknown;
     const parsed = VoiceManifestSchema.safeParse(raw);
     return parsed.success ? parsed.data : undefined;
   }
@@ -153,7 +164,7 @@ export class BlobVoiceStorage implements VoiceStorage {
   async putManifest(manifest: VoiceManifest): Promise<void> {
     await withRetry(() =>
       put(MANIFEST_PATH, JSON.stringify(manifest), {
-        access: "public",
+        access: blobAccess(),
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",
@@ -165,7 +176,7 @@ export class BlobVoiceStorage implements VoiceStorage {
     const pathname = judgmentPath(judgment.evaluator_id, judgment.comparison_id);
     const write = () =>
       put(pathname, JSON.stringify(judgment), {
-        access: "public",
+        access: blobAccess(),
         addRandomSuffix: false,
         allowOverwrite: false,
         contentType: "application/json",
@@ -202,7 +213,9 @@ export class BlobVoiceStorage implements VoiceStorage {
       const results = await Promise.all(
         chunk.map(async (blob) => {
           try {
-            const raw = await withRetry(() => fetchJson<unknown>(blob.url), 3);
+            const response = await withRetry(() => get(blob.pathname, { access: blobAccess() }), 3);
+            if (!response || response.statusCode !== 200 || !response.stream) return undefined;
+            const raw = JSON.parse(await new Response(response.stream).text()) as unknown;
             const parsed = VoiceJudgmentSchema.safeParse(raw);
             return parsed.success ? parsed.data : undefined;
           } catch {
@@ -216,6 +229,11 @@ export class BlobVoiceStorage implements VoiceStorage {
       }
     }
     return { judgments, unreadable };
+  }
+  async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
+    const response = await get(audioPath(kind, id), { access: blobAccess() });
+    if (!response || response.statusCode !== 200 || !response.stream) return null;
+    return Buffer.from(await new Response(response.stream).arrayBuffer());
   }
 }
 

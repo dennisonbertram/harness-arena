@@ -1,4 +1,5 @@
 import { get, list } from "@vercel/blob";
+import { blobAccess } from "./blob-access";
 
 export interface OpsRecordMetadata { pathname: string; size: number; uploaded_at: string; etag: string }
 export interface OpsListPage { records: OpsRecordMetadata[]; cursor?: string; has_more: boolean }
@@ -45,7 +46,7 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
       clearTimeout(timer);return { status: "transient", error: controller.signal.aborted||error instanceof Error&&error.message === "read_timeout" ? "read_timeout" : "read_failed" };
     }
     try { for (let attempt = 0; attempt < 2; attempt++) {
-      try { const result = await timeout(get(pathname,{access:"public",abortSignal:controller.signal}),Math.max(1,deadlineAt-Date.now()));
+      try { const result = await timeout(get(pathname,{access:blobAccess(),abortSignal:controller.signal}),Math.max(1,deadlineAt-Date.now()));
         if (!result) { if(attempt===1)return {status:"transient",error:"read_failed"}; continue; }
         if (result.statusCode !== 200 || !result.stream) throw new Error("read_failed");
         const bytes = await boundedBytes(result.stream, maxBytes, deadlineAt, controller);

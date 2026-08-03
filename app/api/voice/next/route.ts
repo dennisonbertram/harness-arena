@@ -12,6 +12,7 @@ const COOKIE_MAX_AGE_SECONDS = 31536000; // ~1 year
 const EXCLUDE_CAP = 25;
 
 const EvaluatorIdSchema = z.uuid();
+const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;
 
 // ponytail: naive in-memory per-IP cap on cookie *minting* — POC-level, not
 // a real abuse boundary, and per-process (serverless cold starts reset it;
@@ -77,9 +78,9 @@ function buildComparisonPayload(manifest: VoiceManifest, result: NextComparison,
   }
   return {
     comparisonId: result.comparisonId,
-    prompt: { audioUrl: prompt.audio_url, text: prompt.text },
-    clipA: { responseId: first.id, audioUrl: first.audio_url },
-    clipB: { responseId: second.id, audioUrl: second.audio_url },
+    prompt: { audioUrl: audioUrl("prompts", prompt.id), text: prompt.text },
+    clipA: { responseId: first.id, audioUrl: audioUrl("responses", first.id) },
+    clipB: { responseId: second.id, audioUrl: audioUrl("responses", second.id) },
     progress: currentProgress,
   };
 }

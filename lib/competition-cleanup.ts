@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { copy, del, get, list, put } from "@vercel/blob";
+import { blobAccess } from "./blob-access";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "reaped"]);
@@ -76,7 +77,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function readJson(pathname: string): Promise<BlobDocument> {
-  const response = await get(pathname, { access: "public" });
+  const response = await get(pathname, { access: blobAccess() });
   if (!response || response.statusCode !== 200 || !response.stream) {
     throw new CompetitionCleanupError(`required record is missing: ${pathname}`);
   }
@@ -92,7 +93,7 @@ async function readJson(pathname: string): Promise<BlobDocument> {
 }
 
 async function readOptionalJson(pathname: string): Promise<BlobDocument | undefined> {
-  const response = await get(pathname, { access: "public" });
+  const response = await get(pathname, { access: blobAccess() });
   if (!response) return undefined;
   if (response.statusCode !== 200 || !response.stream) {
     throw new CompetitionCleanupError(`required record is missing: ${pathname}`);
@@ -230,7 +231,7 @@ async function claimOperationIdentity(expected: CleanupOperationIdentity): Promi
 
   try {
     await put(pathname, JSON.stringify(expected, null, 2), {
-      access: "public",
+      access: blobAccess(),
       addRandomSuffix: false,
       allowOverwrite: false,
     });
@@ -404,7 +405,7 @@ async function deleteOperation(
         recorded_at: new Date().toISOString(),
         operationId: operation.operationId,
         ...recovery,
-      }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: true });
+      }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true });
     } catch {
       delete recovery.receiptPath;
     }
@@ -425,7 +426,7 @@ async function deleteOperation(
     deletedPathnames: operation.sourcePathnames,
     remainingPathnames: [],
     receiptPath,
-  }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: true });
+  }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true });
 }
 
 /**
@@ -532,7 +533,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
   // copied. A copy failure leaves the leaderboard exactly as it was.
   for (const pathname of sourcePathnames) {
     await copy(pathname, `${archivePrefix}/${pathname}`, {
-      access: "public",
+      access: blobAccess(),
       addRandomSuffix: false,
       allowOverwrite: false,
     });
@@ -560,7 +561,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
     ...result,
     source_pathnames: sourcePathnames,
     deletion_groups: deletionGroups,
-  }, null, 2), { access: "public", addRandomSuffix: false, allowOverwrite: false });
+  }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: false });
 
   await deleteOperation({ operationId: archiveId, result, reason, sourcePathnames, deletionGroups });
 

@@ -218,20 +218,15 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
       ],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify(makeJudgment({ comparison_id: "c1" })) })
-        .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ not: "a judgment" }) }),
-    );
+    vi.mocked(get)
+      .mockResolvedValueOnce({ statusCode: 200, stream: new Response(JSON.stringify(makeJudgment({ comparison_id: "c1" }))).body } as never)
+      .mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify({ not: "a judgment" })).body } as never);
 
     const { judgments, unreadable } = await storage.listAllJudgments();
 
     expect(judgments.map((j) => j.comparison_id)).toEqual(["c1"]);
     expect(unreadable).toBe(1);
 
-    vi.unstubAllGlobals();
   });
 
   it("getManifest returns undefined when the stored content fails manifest schema validation", async () => {
@@ -240,15 +235,11 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
       blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify({ not: "a manifest" }), { status: 200 })),
-    );
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify({ not: "a manifest" })).body } as never);
 
     const manifest = await storage.getManifest();
 
     expect(manifest).toBeUndefined();
-    vi.unstubAllGlobals();
   });
 
   it("getManifest returns undefined (without fetching) when no manifest blob exists", async () => {
@@ -264,22 +255,18 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("getManifest reads via list + public URL fetch, never the authenticated get() endpoint", async () => {
+  it("getManifest reads via the configured authenticated Blob access mode", async () => {
     const storage = new BlobVoiceStorage();
     vi.mocked(list).mockResolvedValueOnce({
       blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
       hasMore: false,
     } as never);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(new Response(JSON.stringify(makeManifest()), { status: 200 })),
-    );
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(JSON.stringify(makeManifest())).body } as never);
 
     const manifest = await storage.getManifest();
 
     expect(manifest?.version).toBe("1");
-    expect(vi.mocked(get)).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    expect(vi.mocked(get)).toHaveBeenCalledWith("voice/manifest.json", { access: "public" });
   });
 
   it("putManifest writes voice/manifest.json with allowOverwrite:true", async () => {

@@ -1,4 +1,5 @@
 import { get, list, put } from "@vercel/blob";
+import { blobAccess } from "./blob-access";
 import { FileStorage } from "./file-storage";
 import { log, normalizeError } from "./log";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
@@ -194,7 +195,7 @@ export async function fetchJson<T>(url: string): Promise<T> {
 }
 
 async function getJson<T>(identifier: string): Promise<T> {
-  const result = await get(identifier, { access: "public" });
+  const result = await get(identifier, { access: blobAccess() });
   // The caller derived this identifier from list(), so a null/304 here is a
   // transiently unreadable object rather than a legitimate missing entity.
   // Throw so withRetry can make another authenticated attempt.
@@ -260,10 +261,11 @@ export class BlobStorage implements Storage {
         // while retaining the reliable SDK data plane.
         return await withRetry(() => getJson<T>(versionedBlobUrl(blob)), 2);
       } catch {
-        // Keep the uploadedAt-versioned public URL as a fallback: a prior Blob
-        // incident had the inverse failure shape (SDK get 403, public URL
-        // healthy), and the version avoids a stale overwritten entity.
-        return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
+        // A public store retains its historical edge fallback. Private stores
+        // must never hand a listed object URL to fetch: only the authenticated
+        // SDK data plane may read them.
+        if (blobAccess() === "public") return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
+        throw new Error("private blob read failed");
       }
     });
   }
@@ -284,7 +286,7 @@ export class BlobStorage implements Storage {
     // there 500'd the callback route and lost the run's totals.
     await withRetry(() =>
       put(pathname, JSON.stringify(value), {
-        access: "public",
+        access: blobAccess(),
         addRandomSuffix: false,
         allowOverwrite: true,
         cacheControlMaxAge: 60,
@@ -394,7 +396,7 @@ export class BlobStorage implements Storage {
         try {
           const full: RunEvent = { ...event, run_id: runId, seq };
           await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
-            access: "public",
+            access: blobAccess(),
             addRandomSuffix: false,
             allowOverwrite: false,
             contentType: "application/json",
@@ -474,7 +476,7 @@ export class BlobStorage implements Storage {
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const { url } = await withRetry(() =>
       put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, {
-        access: "public",
+        access: blobAccess(),
         addRandomSuffix: false,
         allowOverwrite: true,
       }),
@@ -489,9 +491,9 @@ export class BlobStorage implements Storage {
         const blobs = await this.listAllBlobs(pathname);
         const blob = blobs.find((candidate) => candidate.pathname === pathname);
         if (!blob) return null;
-        const response = await fetch(versionedBlobUrl(blob), { cache: "no-store" });
-        if (!response.ok) throw new Error(`blob fetch ${response.status}`);
-        return Buffer.from(await response.arrayBuffer());
+        const response = await get(blob.pathname, { access: blobAccess() });
+        if (!response || response.statusCode !== 200 || !response.stream) throw new Error("blob get failed");
+        return Buffer.from(await new Response(response.stream).arrayBuffer());
       });
     } catch {
       return null;

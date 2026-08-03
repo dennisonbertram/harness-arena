@@ -287,11 +287,11 @@ describe("GET /api/voice/next", () => {
       const body = await response.json();
 
       expect(body.prompt).toEqual({
-        audioUrl: "https://blob.example/voice/audio/prompts/prompt-2.wav",
+        audioUrl: "/api/voice/audio/prompts/prompt-2",
         text: undefined,
       });
-      expect(body.clipA.audioUrl).toBe("https://blob.example/voice/audio/responses/resp-2a.wav");
-      expect(body.clipB.audioUrl).toBe("https://blob.example/voice/audio/responses/resp-2b.wav");
+      expect(body.clipA.audioUrl).toBe("/api/voice/audio/responses/resp-2a");
+      expect(body.clipB.audioUrl).toBe("/api/voice/audio/responses/resp-2b");
     });
   });
 });
