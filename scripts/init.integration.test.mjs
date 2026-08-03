@@ -112,7 +112,7 @@ async function installFakeNext(checkout) {
   const nextBin = join(checkout, "node_modules", "next", "dist", "bin", "next");
   await mkdir(join(nextBin, ".."), { recursive: true });
   await writeFile(nextBin, [
-    "const { appendFile, existsSync } = require('node:fs');",
+    "const { appendFileSync, existsSync } = require('node:fs');",
     "const { createServer } = require('node:http');",
     "const { join } = require('node:path');",
     "const args = process.argv.slice(2);",
@@ -124,7 +124,7 @@ async function installFakeNext(checkout) {
     "const health = { ok: true, gateway_key_present: Boolean(process.env.AI_GATEWAY_API_KEY), runner_secret_present: Boolean(process.env.RUNNER_CALLBACK_SECRET) };",
     "const requestLog = join(process.env.HARNESS_INIT_STATE, '..', '..', 'fake-next-requests.log');",
     "const server = createServer((request, response) => {",
-    "  appendFile(requestLog, `${request.url}\\n`, () => {});",
+    "  appendFileSync(requestLog, `${request.url}\\n`);",
     "  if (request.url === '/api/local-instance') {",
     "    const accepted = process.env.HARNESS_LOCAL_INIT === '1' && process.env.STORAGE === 'file' && request.headers['x-harness-local-instance-nonce'] === process.env.LOCAL_INSTANCE_NONCE;",
     "    response.writeHead(accepted ? 204 : 404, { 'cache-control': 'no-store' });",
@@ -413,7 +413,6 @@ describe.sequential("read-only init check integration", () => {
     const result = await runInit("--check");
     expect(result.code, result.stderr).toBe(0);
     expect(parseLastJson(result.stdout)).toMatchObject({ mode: "existing" });
-    await delay(25);
     expect((await readFile(requestLog, "utf8")).trim().split("\n")).toEqual(["/api/local-instance"]);
     expect(await snapshotTree(root)).toEqual(before);
     await expectOperatorEnvsPreserved();
