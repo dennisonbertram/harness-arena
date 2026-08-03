@@ -514,6 +514,15 @@ describe.skipIf(!["signal", "normal", "assertion"].includes(metaMode))("test-wor
   });
 });
 
+describe.skipIf(metaMode !== "publication-delay")("test-worker publication delay fixture", () => {
+  it("delays fixture publication", async () => {
+    const delayMs = Number(process.env.HARNESS_INIT_META_PUBLICATION_DELAY_MS ?? 0);
+    if (!Number.isFinite(delayMs) || delayMs < 0) throw new Error("HARNESS_INIT_META_PUBLICATION_DELAY_MS must be a non-negative number");
+    await delay(delayMs);
+    await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid }));
+  });
+});
+
 describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisite interruption fixture", () => {
   it("publishes a hung prerequisite leader and descendant before interruption", async () => {
     const pnpm = await fakeHungPnpm(root, `meta-${process.pid}`, `${process.env.HARNESS_INIT_META_MARKER}.events`);
