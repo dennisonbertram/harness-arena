@@ -75,5 +75,34 @@ describe("GET /api/runs/[id]", () => {
       expect((await storageRef.current.getRun("run-stale"))?.status).toBe("reaped");
       await vi.waitFor(() => expect(dispatchQueuedRuns).toHaveBeenCalledWith(storageRef.current));
     });
+
+    it("logs a reaper failure for the requested run without failing the read", async () => {
+      await storageRef.current.putRun({ id: "run-probe-failed", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-01-01T00:00:00.000Z" });
+      vi.spyOn(storageRef.current, "latestEventTimestamp").mockRejectedValueOnce(new Error("blob unavailable"));
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const response = await GET(new NextRequest("http://localhost/api/runs/run-probe-failed"), { params: Promise.resolve({ id: "run-probe-failed" }) });
+      expect(response.status).toBe(200);
+      expect(logSpy.mock.calls.map(([line]) => JSON.parse(line as string))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "run.reap_failed", run_id: "run-probe-failed", error_stage: "reap" }),
+      ]));
+      logSpy.mockRestore();
+    });
+
+    it("logs a dispatcher failure after reaping frees the requested run slot", async () => {
+      vi.useFakeTimers();
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      vi.setSystemTime(new Date(new Date(createdAt).getTime() + reapThresholdMs() + 1000));
+      await storageRef.current.putRun({ id: "run-dispatch-failed", submission_id: "sub-1", status: "running", task_results: [], created_at: createdAt });
+      dispatchQueuedRuns.mockRejectedValueOnce(new Error("dispatcher unavailable"));
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      expect((await GET(new NextRequest("http://localhost/api/runs/run-dispatch-failed"), { params: Promise.resolve({ id: "run-dispatch-failed" }) })).status).toBe(200);
+      await vi.waitFor(() => expect(dispatchQueuedRuns).toHaveBeenCalled());
+      expect(logSpy.mock.calls.map(([line]) => JSON.parse(line as string))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "run.dispatch_failed", run_id: "run-dispatch-failed", error_stage: "dispatch" }),
+      ]));
+      logSpy.mockRestore();
+    });
   });
 });

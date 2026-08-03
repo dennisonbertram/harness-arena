@@ -1,4 +1,4 @@
-import { log } from "./log";
+import { log, normalizeError } from "./log";
 import { startRun } from "./run-trigger";
 import type { Storage } from "./storage";
 import type { Run } from "./types";
@@ -64,8 +64,7 @@ type StartFn = (run: Run, prompt: string) => Promise<void>;
 export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = startRun): Promise<string[]> {
   const runs = await storage.listRuns();
   const toStart = selectRunsToStart(runs);
-  const started: string[] = [];
-  const starts: Promise<void>[] = [];
+  const starts: Promise<string | undefined>[] = [];
   for (const run of toStart) {
     const submission = await storage.getSubmission(run.submission_id);
     if (!submission) {
@@ -76,11 +75,13 @@ export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = st
     // concurrent dispatch is less likely to double-start it.
     const claimed: Run = { ...run, dispatched_at: new Date().toISOString() };
     await storage.putRun(claimed);
-    started.push(run.id);
     starts.push(
-      startFn(claimed, submission.prompt).catch((err: unknown) =>
-        log("warn", "run-trigger.failed", { run_id: run.id, error: (err as Error).message }),
-      ),
+      startFn(claimed, submission.prompt)
+        .then(() => run.id)
+        .catch((error: unknown) => {
+          log("error", "dispatch.start_failed", { run_id: run.id, ...normalizeError(error, "sandbox_start") });
+          return undefined;
+        }),
     );
   }
   // AWAIT the sandbox creations. Callers invoke dispatch inside next/server's
@@ -88,7 +89,7 @@ export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = st
   // Fire-and-forget here let the function terminate mid-Sandbox.create, leaving
   // runs claimed-but-never-started (holding a slot until the reaper frees it).
   // Bounded by MAX_STARTS_PER_TICK so one invocation never awaits too many.
-  await Promise.all(starts);
+  const started = (await Promise.all(starts)).filter((id): id is string => id !== undefined);
   if (started.length > 0) log("info", "dispatch.started", { count: started.length, run_ids: started });
   return started;
 }

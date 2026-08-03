@@ -3,6 +3,7 @@ import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { reapIfStale } from "@/lib/reaper";
 import { runModel } from "@/lib/models";
 import { getStorage } from "@/lib/storage";
+import { log, normalizeError } from "@/lib/log";
 
 export async function GET() {
   const storage = getStorage();
@@ -10,14 +11,21 @@ export async function GET() {
   // Lazy reap: every poll of the run list is a chance to flip a stale run
   // (no events for 10+ minutes) to `reaped` instead of waiting on the
   // once-a-day cron (see app/api/cron/reap/route.ts).
-  const current = await Promise.all(runs.map((run) => reapIfStale(storage, run).catch(() => run)));
+  const current = await Promise.all(runs.map((run) => reapIfStale(storage, run).catch((error: unknown) => {
+    log("error", "runs.reap_failed", { run_id: run.id, ...normalizeError(error, "reap") });
+    return run;
+  })));
   // Lazy dispatch: same pattern — a run-list poll (the pending page refreshes
   // every 15s) is a chance to start queued runs up to the concurrency cap, so
   // the queue drains without waiting on the daily cron.
   try {
-    after(() => dispatchQueuedRuns(storage).catch(() => {}));
+    after(() => dispatchQueuedRuns(storage).catch((error: unknown) => {
+      log("error", "runs.dispatch_failed", { ...normalizeError(error, "dispatch") });
+    }));
   } catch {
-    void dispatchQueuedRuns(storage).catch(() => {});
+    void dispatchQueuedRuns(storage).catch((error: unknown) => {
+      log("error", "runs.dispatch_failed", { ...normalizeError(error, "dispatch") });
+    });
   }
   // Always carry a model so consumers don't have to know the default; legacy
   // (pre-multi-model) runs read as glm-5.2.

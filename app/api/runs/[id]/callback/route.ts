@@ -1,7 +1,7 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { verifyRunnerSecret } from "@/lib/runner-auth";
 import { getStorage } from "@/lib/storage";
 import { NewRunEventSchema, TaskResultSchema } from "@/lib/types";
@@ -68,6 +68,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const rawBody = await request.json().catch(() => null);
   const parsed = CallbackBodySchema.safeParse(rawBody);
   if (!parsed.success) {
+    // Do not include rawBody or validation details: callback payloads can
+    // contain prompts, trace URLs, and runner credentials.
+    log("warn", "callback.invalid_payload", { run_id: id, stage: "validation" });
     return NextResponse.json({ error: "invalid callback body" }, { status: 400 });
   }
 
@@ -127,7 +130,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const storageRef = storage;
     const kick = () =>
       dispatchQueuedRuns(storageRef).catch((err: unknown) =>
-        log("warn", "dispatch.failed", { run_id: id, error: (err as Error).message }),
+        log("error", "dispatch.failed", { run_id: id, ...normalizeError(err, "dispatch") }),
       );
     try {
       after(kick);

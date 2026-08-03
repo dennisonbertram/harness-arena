@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { after } from "next/server";
 import { dispatchQueuedRuns } from "./dispatch";
 import { JUDGE_MODEL, judgeSubmission, type JudgeVerdict } from "./judge";
-import { log } from "./log";
+import { log, normalizeError } from "./log";
 import type { Storage } from "./storage";
 import { getTasks } from "./tasks";
 import type { Run, Submission } from "./types";
@@ -61,7 +61,7 @@ export async function judgeAndDispatch(
     verdict = await judgeSubmission(submission.prompt, getTasks());
   } catch (err) {
     const detail = (err as Error).message;
-    log("error", `${logPrefix}.judge_unavailable`, { submission_id: submission.id, error: detail });
+    log("error", `${logPrefix}.judge_unavailable`, { submission_id: submission.id, ...normalizeError(err, "judge") });
     return { kind: "judge_unavailable", error: detail };
   }
 
@@ -102,7 +102,7 @@ export async function judgeAndDispatch(
 
   const kickDispatch = () =>
     dispatchQueuedRuns(storage).catch((err: unknown) =>
-      log("warn", `${logPrefix}.dispatch_failed`, { submission_id: submission.id, error: (err as Error).message }),
+      log("error", `${logPrefix}.dispatch_failed`, { submission_id: submission.id, ...normalizeError(err, "dispatch") }),
     );
   try {
     after(kickDispatch);

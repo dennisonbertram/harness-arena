@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
+import { log } from "@/lib/log";
 
 const isRateLimited = createRateLimiter(10);
 
@@ -20,6 +21,7 @@ export async function POST(request: NextRequest) {
   });
   const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok || !body || typeof body.error === "string") {
+    log("warn", "auth.device_start_failed", { stage: "device_code", status: response.status });
     return NextResponse.json(
       { error: "GitHub Device Flow is not enabled for this OAuth app. Enable Device Flow in the GitHub OAuth App settings." },
       { status: 503 },
@@ -30,6 +32,7 @@ export async function POST(request: NextRequest) {
     typeof device_code !== "string" || typeof user_code !== "string" || typeof verification_uri !== "string" ||
     typeof expires_in !== "number" || typeof interval !== "number"
   ) {
+    log("warn", "auth.device_start_invalid_response", { stage: "device_code" });
     return NextResponse.json({ error: "GitHub returned an invalid Device Flow response" }, { status: 502 });
   }
   return NextResponse.json({ device_code, user_code, verification_uri, expires_in, interval });

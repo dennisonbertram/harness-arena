@@ -226,8 +226,11 @@ describe("judgeSubmission", () => {
 
     it("throws (does not return a rejected verdict) on a network error", async () => {
       vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(new Error("network down")));
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
       await expect(judgeSubmission("some prompt", FIXTURE_TASKS)).rejects.toThrow("network down");
+      expect(logSpy.mock.calls.flat().join(" ")).toContain("provider.request_failed");
+      logSpy.mockRestore();
     });
   });
 });

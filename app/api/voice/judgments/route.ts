@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { comparisonIdFor } from "@/lib/voice-session";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { VOICE_JUDGMENT_REASONS, VOICE_OUTCOMES, VoicePlayCountsSchema } from "@/lib/voice-types";
@@ -130,7 +130,7 @@ export async function POST(request: NextRequest) {
     log("error", "voice.judgment.store_failed", {
       comparison_id: judgment.comparison_id,
       evaluator_id: evaluatorId,
-      error: (err as Error).message,
+      ...normalizeError(err, "judgment_store"),
     });
     return NextResponse.json({ error: "failed to store judgment" }, { status: 500 });
   }
