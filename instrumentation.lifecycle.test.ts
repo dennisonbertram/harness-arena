@@ -71,7 +71,7 @@ describe("hosted request span lifecycle", () => {
     expect(waitUntilTasks).toHaveLength(2);
   });
 
-  it("coalesces retained children behind one post-root request-lifetime drain", async () => {
+  it("binds every retained child and root to request-lifetime ownership", async () => {
     const waitUntilTasks: Promise<unknown>[] = [];
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
       get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
@@ -90,17 +90,16 @@ describe("hosted request span lifecycle", () => {
     for (let index = 0; index < 8; index += 1) {
       tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
     }
-    expect(waitUntilTasks).toHaveLength(0);
+    expect(waitUntilTasks).toHaveLength(8);
 
     root.end();
-    expect(waitUntilTasks).toHaveLength(1);
+    expect(waitUntilTasks).toHaveLength(9);
     await Promise.all(waitUntilTasks);
-    expect(batches).toHaveLength(1);
-    expect(batches[0]).toHaveLength(9);
+    expect(batches.flat()).toHaveLength(9);
     await provider.shutdown();
   });
 
-  it("runs the same bounded post-root drain as a local fallback without request context", async () => {
+  it("runs the same bounded retained-span drain as a local fallback without request context", async () => {
     const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }));
     const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
     const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
@@ -133,16 +132,17 @@ describe("hosted request span lifecycle", () => {
     }
 
     root.end();
-    expect(waitUntilTasks).toHaveLength(1);
+    expect(waitUntilTasks).toHaveLength(32);
     let lifecycleSettled = false;
-    void waitUntilTasks[0]!.then(() => { lifecycleSettled = true; });
+    const rootLifecycle = waitUntilTasks.at(-1)!;
+    void rootLifecycle.then(() => { lifecycleSettled = true; });
 
     await vi.advanceTimersByTimeAsync(5_500);
     expect(exportSpans).toHaveBeenCalledTimes(2);
     expect(lifecycleSettled).toBe(false);
 
     await vi.advanceTimersByTimeAsync(500);
-    await waitUntilTasks[0];
+    await rootLifecycle;
     expect(lifecycleSettled).toBe(true);
     expect(structuredSpanReadiness().structured.queued).toBe(0);
     await provider.shutdown();
@@ -171,37 +171,30 @@ describe("hosted request span lifecycle", () => {
       tracer.startSpan(`second-late-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext));
 
     root.end();
-    expect(waitUntilTasks).toHaveLength(1);
-    const lifecycleSettled: boolean[] = [];
-    const observeLifecycleTasks = () => {
-      for (let index = lifecycleSettled.length; index < waitUntilTasks.length; index += 1) {
-        lifecycleSettled[index] = false;
-        void waitUntilTasks[index]!.then(() => { lifecycleSettled[index] = true; });
-      }
-    };
-    observeLifecycleTasks();
+    expect(waitUntilTasks).toHaveLength(32);
 
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(exportSpans).toHaveBeenCalledTimes(2);
     for (const span of firstLateGeneration) span.end();
-    expect(waitUntilTasks).toHaveLength(2);
-    observeLifecycleTasks();
+    expect(waitUntilTasks).toHaveLength(48);
 
     await vi.advanceTimersByTimeAsync(5_000);
     expect(exportSpans).toHaveBeenCalledTimes(3);
     for (const span of secondLateGeneration) span.end();
-    expect(waitUntilTasks).toHaveLength(3);
-    observeLifecycleTasks();
+    expect(waitUntilTasks).toHaveLength(64);
+    let latestLifecycleSettled = false;
+    const latestLifecycle = waitUntilTasks.at(-1)!;
+    void latestLifecycle.then(() => { latestLifecycleSettled = true; });
 
     await vi.advanceTimersByTimeAsync(5_250);
     expect(exportSpans).toHaveBeenCalledTimes(4);
-    expect(lifecycleSettled).toEqual([true, true, false]);
+    expect(latestLifecycleSettled).toBe(false);
     expect(structuredSpanReadiness().structured.queued).toBe(16);
 
     await vi.advanceTimersByTimeAsync(2_750);
     await Promise.all(waitUntilTasks);
-    expect(lifecycleSettled).toEqual([true, true, true]);
+    expect(latestLifecycleSettled).toBe(true);
     expect(structuredSpanReadiness().structured.queued).toBe(0);
     await provider.shutdown();
   });
@@ -266,12 +259,13 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
-  it("retains bounded ancestry for nested, sibling, and out-of-order saved contexts", async () => {
+  it("owns nested, sibling, and out-of-order spans from saved contexts", async () => {
     const waitUntilTasks: Promise<unknown>[] = [];
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
       get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
     };
-    const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }));
+    const exported: ReadableSpan[] = [];
+    const exportSpans = vi.fn((spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { exported.push(...spans); callback({ code: 0 }); });
     const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
     const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
     const tracer = provider.getTracer("saved-ended-ancestry");
@@ -282,7 +276,7 @@ describe("hosted request span lifecycle", () => {
     nestedParent.end();
     root.end();
     await Promise.all(waitUntilTasks);
-    expect(waitUntilTasks).toHaveLength(1);
+    expect(waitUntilTasks).toHaveLength(2);
 
     const firstSibling = tracer.startSpan("first-sibling", { kind: SpanKind.SERVER }, rootContext);
     const secondSibling = tracer.startSpan("second-sibling", { kind: SpanKind.SERVER }, rootContext);
@@ -291,9 +285,9 @@ describe("hosted request span lifecycle", () => {
     nestedChild.end();
     firstSibling.end();
 
-    expect(waitUntilTasks).toHaveLength(2);
-    await waitUntilTasks[1];
-    expect(exportSpans).toHaveBeenCalledTimes(2);
+    expect(waitUntilTasks).toHaveLength(5);
+    await Promise.all(waitUntilTasks);
+    expect(exported).toHaveLength(5);
     await provider.shutdown();
   });
 

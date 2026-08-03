@@ -47,29 +47,26 @@ dropped counts and an unready reason without collector headers or their values.
 The OTLP queue retains a failed batch until a later request or shutdown flush
 acknowledges it; it remains capped at 32 spans, records
 `export_unacknowledged`, and does not loop inside a single `forceFlush` call.
-Because `@vercel/otel`'s root-start lifecycle wait is short, each retained root
-also registers one root-identity-scoped, post-enqueue aggregate drain through the
-public `@vercel/functions` `waitUntil` API in that root's request context. All
-configured sinks join the same task on the next microtask; roots with distinct
-span IDs receive independent lifecycle tasks even when they continue one
-incoming trace. Each lifecycle generation seals a fixed queue-sequence cutoff
-before it starts draining. A retained descendant that ends after that cutoff
-synchronously registers the next task in its current request context; all
-configured sinks coalesce into that generation before its cutoff is sealed.
-The per-generation deadline is derived from queue capacity and the per-export
+Because `@vercel/otel`'s root-start lifecycle wait is short, every accepted
+retained span synchronously registers a post-enqueue task through the public
+`@vercel/functions` `waitUntil` API in its current request context. Structured
+and OTLP processors coalesce on that span's exact `trace_id:span_id` identity,
+so multiple sinks share one promise without combining distinct spans or
+requests. Each promise seals a fixed queue-sequence cutoff on the next
+microtask. Spans ending in the same turn keep independent lifecycle ownership
+while sharing a bounded processor drain; later spans register new promises.
+The per-span lifecycle deadline is derived from queue capacity and the per-export
 acknowledgement bound. Because older generation cutoffs can split
 otherwise combinable batches, the sound worst case is one five-second export
 window for each of the 32 bounded queue slots, plus a 250 ms settlement margin.
 New arrivals never extend an existing generation or create an unbounded
 recursive drain. Failures are consumed by the lifecycle task while
 the unacknowledged batch remains queued for a later request or shutdown retry.
-Saved ended-parent contexts remain attributable through a bounded ancestry
-cache so direct children, nested descendants, and siblings that start after a
-fully drained root still register their own request-context generation. Each
-sink retains at most 64 ended span-to-root entries and 64 ended-root markers;
-both expire after the same 160.25-second lifecycle horizon, with oldest entries
-evicted first at capacity. Root keys remain `trace_id:span_id`, so this bounded
-retention cannot conflate distinct requests that continue one incoming trace.
+No parent/root ancestry cache is involved: saved ended-parent contexts, active
+descendants, cap pressure, and elapsed time cannot cause an accepted retained
+span to lose lifecycle ownership. Spans refused by the bounded queue increment
+the sink's dropped count and emit the rate-limited safe drop signal; they are
+never enqueued as unowned work.
 Without a hosted request context, the same bounded, catch-wrapped task runs
 locally as a best-effort fallback.
 

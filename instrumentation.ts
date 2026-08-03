@@ -1,7 +1,7 @@
 import { JsonTraceSerializer, ProtobufTraceSerializer, type ISerializer } from "@opentelemetry/otlp-transformer";
 import { waitUntil } from "@vercel/functions";
 import { registerOTel } from "@vercel/otel";
-import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Context, type Span, type SpanContext, type SpanStatus } from "@opentelemetry/api";
+import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Instrumentation } from "next";
@@ -19,9 +19,7 @@ const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
 // bounded acknowledgement window per queue slot instead of assuming batches
 // from distinct generations can be combined.
 const MAX_SNAPSHOT_ACK_WINDOWS = MAX_BUFFERED_SPANS;
-const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_SNAPSHOT_ACK_WINDOWS * EXPORT_ACK_DEADLINE_MILLIS + 250;
-const MAX_RETAINED_ENDED_ANCESTRY = MAX_BUFFERED_SPANS * 2;
-const ENDED_ANCESTRY_RETENTION_MILLIS = POST_ROOT_DRAIN_DEADLINE_MILLIS;
+const SPAN_DRAIN_DEADLINE_MILLIS = MAX_SNAPSHOT_ACK_WINDOWS * EXPORT_ACK_DEADLINE_MILLIS + 250;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
@@ -300,39 +298,39 @@ function spanIdentity(spanContext: SpanContext): string {
   return `${spanContext.traceId}:${spanContext.spanId}`;
 }
 
-type RootDrainParticipant = {
+type SpanDrainParticipant = {
   captureDrainSnapshot(): number | undefined;
-  forceFlushThrough(cutoff: number): Promise<void>;
+  scheduleFlushThrough(cutoff: number): Promise<void>;
 };
-type RootDrainRegistration = { participants: Set<RootDrainParticipant> };
-const openRootDrainRegistrations = new Map<string, RootDrainRegistration>();
+type SpanDrainRegistration = { participants: Set<SpanDrainParticipant> };
+const openSpanDrainRegistrations = new Map<string, SpanDrainRegistration>();
 
-function registerPostRootDrain(rootKey: string, participant: RootDrainParticipant): void {
-  const existing = openRootDrainRegistrations.get(rootKey);
+function registerSpanDrain(spanKey: string, participant: SpanDrainParticipant): void {
+  const existing = openSpanDrainRegistrations.get(spanKey);
   if (existing) {
     existing.participants.add(participant);
     return;
   }
 
-  const registration: RootDrainRegistration = { participants: new Set([participant]) };
+  const registration: SpanDrainRegistration = { participants: new Set([participant]) };
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const aggregate = Promise.resolve().then(async () => {
     // Composite processors call onEnd synchronously. Deferring one microtask
     // lets every configured sink join this lifecycle generation. Seal it
     // before taking fixed queue cutoffs so later arrivals synchronously bind
     // a new bounded waitUntil task.
-    if (openRootDrainRegistrations.get(rootKey) === registration) openRootDrainRegistrations.delete(rootKey);
+    if (openSpanDrainRegistrations.get(spanKey) === registration) openSpanDrainRegistrations.delete(spanKey);
     const snapshots = [...registration.participants].map((processor) => ({
       processor,
       cutoff: processor.captureDrainSnapshot(),
     }));
     await Promise.allSettled(snapshots.map(({ processor, cutoff }) =>
-      cutoff === undefined ? Promise.resolve() : processor.forceFlushThrough(cutoff)));
+      cutoff === undefined ? Promise.resolve() : processor.scheduleFlushThrough(cutoff)));
   });
   const bounded = Promise.race([
     aggregate,
     new Promise<never>((_resolve, reject) => {
-      deadline = setTimeout(() => reject(new Error("post-root span drain deadline exceeded")), POST_ROOT_DRAIN_DEADLINE_MILLIS);
+      deadline = setTimeout(() => reject(new Error("retained span drain deadline exceeded")), SPAN_DRAIN_DEADLINE_MILLIS);
     }),
   ]).then(
     () => undefined,
@@ -340,11 +338,11 @@ function registerPostRootDrain(rootKey: string, participant: RootDrainParticipan
   ).finally(() => {
     if (deadline) clearTimeout(deadline);
   });
-  openRootDrainRegistrations.set(rootKey, registration);
+  openSpanDrainRegistrations.set(spanKey, registration);
   try {
-    // This synchronous call binds the aggregate promise to the current root's
-    // Vercel request context. With no hosted context, the bounded task still
-    // runs locally as a catch-wrapped best-effort fallback.
+    // This synchronous call binds the aggregate promise to the current span's
+    // request context. With no hosted context, the bounded task still runs
+    // locally as a catch-wrapped best-effort fallback.
     waitUntil(bounded);
   } catch {
     // The local task is already running and cannot reject.
@@ -359,101 +357,27 @@ export class BoundedSpanProcessor implements SpanProcessor {
   private flushInFlight?: Promise<void>;
   private inFlightBatchLength = 0;
   private nextQueueSequence = 0;
-  private readonly rootKeyBySpan = new Map<string, string>();
-  private readonly activeSpanCountByRoot = new Map<string, number>();
-  private readonly endedSpanRootKeys = new Map<string, { rootKey: string; expiresAt: number }>();
-  private readonly endedRootExpirations = new Map<string, number>();
+  private highestRequestedCutoff = 0;
   constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
     if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
   }
-  onStart(span: Span, parentContext: Context): void {
-    if (this.closed) return;
-    this.pruneEndedAncestry();
-    const currentKey = spanIdentity(span.spanContext());
-    const parentSpanContext = trace.getSpanContext(parentContext);
-    const rootKey = !parentSpanContext || parentSpanContext.isRemote
-      ? currentKey
-      : this.lookupRootKey(spanIdentity(parentSpanContext));
-    if (!rootKey) return;
-    this.rootKeyBySpan.set(currentKey, rootKey);
-    this.activeSpanCountByRoot.set(rootKey, (this.activeSpanCountByRoot.get(rootKey) ?? 0) + 1);
-  }
+  onStart(): void {}
   onEnd(span: ReadableSpan): void {
-    const currentKey = spanIdentity(span.spanContext());
-    const isRoot = spanPriority(span) === 2;
-    const rootKey = this.rootKeyBySpan.get(currentKey) ?? (isRoot ? currentKey : undefined);
-    if (isRoot && rootKey) this.rememberEndedRoot(rootKey);
-    try {
-      if (this.closed || !shouldRetainSpan(span)) return;
-      if (this.queue.length >= MAX_BUFFERED_SPANS) {
-        const priority = spanPriority(span);
-        const evictionIndex = this.queue.findIndex((queued, index) => index >= this.inFlightBatchLength && spanPriority(queued.span) < priority);
-        if (evictionIndex >= 0) {
-          this.queue.splice(evictionIndex, 1);
-          this.recordDrop("priority_evicted");
-        } else {
-          this.recordDrop("queue_full");
-          return;
-        }
+    if (this.closed || !shouldRetainSpan(span)) return;
+    if (this.queue.length >= MAX_BUFFERED_SPANS) {
+      const priority = spanPriority(span);
+      const evictionIndex = this.queue.findIndex((queued, index) => index >= this.inFlightBatchLength && spanPriority(queued.span) < priority);
+      if (evictionIndex >= 0) {
+        this.queue.splice(evictionIndex, 1);
+        this.recordDrop("priority_evicted");
+      } else {
+        this.recordDrop("queue_full");
+        return;
       }
-      this.queue.push({ sequence: ++this.nextQueueSequence, span });
-      updateSinkReadiness(this.sink, { queued: this.queue.length });
-      if (rootKey && (isRoot || this.isEndedRoot(rootKey))) registerPostRootDrain(rootKey, this);
-    } finally {
-      this.releaseSpan(currentKey, rootKey);
     }
-  }
-  private releaseSpan(currentKey: string, rootKey: string | undefined): void {
-    if (!rootKey) return;
-    const wasTracked = this.rootKeyBySpan.delete(currentKey);
-    this.rememberEndedSpan(currentKey, rootKey);
-    if (!wasTracked) return;
-    const remaining = (this.activeSpanCountByRoot.get(rootKey) ?? 1) - 1;
-    if (remaining > 0) {
-      this.activeSpanCountByRoot.set(rootKey, remaining);
-      return;
-    }
-    this.activeSpanCountByRoot.delete(rootKey);
-  }
-  private lookupRootKey(spanKey: string): string | undefined {
-    const liveRootKey = this.rootKeyBySpan.get(spanKey);
-    if (liveRootKey) return liveRootKey;
-    const retained = this.endedSpanRootKeys.get(spanKey);
-    if (!retained) return undefined;
-    this.endedSpanRootKeys.delete(spanKey);
-    this.endedSpanRootKeys.set(spanKey, retained);
-    return retained.rootKey;
-  }
-  private rememberEndedSpan(spanKey: string, rootKey: string): void {
-    this.pruneEndedAncestry();
-    this.endedSpanRootKeys.delete(spanKey);
-    this.endedSpanRootKeys.set(spanKey, { rootKey, expiresAt: Date.now() + ENDED_ANCESTRY_RETENTION_MILLIS });
-    this.trimEndedAncestry(this.endedSpanRootKeys);
-  }
-  private rememberEndedRoot(rootKey: string): void {
-    this.pruneEndedAncestry();
-    this.endedRootExpirations.delete(rootKey);
-    this.endedRootExpirations.set(rootKey, Date.now() + ENDED_ANCESTRY_RETENTION_MILLIS);
-    this.trimEndedAncestry(this.endedRootExpirations);
-  }
-  private isEndedRoot(rootKey: string): boolean {
-    this.pruneEndedAncestry();
-    return this.endedRootExpirations.has(rootKey);
-  }
-  private pruneEndedAncestry(now = Date.now()): void {
-    for (const [spanKey, retained] of this.endedSpanRootKeys) {
-      if (retained.expiresAt <= now) this.endedSpanRootKeys.delete(spanKey);
-    }
-    for (const [rootKey, expiresAt] of this.endedRootExpirations) {
-      if (expiresAt <= now) this.endedRootExpirations.delete(rootKey);
-    }
-  }
-  private trimEndedAncestry<T>(retained: Map<string, T>): void {
-    while (retained.size > MAX_RETAINED_ENDED_ANCESTRY) {
-      const oldestKey = retained.keys().next().value;
-      if (oldestKey === undefined) return;
-      retained.delete(oldestKey);
-    }
+    this.queue.push({ sequence: ++this.nextQueueSequence, span });
+    updateSinkReadiness(this.sink, { queued: this.queue.length });
+    registerSpanDrain(spanIdentity(span.spanContext()), this);
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;
@@ -510,13 +434,20 @@ export class BoundedSpanProcessor implements SpanProcessor {
       updateSinkReadiness(this.sink, { ready: true, queued: this.queue.length, reason: undefined });
     }
   }
+  scheduleFlushThrough(cutoff: number): Promise<void> {
+    this.highestRequestedCutoff = Math.max(this.highestRequestedCutoff, cutoff);
+    // Lifecycle registrations ending in this turn update their requested
+    // cutoffs synchronously, then share one processor drain on the next turn.
+    return Promise.resolve().then(() => this.forceFlushThrough(cutoff));
+  }
   async forceFlushThrough(cutoff: number): Promise<void> {
+    this.highestRequestedCutoff = Math.max(this.highestRequestedCutoff, cutoff);
     while (this.queue[0]?.sequence !== undefined && this.queue[0].sequence <= cutoff) {
       if (this.flushInFlight) {
         await this.flushInFlight;
         continue;
       }
-      const flush = this.drainThrough(cutoff);
+      const flush = this.drainThrough(this.highestRequestedCutoff);
       this.flushInFlight = flush;
       try { await flush; }
       finally {
