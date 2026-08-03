@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -61,8 +61,30 @@ describe("FileStorage", () => {
     const indexPath = join(local.root, "events", "run-1.index.json");
     const index = JSON.parse(await readFile(indexPath, "utf8"));
     const eventInfo = await stat(eventPath);
+    const indexInfo = await stat(indexPath);
     expect(index).toMatchObject({ version: 1, latest_ts: "2026-08-02T00:01:00.000Z" });
     expect(index.event_identity).toMatchObject({ size: eventInfo.size, mtime_ms: eventInfo.mtimeMs });
+    expect(indexInfo.mode & 0o777).toBe(0o600);
+    expect((await readdir(join(local.root, "events"))).filter((name) => name.includes(".tmp"))).toEqual([]);
+  });
+
+  it("rebuilds a stale index from a legacy event array and removes an orphan index", async () => {
+    const local = await storage();
+    await local.appendRunEvents("run-1", [{ ts: "2026-08-02T00:00:00.000Z", type: "run.created", payload: {} }]);
+    const eventPath = join(local.root, "events", "run-1.json");
+    const indexPath = join(local.root, "events", "run-1.index.json");
+    // Existing worktrees use the original array-only representation. Changing
+    // it invalidates the sidecar identity and forces a one-time safe rebuild.
+    await writeFile(eventPath, JSON.stringify([
+      { run_id: "run-1", seq: 1, ts: "2026-08-02T00:00:00.000Z", type: "run.created", payload: {} },
+      { run_id: "run-1", seq: 2, ts: "2026-08-02T00:02:00.000Z", type: "task.started", payload: {} },
+    ]));
+    await expect(local.latestEventTimestamp("run-1")).resolves.toBe("2026-08-02T00:02:00.000Z");
+    expect(JSON.parse(await readFile(indexPath, "utf8"))).toMatchObject({ latest_ts: "2026-08-02T00:02:00.000Z" });
+
+    await rm(eventPath);
+    await expect(local.latestEventTimestamp("run-1")).resolves.toBeUndefined();
+    await expect(readFile(indexPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("fails loudly instead of accepting a corrupt local document", async () => {

@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { appendRunEventsFile, assertSafeStoragePath, atomicWriteFile, safeStoragePart } from "./file-storage-lock.mjs";
-import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type RunEvent, type Submission } from "./types";
+import { appendRunEventsFile, assertSafeStoragePath, atomicWriteFile, latestEventTimestampFile, readRunEventsFile, safeStoragePart } from "./file-storage-lock.mjs";
+import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type Submission } from "./types";
 import type { Storage } from "./storage";
 
 export class LocalStorageReadError extends Error {
@@ -79,12 +79,11 @@ export class FileStorage implements Storage {
 
   async listRunEvents(runId: string) { return this.listRunEventsSince(runId, 0); }
   async listRunEventsSince(runId: string, sinceSeq: number) {
-    const events = (await this.readJson<RunEvent[]>(this.path("events", `${safeStoragePart(runId)}.json`))) ?? [];
+    const events = await readRunEventsFile(this.root, safeStoragePart(runId));
     return events.filter((event) => event.seq > sinceSeq).sort((a, b) => a.seq - b.seq);
   }
   async latestEventTimestamp(runId: string) {
-    const events = await this.listRunEvents(runId);
-    return events.reduce<string | undefined>((latest, event) => !latest || event.ts > latest ? event.ts : latest, undefined);
+    return latestEventTimestampFile(this.root, safeStoragePart(runId));
   }
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string) {
     const path = this.path("traces", safeStoragePart(runId), safeStoragePart(taskId), safeStoragePart(name));
