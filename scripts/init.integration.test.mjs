@@ -248,7 +248,7 @@ function processIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-async function fakeHungPnpm(checkout, label, eventPath) {
+async function fakeHungPnpm(checkout, label, eventPath, markerDelayMs = 0) {
   const bin = join(checkout, "..", `bin-${label}`);
   const marker = join(checkout, "..", `pnpm-${label}.json`);
   const events = eventPath ?? join(checkout, "..", `pnpm-${label}.events`);
@@ -265,6 +265,7 @@ async function fakeHungPnpm(checkout, label, eventPath) {
     "const descendant = `const { appendFileSync } = require('node:fs'); const events = process.argv[1]; process.on('SIGTERM', () => appendFileSync(events, 'descendant:SIGTERM\\\\n')); appendFileSync(events, 'descendant:ready\\\\n'); setInterval(() => {}, 1000);`;",
     "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
     "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
+    `if (${markerDelayMs} > 0) await new Promise((resolve) => setTimeout(resolve, ${markerDelayMs}));`,
     `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
@@ -422,19 +423,24 @@ describe.sequential("read-only init check integration", () => {
 
   it("bounds and reaps a hung pnpm prerequisite process group", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-hung-pnpm-");
-    const pnpm = await fakeHungPnpm(checkout, "hung");
-    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "500" }, "--check");
-    const pids = JSON.parse(await waitForFile(pnpm.marker));
+    const prerequisiteTimeoutMs = 500;
+    // The operation owns one prerequisite deadline plus bounded process-group
+    // cleanup. Keep fixture scheduling slack proportional to that deadline so
+    // this remains stable when the full suite competes for a test worker.
+    const operationBoundMs = prerequisiteTimeoutMs * 4;
+    const pnpm = await fakeHungPnpm(checkout, "hung", undefined, prerequisiteTimeoutMs / 2);
+    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: String(prerequisiteTimeoutMs) }, "--check");
+    const pids = JSON.parse(await waitForFile(pnpm.marker, operationBoundMs));
     const started = Date.now();
-    const result = await Promise.race([invocation, delay(2_000).then(() => ({ timedOut: true }))]);
+    const result = await Promise.race([invocation, delay(operationBoundMs).then(() => ({ timedOut: true }))]);
     if (result.timedOut) {
       for (const pid of launcherGroups) await terminateProcessGroup(pid).catch(() => {});
     }
     expect(result.timedOut).not.toBe(true);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/timed out/i);
-    expect(Date.now() - started).toBeLessThan(2_500);
-    await expect(waitForProcessGroupExit(pids.leader, 2_000)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(operationBoundMs);
+    await expect(waitForProcessGroupExit(pids.leader, operationBoundMs)).resolves.toBeUndefined();
     expect(processIsAlive(pids.child)).toBe(false);
   }, 10_000);
 
