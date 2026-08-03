@@ -14,7 +14,18 @@ function levelFor(event: Record<string, unknown>): LogLevel {
 export async function GET(request: Request): Promise<Response> {
   const result = await executePassiveMonitorCron({ request, env: process.env, fetchImpl: globalThis.fetch });
   let retained = true;
-  for (const event of result.events) retained = log(levelFor(event), "monitor.observation", event) && retained;
+  for (const event of result.events) {
+    const {
+      environment: target_environment,
+      deployment_sha: target_deployment_sha,
+      ...fields
+    } = event;
+    retained = log(levelFor(event), "monitor.observation", {
+      ...fields,
+      target_environment,
+      target_deployment_sha,
+    }) && retained;
+  }
   if (!retained) return Response.json({ ok: false, error: "observation_not_retained" }, { status: 503 });
   return Response.json(result.body, { status: result.status });
 }
