@@ -12,14 +12,32 @@ vi.mock("@vercel/sandbox", () => ({
   Sandbox: { create: (...args: unknown[]) => mockCreate(...args) },
 }));
 
+const { FUTURE_MANIFEST_LIVE_ALIAS } = vi.hoisted(() => ({
+  FUTURE_MANIFEST_LIVE_ALIAS: "new-live-alias.example.test",
+}));
+vi.mock("@/config/development-environment.json", async (importOriginal) => {
+  const actual = await importOriginal() as unknown as {
+    default: typeof import("@/config/development-environment.json");
+  };
+  return {
+    default: {
+      ...actual.default,
+      live: {
+        ...actual.default.live,
+        aliases: [...actual.default.live.aliases, FUTURE_MANIFEST_LIVE_ALIAS],
+      },
+    },
+  };
+});
+
 import { buildRunnerTasks } from "@/lib/tasks-for-runner";
 import { createRunSandbox } from "@/lib/sandbox";
 import type { Run } from "@/lib/types";
 
 const GOLDEN_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
 const NETWORK_ALLOWLIST = [
+  "cb.example.test",
   "ai-gateway.vercel.sh",
-  "harness-arena-psi.vercel.app",
   "*.public.blob.vercel-storage.com",
   "astral.sh",
   "pypi.org",
@@ -50,6 +68,8 @@ const ENV_KEYS = [
   "RUNNER_AGENT_TIMEOUT_CAP",
   "RUNNER_VERIFY_TIMEOUT_CAP",
   "VERCEL_GIT_COMMIT_SHA",
+  "VERCEL_ENV",
+  "VERCEL",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -101,6 +121,8 @@ describe("createRunSandbox", () => {
     delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
     delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
     delete process.env.VERCEL_GIT_COMMIT_SHA;
+    delete process.env.VERCEL_ENV;
+    delete process.env.VERCEL;
   });
 
   afterEach(() => {
@@ -190,6 +212,21 @@ describe("createRunSandbox", () => {
 
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ networkPolicy: "allow-all" }));
     });
+
+    it.each(["production", "preview", "development"])(
+      "rejects RUNNER_NETWORK_MODE=allow-all in a Vercel %s context",
+      async (vercelEnvironment) => {
+        process.env.RUNNER_NETWORK_MODE = "allow-all";
+        process.env.VERCEL = "1";
+        process.env.VERCEL_ENV = vercelEnvironment;
+        mockCreate.mockResolvedValue(makeSandbox());
+
+        await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+          "sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel",
+        );
+        expect(mockCreate).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("bootstraps the sandbox by curling the runner bundle from CALLBACK_BASE and extracting it to /opt/runner", async () => {
@@ -225,15 +262,58 @@ describe("createRunSandbox", () => {
     );
   });
 
-  it("falls back to the production callback base URL when CALLBACK_BASE is unset", async () => {
+  it("fails closed instead of falling back to the production callback when CALLBACK_BASE is unset", async () => {
     delete process.env.CALLBACK_BASE;
-    const sandbox = makeSandbox();
-    mockCreate.mockResolvedValue(sandbox);
+    mockCreate.mockResolvedValue(makeSandbox());
 
-    await createRunSandbox(makeRun(), { prompt: "be careful" });
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: missing required env var CALLBACK_BASE",
+    );
 
-    const bootstrap = sandbox.runCommand.mock.calls[0][0] as { args: string[] };
-    expect(bootstrap.args[1]).toContain("https://harness-arena-psi.vercel.app/runner-bundle.tgz");
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "harness-arena-psi.vercel.app",
+    "harness-arena-dennisons-projects.vercel.app",
+    "harness-arena-git-main-dennisons-projects.vercel.app",
+  ])("refuses known production callback origin %s in Development/local execution", async (hostname) => {
+    process.env.CALLBACK_BASE = `https://${hostname}`;
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: production callback origin denied",
+    );
+
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it("denies a newly added manifest live alias without a matching sandbox code change", async () => {
+    process.env.CALLBACK_BASE = `https://${FUTURE_MANIFEST_LIVE_ALIAS}`;
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: production callback origin denied",
+    );
+
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "http://cb.example.test",
+    "https://user@cb.example.test",
+    "https://cb.example.test/runner",
+    "https://cb.example.test?mode=dev",
+    "https://cb.example.test#fragment",
+    "https://cb.example.test/",
+  ])("refuses non-canonical CALLBACK_BASE %s", async (callbackBase) => {
+    process.env.CALLBACK_BASE = callbackBase;
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: invalid CALLBACK_BASE",
+    );
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {

@@ -35,34 +35,72 @@ review are complete.
    and have native parent Epic `#139`.
 2. Inspect `config/development-environment.json`. It identifies the reserved
    project `harness-arena-development` / `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`.
-3. Keep the missing development `host`, `store.id`, and `callbackOrigin`
+3. Confirm that Vercel native Git integration links only
+   `dennisonbertram/harness-arena` to that isolated project. The Vercel
+   Production Branch for this project is `dev`. “Production” here is Vercel's
+   routing label inside the Development project; it is not the live project,
+   live environment, or production approval.
+4. Keep the missing development `host`, `store.id`, and `callbackOrigin`
    entries missing until the infrastructure owner provisions and independently
    confirms each value. The known live Blob store identifier is recorded only
    as an identifier; the manifest contains no token or other secret.
-4. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
+   `CALLBACK_BASE` is required for Sandbox runs and must equal the manifest's
+   `callbackOrigin`: a canonical, publicly reachable HTTPS origin for the
+   isolated Development deployment that Vercel Sandbox can reach. It must have
+   no credentials, port, path, query, or fragment. A localhost, loopback,
+   production, or live origin is invalid.
+5. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
    with read-only Vercel inventory access. Compare it with the manifest and stop
    on any omitted or changed identifier. Never retrieve or print Blob
    credentials during this preflight.
-5. Run the verifier; it reports missing infrastructure and policy violations
-   without printing secret values.
+6. Run the verifier with a read-only-scoped token. It reports missing
+   infrastructure and policy violations without printing secret values:
 
-## Development-only integration and deploy
+   ```sh
+   VERCEL_TOKEN='<read-only-token>' node scripts/ops/vercel-development.mjs verify <exact-reviewed-origin-dev-sha>
+   ```
+
+## Native Git deployment ownership
 
 The infrastructure owner may create a distinct development host, Blob store,
-and callback origin in the reserved project. Before any development deploy,
-record the assigned non-production identifiers in the manifest and prove they
-are distinct from every value under `live`. Do not copy tokens, callback
-origins, aliases, or Blob values from production.
+and callback origin in the reserved project. Record those identifiers in the
+manifest and prove they are distinct from every value under `live`. Do not copy
+tokens, callback origins, aliases, environment values, or Blob resources from
+the live project.
 
-Deploy only from `dev` into the reserved project after review. A successful
-development deployment does not constitute production approval or authorize a
-production deployment.
+After a reviewed change reaches protected `dev`, Vercel native Git integration
+is the only deployment owner for the Development project. The repository has
+no deploy wrapper and no postflight mutation path. The verifier resolves the
+fixed GitHub URL outside the repository with user/system/repository Git config
+and replacement objects disabled, checks the remote `dev` SHA before and after
+Vercel inspection, and requires both observations to equal the explicit
+reviewed SHA.
+
+Vercel inspection is GET-only, bounded by request deadlines and response-size
+limits, and fixed to the Development project and team. It checks GitHub repo
+linkage, the `dev` Production Branch, Development alias/callback/store
+identities, and separation from the complete live inventory. It never decrypts
+credential values; the only decrypted value is the non-secret `CALLBACK_BASE`
+needed to prove isolation. `RUNNER_NETWORK_MODE` must not be configured in the
+Vercel project, and runtime code rejects `RUNNER_NETWORK_MODE=allow-all` in
+Production, Preview, and Development Vercel contexts.
+
+Issue #175 verifies this read-only metadata boundary; it does not remove write
+authority from an owner-capable Vercel credential. Issue #148 must enforce a
+least-privilege verifier identity with credential-level no-write authority.
+That credential restriction is the technical control: a repository wrapper
+cannot prevent an operator from invoking the raw owner-authorized Vercel CLI.
+
+Do not run write-capable Vercel commands from this repository. Do not manually
+upload, promote, roll back, or change aliases, domains, environments, stores,
+or Git linkage. A successful Development deployment is not production
+approval and never authorizes mutation of the live project.
 
 ## Rollback and stop rules
 
-Rollback means removing a development alias or redeploying a prior `dev`
-revision in the reserved project only. Never roll back by changing the live
-project or its data.
+Rollback is not an approved repository operation. Stop and obtain a separately
+reviewed development-only policy rather than changing any project, alias, or
+data.
 
 Stop immediately if an operation goes beyond read-only inspection of live
 identifiers, routing, or deployment metadata, or if it could read credential

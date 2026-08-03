@@ -140,17 +140,9 @@ may be rerun alone only after the first output has been diagnosed and recorded.
 not a token issued by the Vercel website. Vercel stores it and injects it into
 deployments.
 
-Generate it in a non-traced shell, send it to Vercel over stdin, keep it only in
-process memory for the admin calls, and unset it afterward:
-
-```sh
-set +x
-unset HISTFILE
-COMP_ADMIN_NEXT="$(openssl rand -hex 32)"
-print -rn -- "$COMP_ADMIN_NEXT" |
-  vercel env update COMPETITION_ADMIN_TOKEN production \
-    --sensitive --yes --scope dennisons-projects
-```
+Production environment mutation is not an approved operation. Stop and obtain
+a separately reviewed, development-only policy; do not invoke raw Vercel
+environment commands from this runbook.
 
 Never print it, put it in an argument, save it to a project file, pull it back
 from Vercel, or include it in this document. Environment changes apply only to
@@ -159,7 +151,6 @@ new deployments, so deploy before using the replacement.
 ## 6. Deploy and prove the serving alias
 
 ```sh
-vercel deploy --prod --yes --scope dennisons-projects
 vercel inspect https://harness-arena-psi.vercel.app \
   --wait --scope dennisons-projects --format json
 vercel logs <deployment-id-from-inspect> --since 10m --level error --no-follow
@@ -170,10 +161,8 @@ deployment. The runner bundle URL is commit-keyed; confirm the deployed commit
 contains the intended runner bundle rather than relying on the stable asset
 pathname.
 
-Do not parse the last line of `vercel deploy`. Build hooks and CLI progress
-output can leave a non-URL line on stdout; one release parsed `}` as `dpl_}` and
-stopped after a successful alias change. Resolve the authoritative deployment
-ID from the production alias with structured `vercel inspect --format json`.
+Production deployment is not an approved operation. Resolve the authoritative
+deployment ID from the production alias with structured `vercel inspect --format json`.
 
 ## 7. Create the successor before closing the predecessor
 

@@ -32,6 +32,11 @@ judgments, use fsynced unique temp files and atomic no-replace publication.
 The child environment is a strict allowlist. Every key discovered in Next's
 development `.env*` inputs is preempted before startup and removed after Next
 loads configuration. `STORAGE=file` fails closed in production and Vercel.
+The localhost/loopback init URL is not reachable from Vercel Sandbox, so it is
+not a valid `CALLBACK_BASE` for a Sandbox run. Sandbox-backed
+testing requires the separately provisioned canonical, publicly reachable
+HTTPS origin of the isolated Development deployment; never substitute a live
+or production origin.
 
 Use `--check` for read-only prerequisite/port/PID validation and `--no-install`
 for an already-installed worktree. Check may run bounded prerequisite and port

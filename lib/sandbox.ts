@@ -1,5 +1,6 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
+import developmentEnvironment from "@/config/development-environment.json";
 import { PINNED_PROVIDERS } from "./arena-params";
 import { log, normalizeError } from "./log";
 import { getStorage } from "./storage";
@@ -12,7 +13,13 @@ import type { Run } from "./types";
 // in. Override via RUNNER_SNAPSHOT_ID for a future rebuild without a
 // redeploy.
 const DEFAULT_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
-const DEFAULT_CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
+const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+// Static JSON import is intentional: Next traces the versioned manifest into
+// the Vercel server bundle, so runtime validation neither depends on the
+// deployment filesystem nor duplicates the live inventory in application
+// code. The public runner bundle does not need this file because the callback
+// is rejected before a Sandbox is created or the runner bundle is downloaded.
+const PRODUCTION_CALLBACK_HOSTS = new Set(developmentEnvironment.live.aliases);
 
 // Requested lifetime before applying the task-derived safety floor below.
 // Vercel Pro currently permits much longer runs, but keeping the requested
@@ -48,9 +55,8 @@ function sandboxTimeoutMs(tasks: RunnerTask[]): number {
 // planned post-POC key rotation, and the judge rejecting prompts that
 // attempt exfiltration. Set RUNNER_NETWORK_MODE=allow-all to disable this
 // allowlist entirely for local debugging.
-const NETWORK_ALLOWLIST = [
+const NETWORK_BASE_ALLOWLIST = [
   "ai-gateway.vercel.sh",
-  "harness-arena-psi.vercel.app",
   "*.public.blob.vercel-storage.com",
   "astral.sh",
   "pypi.org",
@@ -69,9 +75,13 @@ const NETWORK_ALLOWLIST = [
   // Docker images are baked into the snapshot -- no docker registry needed.
 ];
 
-function networkPolicy(): NetworkPolicy {
-  if (process.env.RUNNER_NETWORK_MODE === "allow-all") return "allow-all";
-  return { allow: NETWORK_ALLOWLIST };
+function networkPolicy(callbackBase: string): NetworkPolicy {
+  if (process.env.RUNNER_NETWORK_MODE === "allow-all") {
+    const vercelContext = process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
+    if (vercelContext) throw new Error("sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel");
+    return "allow-all";
+  }
+  return { allow: [new URL(callbackBase).hostname, ...NETWORK_BASE_ALLOWLIST] };
 }
 
 interface VercelCredentials {
@@ -105,6 +115,35 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function callbackBase(): string {
+  const value = requireEnv("CALLBACK_BASE");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("sandbox: invalid CALLBACK_BASE");
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.port !== ""
+    || parsed.pathname !== "/"
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || parsed.origin !== value
+  ) {
+    throw new Error("sandbox: invalid CALLBACK_BASE");
+  }
+  const developmentOrLocal =
+    process.env.VERCEL_ENV !== "production"
+    || process.env.VERCEL_PROJECT_ID === DEVELOPMENT_PROJECT_ID;
+  if (developmentOrLocal && PRODUCTION_CALLBACK_HOSTS.has(parsed.hostname)) {
+    throw new Error("sandbox: production callback origin denied");
+  }
+  return parsed.origin;
+}
+
 // Any failure here (missing env, SDK throw, non-zero bootstrap exit) must
 // surface as run.failed instead of leaving the run stuck at `queued`
 // forever -- that's the whole point of this ticket.
@@ -126,7 +165,7 @@ async function markFailed(run: Run, err: unknown): Promise<void> {
 
 export async function createRunSandbox(run: Run, opts: { prompt: string }): Promise<{ sandbox_id: string }> {
   try {
-    const callbackBase = process.env.CALLBACK_BASE ?? DEFAULT_CALLBACK_BASE;
+    const callbackOrigin = callbackBase();
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
     // Safety ceiling per run (not the metric). Headroom for pricier models like
@@ -139,7 +178,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const sandbox = await Sandbox.create({
       source: { type: "snapshot", snapshotId: process.env.RUNNER_SNAPSHOT_ID ?? DEFAULT_SNAPSHOT_ID },
       timeout: sandboxTimeoutMs(runnerTasks),
-      networkPolicy: networkPolicy(),
+      networkPolicy: networkPolicy(callbackOrigin),
       ...vercelCredentials(),
     });
 
@@ -156,7 +195,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     // launched old transport code in production (/v1/v1/messages) even though
     // the application deployment contained the fix. Tie the download URL to
     // the deployment commit so every code revision has a distinct cache key.
-    const runnerBundleUrl = new URL(`${callbackBase}/runner-bundle.tgz`);
+    const runnerBundleUrl = new URL(`${callbackOrigin}/runner-bundle.tgz`);
     runnerBundleUrl.searchParams.set("v", process.env.VERCEL_GIT_COMMIT_SHA ?? "dev");
 
     // Bootstrap carries no secrets, so a plain shell string is fine here.
@@ -182,7 +221,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     // immediately without waiting for the runner process to exit.
     const runnerEnv: Record<string, string> = {
       RUN_ID: run.id,
-      CALLBACK_BASE: callbackBase,
+      CALLBACK_BASE: callbackOrigin,
       RUNNER_CALLBACK_SECRET: runnerCallbackSecret,
       AI_GATEWAY_API_KEY: aiGatewayApiKey,
       SYSTEM_PROMPT_B64: systemPromptB64,

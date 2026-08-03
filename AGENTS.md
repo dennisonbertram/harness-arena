@@ -32,6 +32,27 @@ CLI cannot query directly. Never print or commit Vercel tokens. If CLI/API
 access is unavailable, report the exact authentication or permission blocker
 instead of silently proceeding without production evidence.
 
+# Vercel deployment boundary
+
+Vercel native Git integration owns Development deployments. The isolated
+project `harness-arena-development` / `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`,
+owned by team `team_cwyLpng8LCwWgINdiQ27hHYa`, uses protected `dev` as its
+Vercel Production Branch. This Vercel label applies only inside the isolated
+Development project and never authorizes the live project or live resources.
+
+`node scripts/ops/vercel-development.mjs verify <exact-reviewed-sha>` is a
+read-only, fail-closed verifier. It checks the stable protected remote `dev`
+tip and isolated project linkage/settings; it does not archive, upload,
+deploy, promote, roll back, or mutate aliases, domains, environments, or
+stores. Agents must not run raw write-capable Vercel commands or configure the
+Git integration. `RUNNER_NETWORK_MODE=allow-all` is forbidden in every Vercel
+environment.
+
+Production evidence remains read-only: `inspect`, `ls`, `logs`, `activity`,
+alias identity, and environment metadata inspection are permitted. Do not read
+credential values. The live project `prj_f4ppu0xpO0LZeHOAH99RHotVbwyo` is
+never a wrapper target.
+
 # Regression tests come first
 
 # Epic-first delivery
