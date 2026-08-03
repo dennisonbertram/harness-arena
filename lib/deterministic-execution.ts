@@ -15,12 +15,20 @@ export type DeterministicScenario = (typeof DETERMINISTIC_SCENARIOS)[number];
 
 function deterministicTimestamp(run: Run, offset: number): string {
   const base = Date.parse(run.created_at);
-  return new Date((Number.isFinite(base) ? base : 0) + offset * 1000).toISOString();
+  return new Date(Math.min((Number.isFinite(base) ? base : Date.now()) + offset, Date.now())).toISOString();
+}
+
+function localCallbackOrigin(): string {
+  const port = Number(process.env.LOCAL_INSTANCE_PORT);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("deterministic execution requires a valid LOCAL_INSTANCE_PORT");
+  }
+  return `http://127.0.0.1:${port}`;
 }
 
 async function callback(runId: string, body: unknown, secret: string): Promise<Response> {
   const { POST } = await import("@/app/api/runs/[id]/callback/route");
-  return POST(new NextRequest(`http://127.0.0.1/api/runs/${runId}/callback`, {
+  return POST(new NextRequest(`${localCallbackOrigin()}/api/runs/${runId}/callback`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-runner-secret": secret },
     body: JSON.stringify(body),
@@ -30,7 +38,7 @@ async function callback(runId: string, body: unknown, secret: string): Promise<R
 async function trace(runId: string, taskId: string, body: string, secret: string): Promise<Response> {
   const { POST } = await import("@/app/api/runs/[id]/trace/route");
   const query = new URLSearchParams({ task_id: taskId, name: "session.jsonl" });
-  return POST(new NextRequest(`http://127.0.0.1/api/runs/${runId}/trace?${query}`, {
+  return POST(new NextRequest(`${localCallbackOrigin()}/api/runs/${runId}/trace?${query}`, {
     method: "POST",
     headers: { "content-type": "application/octet-stream", "x-runner-secret": secret },
     body,
@@ -66,17 +74,22 @@ export async function executeDeterministicRun(
   if (!DETERMINISTIC_SCENARIOS.includes(opts.scenario)) throw new Error(`unknown deterministic scenario: ${opts.scenario}`);
 
   const storage = getStorage();
+  const existingEvents = await storage.listRunEvents(run.id);
+  const lastExistingTimestamp = existingEvents.at(-1)?.ts;
+  const timelineRun = lastExistingTimestamp && Date.parse(lastExistingTimestamp) > Date.parse(run.created_at)
+    ? { ...run, created_at: lastExistingTimestamp }
+    : run;
   const sandboxId = `local-${run.id}`;
   const withSandbox = { ...(await storage.getRun(run.id) ?? run), sandbox_id: sandboxId };
   await storage.putRun(withSandbox);
   await storage.appendRunEvents(run.id, [{
-    ts: deterministicTimestamp(run, 1), type: "run.sandbox_creating", payload: { sandbox_id: sandboxId, deterministic: true },
+    ts: deterministicTimestamp(timelineRun, 1), type: "run.sandbox_creating", payload: { sandbox_id: sandboxId, deterministic: true },
   }]);
 
   if (opts.scenario === "callback-failure") {
     const response = await callback(run.id, { events: [], status: "running" }, `${secret}-rejected`);
     if (response.status !== 401) throw new Error(`deterministic callback failure expected 401, received ${response.status}`);
-    await markFailed(run, "deterministic callback authentication rejected", "callback", 2);
+    await markFailed(timelineRun, "deterministic callback authentication rejected", "callback", 2);
     return { sandbox_id: sandboxId };
   }
 
@@ -84,12 +97,12 @@ export async function executeDeterministicRun(
     const { reapIfStale, reapThresholdMs } = await import("./reaper");
     const claimed = { ...withSandbox, dispatched_at: run.created_at };
     await storage.putRun(claimed);
-    await reapIfStale(storage, claimed, Date.parse(deterministicTimestamp(run, 1)) + reapThresholdMs() + 1);
+    await reapIfStale(storage, claimed, Date.parse(deterministicTimestamp(timelineRun, 1)) + reapThresholdMs() + 1);
     return { sandbox_id: sandboxId };
   }
 
   await requireAccepted(await callback(run.id, {
-    events: [{ ts: deterministicTimestamp(run, 2), type: "run.sandbox_ready", payload: { sandbox_id: sandboxId, deterministic: true } }],
+    events: [{ ts: deterministicTimestamp(timelineRun, 2), type: "run.sandbox_ready", payload: { sandbox_id: sandboxId, deterministic: true } }],
     status: "running",
   }, secret), "ready callback");
 
@@ -97,13 +110,17 @@ export async function executeDeterministicRun(
   const results: TaskResult[] = [];
   let offset = 3;
   for (const [index, task] of tasks.entries()) {
+    if (opts.scenario === "budget-exceeded" && index > 0) {
+      results.push({ task_id: task.id, attempted: false, passed: false });
+      continue;
+    }
     const fails = opts.scenario === "task-failure" && index === 0;
     const result: TaskResult = {
       task_id: task.id,
       attempted: true,
       passed: !fails,
       reward: fails ? 0 : 1,
-      cost_usd: 0,
+      cost_usd: opts.scenario === "budget-exceeded" ? 0.02 : 0,
       cost_source: "deterministic-fixture",
       duration_s: 0.25,
       agent_duration_s: 0.1,
@@ -114,19 +131,22 @@ export async function executeDeterministicRun(
     };
     results.push(result);
     const taskEvents: NewRunEvent[] = [
-      { ts: deterministicTimestamp(run, offset++), type: "task.started", payload: { task_id: task.id, index } },
-      { ts: deterministicTimestamp(run, offset++), type: "task.agent_finished", payload: { task_id: task.id, exit_code: fails ? 1 : 0 } },
-      { ts: deterministicTimestamp(run, offset++), type: "task.verify_started", payload: { task_id: task.id } },
-      fails
-        ? { ts: deterministicTimestamp(run, offset++), type: "task.failed", payload: { task_id: task.id, stage: "agent", error: "deterministic task failure" } }
-        : { ts: deterministicTimestamp(run, offset++), type: "task.verified", payload: { task_id: task.id, passed: true, reward: 1 } },
+      { ts: deterministicTimestamp(timelineRun, offset++), type: "task.started", payload: { task_id: task.id, index } },
+      { ts: deterministicTimestamp(timelineRun, offset++), type: "task.agent_finished", payload: { task_id: task.id, exit_code: fails ? 1 : 0 } },
+      ...(fails
+        ? [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.failed" as const, payload: { task_id: task.id, stage: "agent", error: "deterministic task failure" } }]
+        : [
+          { ts: deterministicTimestamp(timelineRun, offset++), type: "task.verify_started" as const, payload: { task_id: task.id } },
+          { ts: deterministicTimestamp(timelineRun, offset++), type: "task.verified" as const, payload: { task_id: task.id, passed: true, reward: 1 } },
+        ]),
     ];
     await requireAccepted(await callback(run.id, { events: taskEvents, task_results: results }, secret), "task callback");
     const traceBody = `${JSON.stringify({ type: "session", id: `${run.id}:${task.id}`, deterministic: true })}\n`;
     const traceResponse = await requireAccepted(await trace(run.id, task.id, traceBody, secret), "trace callback");
-    result.trace_blob_url = String(traceResponse.url);
+    const traceUrl = new URL(String(traceResponse.url));
+    result.trace_blob_url = `${localCallbackOrigin()}${traceUrl.pathname}${traceUrl.search}`;
     await requireAccepted(await callback(run.id, {
-      events: [{ ts: deterministicTimestamp(run, offset++), type: "task.trace_uploaded", payload: { task_id: task.id, name: "session.jsonl" } }],
+      events: [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.trace_uploaded", payload: { task_id: task.id, name: "session.jsonl" } }],
       task_results: results,
     }, secret), "trace event callback");
   }
@@ -135,11 +155,11 @@ export async function executeDeterministicRun(
   const virtualCost = overBudget ? 0.02 : 0;
   const terminalEvents: NewRunEvent[] = [
     ...(overBudget ? [{
-      ts: deterministicTimestamp(run, offset++),
+      ts: deterministicTimestamp(timelineRun, offset++),
       type: "run.budget_exceeded" as const,
-      payload: { spent_usd: virtualCost, cap_usd: 0.01, tasks_completed: tasks.length, deterministic: true },
+      payload: { spent_usd: virtualCost, cap_usd: 0.01, tasks_completed: 1, deterministic: true },
     }] : []),
-    { ts: deterministicTimestamp(run, offset), type: "run.completed", payload: { deterministic: true } },
+    { ts: deterministicTimestamp(timelineRun, offset), type: "run.completed", payload: { deterministic: true } },
   ];
   await requireAccepted(await callback(run.id, {
     events: terminalEvents,

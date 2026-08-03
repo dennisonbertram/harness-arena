@@ -23,6 +23,7 @@ export async function runRealSandboxSmoke({ env = process.env, create }) {
       runtime: "node22",
       timeout: requested,
       networkPolicy: "deny-all",
+      persistent: false,
       token: env.VERCEL_TOKEN,
       teamId: env.VERCEL_TEAM_ID,
       projectId: env.VERCEL_PROJECT_ID,
@@ -33,6 +34,6 @@ export async function runRealSandboxSmoke({ env = process.env, create }) {
     if (result.exitCode !== 0) throw new Error(`real Sandbox smoke command failed (${result.exitCode})`);
     return { ok: true, mode: "real-sandbox-creation", sandbox_id: sandbox.name, timeout_ms: requested };
   } finally {
-    if (sandbox) await sandbox.stop({ signal: AbortSignal.timeout(30_000) });
+    if (sandbox) await sandbox.delete({ signal: AbortSignal.timeout(30_000) });
   }
 }

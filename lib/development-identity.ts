@@ -10,6 +10,7 @@ export const SEEDED_DEVELOPMENT_IDENTITY: AgentIdentity = Object.freeze({
 });
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 
 function isDeterministicMode(value: string | undefined): boolean {
   return value?.startsWith("deterministic-") === true;
@@ -56,7 +57,8 @@ function hostedDevelopmentIdentityAllowed(
   const requestHost = new URL(request.url).hostname;
   return env.VERCEL === "1"
     && env.HARNESS_LOCAL_INIT !== "1"
-    && env.VERCEL_PROJECT_ID === manifest.vercelProject.id
+    && manifest.vercelProject.id === DEVELOPMENT_PROJECT_ID
+    && env.VERCEL_PROJECT_ID === DEVELOPMENT_PROJECT_ID
     && env.VERCEL_PROJECT_ID !== manifest.live.projectId
     && env.VERCEL_GIT_COMMIT_REF === manifest.branch
     && env.VERCEL_GIT_COMMIT_REF !== "main"

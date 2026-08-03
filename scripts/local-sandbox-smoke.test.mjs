@@ -73,19 +73,26 @@ describe("local deterministic HTTP smoke", () => {
 
   it("fails when the persisted lifecycle is missing a required transition", async () => {
     const state = await mkdtemp(join(tmpdir(), "arena-local-smoke-test-"));
+    const createdAt = new Date().toISOString();
+    const taskId = "manifest-task";
+    const run = {
+      id: "run-1", submission_id: "sub-1", status: "completed", tasks_passed: 1, total_cost_usd: 0,
+      over_budget: false, task_results: [{ task_id: taskId, attempted: true, passed: true, cost_usd: 0 }],
+      created_at: createdAt, finished_at: createdAt,
+    };
     await mkdir(join(state, "runs"), { recursive: true });
-    await writeFile(join(state, "runs", "run-1.json"), JSON.stringify({
-      id: "run-1", submission_id: "sub-1", status: "completed", task_results: [], created_at: new Date().toISOString(),
-    }));
+    await writeFile(join(state, "runs", "run-1.json"), JSON.stringify(run));
     const responses = [
       new Response(JSON.stringify({
         ok: true, seeded: true, writable: true, execution_mode: "deterministic-success", development_identity: "seeded",
       }), { status: 200 }),
-      new Response(JSON.stringify({ submission_id: "sub-1", run_id: "run-1", run_ids: ["run-1"], status: "queued" }), { status: 200 }),
-      new Response(JSON.stringify({ id: "run-1", status: "completed" }), { status: 200 }),
+      Response.json({ ok: true, storage: "up", gateway_key_present: false }),
+      Response.json([{ id: taskId, description: "fixture" }]),
+      Response.json({ submission_id: "sub-1", run_id: "run-1", run_ids: ["run-1"], status: "queued", judge_reason: "Approved by deterministic local fairness fixture; no provider request was made." }),
+      Response.json(run),
       new Response(JSON.stringify([
-        { run_id: "run-1", seq: 1, ts: new Date().toISOString(), type: "run.created", payload: {} },
-        { run_id: "run-1", seq: 2, ts: new Date().toISOString(), type: "run.completed", payload: {} },
+        { run_id: "run-1", seq: 1, ts: createdAt, type: "run.created", payload: {} },
+        { run_id: "run-1", seq: 2, ts: createdAt, type: "run.completed", payload: {} },
       ]), { status: 200 }),
     ];
     const fetchImpl = vi.fn(async () => responses.shift());

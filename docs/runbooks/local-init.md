@@ -64,7 +64,7 @@ fixtures; their virtual failure/cost records are not billed execution.
 `./scripts/init.sh --real-sandbox-smoke` is a separate, explicit credential and
 creation probe. It accepts only the isolated Development project ID, refuses
 `main`, creates a short-lived Node sandbox with deny-all egress, runs one
-harmless local command, and always stops it. It performs no callback, model
+harmless local command, and always permanently deletes the Sandbox (including its snapshots and sessions). It performs no callback, model
 request, benchmark run, or Blob/application data access. It requires locally
 scoped `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and the isolated Development
 `VERCEL_PROJECT_ID`; do not use live credentials or data. This probe does not

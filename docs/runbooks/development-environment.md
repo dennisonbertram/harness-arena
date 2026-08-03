@@ -105,7 +105,7 @@ approval and never authorizes mutation of the live project.
 
 The optional `./scripts/init.sh --real-sandbox-smoke` is not a deployment or
 application smoke. It uses local scoped credentials only to create a bounded,
-deny-all, non-production Sandbox, run one harmless command, and stop it in a
+deny-all, non-persistent, non-production Sandbox, run one harmless command, and permanently delete it in a
 `finally` path. It never uses `CALLBACK_BASE`, reaches the Development or live
 data plane, invokes a model, or asserts that a remote Sandbox can callback to
 localhost. Do not run it with the live project ID.
