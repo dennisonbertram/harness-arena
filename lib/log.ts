@@ -45,18 +45,35 @@ function replaceAll(value: string, needle: string): string {
 function redactString(value: string, secrets: Set<string>): string {
   // Do not run global redaction regexes or configured-secret replacement over
   // attacker-sized input. Content outside this prefix cannot reach telemetry.
-  let safe = truncate(value);
+  const contentLimit = MAX_STRING_CHARS - 13;
+  const wasTruncated = value.length > contentLimit;
+  let safe = value.slice(0, contentLimit);
   // Longest first prevents overlapping values from leaving a secret suffix.
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) safe = replaceAll(safe, secret);
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+    const fullMatch = safe.indexOf(secret);
+    if (fullMatch >= 0) {
+      safe = replaceAll(safe, secret);
+      continue;
+    }
+    // A secret crossing the truncation boundary cannot match in full. Compare
+    // only a constant-size prefix, then discard the overlapping tail.
+    if (wasTruncated && secret.length >= 8) {
+      const probe = secret.slice(0, Math.min(64, secret.length));
+      const overlap = safe.indexOf(probe);
+      if (overlap >= 0 && overlap + secret.length > safe.length) safe = `${safe.slice(0, overlap)}[REDACTED]`;
+    }
+  }
   safe = safe.replace(ABSOLUTE_URL_WITH_QUERY, "$1");
   safe = safe.replace(RELATIVE_URL_WITH_QUERY, "$1$2");
   safe = safe.replace(BEARER, "Bearer [REDACTED]");
-  return truncate(safe);
+  return wasTruncated ? `${safe}...[Truncated]` : safe;
 }
 
 function errorClass(error: unknown): "error" | "type_error" | "range_error" | "syntax_error" | "abort_error" | "non_error" {
   if (!(error instanceof Error)) return "non_error";
-  switch (error.name) {
+  let name = "Error";
+  try { name = error.name; } catch { /* hostile getters classify as a generic Error */ }
+  switch (name) {
     case "TypeError": return "type_error";
     case "RangeError": return "range_error";
     case "SyntaxError": return "syntax_error";

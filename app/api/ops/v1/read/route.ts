@@ -1,6 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createOpsReadService, OPS_RECORD_KINDS, OPS_SCHEMA_VERSION, opsAuthorized, type OpsKind } from "@/lib/ops-read";
-import { opsEvent } from "@/lib/ops-route";
+import { observeOpsGet } from "@/lib/ops-route";
 export { POST, PUT, PATCH, DELETE, OPTIONS } from "@/lib/ops-route";
-export const dynamic="force-dynamic"; const headers={"cache-control":"no-store"};
-export async function GET(request:NextRequest){let response:NextResponse;if(!opsAuthorized(request.headers.get("authorization")))response=NextResponse.json({error:"unauthorized"},{status:401,headers});else {const query=Object.fromEntries(request.nextUrl.searchParams) as Record<string,string>;const kind=query.kind as OpsKind;if(!OPS_RECORD_KINDS.some((entry)=>entry.kind===kind))response=NextResponse.json({error:"unknown_kind"},{status:400,headers});else {const result=await createOpsReadService().read(kind,query);const error=result.error;if(error){const code=error.code,status=code==="not_found"?404:code==="too_large"?413:code==="transient"?503:400;response=NextResponse.json({schema_version:OPS_SCHEMA_VERSION,kind,...result},{status,headers});}else response=NextResponse.json({schema_version:OPS_SCHEMA_VERSION,kind,...result},{headers});}}opsEvent(request,response.status);return response;}
+export const dynamic = "force-dynamic";
+const headers = { "cache-control": "no-store" };
+export async function GET(request: NextRequest) {
+  return observeOpsGet(request, async () => {
+    if (!opsAuthorized(request.headers.get("authorization"))) return NextResponse.json({ error: "unauthorized" }, { status: 401, headers });
+    const query = Object.fromEntries(request.nextUrl.searchParams) as Record<string, string>;
+    const kind = query.kind as OpsKind;
+    if (!OPS_RECORD_KINDS.some((entry) => entry.kind === kind)) return NextResponse.json({ error: "unknown_kind" }, { status: 400, headers });
+    const result = await createOpsReadService().read(kind, query);
+    const error = result.error;
+    if (error) {
+      const code = error.code;
+      const status = code === "not_found" ? 404 : code === "too_large" ? 413 : code === "transient" ? 503 : 400;
+      return NextResponse.json({ schema_version: OPS_SCHEMA_VERSION, kind, ...result }, { status, headers });
+    }
+    return NextResponse.json({ schema_version: OPS_SCHEMA_VERSION, kind, ...result }, { headers });
+  });
+}

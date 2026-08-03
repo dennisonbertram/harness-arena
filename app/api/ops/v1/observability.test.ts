@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const log = vi.hoisted(() => vi.fn());
@@ -7,7 +7,7 @@ const storage = vi.hoisted(() => ({
   listSubmissions: vi.fn().mockResolvedValue([]), listRuns: vi.fn().mockResolvedValue([]), listCompetitions: vi.fn().mockResolvedValue([]),
   listRunEvents: vi.fn(), getTraceBytes: vi.fn(),
 }));
-vi.mock("@/lib/log", () => ({ log }));
+vi.mock("@/lib/log", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/log")>(), log }));
 vi.mock("@/lib/storage", () => ({ getStorage: () => storage }));
 vi.mock("@/lib/reaper", () => ({ reapIfStale: vi.fn() }));
 vi.mock("@/lib/dispatch", () => ({ dispatchQueuedRuns: vi.fn() }));
@@ -60,9 +60,14 @@ describe("ops v1 route observability", () => {
 
   it("emits exactly one unexpected-failure event and rethrows for every GET route", async () => {
     const cases: Array<[string, () => Promise<Response>, () => void]> = [
-      ["/api/ops/v1", () => baseGet(request("/api/ops/v1")), () => {
-        vi.spyOn(NextResponse, "json").mockImplementationOnce(() => { throw new Error("base serialization failed"); });
-      }],
+      ["/api/ops/v1", () => {
+        const source = request("/api/ops/v1");
+        const hostile = new Proxy(source, { get(target, property) {
+          if (property === "headers") throw new Error("base request failed");
+          return Reflect.get(target, property, target);
+        } });
+        return baseGet(hostile);
+      }, () => {}],
       ["/api/ops/v1/inventory", () => inventoryGet(request("/api/ops/v1/inventory?kind=runs")), () => {
         opsService.list.mockRejectedValueOnce(new Error("inventory failed"));
       }],
@@ -77,8 +82,8 @@ describe("ops v1 route observability", () => {
       log.mockClear();
       arrange();
       await expect(invoke()).rejects.toBeInstanceOf(Error);
-      expect(log).toHaveBeenCalledOnce();
-      expect(log).toHaveBeenCalledWith("error", "ops.request.unexpected_failure", expect.objectContaining({ route, method: "GET", status: 500 }));
+      expect(log, route).toHaveBeenCalledOnce();
+      expect(log, route).toHaveBeenCalledWith("error", "ops.request.unexpected_failure", expect.objectContaining({ route, method: "GET", status: 500 }));
       vi.restoreAllMocks();
     }
   });

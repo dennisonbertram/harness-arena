@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { describe, expect, it, vi } from "vitest";
 import { createSafeSpanProcessor, onRequestError } from "./instrumentation";
@@ -49,7 +50,10 @@ describe("onRequestError", () => {
       forceFlush: async () => {},
       shutdown: async () => {},
     };
-    const provider = new BasicTracerProvider({ spanProcessors: [createSafeSpanProcessor(exporter)] });
+    const provider = new BasicTracerProvider({
+      resource: resourceFromAttributes({ "service.name": "secret-resource-name", "host.url": "https://host.test?token=secret" }),
+      spanProcessors: [createSafeSpanProcessor(exporter)],
+    });
     const span = provider.getTracer("hostile?scope=secret").startSpan("GET https://arena.example/api/runs?token=secret", {
       kind: SpanKind.SERVER,
       attributes: {
