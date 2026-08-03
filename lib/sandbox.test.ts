@@ -12,6 +12,22 @@ vi.mock("@vercel/sandbox", () => ({
   Sandbox: { create: (...args: unknown[]) => mockCreate(...args) },
 }));
 
+const { FUTURE_MANIFEST_LIVE_ALIAS } = vi.hoisted(() => ({
+  FUTURE_MANIFEST_LIVE_ALIAS: "new-live-alias.example.test",
+}));
+vi.mock("@/config/development-environment.json", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/config/development-environment.json")>();
+  return {
+    default: {
+      ...actual.default,
+      live: {
+        ...actual.default.live,
+        aliases: [...actual.default.live.aliases, FUTURE_MANIFEST_LIVE_ALIAS],
+      },
+    },
+  };
+});
+
 import { buildRunnerTasks } from "@/lib/tasks-for-runner";
 import { createRunSandbox } from "@/lib/sandbox";
 import type { Run } from "@/lib/types";
@@ -261,6 +277,17 @@ describe("createRunSandbox", () => {
     "harness-arena-git-main-dennisons-projects.vercel.app",
   ])("refuses known production callback origin %s in Development/local execution", async (hostname) => {
     process.env.CALLBACK_BASE = `https://${hostname}`;
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: production callback origin denied",
+    );
+
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it("denies a newly added manifest live alias without a matching sandbox code change", async () => {
+    process.env.CALLBACK_BASE = `https://${FUTURE_MANIFEST_LIVE_ALIAS}`;
     mockCreate.mockResolvedValue(makeSandbox());
 
     await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(

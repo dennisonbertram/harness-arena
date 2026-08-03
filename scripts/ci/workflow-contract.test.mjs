@@ -13,6 +13,8 @@ const developmentRunbook = await readFile(
   new URL("../../docs/runbooks/development-environment.md", import.meta.url),
   "utf8",
 );
+const localRunbook = await readFile(new URL("../../docs/runbooks/local-init.md", import.meta.url), "utf8");
+const envExample = await readFile(new URL("../../.env.example", import.meta.url), "utf8");
 
 const CHECKOUT_SHA = "11d5960a326750d5838078e36cf38b85af677262";
 const SETUP_NODE_SHA = "49933ea5288caeca8642d1e84afbd3f7d6820020";
@@ -86,5 +88,16 @@ describe("development runbook safety boundary", () => {
       /forbids all live mutations, deploys, promotions, rollbacks, alias changes, environment changes, store changes, data changes, credential value reads, and mutating application access/i,
     );
     expect(developmentRunbook).not.toMatch(/must never be used to[\s\S]{0,80}inspect/i);
+  });
+
+  it("documents the required public Development callback without publishing a live or localhost example", () => {
+    expect(envExample).toMatch(/^CALLBACK_BASE=$/m);
+    expect(envExample).toMatch(/CALLBACK_BASE[\s\S]{0,240}required[\s\S]{0,240}canonical[\s\S]{0,240}publicly reachable HTTPS/i);
+    expect(envExample).toMatch(/Vercel Sandbox/i);
+    expect(envExample).not.toMatch(/^CALLBACK_BASE=https?:\/\/.+/m);
+    expect(developmentRunbook).toMatch(
+      /CALLBACK_BASE[\s\S]{0,320}required[\s\S]{0,320}canonical[\s\S]{0,320}publicly reachable HTTPS[\s\S]{0,320}Vercel Sandbox/i,
+    );
+    expect(localRunbook).toMatch(/localhost[\s\S]{0,240}not reachable from Vercel Sandbox/i);
   });
 });
