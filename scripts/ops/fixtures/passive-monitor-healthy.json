@@ -1,0 +1,10 @@
+{
+  "schema_version": "agent_ops_status.v1",
+  "checked_at": "2026-08-03T12:00:00.000Z",
+  "environment": "development",
+  "verdict": "healthy",
+  "health": { "sha": "abcdef1", "ok": true, "storage": "up" },
+  "platform": { "deployment": { "id": "dpl_fixture", "sha": "abcdef1" } },
+  "findings": [],
+  "blockers": []
+}

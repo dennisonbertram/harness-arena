@@ -9,6 +9,7 @@ import {
 
 const healthy = { environment: "development", verdict: "healthy", checked_at: "2026-08-03T12:00:00.000Z", health: { sha: "abcdef1" }, platform: { deployment: { id: "dpl_1", sha: "abcdef1" } }, findings: [], blockers: [] };
 const failed = (codes, sha = "abcdef1") => ({ ...healthy, verdict: "failed", health: { sha }, platform: { deployment: { id: "dpl_1", sha } }, findings: codes.map((code) => ({ code, severity: "failed", detail: `secret=monitor-token prompt=private request ${code}` })) });
+const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
 describe("passive monitor incident state machine", () => {
   it("creates one stable, secret-safe incident for a new product failure", () => {
@@ -22,9 +23,10 @@ describe("passive monitor incident state machine", () => {
 
   it("deduplicates repeats, comments changed deployment evidence, and handles partial then full proven recovery", () => {
     const one = buildObservation(failed(["storage_down", "freshness_stale"]), { environment: "development" });
-    const [storage, stale] = one.failures;
+    const storage = one.failures.find((item) => item.code === "storage_down");
+    const stale = one.failures.find((item) => item.code === "freshness_stale");
     const incidents = [
-      { number: 41, state: "OPEN", fingerprint: storage.fingerprint, evidence_sha: "abcdef1" },
+      { number: 41, state: "OPEN", body: `<!-- harness-arena-monitor:${JSON.stringify({ fingerprint: storage.fingerprint, evidence_sha: "abcdef1" })} -->` },
       { number: 42, state: "OPEN", fingerprint: stale.fingerprint, evidence_sha: "abcdef1" },
     ];
     expect(planIncidentTransitions({ observation: one, incidents }).actions).toEqual([]);
@@ -35,13 +37,10 @@ describe("passive monitor incident state machine", () => {
       expect.objectContaining({ action: "comment", number: 42, reason: "recovery_pending" }),
     ]);
 
-    const partial = planIncidentTransitions({ observation: changedDeployment, incidents: [{ ...incidents[0], evidence_sha: "fedcba2" }, { ...incidents[1], recovery_pending: true }] });
+    const partial = planIncidentTransitions({ observation: changedDeployment, incidents: [{ number: 41, state: "OPEN", fingerprint: storage.fingerprint, evidence_sha: "fedcba2" }, { ...incidents[1], recovery_pending: true }] });
     expect(partial.actions).toEqual([expect.objectContaining({ action: "close", number: 42, reason: "recovery_proven" })]);
-    const full = planIncidentTransitions({ observation: buildObservation(healthy, { environment: "development" }), incidents: [{ ...incidents[0], evidence_sha: "fedcba2" }, { ...incidents[1], recovery_pending: true }] });
-    expect(full.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "comment", number: 41, reason: "recovery_pending" }),
-      expect.objectContaining({ action: "close", number: 42, reason: "recovery_proven" }),
-    ]));
+    const full = planIncidentTransitions({ observation: buildObservation(healthy, { environment: "development" }), incidents: [{ number: 41, state: "OPEN", fingerprint: storage.fingerprint, evidence_sha: "fedcba2" }, { number: 42, state: "CLOSED", fingerprint: stale.fingerprint, recovery_pending: true }] });
+    expect(full.actions).toEqual([expect.objectContaining({ action: "comment", number: 41, reason: "recovery_pending" })]);
   });
 
   it("reopens the exact prior incident when a recovered failure flaps", () => {
@@ -56,6 +55,14 @@ describe("passive monitor incident state machine", () => {
     expect(monitorFailure).toMatchObject({ kind: "monitor_self_failure", failures: [expect.objectContaining({ alert_class: "monitor", code: "monitor_execution_failed" })] });
     expect(JSON.stringify(monitorFailure)).not.toMatch(/monitor-token|private/);
     expect(stableFingerprint({ environment: "production", alert_class: "monitor", code: "monitor_execution_failed" })).toBe(monitorFailure.failures[0].fingerprint);
+  });
+
+  it("classifies controlled healthy and degraded fixtures without retaining prompts or credentials", () => {
+    const good = buildObservation(fixture("passive-monitor-healthy.json"), { environment: "development", knownSecrets: ["fixture-token"] });
+    const degraded = buildObservation(fixture("passive-monitor-degraded.json"), { environment: "development", knownSecrets: ["fixture-token"] });
+    expect(good).toMatchObject({ kind: "healthy", failures: [] });
+    expect(degraded).toMatchObject({ kind: "product_failure", failures: expect.arrayContaining([expect.objectContaining({ code: "storage_down", alert_class: "storage" }), expect.objectContaining({ code: "stale_runs", alert_class: "queue" })]) });
+    expect(JSON.stringify(degraded)).not.toMatch(/fixture-token|private task body/);
   });
 });
 
@@ -78,5 +85,12 @@ describe("monitor workflow contract", () => {
   it("sanitizes retained artifacts and issue evidence", () => {
     const record = sanitizeMonitorRecord({ prompt: "private prompt", authorization: "Bearer monitor-token", nested: { error: "token=monitor-token" } }, ["monitor-token"]);
     expect(JSON.stringify(record)).not.toMatch(/monitor-token|private prompt|Bearer/);
+  });
+
+  it("allows only GitHub issue state changes after a plan and never runs infrastructure commands", () => {
+    const applier = readFileSync(new URL("./apply-passive-monitor-plan.mjs", import.meta.url), "utf8");
+    expect(applier).toMatch(/spawn\("gh", args, \{ shell: false/);
+    expect(applier).not.toMatch(/\b(?:vercel|curl|fetch\(|POST|PUT|PATCH|DELETE|blob|admin)\b/i);
+    expect(applier).toMatch(/\["issue", "(?:create|comment|edit|close|reopen)"/);
   });
 });
