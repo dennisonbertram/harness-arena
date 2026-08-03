@@ -252,6 +252,7 @@ function processIsAlive(pid) {
 async function fakeHungPnpm(checkout, label, eventPath, markerDelayMs = 0) {
   const bin = join(checkout, "..", `bin-${label}`);
   const marker = join(checkout, "..", `pnpm-${label}.json`);
+  const readyMarker = `${marker}.ready`;
   const events = eventPath ?? join(checkout, "..", `pnpm-${label}.events`);
   await mkdir(bin);
   const path = join(bin, "pnpm");
@@ -267,11 +268,12 @@ async function fakeHungPnpm(checkout, label, eventPath, markerDelayMs = 0) {
     "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
     `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
     "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
+    `await atomicWriteFile(${JSON.stringify(readyMarker)}, "ready");`,
     `if (${markerDelayMs} > 0) await new Promise((resolve) => setTimeout(resolve, ${markerDelayMs}));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(path, 0o700);
-  return { events, marker, path: `${bin}:${process.env.PATH}` };
+  return { events, marker, readyMarker, path: `${bin}:${process.env.PATH}` };
 }
 
 function cleanupHarness() {
@@ -518,6 +520,7 @@ describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisit
     const initExitMarker = `${process.env.HARNESS_INIT_META_MARKER}.init-exit`;
     const invocation = runInitWithEnv({ PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "60000" }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker));
+    await waitForFile(pnpm.readyMarker);
     await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
       worker_pid: process.pid,
       init_pid: pids.init,
