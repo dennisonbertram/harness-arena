@@ -460,6 +460,49 @@ describe("authenticated prerequisite supervisor", () => {
     } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
+  it("preserves the authoritative abort reason when authenticated cleanup fails after final commit", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-abort-reason-over-cleanup.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const controller = new AbortController();
+    const abortReason = new Error("authoritative cancellation");
+    const originalSend = owned.child.send;
+    owned.child.send = function rejectCleanup(message, ...args) {
+      if (message?.type === "terminate") throw new Error("cleanup transport failed");
+      return originalSend.call(this, message, ...args);
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned, {
+        signal: controller.signal,
+        beforeDisconnect: () => controller.abort(abortReason),
+      })).rejects.toBe(abortReason);
+    } finally {
+      owned.child.send = originalSend;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("propagates authenticated cleanup failures when no abort signal is active", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-cleanup-error-without-abort.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const originalSend = owned.child.send;
+    owned.child.send = function rejectCleanup(message, ...args) {
+      if (message?.type === "terminate") throw new Error("cleanup transport failed");
+      return originalSend.call(this, message, ...args);
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned, {
+        beforeDisconnect: () => { throw new Error("detach callback failed"); },
+      })).rejects.toThrow("durable detach cleanup could not be authenticated");
+    } finally {
+      owned.child.send = originalSend;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
   it("coalesces concurrent authenticated cleanup into one bounded operation", async () => {
     const root = await temp();
     const marker = join(root, "coalesced-cleanup.json");
