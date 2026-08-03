@@ -239,6 +239,118 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
+  it("binds a new lifecycle generation for a child started from a fully drained ended-root context", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exported: ReadableSpan[] = [];
+    const exporter = {
+      export: (spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { exported.push(...spans); callback({ code: 0 }); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("saved-ended-root-context");
+    const root = tracer.startSpan("request-root");
+    const savedRootContext = trace.setSpan(context.active(), root);
+
+    root.end();
+    await Promise.all(waitUntilTasks);
+    expect(exported).toHaveLength(1);
+
+    tracer.startSpan("post-drain-server-child", { kind: SpanKind.SERVER }, savedRootContext).end();
+    expect(waitUntilTasks).toHaveLength(2);
+    await waitUntilTasks[1];
+    expect(exported).toHaveLength(2);
+    await provider.shutdown();
+  });
+
+  it("retains bounded ancestry for nested, sibling, and out-of-order saved contexts", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }));
+    const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("saved-ended-ancestry");
+    const root = tracer.startSpan("request-root");
+    const rootContext = trace.setSpan(context.active(), root);
+    const nestedParent = tracer.startSpan("nested-parent", { kind: SpanKind.SERVER }, rootContext);
+    const savedNestedContext = trace.setSpan(context.active(), nestedParent);
+    nestedParent.end();
+    root.end();
+    await Promise.all(waitUntilTasks);
+    expect(waitUntilTasks).toHaveLength(1);
+
+    const firstSibling = tracer.startSpan("first-sibling", { kind: SpanKind.SERVER }, rootContext);
+    const secondSibling = tracer.startSpan("second-sibling", { kind: SpanKind.SERVER }, rootContext);
+    const nestedChild = tracer.startSpan("nested-child", { kind: SpanKind.SERVER }, savedNestedContext);
+    secondSibling.end();
+    nestedChild.end();
+    firstSibling.end();
+
+    expect(waitUntilTasks).toHaveLength(2);
+    await waitUntilTasks[1];
+    expect(exportSpans).toHaveBeenCalledTimes(2);
+    await provider.shutdown();
+  });
+
+  it("caps retained ended ancestry and evicts the least-recently-ended root", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exporter = {
+      export: (_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("bounded-ended-ancestry");
+    const savedRootContexts = [];
+    for (let index = 0; index < 65; index += 1) {
+      const root = tracer.startSpan(`request-root-${index}`);
+      savedRootContexts.push(trace.setSpan(context.active(), root));
+      root.end();
+      await waitUntilTasks.at(-1);
+    }
+    expect(waitUntilTasks).toHaveLength(65);
+
+    tracer.startSpan("evicted-root-child", { kind: SpanKind.SERVER }, savedRootContexts[0]).end();
+    expect(waitUntilTasks).toHaveLength(65);
+    tracer.startSpan("retained-root-child", { kind: SpanKind.SERVER }, savedRootContexts.at(-1)).end();
+    expect(waitUntilTasks).toHaveLength(66);
+    await waitUntilTasks[65];
+    await provider.shutdown();
+  });
+
+  it("expires retained ended ancestry after the bounded lifecycle horizon", async () => {
+    vi.useFakeTimers();
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exporter = {
+      export: (_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("expired-ended-ancestry");
+    const root = tracer.startSpan("request-root");
+    const savedRootContext = trace.setSpan(context.active(), root);
+    root.end();
+    await vi.advanceTimersByTimeAsync(0);
+    await waitUntilTasks[0];
+
+    await vi.advanceTimersByTimeAsync(160_251);
+    tracer.startSpan("expired-root-child", { kind: SpanKind.SERVER }, savedRootContext).end();
+    expect(waitUntilTasks).toHaveLength(1);
+    await provider.shutdown();
+  });
+
   it("binds one aggregate two-sink lifecycle task to each concurrent root request context in the same incoming trace", async () => {
     const tasksByRequest = new Map<string, Promise<unknown>[]>([["request-a", []], ["request-b", []]]);
     let activeRequest = "request-a";
