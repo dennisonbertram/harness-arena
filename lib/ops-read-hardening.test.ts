@@ -8,6 +8,40 @@ import {
 } from "./ops-read";
 
 describe("ops read hardening contract", () => {
+  it("normalizes the full credential-key grammar, URL schemes, Error fields, and short configured secrets", () => {
+    const previous = { token: process.env.OPS_READ_TOKEN, session: process.env.SESSION_SECRET };
+    process.env.OPS_READ_TOKEN = "q";
+    process.env.SESSION_SECRET = "yz";
+    const sentinels = {
+      tokenHeader: "server-token-header", headerToken: "server-header-token", sessionCookie: "server-session-cookie",
+      apiKeyHeader: "server-api-key-header", authToken: "server-auth-token", credentialHeader: "server-credential-header",
+      errorName: "server-error-name", errorMessage: "server-error-message", errorStack: "server-error-stack",
+      errorCause: "server-error-cause", errorEnumerable: "server-error-enumerable", urlUser: "server-url-user",
+      urlPass: "server-url-pass", urlQuery: "server-url-query", urlHash: "server-url-hash",
+    };
+    try {
+      const error = new Error(`auth token=${sentinels.errorMessage}`, { cause: { "credential header": sentinels.errorCause } });
+      error.name = `SessionAuth ${sentinels.errorName}`;
+      error.stack = `Error: ${sentinels.errorStack}`;
+      (error as Error & { context: unknown }).context = { session_id: sentinels.errorEnumerable };
+      const output = redactOpsValue({
+        error,
+        object: { tokenHeader: sentinels.tokenHeader, "header-token": sentinels.headerToken, sessionCookie: sentinels.sessionCookie, api_key_header: sentinels.apiKeyHeader, authToken: sentinels.authToken, "credential header": sentinels.credentialHeader },
+        serialized: JSON.stringify({ setCookieHeader: sentinels.sessionCookie, x_auth_token: sentinels.authToken, "Header.API-Key": sentinels.apiKeyHeader }),
+        urls: [`HTTPS://${sentinels.urlUser}:${sentinels.urlPass}@x.test/a?sig=${sentinels.urlQuery}#${sentinels.urlHash}`, "https://token:password@x.test/b?auth=q#secret"],
+        short: "q/yz",
+      }) as { error: { stack?: string } };
+      const text = JSON.stringify(output);
+      for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+      expect(output.error).toHaveProperty("stack");
+      expect(text).toContain("https://x.test/a");
+      expect(text).toContain("https://x.test/b");
+      expect(text).not.toContain("q/yz");
+    } finally {
+      if (previous.token === undefined) delete process.env.OPS_READ_TOKEN; else process.env.OPS_READ_TOKEN = previous.token;
+      if (previous.session === undefined) delete process.env.SESSION_SECRET; else process.env.SESSION_SECRET = previous.session;
+    }
+  });
   it("covers every persisted writer namespace", () => {
     expect(OPS_RECORD_KINDS.map((entry) => entry.prefix)).toEqual([
       "submissions/", "runs/", "competitions/", "events/", "traces/",

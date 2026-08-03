@@ -287,6 +287,79 @@ describe("ops evidence and verdict honesty", () => {
     await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue(response), timeoutMs: 25, retries: 0 })).resolves.toMatchObject({ error: "invalid_json" });
   });
 
+  it("bounds fetch itself and disposes a response that arrives after the absolute deadline", async () => {
+    let signal;
+    let resolveFetch;
+    const cancel = vi.fn(() => Promise.reject(new Error("late cancel rejection")));
+    const fetchImpl = vi.fn((_url, init) => {
+      signal = init.signal;
+      return new Promise((resolve) => { resolveFetch = resolve; });
+    });
+    const started = Date.now();
+    const pending = requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 10, retries: 0 });
+    const result = await hardBound(pending, 100);
+    expect(result).toMatchObject({ error: "request_timeout", kind: "timeout", attempts: 1 });
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(signal.aborted).toBe(true);
+    resolveFetch({ status: 200, headers: new Headers(), body: { locked: false, cancel } });
+    await delay(0);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("normalizes every hostile response surface behind one fail-closed boundary", async () => {
+    const forged = Object.assign(new Error("forged"), { code: "request_timeout", kind: "timeout" });
+    const validHeaders = () => new Headers();
+    const validBody = () => ({ locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }), cancel: vi.fn(), releaseLock: vi.fn() }) });
+    const cases = [
+      ["undefined response", undefined],
+      ["primitive response", 7],
+      ["throwing status", { get status() { throw forged; }, headers: validHeaders(), body: validBody() }],
+      ["invalid status type", { status: "200", headers: validHeaders(), body: validBody() }],
+      ["throwing headers", { status: 200, get headers() { throw forged; }, body: validBody() }],
+      ["throwing header getter", { status: 200, headers: { get() { throw forged; } }, body: validBody() }],
+      ["non-string content length", { status: 200, headers: { get: () => ({ value: "1" }) }, body: validBody() }],
+      ["disturbed body", { status: 200, headers: validHeaders(), bodyUsed: true, body: validBody() }],
+      ["locked body", { status: 200, headers: validHeaders(), body: { ...validBody(), locked: true } }],
+      ["throwing body getter", { status: 200, headers: validHeaders(), get body() { throw forged; } }],
+      ["throwing getReader", { status: 200, headers: validHeaders(), body: { locked: false, getReader() { throw forged; }, cancel: vi.fn() } }],
+      ["invalid reader", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => null, cancel: vi.fn() } }],
+      ["throwing read getter", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ get read() { throw forged; }, cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["forged read rejection", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: () => Promise.reject(forged), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid read result", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue("done"), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid done flag", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: "yes" }), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid chunk", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value: { bytes: 2 } }), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+    ];
+    for (const [label, response] of cases) {
+      let signal;
+      const result = await hardBound(requestOpsJson({
+        baseUrl: new URL("https://arena.example"),
+        path: "/api/health",
+        fetchImpl: vi.fn(async (_url, init) => { signal = init.signal; return response; }),
+        timeoutMs: 25,
+        retries: 0,
+      }));
+      expect(result, label).toMatchObject({ ok: false, error: "invalid_response", kind: "transport", attempts: 1 });
+      expect(signal.aborted, label).toBe(true);
+    }
+  });
+
+  it("captures cleanup handles once and absorbs cancel/release failures without unhandled rejection", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const cancel = vi.fn(() => Promise.reject(new Error("cancel rejection")));
+    const releaseLock = vi.fn(() => { throw new Error("release throw"); });
+    const reader = { read: () => Promise.reject(Object.assign(new Error("hostile read"), { code: "response_too_large" })), cancel, releaseLock };
+    try {
+      const result = await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ status: 200, headers: new Headers(), body: { locked: false, getReader: () => reader } }), timeoutMs: 25, retries: 0 });
+      expect(result).toMatchObject({ error: "invalid_response", kind: "transport" });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(releaseLock).toHaveBeenCalledOnce();
+      await delay(0);
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  });
+
   it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
     const fetchImpl = healthyApiFetch();
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
@@ -396,6 +469,50 @@ describe("ops evidence and verdict honesty", () => {
 });
 
 describe("redaction, platform wiring, and process bounds", () => {
+  it("uses one normalized sentinel matrix for URLs, credential keys, Errors, and every nonempty secret", () => {
+    const sentinels = {
+      tokenHeader: "sentinel-token-header",
+      headerToken: "sentinel-header-token",
+      sessionCookie: "sentinel-session-cookie",
+      apiKeyHeader: "sentinel-api-key-header",
+      authToken: "sentinel-auth-token",
+      credentialHeader: "sentinel-credential-header",
+      shortOne: "q",
+      shortTwo: "yz",
+      errorName: "sentinel-error-name",
+      errorMessage: "sentinel-error-message",
+      errorStack: "sentinel-error-stack",
+      errorCause: "sentinel-error-cause",
+      errorEnumerable: "sentinel-error-enumerable",
+      urlUser: "sentinel-url-user",
+      urlPass: "sentinel-url-pass",
+      urlQuery: "sentinel-url-query",
+      urlHash: "sentinel-url-hash",
+    };
+    const error = new Error(`auth token=${sentinels.errorMessage}`, { cause: { "credential header": sentinels.errorCause } });
+    error.name = `SessionAuth ${sentinels.errorName}`;
+    error.stack = `Error: ${sentinels.errorStack}`;
+    error.context = { session_id: sentinels.errorEnumerable };
+    const output = redactSensitive({
+      error,
+      object: {
+        tokenHeader: sentinels.tokenHeader,
+        "header-token": sentinels.headerToken,
+        sessionCookie: sentinels.sessionCookie,
+        api_key_header: sentinels.apiKeyHeader,
+        authToken: sentinels.authToken,
+        "credential header": sentinels.credentialHeader,
+      },
+      serialized: JSON.stringify({ setCookieHeader: sentinels.sessionCookie, x_auth_token: sentinels.authToken, "Header.API-Key": sentinels.apiKeyHeader }),
+      urls: [`HTTPS://${sentinels.urlUser}:${sentinels.urlPass}@x.test/a?sig=${sentinels.urlQuery}#${sentinels.urlHash}`, "https://token:password@x.test/b?auth=q#secret"],
+      arbitrary: `${sentinels.shortOne}/${sentinels.shortTwo}`,
+    }, [sentinels.shortOne, sentinels.shortTwo]);
+    const text = JSON.stringify(output);
+    for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+    expect(output.error).toHaveProperty("stack");
+    expect(text).toContain("https://x.test/a");
+    expect(text).toContain("https://x.test/b");
+  });
   it("recursively redacts headers, sensitive fields, URLs, arbitrary errors, and supplied literals", () => {
     const value = { Authorization: "Basic dXNlcjpwYXNz", Cookie: "sid=secret", "Set-Cookie": "sid=secret", "x-api-key": "key", nested: [{ password: "pw", detail: "failed with Bearer abc and literal-needle at https://x.test/a?token=literal-needle" }] };
     const output = JSON.stringify(redactSensitive(value, ["literal-needle", "secret"]));
