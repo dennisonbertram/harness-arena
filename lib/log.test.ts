@@ -25,6 +25,28 @@ describe("log", () => {
     spy.mockRestore();
   });
 
+  it("retains monitor target identity separately from the runtime envelope", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "runtime-sha");
+
+    log("info", "monitor.observation", {
+      environment: "spoofed-runtime",
+      deployment_sha: "spoofed-runtime-sha",
+      target_environment: "development",
+      target_deployment_sha: "target-sha",
+    });
+
+    expect(JSON.parse(spy.mock.calls[0]?.[0] as string)).toMatchObject({
+      environment: "production",
+      deployment_sha: "runtime-sha",
+      target_environment: "development",
+      target_deployment_sha: "target-sha",
+    });
+    vi.unstubAllEnvs();
+    spy.mockRestore();
+  });
+
   it("acknowledges successful emission and reports console failure", () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     expect(log("info", "monitor.observation", { verdict: "healthy" })).toBe(true);

@@ -24,8 +24,20 @@ describe("GET /api/cron/agent-monitor", () => {
     expect(await response.json()).toMatchObject({ ok: true });
     expect(executePassiveMonitorCron).toHaveBeenCalledWith(expect.objectContaining({ request, env: process.env, fetchImpl: globalThis.fetch }));
     expect(log).toHaveBeenCalledTimes(2);
-    expect(log).toHaveBeenNthCalledWith(1, "info", "monitor.observation", expect.objectContaining({ environment: "development", verdict: "healthy" }));
-    expect(log).toHaveBeenNthCalledWith(2, "warn", "monitor.observation", expect.objectContaining({ environment: "production", verdict: "access_blocked" }));
+    expect(log).toHaveBeenNthCalledWith(1, "info", "monitor.observation", expect.objectContaining({
+      target_environment: "development",
+      target_deployment_sha: "abc",
+      verdict: "healthy",
+    }));
+    expect(log).toHaveBeenNthCalledWith(2, "warn", "monitor.observation", expect.objectContaining({
+      target_environment: "production",
+      target_deployment_sha: null,
+      verdict: "access_blocked",
+    }));
+    for (const [, , fields] of vi.mocked(log).mock.calls) {
+      expect(fields).not.toHaveProperty("environment");
+      expect(fields).not.toHaveProperty("deployment_sha");
+    }
     expect(JSON.stringify(vi.mocked(log).mock.calls)).not.toMatch(/route-secret|authorization/i);
   });
 
