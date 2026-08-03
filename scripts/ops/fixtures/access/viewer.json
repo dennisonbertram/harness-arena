@@ -1,0 +1,33 @@
+{
+  "schema_version": "agent_access_evidence.v1",
+  "role": "diagnostic",
+  "captured_at": "2026-08-03T10:00:00.000Z",
+  "github": {
+    "state": "authenticated",
+    "identity_kind": "fine_grained_pat",
+    "repository_role": "read",
+    "expires_at": "2026-09-03T10:00:00.000Z",
+    "permissions": { "metadata": "read", "contents": "read", "actions": "read", "issues": "read", "pull_requests": "read" }
+  },
+  "vercel": {
+    "state": "authenticated",
+    "identity_kind": "viewer_team_identity",
+    "team_role": "VIEWER",
+    "project_role": "VIEWER",
+    "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
+    "environment_metadata": true,
+    "decrypted_environment_values": false,
+    "deployments": true,
+    "logs": true
+  },
+  "ops": {
+    "state": "authenticated",
+    "token_present": true,
+    "methods": ["GET"],
+    "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 }
+  },
+  "blob": { "credential_present": false, "read_via": "get_only_ops" },
+  "sandbox": { "credential_present": false, "read_via": "get_only_ops" },
+  "ai_gateway": { "spend_credential_present": false, "read_via": "vercel_logs" },
+  "secrets": { "static_values_present": false, "metadata_readable": true, "ephemeral_file_mode": "0600", "cleanup_verified": true }
+}

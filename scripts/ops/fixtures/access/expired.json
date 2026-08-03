@@ -1,0 +1,18 @@
+{
+  "schema_version": "agent_access_evidence.v1",
+  "role": "diagnostic",
+  "captured_at": "2026-08-03T10:00:00.000Z",
+  "github": {
+    "state": "authenticated",
+    "identity_kind": "github_app",
+    "repository_role": "app",
+    "expires_at": "2026-08-03T09:59:59.000Z",
+    "permissions": { "metadata": "read", "contents": "read", "actions": "read", "issues": "read", "pull_requests": "read" }
+  },
+  "vercel": { "state": "missing" },
+  "ops": { "state": "missing", "token_present": false },
+  "blob": { "credential_present": false, "read_via": null },
+  "sandbox": { "credential_present": false, "read_via": null },
+  "ai_gateway": { "spend_credential_present": false, "read_via": null },
+  "secrets": { "static_values_present": false, "metadata_readable": false, "cleanup_verified": false }
+}
