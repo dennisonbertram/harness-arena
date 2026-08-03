@@ -1,0 +1,40 @@
+{
+  "schema_version": "agent_access_evidence.v1",
+  "role": "monitor",
+  "captured_at": "2026-08-03T10:00:00.000Z",
+  "github": {
+    "state": "authenticated",
+    "identity_kind": "github_app",
+    "repository_role": "app",
+    "expires_at": "2026-08-03T11:00:00.000Z",
+    "permissions": { "metadata": "read", "contents": "read", "actions": "read", "issues": "read", "pull_requests": "read" }
+  },
+  "vercel": {
+    "state": "authenticated",
+    "identity_kind": "viewer_team_identity",
+    "team_role": "VIEWER",
+    "project_role": "VIEWER",
+    "team_permissions": [],
+    "extended_permissions_complete": true,
+    "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
+    "environment_metadata": true,
+    "decrypted_environment_values": false,
+    "deployments": true,
+    "logs": true
+  },
+  "ops": {
+    "state": "authenticated",
+    "token_present": true,
+    "methods": ["GET"],
+    "credential_separation_attested": true,
+    "target": { "environment": "development", "project_id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "hostname": "harness-arena-development.vercel.app" },
+    "mutation_route_coverage": { "complete": true },
+    "deployed_source": { "deployment_id": "dpl_development", "deployment_url": "harness-arena-development-git-dev-unique.vercel.app", "project_id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hostname": "harness-arena-development.vercel.app" },
+    "mutation_denial": { "environment": "development", "status": 405, "allow": "GET" },
+    "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 }
+  },
+  "blob": { "credential_present": false, "read_via": "get_only_ops" },
+  "sandbox": { "credential_present": false, "read_via": "get_only_ops" },
+  "ai_gateway": { "spend_credential_present": false, "read_via": "vercel_logs" },
+  "secrets": { "forbidden_static_values_present": false, "metadata_readable": true, "secret_values_accessed": false }
+}

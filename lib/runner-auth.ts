@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextRequest } from "next/server";
 import { log } from "./log";
+import { separatedCredential } from "./credential-separation.mjs";
 
 // Shared by the runner callback and trace routes. Fails closed: an unset or
 // empty RUNNER_CALLBACK_SECRET always denies, even if the caller also sends
@@ -8,7 +9,8 @@ import { log } from "./log";
 // sha256 digests are compared with timingSafeEqual (fixed 32-byte length,
 // so this also avoids leaking secret length via a raw-string length check).
 export function verifyRunnerSecret(request: NextRequest): boolean {
-  const secret = process.env.RUNNER_CALLBACK_SECRET;
+  let secret: string | undefined;
+  try { secret = separatedCredential("RUNNER_CALLBACK_SECRET"); } catch { secret = undefined; }
   if (!secret) {
     log("error", "runner_secret.unconfigured");
     return false;

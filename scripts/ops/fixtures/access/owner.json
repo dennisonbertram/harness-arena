@@ -1,0 +1,30 @@
+{
+  "schema_version": "agent_access_evidence.v1",
+  "role": "diagnostic",
+  "captured_at": "2026-08-03T10:00:00.000Z",
+  "github": {
+    "state": "authenticated",
+    "identity_kind": "user_session",
+    "repository_role": "admin",
+    "expires_at": null,
+    "permissions": { "metadata": "read", "contents": "write", "actions": "write", "issues": "write", "pull_requests": "write" }
+  },
+  "vercel": {
+    "state": "authenticated",
+    "identity_kind": "owner_session",
+    "team_role": "OWNER",
+    "project_role": "ADMIN",
+    "team_permissions": ["FullProductionDeployment"],
+    "extended_permissions_complete": true,
+    "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
+    "environment_metadata": true,
+    "decrypted_environment_values": true,
+    "deployments": true,
+    "logs": true
+  },
+  "ops": { "state": "authenticated", "token_present": true, "methods": ["GET"], "credential_separation_attested": true, "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 } },
+  "blob": { "credential_present": true, "read_via": "direct_rw_token" },
+  "sandbox": { "credential_present": true, "read_via": "owner_token" },
+  "ai_gateway": { "spend_credential_present": true, "read_via": "owner_token" },
+  "secrets": { "forbidden_static_values_present": true, "metadata_readable": true, "ephemeral_file_mode": null, "cleanup_verified": false }
+}

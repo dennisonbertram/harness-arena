@@ -2,6 +2,9 @@ import { cache } from "react";
 import NextAuth from "next-auth";
 import GitHub from "next-auth/providers/github";
 import { jwtCallback, sessionCallback } from "@/lib/auth-callbacks";
+import { assertOpsReadCredentialSeparation } from "@/lib/credential-separation.mjs";
+
+assertOpsReadCredentialSeparation(process.env);
 
 const {
   handlers,
