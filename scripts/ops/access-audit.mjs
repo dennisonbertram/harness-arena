@@ -10,6 +10,7 @@ import { spawnCommand } from "./agent-status.mjs";
 export const ACCESS_AUDIT_SCHEMA_VERSION = "agent_access_audit.v1";
 export const ACCESS_AUDIT_EXIT_CODES = Object.freeze({ observable: 0, missing: 2, overprivileged: 3, usage_error: 64 });
 const MAX_JSON_BYTES = 1024 * 1024;
+const MAX_VERCEL_PAGES = 100;
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]);
 const WRITE_LEVELS = new Set(["write", "admin", "owner", "maintain", "triage", "push", "developer"]);
 const VERCEL_WRITE_ROLES = new Set(["OWNER", "ADMIN", "DEVELOPER", "MEMBER", "CONTRIBUTOR", "SECURITY", "BILLING"]);
@@ -172,14 +173,26 @@ function strongestVercelRole(roles) {
   return roles.map(normalizeVercelRole).filter(Boolean).sort((left, right) => (VERCEL_ROLE_RANK.get(right) ?? 99) - (VERCEL_ROLE_RANK.get(left) ?? 99))[0] ?? null;
 }
 
-export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {}, projectMembers = project.members, accessGroupProjects = [], extendedPermissionsComplete = true }) {
+function grantStrings(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(grantStrings);
+  if (!value || typeof value !== "object") return [];
+  return Object.values(value).flatMap(grantStrings);
+}
+
+export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {}, projectMembers = [], accessGroupProjects = [], accessGroupMemberships = [], extendedPermissionsComplete = true }) {
   const tokenProjectId = token.projectId ?? token.project_id ?? token.scope?.projectId ?? null;
   const membership = team.membership ?? {};
-  const teamRoles = [...(Array.isArray(membership.teamRoles) ? membership.teamRoles : []), membership.role, team.currentUserRole, team.role].filter(Boolean);
+  const matchingGroupMemberships = (Array.isArray(accessGroupMemberships) ? accessGroupMemberships : [])
+    .filter((item) => [item.uid, item.userId, item.id, item.user?.id].includes(userId));
+  const groupTeamRoles = matchingGroupMemberships.flatMap((item) => Array.isArray(item.teamRoles) ? item.teamRoles : []);
+  const teamRoles = [...(Array.isArray(membership.teamRoles) ? membership.teamRoles : []), ...groupTeamRoles, membership.role, team.currentUserRole, team.role].filter(Boolean);
   const teamRole = strongestVercelRole(teamRoles);
   const directRoles = (Array.isArray(projectMembers) ? projectMembers : [])
     .filter((item) => [item.uid, item.userId, item.id].includes(userId)).map((item) => item.role);
+  const groupIds = new Set(matchingGroupMemberships.map((item) => item.accessGroupId ?? item.access_group_id).filter(Boolean));
   const groupRoles = (Array.isArray(accessGroupProjects) ? accessGroupProjects : [])
+    .filter((item) => groupIds.has(item.accessGroupId ?? item.access_group_id))
     .filter((item) => (item.projectId ?? item.project_id) === projectId).map((item) => item.role);
   const explicitRoles = [...directRoles, ...groupRoles, project.membership?.role, project.currentUserRole, project.role].filter(Boolean);
   const projectRole = strongestVercelRole([...teamRoles, ...explicitRoles]);
@@ -190,9 +203,14 @@ export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}
     project_role: projectRole,
     role_source: groupRoles.length ? "access_group_effective" : explicitRoles.length ? "project_explicit" : teamRole ? "team_inherited" : "unknown",
     team_roles: [...new Set(teamRoles.map(normalizeVercelRole))],
-    team_permissions: [...new Set(Array.isArray(membership.teamPermissions) ? membership.teamPermissions : [])].sort(),
+    team_permissions: [...new Set([
+      ...(Array.isArray(membership.teamPermissions) ? membership.teamPermissions : []),
+      ...matchingGroupMemberships.flatMap((item) => grantStrings(item.teamPermissions ?? item.permissions ?? item.extendedPermissions ?? item.extended_permissions ?? item.grants)),
+    ])].sort(),
     extended_permissions_complete: extendedPermissionsComplete
-      && Array.isArray(membership.teamRoles) && Array.isArray(membership.teamPermissions),
+      && Array.isArray(membership.teamRoles) && Array.isArray(membership.teamPermissions)
+      && matchingGroupMemberships.every((item) => Array.isArray(item.teamRoles)
+        && (Array.isArray(item.teamPermissions) || Array.isArray(item.permissions) || Array.isArray(item.extendedPermissions) || Array.isArray(item.extended_permissions) || Array.isArray(item.grants))),
   };
 }
 
@@ -364,6 +382,33 @@ async function safeGetJson(fetchImpl, url, headers = {}) {
   try { return JSON.parse(text); } catch { throw new Error("read_probe_invalid_json"); }
 }
 
+function paginatedCursor(page) {
+  if (!plainObject(page?.pagination) || !Object.hasOwn(page.pagination, "nextCursor")) throw new Error("vercel_pagination_schema_invalid");
+  const cursor = page.pagination.nextCursor;
+  if (cursor === null) return null;
+  if (typeof cursor !== "string" || !cursor) throw new Error("vercel_pagination_cursor_invalid");
+  return cursor;
+}
+
+async function getAllVercelPages({ fetchImpl, headers, url, collection }) {
+  const entries = [];
+  const cursors = new Set();
+  let cursor = null;
+  for (let pageNumber = 0; pageNumber < MAX_VERCEL_PAGES; pageNumber += 1) {
+    const target = new URL(url);
+    target.searchParams.set("limit", "100");
+    if (cursor) target.searchParams.set("cursor", cursor);
+    const page = await safeGetJson(fetchImpl, target.href, headers);
+    if (!Array.isArray(page?.[collection])) throw new Error("vercel_pagination_schema_invalid");
+    entries.push(...page[collection]);
+    cursor = paginatedCursor(page);
+    if (cursor === null) return entries;
+    if (cursors.has(cursor)) throw new Error("vercel_pagination_cursor_repeated");
+    cursors.add(cursor);
+  }
+  throw new Error("vercel_pagination_limit_exceeded");
+}
+
 export function resolveOpsTarget(policy, { url: value, projectId }) {
   let url;
   try { url = new URL(value); } catch { throw new Error("ops_target_invalid"); }
@@ -429,12 +474,11 @@ async function probeVercel(policy, env, commandRunner, fetchImpl) {
   if (!token || !teamId || !projectId || !policy.capabilities.vercel.project_ids.includes(projectId)) throw new Error("vercel_active_identity_missing");
   const headers = { authorization: `Bearer ${token}` };
   const commandOptions = { env: { PATH: env.PATH ?? process.env.PATH, VERCEL_TOKEN: token, VERCEL_ORG_ID: teamId, VERCEL_PROJECT_ID: projectId } };
-  const [user, teamsResponse, project, tokensResponse, accessGroupsResponse, environment, deployments] = await Promise.all([
+  const [user, teamsResponse, project, tokensResponse, environment, deployments] = await Promise.all([
     safeGetJson(fetchImpl, "https://api.vercel.com/v2/user", headers),
     safeGetJson(fetchImpl, "https://api.vercel.com/v2/teams?limit=100", headers),
     safeGetJson(fetchImpl, `https://api.vercel.com/v9/projects/${encodeURIComponent(projectId)}?teamId=${encodeURIComponent(teamId)}`, headers),
     safeGetJson(fetchImpl, "https://api.vercel.com/v6/user/tokens", headers),
-    safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups?teamId=${encodeURIComponent(teamId)}&limit=100`, headers),
     runJsonCommand(commandRunner, "vercel", ["env", "ls", "production", "--json"], commandOptions),
     runJsonCommand(commandRunner, "vercel", ["ls", "--json", "--environment", "production"], commandOptions),
   ]);
@@ -444,22 +488,34 @@ async function probeVercel(policy, env, commandRunner, fetchImpl) {
   const target = deploymentList[0]?.url ?? deploymentList[0]?.uid ?? deploymentList[0]?.id;
   if (!target || !/^[A-Za-z0-9_.-]+$/.test(target)) throw new Error("vercel_deployment_missing");
   await runReadCommand(commandRunner, "vercel", ["logs", target, "--json", "--since", "1h"], commandOptions);
-  const accessGroups = accessGroupsResponse.accessGroups ?? accessGroupsResponse.access_groups;
-  if (!Array.isArray(accessGroups) || accessGroupsResponse.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
   const userId = user.user?.id ?? user.id;
+  if (typeof userId !== "string" || !userId) throw new Error("vercel_user_schema_invalid");
+  // The official members endpoint is the sole direct-membership authority. The
+  // project detail's embedded members field can be partial and is never used.
+  const projectMembers = await getAllVercelPages({
+    fetchImpl, headers,
+    url: `https://api.vercel.com/v1/projects/${encodeURIComponent(projectId)}/members?teamId=${encodeURIComponent(teamId)}`,
+    collection: "value",
+  });
+  const accessGroups = await getAllVercelPages({
+    fetchImpl, headers,
+    url: `https://api.vercel.com/v1/access-groups?teamId=${encodeURIComponent(teamId)}`,
+    collection: "accessGroups",
+  });
   const accessGroupProjects = [];
+  const accessGroupMemberships = [];
   for (const group of accessGroups) {
-    const groupId = group.id ?? group.uid;
+    const groupId = group.accessGroupId ?? group.access_group_id ?? group.id ?? group.uid;
     if (!groupId || !/^[A-Za-z0-9_-]+$/.test(groupId)) throw new Error("vercel_access_groups_unverifiable");
-    const members = await safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/members?teamId=${encodeURIComponent(teamId)}&limit=100`, headers);
-    if (!Array.isArray(members.members) || members.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
-    if (!members.members.some((member) => member.uid === userId)) continue;
-    const projects = await safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/projects?teamId=${encodeURIComponent(teamId)}&limit=100`, headers);
-    if (!Array.isArray(projects.projects) || projects.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
-    accessGroupProjects.push(...projects.projects);
+    const members = await getAllVercelPages({ fetchImpl, headers, url: `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/members?teamId=${encodeURIComponent(teamId)}`, collection: "members" });
+    const currentMemberships = members.filter((member) => [member.uid, member.userId, member.id, member.user?.id].includes(userId));
+    if (!currentMemberships.length) continue;
+    accessGroupMemberships.push(...currentMemberships.map((member) => ({ ...member, accessGroupId: member.accessGroupId ?? member.access_group_id ?? groupId })));
+    const projects = await getAllVercelPages({ fetchImpl, headers, url: `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/projects?teamId=${encodeURIComponent(teamId)}`, collection: "projects" });
+    accessGroupProjects.push(...projects.map((item) => ({ ...item, accessGroupId: item.accessGroupId ?? item.access_group_id ?? groupId })));
   }
   const tokenMetadata = selectActiveVercelToken(tokensResponse, token);
-  const normalized = normalizeVercelAccess({ projectId, userId, token: tokenMetadata, team, project, accessGroupProjects, extendedPermissionsComplete: Array.isArray(project.members) });
+  const normalized = normalizeVercelAccess({ projectId, userId, token: tokenMetadata, team, project, projectMembers, accessGroupProjects, accessGroupMemberships, extendedPermissionsComplete: true });
   return {
     state: "authenticated",
     identity_kind: `${String(normalized.project_role ?? "unknown").toLowerCase()}_team_identity`,

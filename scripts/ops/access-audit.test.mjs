@@ -85,7 +85,10 @@ describe("least-privilege access policy", () => {
         : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } }] }
           : String(url).includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [] }
             : String(url).includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
-              : String(url).includes("/v1/access-groups?") ? { accessGroups: [], pagination: { count: 0 } }
+              : String(url).includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) ? String(url).includes("cursor=member-page-2")
+                ? { value: [], pagination: { count: 0, nextCursor: null } }
+                : { value: [], pagination: { count: 0, nextCursor: "member-page-2" } }
+                : String(url).includes("/v1/access-groups?") ? { accessGroups: [], pagination: { count: 0, nextCursor: null } }
             : {};
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
     });
@@ -102,6 +105,7 @@ describe("least-privilege access policy", () => {
     expect(report.overall, JSON.stringify({ collected, report, requests })).toBe("observable");
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
+    expect(requests.some(([url]) => url.includes("cursor=member-page-2"))).toBe(true);
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
   });
 
@@ -236,23 +240,24 @@ describe("least-privilege access policy", () => {
       userId: "user-one",
       token: audit.selectActiveVercelToken({ tokens: [{ prefix: "vcp_", suffix: "tail", scopes: [{ type: "project", projectId: "project-one" }] }] }, "vcp_secret-tail"),
       team: { membership: { role: "VIEWER" } },
-      project: { members: [] },
+      projectMembers: [],
     })).toMatchObject({ token_project_id: "project-one", team_role: "VIEWER", project_role: "VIEWER", role_source: "team_inherited" });
-    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }] } }).project_role).toBe("VIEWER");
-    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_DEVELOPER" }] } }).project_role).toBe("DEVELOPER");
-    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "ADMIN" }] } }).project_role).toBe("ADMIN");
-    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "project-admin" }] } }).project_role).toBe("ADMIN");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, projectMembers: [{ uid: "user-one", role: "PROJECT_VIEWER" }] }).project_role).toBe("VIEWER");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, projectMembers: [{ uid: "user-one", role: "PROJECT_DEVELOPER" }] }).project_role).toBe("DEVELOPER");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, projectMembers: [{ uid: "user-one", role: "ADMIN" }] }).project_role).toBe("ADMIN");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, projectMembers: [{ uid: "user-one", role: "project-admin" }] }).project_role).toBe("ADMIN");
     expect(audit.normalizeVercelAccess({
       projectId: "project-one",
       userId: "user-one",
       team: { membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } },
-      project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }, { uid: "user-one", role: "PROJECT_ADMIN" }] },
+      projectMembers: [{ uid: "user-one", role: "PROJECT_VIEWER" }, { uid: "user-one", role: "PROJECT_ADMIN" }],
     })).toMatchObject({ project_role: "ADMIN", extended_permissions_complete: true });
     expect(audit.normalizeVercelAccess({
       projectId: "project-one", userId: "user-one",
       team: { membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } },
-      project: { members: [] },
-      accessGroupProjects: [{ projectId: "project-one", role: "PROJECT_VIEWER" }, { projectId: "project-one", role: "ADMIN" }],
+      projectMembers: [],
+      accessGroupMemberships: [{ uid: "user-one", accessGroupId: "group-one", teamRoles: ["VIEWER"], permissions: ["OrgViewer"] }],
+      accessGroupProjects: [{ accessGroupId: "group-one", projectId: "project-one", role: "PROJECT_VIEWER" }, { accessGroupId: "group-one", projectId: "project-one", role: "ADMIN" }],
     })).toMatchObject({ project_role: "ADMIN", role_source: "access_group_effective", extended_permissions_complete: true });
     for (const role of ["PROJECT_DEVELOPER", "ADMIN", "project-admin"]) {
       const raw = await evidence("viewer");
