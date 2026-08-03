@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { readiness, listRuns, listSubmissions, getManifest, getVoiceStorage } = vi.hoisted(() => ({
+const { readiness, listRuns, listSubmissions, getManifest, getVoiceStorage, probeBlobAccess } = vi.hoisted(() => ({
   readiness: vi.fn(), listRuns: vi.fn(), listSubmissions: vi.fn(), getManifest: vi.fn(),
   getVoiceStorage: vi.fn(() => ({ getManifest: vi.fn() })),
+  probeBlobAccess: vi.fn(),
 }));
 vi.mock("@/lib/storage", () => ({ getStorage: () => ({ listRuns, listSubmissions, checkReady: readiness }) }));
 vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => { getVoiceStorage(); return { getManifest }; } }));
+vi.mock("@/lib/blob-access", () => ({ probeBlobAccess }));
 import { GET } from "./route";
 
 describe("GET /api/ready", () => {
@@ -15,9 +17,23 @@ describe("GET /api/ready", () => {
     listRuns.mockReset().mockResolvedValue([]);
     listSubmissions.mockReset().mockResolvedValue([]);
     getManifest.mockReset().mockResolvedValue(undefined);
+    probeBlobAccess.mockReset().mockResolvedValue(undefined);
     vi.stubEnv("LOCAL_INSTANCE_NONCE", "nonce-1");
     vi.stubEnv("LOCAL_INSTANCE_PID", String(process.pid));
     getVoiceStorage.mockClear();
+  });
+
+  it("fails hosted readiness when Vercel rejects a forged but well-shaped OIDC token", async () => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "e30.eyJleHAiOjQxMDI0NDQ4MDB9.forged");
+    probeBlobAccess.mockRejectedValueOnce(new Error("OIDC signature verification failed"));
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    expect(probeBlobAccess).toHaveBeenCalledOnce();
   });
   it("binds readiness to the current process instance and verifies seed/writeability", async () => {
     vi.stubEnv("HARNESS_LOCAL_INIT", "1");

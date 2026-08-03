@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkVoiceAudioNft, inspectVoiceAudioNft } from "./check-voice-audio-nft.mjs";
 
 describe("voice audio NFT artifact guard", () => {
@@ -30,8 +33,18 @@ describe("voice audio NFT artifact guard", () => {
     expect(result.forbidden).toEqual([".env.production", "lib/voice-storage.ts"]);
   });
 
-  it("rejects an NFT older than the current build start", async () => {
-    await expect(checkVoiceAudioNft({ buildStartedAtMs: Date.now() + 60_000 })).rejects.toThrow(/stale|current build/i);
+  it("accepts a recreated NFT when filesystem timestamp granularity rounds before build start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "voice-nft-coarse-time-"));
+    const nftPath = join(root, "route.js.nft.json");
+    const buildStartedAtMs = Date.now();
+    try {
+      await writeFile(nftPath, JSON.stringify({ files: [] }));
+      const coarseTimestamp = new Date(buildStartedAtMs - 999);
+      await utimes(nftPath, coarseTimestamp, coarseTimestamp);
+      await expect(checkVoiceAudioNft({ nftPath, buildStartedAtMs })).resolves.toEqual({ projectFiles: [], forbidden: [] });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("fails closed when the current build artifact is missing", async () => {
