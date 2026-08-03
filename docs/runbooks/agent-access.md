@@ -22,6 +22,24 @@ audit. Missing and expired identities are reported as `missing`.
 
 ## Run the audit
 
+The audit requires an explicitly supplied `GH_TOKEN` for GitHub reads. It does
+not use the GitHub CLI credential store or other inherited authentication, so
+the token can be compared locally with `OPS_READ_TOKEN` before any command or
+network request. `GH_TOKEN` must be a separately scoped read-only identity.
+
+Before any external probe, the collector runs the central credential-separation
+attestation across every locally available audit/runtime credential. A collision
+fails closed without making a request and the report contains no credential
+value or hash.
+
+Vercel proof combines all team roles, `teamPermissions`, direct project member
+roles, and complete access-group membership/project-role listings. The strongest
+effective role wins; a Viewer label cannot mask an Admin/Developer role or a
+write/deploy/admin permission such as `CreateProject` or
+`FullProductionDeployment`. Missing arrays, inaccessible access-group data, or
+pagination that prevents proving the complete grant set is reported as
+unverifiable, never observable.
+
 The default command actively probes the authenticated GitHub and Vercel
 identities and the application operations API. It uses only documented
 read-only `gh api`, Vercel CLI/API, and HTTP GET operations:

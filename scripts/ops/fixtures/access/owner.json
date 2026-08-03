@@ -14,6 +14,8 @@
     "identity_kind": "owner_session",
     "team_role": "OWNER",
     "project_role": "ADMIN",
+    "team_permissions": ["FullProductionDeployment"],
+    "extended_permissions_complete": true,
     "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
     "environment_metadata": true,
     "decrypted_environment_values": true,

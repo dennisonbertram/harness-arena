@@ -22,7 +22,7 @@
       "methods": ["GET"],
       "write_methods": ["POST", "PUT", "PATCH", "DELETE"],
       "write_expected_status": 405,
-      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "VERCEL_TOKEN"],
+      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"],
       "targets": {
         "production": {
           "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
@@ -79,6 +79,7 @@
       "GITHUB_EVENT_PATH": { "purpose": "GitHub Actions event payload path", "environments": ["ci"], "secret": false, "owner": "github-actions", "required": "ci", "safe_diagnostic": "path_basename_only" },
       "GITHUB_REPOSITORY": { "purpose": "GitHub Actions repository identity", "environments": ["ci"], "secret": false, "owner": "github-actions", "required": "ci", "safe_diagnostic": "value_non_secret" },
       "GITHUB_TOKEN": { "purpose": "GitHub Actions job token", "environments": ["ci"], "secret": true, "owner": "github-actions", "required": "ci", "safe_diagnostic": "metadata_presence_only" },
+      "GH_TOKEN": { "purpose": "Explicit read-only GitHub CLI audit identity", "environments": ["ops"], "secret": true, "owner": "github", "required": "agent_access_audit", "safe_diagnostic": "metadata_presence_only" },
       "GIT_COMMIT_SHA": { "purpose": "Non-Vercel deployment commit identity", "environments": ["production", "development", "local"], "secret": false, "owner": "deployment", "required": "optional", "safe_diagnostic": "value_non_secret" },
       "HARNESS_INIT_ANCHOR_CONFIG": { "purpose": "Local init anchor handoff config", "environments": ["local"], "secret": true, "owner": "local-init", "required": "ephemeral", "safe_diagnostic": "metadata_presence_only" },
       "HARNESS_INIT_ANCHOR_NONCE": { "purpose": "Local init anchor nonce", "environments": ["local"], "secret": true, "owner": "local-init", "required": "ephemeral", "safe_diagnostic": "metadata_presence_only" },

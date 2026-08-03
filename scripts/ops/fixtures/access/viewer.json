@@ -14,6 +14,8 @@
     "identity_kind": "viewer_team_identity",
     "team_role": "VIEWER",
     "project_role": "VIEWER",
+    "team_permissions": [],
+    "extended_permissions_complete": true,
     "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
     "environment_metadata": true,
     "decrypted_environment_values": false,

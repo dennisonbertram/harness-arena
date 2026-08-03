@@ -76,14 +76,16 @@ describe("least-privilege access policy", () => {
     const requests = [];
     const fetchImpl = vi.fn(async (url, init) => {
       requests.push([String(url), init?.method]);
-      const body = String(url).endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10, policy_size: 10 } }
-        : String(url).endsWith("/api/ops/v1") ? { schema_version: "ops.v1", credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10, policy_size: 10 }, kinds: [{ kind: "runs", prefix: "runs/", format: "json" }], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
+      const policySize = policy.capabilities.get_only_ops.separate_from.length;
+      const body = String(url).endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 3, policy_size: policySize } }
+        : String(url).endsWith("/api/ops/v1") ? { schema_version: "ops.v1", credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 3, policy_size: policySize }, kinds: [{ kind: "runs", prefix: "runs/", format: "json" }], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
           : String(url).includes("/api/ops/v1/inventory?kind=runs&limit=1") ? { schema_version: "ops.v1", kind: "runs", items: [], has_more: false, next_cursor: null }
             : String(url).endsWith("/api/ops/v1/summary") ? { schema_version: "ops.v1", counts: {}, latest: {}, run_states: {}, integrity: {}, scan: { records: 0, complete: true, truncated: false } }
               : String(url).includes("/v2/user") ? { id: "viewer-user" }
-        : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER" } }] }
+        : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } }] }
           : String(url).includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [] }
             : String(url).includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
+              : String(url).includes("/v1/access-groups?") ? { accessGroups: [], pagination: { count: 0 } }
             : {};
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
     });
@@ -103,22 +105,23 @@ describe("least-privilege access policy", () => {
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
   });
 
-  it("attests all local audit credentials before making any external request", async () => {
+  it.each(["GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"])("attests local %s before making any external request", async (collidingName) => {
     const audit = await subject();
     const policy = await audit.loadPolicy(policyPath);
     const commandRunner = vi.fn();
     const fetchImpl = vi.fn();
     const secret = "must-never-leave-process";
-    const collected = await audit.collectActiveAccessEvidence({
-      policy, role: "monitor", cwd: repo,
-      env: {
+    const env = {
         OPS_READ_TOKEN: secret,
         GH_TOKEN: "github-read-token",
-        VERCEL_TOKEN: secret,
+        VERCEL_TOKEN: "vercel-read-token",
         VERCEL_TEAM_ID: "team-one",
         VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0],
         HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app",
-      },
+      };
+    env[collidingName] = secret;
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo, env,
       commandRunner, fetchImpl,
     });
     expect(commandRunner).not.toHaveBeenCalled();
@@ -210,6 +213,12 @@ describe("least-privilege access policy", () => {
       team: { membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } },
       project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }, { uid: "user-one", role: "PROJECT_ADMIN" }] },
     })).toMatchObject({ project_role: "ADMIN", extended_permissions_complete: true });
+    expect(audit.normalizeVercelAccess({
+      projectId: "project-one", userId: "user-one",
+      team: { membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } },
+      project: { members: [] },
+      accessGroupProjects: [{ projectId: "project-one", role: "PROJECT_VIEWER" }, { projectId: "project-one", role: "ADMIN" }],
+    })).toMatchObject({ project_role: "ADMIN", role_source: "access_group_effective", extended_permissions_complete: true });
     for (const role of ["PROJECT_DEVELOPER", "ADMIN", "project-admin"]) {
       const raw = await evidence("viewer");
       raw.vercel.project_role = role;

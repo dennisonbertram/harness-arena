@@ -4,7 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { redactOpsText, redactOpsValue } from "../../lib/ops-redaction.mjs";
-import { OPS_READ_SEPARATE_FROM } from "../../lib/credential-separation.mjs";
+import { credentialSeparationAttestation, OPS_READ_SEPARATE_FROM } from "../../lib/credential-separation.mjs";
 import { spawnCommand } from "./agent-status.mjs";
 
 export const ACCESS_AUDIT_SCHEMA_VERSION = "agent_access_audit.v1";
@@ -12,7 +12,9 @@ export const ACCESS_AUDIT_EXIT_CODES = Object.freeze({ observable: 0, missing: 2
 const MAX_JSON_BYTES = 1024 * 1024;
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"]);
 const WRITE_LEVELS = new Set(["write", "admin", "owner", "maintain", "triage", "push", "developer"]);
-const VERCEL_WRITE_ROLES = new Set(["OWNER", "ADMIN", "DEVELOPER", "MEMBER"]);
+const VERCEL_WRITE_ROLES = new Set(["OWNER", "ADMIN", "DEVELOPER", "MEMBER", "CONTRIBUTOR", "SECURITY", "BILLING"]);
+const VERCEL_READ_ONLY_PERMISSIONS = new Set(["OrgViewer", "UsageViewer", "V0Viewer"]);
+const VERCEL_ROLE_RANK = new Map([["GUEST", 0], ["VIEWER", 1], ["VIEWER_FOR_PLUS", 1], ["BILLING", 2], ["SECURITY", 2], ["CONTRIBUTOR", 3], ["MEMBER", 4], ["DEVELOPER", 5], ["ADMIN", 6], ["OWNER", 7]]);
 
 function extension(path) {
   const match = /\.[^.]+$/.exec(path);
@@ -166,18 +168,31 @@ function normalizeVercelRole(role) {
   return value;
 }
 
-export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {} }) {
+function strongestVercelRole(roles) {
+  return roles.map(normalizeVercelRole).filter(Boolean).sort((left, right) => (VERCEL_ROLE_RANK.get(right) ?? 99) - (VERCEL_ROLE_RANK.get(left) ?? 99))[0] ?? null;
+}
+
+export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {}, projectMembers = project.members, accessGroupProjects = [], extendedPermissionsComplete = true }) {
   const tokenProjectId = token.projectId ?? token.project_id ?? token.scope?.projectId ?? null;
-  const teamRole = team.membership?.role ?? team.currentUserRole ?? team.role ?? null;
-  const member = Array.isArray(project.members)
-    ? project.members.find((item) => [item.uid, item.userId, item.id].includes(userId)) : null;
-  const explicitRole = member?.role ?? project.membership?.role ?? project.currentUserRole ?? project.role ?? null;
+  const membership = team.membership ?? {};
+  const teamRoles = [...(Array.isArray(membership.teamRoles) ? membership.teamRoles : []), membership.role, team.currentUserRole, team.role].filter(Boolean);
+  const teamRole = strongestVercelRole(teamRoles);
+  const directRoles = (Array.isArray(projectMembers) ? projectMembers : [])
+    .filter((item) => [item.uid, item.userId, item.id].includes(userId)).map((item) => item.role);
+  const groupRoles = (Array.isArray(accessGroupProjects) ? accessGroupProjects : [])
+    .filter((item) => (item.projectId ?? item.project_id) === projectId).map((item) => item.role);
+  const explicitRoles = [...directRoles, ...groupRoles, project.membership?.role, project.currentUserRole, project.role].filter(Boolean);
+  const projectRole = strongestVercelRole([...teamRoles, ...explicitRoles]);
   return {
     project_id: project.id ?? project.uid ?? projectId ?? null,
     token_project_id: tokenProjectId,
     team_role: normalizeVercelRole(teamRole),
-    project_role: normalizeVercelRole(explicitRole ?? teamRole),
-    role_source: explicitRole ? "project_explicit" : teamRole ? "team_inherited" : "unknown",
+    project_role: projectRole,
+    role_source: groupRoles.length ? "access_group_effective" : explicitRoles.length ? "project_explicit" : teamRole ? "team_inherited" : "unknown",
+    team_roles: [...new Set(teamRoles.map(normalizeVercelRole))],
+    team_permissions: [...new Set(Array.isArray(membership.teamPermissions) ? membership.teamPermissions : [])].sort(),
+    extended_permissions_complete: extendedPermissionsComplete
+      && Array.isArray(membership.teamRoles) && Array.isArray(membership.teamPermissions),
   };
 }
 
@@ -202,8 +217,10 @@ function auditVercel(policy, evidence) {
   if (/owner|admin|developer/i.test(String(evidence.identity_kind ?? ""))) reasons.push("vercel_identity_kind_can_write");
   if (VERCEL_WRITE_ROLES.has(teamRole)) reasons.push("vercel_team_role_can_write");
   if (VERCEL_WRITE_ROLES.has(projectRole)) reasons.push("vercel_project_role_can_write");
+  for (const permission of evidence.team_permissions ?? []) if (!VERCEL_READ_ONLY_PERMISSIONS.has(permission)) reasons.push(`vercel_${permission}_can_write`);
   if (evidence.decrypted_environment_values) reasons.push("vercel_static_identity_can_decrypt_secrets");
   if (reasons.length) return capability("vercel", "overprivileged", reasons);
+  if (evidence.extended_permissions_complete !== true) return capability("vercel", "missing", ["vercel_extended_permissions_unverifiable"]);
   const allowedProject = policy.capabilities.vercel.project_ids.includes(evidence.project_id)
     && (!evidence.token_project_id || evidence.token_project_id === evidence.project_id);
   if (teamRole !== "VIEWER" || projectRole !== "VIEWER" || !allowedProject || !evidence.environment_metadata || !evidence.deployments || !evidence.logs) {
@@ -285,14 +302,14 @@ export async function deriveProtectedMutationRoutes({ cwd }) {
   return routes.sort((left, right) => `${left.file}:${left.method}`.localeCompare(`${right.file}:${right.method}`));
 }
 
-async function runJsonCommand(commandRunner, binary, args) {
-  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES });
+async function runJsonCommand(commandRunner, binary, args, options = {}) {
+  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES, ...options });
   if (result?.exitCode !== 0) throw new Error(`${binary}_read_probe_failed`);
   try { return JSON.parse(result.stdout); } catch { throw new Error(`${binary}_read_probe_invalid_json`); }
 }
 
-async function runReadCommand(commandRunner, binary, args) {
-  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES });
+async function runReadCommand(commandRunner, binary, args, options = {}) {
+  const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES, ...options });
   if (result?.exitCode !== 0) throw new Error(`${binary}_read_probe_failed`);
   return result.stdout;
 }
@@ -305,14 +322,16 @@ function githubRepositoryRole(permissions = {}) {
   return permissions.pull ? "read" : "none";
 }
 
-async function probeGitHub(policy, commandRunner) {
+async function probeGitHub(policy, env, commandRunner) {
+  if (!env.GH_TOKEN) throw new Error("github_explicit_identity_missing");
+  const commandOptions = { env: { PATH: env.PATH ?? process.env.PATH, GH_TOKEN: env.GH_TOKEN } };
   const repository = policy.capabilities.github.repository;
   let identity, identityKind;
   try {
-    identity = await runJsonCommand(commandRunner, "gh", ["api", "user"]);
+    identity = await runJsonCommand(commandRunner, "gh", ["api", "user"], commandOptions);
     identityKind = "authenticated_user";
   } catch {
-    const installation = await runJsonCommand(commandRunner, "gh", ["api", "installation/repositories"]);
+    const installation = await runJsonCommand(commandRunner, "gh", ["api", "installation/repositories"], commandOptions);
     identity = { login: installation?.repositories?.[0]?.owner?.login ?? "github-app" };
     identityKind = "github_app";
   }
@@ -323,7 +342,7 @@ async function probeGitHub(policy, commandRunner) {
     pull_requests: `repos/${repository}/pulls?per_page=1`,
   };
   const responses = {};
-  for (const [name, endpoint] of Object.entries(endpoints)) responses[name] = await runJsonCommand(commandRunner, "gh", ["api", endpoint]);
+  for (const [name, endpoint] of Object.entries(endpoints)) responses[name] = await runJsonCommand(commandRunner, "gh", ["api", endpoint], commandOptions);
   return {
     state: "authenticated",
     identity_kind: identityKind,
@@ -409,22 +428,38 @@ async function probeVercel(policy, env, commandRunner, fetchImpl) {
   const projectId = env.VERCEL_PROJECT_ID;
   if (!token || !teamId || !projectId || !policy.capabilities.vercel.project_ids.includes(projectId)) throw new Error("vercel_active_identity_missing");
   const headers = { authorization: `Bearer ${token}` };
-  const [user, teamsResponse, project, tokensResponse, environment, deployments] = await Promise.all([
+  const commandOptions = { env: { PATH: env.PATH ?? process.env.PATH, VERCEL_TOKEN: token, VERCEL_ORG_ID: teamId, VERCEL_PROJECT_ID: projectId } };
+  const [user, teamsResponse, project, tokensResponse, accessGroupsResponse, environment, deployments] = await Promise.all([
     safeGetJson(fetchImpl, "https://api.vercel.com/v2/user", headers),
     safeGetJson(fetchImpl, "https://api.vercel.com/v2/teams?limit=100", headers),
     safeGetJson(fetchImpl, `https://api.vercel.com/v9/projects/${encodeURIComponent(projectId)}?teamId=${encodeURIComponent(teamId)}`, headers),
     safeGetJson(fetchImpl, "https://api.vercel.com/v6/user/tokens", headers),
-    runJsonCommand(commandRunner, "vercel", ["env", "ls", "production", "--json"]),
-    runJsonCommand(commandRunner, "vercel", ["ls", "--json", "--environment", "production"]),
+    safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups?teamId=${encodeURIComponent(teamId)}&limit=100`, headers),
+    runJsonCommand(commandRunner, "vercel", ["env", "ls", "production", "--json"], commandOptions),
+    runJsonCommand(commandRunner, "vercel", ["ls", "--json", "--environment", "production"], commandOptions),
   ]);
   const team = (teamsResponse.teams ?? []).find((item) => item.id === teamId);
   if (!team) throw new Error("vercel_team_membership_missing");
   const deploymentList = Array.isArray(deployments) ? deployments : deployments.deployments ?? [];
   const target = deploymentList[0]?.url ?? deploymentList[0]?.uid ?? deploymentList[0]?.id;
   if (!target || !/^[A-Za-z0-9_.-]+$/.test(target)) throw new Error("vercel_deployment_missing");
-  await runReadCommand(commandRunner, "vercel", ["logs", target, "--json", "--since", "1h"]);
+  await runReadCommand(commandRunner, "vercel", ["logs", target, "--json", "--since", "1h"], commandOptions);
+  const accessGroups = accessGroupsResponse.accessGroups ?? accessGroupsResponse.access_groups;
+  if (!Array.isArray(accessGroups) || accessGroupsResponse.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
+  const userId = user.user?.id ?? user.id;
+  const accessGroupProjects = [];
+  for (const group of accessGroups) {
+    const groupId = group.id ?? group.uid;
+    if (!groupId || !/^[A-Za-z0-9_-]+$/.test(groupId)) throw new Error("vercel_access_groups_unverifiable");
+    const members = await safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/members?teamId=${encodeURIComponent(teamId)}&limit=100`, headers);
+    if (!Array.isArray(members.members) || members.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
+    if (!members.members.some((member) => member.uid === userId)) continue;
+    const projects = await safeGetJson(fetchImpl, `https://api.vercel.com/v1/access-groups/${encodeURIComponent(groupId)}/projects?teamId=${encodeURIComponent(teamId)}&limit=100`, headers);
+    if (!Array.isArray(projects.projects) || projects.pagination?.next) throw new Error("vercel_access_groups_unverifiable");
+    accessGroupProjects.push(...projects.projects);
+  }
   const tokenMetadata = selectActiveVercelToken(tokensResponse, token);
-  const normalized = normalizeVercelAccess({ projectId, userId: user.user?.id ?? user.id, token: tokenMetadata, team, project });
+  const normalized = normalizeVercelAccess({ projectId, userId, token: tokenMetadata, team, project, accessGroupProjects, extendedPermissionsComplete: Array.isArray(project.members) });
   return {
     state: "authenticated",
     identity_kind: `${String(normalized.project_role ?? "unknown").toLowerCase()}_team_identity`,
@@ -464,8 +499,19 @@ async function probeOps(policy, env, fetchImpl, cwd) {
 
 export async function collectActiveAccessEvidence({ policy, role, cwd, env = process.env, commandRunner = spawnCommand, fetchImpl = fetch, now = new Date().toISOString() }) {
   const guarded = async (probe, missing) => { try { return await probe(); } catch (error) { return { ...missing, reason: error instanceof Error ? error.message : "probe_failed" }; } };
+  const localSeparation = credentialSeparationAttestation(env);
+  if (localSeparation.state !== "ok") {
+    const missing = { state: "missing", reason: "credential_separation_invalid" };
+    return {
+      schema_version: "agent_access_evidence.v1", role, captured_at: now,
+      github: missing, vercel: missing, ops: { ...missing, token_present: false, methods: [], credential_collisions: ["local"] },
+      blob: { credential_present: false, read_via: null }, sandbox: { credential_present: false, read_via: null },
+      ai_gateway: { spend_credential_present: false, read_via: null },
+      secrets: { forbidden_static_values_present: true, metadata_readable: false, secret_values_accessed: false },
+    };
+  }
   const [github, vercel, ops] = await Promise.all([
-    guarded(() => probeGitHub(policy, commandRunner), { state: "missing" }),
+    guarded(() => probeGitHub(policy, env, commandRunner), { state: "missing" }),
     guarded(() => probeVercel(policy, env, commandRunner, fetchImpl), { state: "missing" }),
     guarded(() => probeOps(policy, env, fetchImpl, cwd), { state: "missing", token_present: Boolean(env.OPS_READ_TOKEN), methods: [] }),
   ]);
