@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,6 +124,33 @@ describe("init security and lifecycle", () => {
     await mkdir(lock);
     await writeFile(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, created_at_ms: Date.now() }));
     await expect(init.acquireInitLock(lock, { staleMs: 1, timeoutMs: 30 })).rejects.toThrow(/lock timeout/);
+  });
+
+  it("uses one abort signal across lock wait and ownership-handshake phase barriers", async () => {
+    expect(init.INIT_CANCELLATION_PHASES).toEqual([
+      "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle",
+    ]);
+
+    const root = await temp();
+    const lock = join(root, "init.lock");
+    await mkdir(lock);
+    await writeFile(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, created_at_ms: Date.now() }));
+    const lockController = new AbortController();
+    const lockWait = init.acquireInitLock(lock, { staleMs: 60_000, timeoutMs: 2_000, pollMs: 10, signal: lockController.signal });
+    lockController.abort(new Error("lock phase cancelled"));
+    await expect(lockWait).rejects.toThrow(/lock phase cancelled/);
+
+    const channel = new PassThrough();
+    const child = new EventEmitter();
+    child.stdio = [undefined, undefined, undefined, channel];
+    const handshakeController = new AbortController();
+    const handshake = init.waitForOwnershipHandshake(child, { pid: 1, nonce: "nonce", port: 2 }, {
+      timeoutMs: 2_000,
+      signal: handshakeController.signal,
+    });
+    handshakeController.abort(new Error("ownership phase cancelled"));
+    await expect(handshake).rejects.toThrow(/ownership phase cancelled/);
+    channel.destroy();
   });
 
   it("retains secret-safe failure evidence while terminating a timed-out process group", async () => {
