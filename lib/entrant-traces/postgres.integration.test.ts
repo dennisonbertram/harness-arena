@@ -1,0 +1,384 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { PGlite } from "@electric-sql/pglite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createPostgresEntrantTraces } from "./postgres";
+
+const migration = (name: string) => readFileSync(path.join(process.cwd(), "db", "migrations", name), "utf8");
+const ALICE = { id: "00000000-0000-0000-0000-000000000101", github_id: 101, github_login: "alice" };
+const BOB = { id: "00000000-0000-0000-0000-000000000202", github_id: 202, github_login: "bob" };
+const SHA = "a".repeat(64);
+
+/**
+ * The reconciler is deliberately defined against a narrow repository port.
+ * Keep this contract test at the concrete Postgres boundary so a future
+ * in-memory fake cannot accidentally become the only implementation of the
+ * close/payout safety path.
+ */
+type ReconciliationPort = {
+  withSubmissionLock<T>(submissionId: string, work: () => Promise<T>): Promise<T>;
+  settleReconciliation(input: {
+    artifact_id: string;
+    state: "pending_upload" | "verified" | "rejected";
+    reason?: string;
+    verified_sha256?: string;
+  }): Promise<unknown>;
+  eligibleVerifiedArtifacts(input: { submission_id: string }): Promise<Array<{
+    id: string;
+    sha256: string;
+    state: string;
+    immutable: boolean;
+  }>>;
+  closeSubmission(input: { submission_id: string; artifact_shas: string[] }): Promise<unknown>;
+};
+
+let db: PGlite;
+let serial = 400;
+
+beforeEach(async () => {
+  db = await PGlite.create();
+  await db.exec(migration("0001_agent_network.sql"));
+  await db.exec(migration("0002_competition_chat.sql"));
+  await db.exec(migration("0003_submission_artifacts.sql"));
+  await db.exec(migration("0006_trace_policy.sql"));
+  await db.exec(migration("0010_submission_trace_closures.sql"));
+  serial = 400;
+  await db.exec(`
+    INSERT INTO entrants (id, github_id, github_login) VALUES
+      ('${ALICE.id}', ${ALICE.github_id}, '${ALICE.github_login}'),
+      ('${BOB.id}', ${BOB.github_id}, '${BOB.github_login}');
+    INSERT INTO submission_bindings (submission_id, competition_id, entrant_id)
+      VALUES ('sub-a', 'comp-a', '${ALICE.id}'), ('sub-b', 'comp-a', '${BOB.id}');
+  `);
+});
+
+afterEach(async () => { await db.close(); });
+
+function traces() {
+  return createPostgresEntrantTraces(db, {
+    ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+    now: () => new Date("2026-08-02T12:00:00.000Z"),
+  });
+}
+
+function reconcilerPort(): ReconciliationPort {
+  return traces() as unknown as ReconciliationPort;
+}
+
+const execution = {
+  submission_id: "sub-a", kind: "execution", schema_version: "execution.v1", mime_type: "application/json",
+  compression: "gzip", compressed_bytes: 128, uncompressed_bytes: 512, sha256: SHA, consent: "entrant-upload.v1",
+};
+
+describe("0003 durable submission artifact metadata", () => {
+  it("is transactional and repeatable, with private object keys rather than public URLs", async () => {
+    await db.exec(migration("0003_submission_artifacts.sql"));
+    expect(migration("0003_submission_artifacts.sql")).toMatch(/^\s*BEGIN\s*;/i);
+    expect(migration("0003_submission_artifacts.sql")).toMatch(/COMMIT\s*;\s*$/i);
+    const columns = await db.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'submission_artifacts'
+    `);
+    expect(columns.rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      "id", "submission_id", "owner_entrant_id", "kind", "schema_version", "object_key", "sha256",
+      "compression", "compressed_bytes", "uncompressed_bytes", "mime_type", "consent", "state", "reconcile_after",
+    ]));
+    for (const row of columns.rows) expect(row.column_name).not.toMatch(/(?:prompt|token|trace|url)/i);
+  });
+
+  it("pins owner/submission binding, one artifact per kind/schema, bounds, state lifecycle, and verified identity immutability", async () => {
+    const definitions = await db.query<{ definition: string }>(`
+      SELECT pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c
+      WHERE c.conrelid = 'submission_artifacts'::regclass
+    `);
+    const all = definitions.rows.map((row) => row.definition).join(" ");
+    expect(all).toMatch(/UNIQUE.*submission_id.*kind.*schema_version/i);
+    expect(all).toMatch(/FOREIGN KEY.*submission_bindings/i);
+    expect(all).toMatch(/CHECK.*pending_upload.*uploaded.*verified.*rejected/i);
+    expect(all).toMatch(/CHECK.*sha256/i);
+  });
+
+  it("prepares exactly once per operation, replays unchanged requests, and conflicts on a changed body of metadata", async () => {
+    const repo = traces();
+    const first = await repo.prepare({ actor: ALICE, operation_id: "prepare-1", artifact: execution });
+    expect(first).toMatchObject({ ok: true, artifact: { state: "pending_upload", object_key: expect.stringMatching(/^private\//) } });
+    await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-1", artifact: { ...execution } })).resolves.toEqual(first);
+    await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-1", artifact: { ...execution, sha256: "b".repeat(64) } })).resolves.toEqual({ ok: false, error: { code: "conflict" } });
+
+    const [concurrentOne, concurrentTwo] = await Promise.all([
+      repo.prepare({ actor: BOB, operation_id: "prepare-concurrent", artifact: { ...execution, submission_id: "sub-b" } }),
+      repo.prepare({ actor: BOB, operation_id: "prepare-concurrent", artifact: { submission_id: "sub-b", consent: execution.consent, sha256: SHA, uncompressed_bytes: 512, compressed_bytes: 128, compression: "gzip", mime_type: "application/json", schema_version: "execution.v1", kind: "execution" } }),
+    ]);
+    expect(concurrentTwo).toEqual(concurrentOne);
+  });
+
+  it("makes a submission close durable across repository instances and refuses a later trace prepare", async () => {
+    const closer = traces();
+    const laterWriter = traces();
+    const prepared = await closer.prepare({ actor: ALICE, operation_id: "close-seed", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await closer.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await closer.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+    await expect(closer.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })).resolves.toMatchObject({ ok: true });
+    await expect(db.query<{ snapshot: unknown }>("SELECT snapshot FROM submission_trace_closures WHERE submission_id='sub-a'"))
+      .resolves.toMatchObject({ rows: [{ snapshot: { schema_version: "submission-trace-close.v1", artifact_ids: [prepared.artifact.id], artifact_shas: [SHA] } }] });
+    await expect(db.query("UPDATE submission_trace_closures SET closed_at=NOW() WHERE submission_id='sub-a'"))
+      .rejects.toThrow();
+
+    await expect(laterWriter.prepare({
+      actor: ALICE,
+      operation_id: "prepare-after-close",
+      artifact: { ...execution, kind: "rationale", schema_version: "rationale.v1" },
+    })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("does not report upload success when its conditional state update loses a concurrent rejection", async () => {
+    const seed = traces();
+    const prepared = await seed.prepare({ actor: ALICE, operation_id: "upload-zero-row", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    const racingDb = {
+      query: async <Row>(sql: string, params?: unknown[]) => {
+        if (sql.startsWith("UPDATE submission_artifacts SET state='uploaded'")) {
+          await db.query(
+            "UPDATE submission_artifacts SET state='rejected', rejected_at=$2, updated_at=$2 WHERE id=$1 AND state='pending_upload'",
+            [prepared.artifact.id, "2026-08-02T12:00:00.000Z"],
+          );
+        }
+        return db.query<Row>(sql, params);
+      },
+      transaction: db.transaction.bind(db),
+    };
+    const racer = createPostgresEntrantTraces(racingDb as never, {
+      ids: { next: () => "00000000-0000-0000-0000-000000000999" },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+
+    await expect(racer.recordUpload({
+      actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128,
+    })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("pins every prepare write to the injected transaction-scoped SQL client", async () => {
+    type TransactionSql = { query<Row>(sql: string, params?: unknown[]): Promise<{ rows: Row[] }> };
+    let transactionCount = 0;
+    const transaction = async <Result>(callback: (tx: TransactionSql) => Promise<Result>): Promise<Result> => {
+      transactionCount += 1;
+      return db.transaction((tx) => callback(tx as unknown as TransactionSql));
+    };
+    const repo = createPostgresEntrantTraces({ query: db.query.bind(db), transaction }, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+    await expect(repo.prepare({ actor: ALICE, operation_id: "prepare-transaction", artifact: execution })).resolves.toMatchObject({ ok: true });
+    expect(transactionCount).toBe(1);
+  });
+
+  it("recovers a committed prepare when the caller loses the transaction result", async () => {
+    // A network failure can arrive after PostgreSQL has committed.  The retry
+    // must return the durable idempotency response rather than create another
+    // private object key or report a false failure.
+    let loseFirstResult = true;
+    const uncertainDb = {
+      query: db.query.bind(db),
+      transaction: async <Result>(work: (tx: typeof db) => Promise<Result>): Promise<Result> => {
+        const committed = await db.transaction((tx) => work(tx as unknown as typeof db));
+        if (loseFirstResult) {
+          loseFirstResult = false;
+          throw new Error("connection lost after commit");
+        }
+        return committed;
+      },
+    };
+    const repo = createPostgresEntrantTraces(uncertainDb as never, {
+      ids: { next: () => `00000000-0000-0000-0000-${String(serial++).padStart(12, "0")}` },
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    });
+
+    const result = await repo.prepare({ actor: ALICE, operation_id: "prepare-lost-result", artifact: execution });
+    expect(result).toMatchObject({ ok: true, artifact: { state: "pending_upload" } });
+    await expect(db.query("SELECT id FROM submission_artifacts WHERE submission_id = 'sub-a'"))
+      .resolves.toMatchObject({ rows: [expect.anything()] });
+  });
+
+  it("records upload, verifies the final checksum, rejects mismatches, and exposes due reconciliation work", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-finalize", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+    await expect(repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toMatchObject({ ok: true, artifact: { state: "uploaded" } });
+    await expect(repo.reconcileDue({ before: new Date("2026-08-03T00:00:00.000Z") })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: prepared.artifact.id, state: "uploaded" }),
+    ]));
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA })).resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+    const policy = { verified_sha256: SHA, scan_revision: "trace-policy.v1" };
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy })).resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved", scan_revision: "trace-policy.v1" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy })).resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: "b".repeat(64) })).resolves.toEqual({ ok: false, error: { code: "conflict" } });
+    await expect(db.query(
+      "UPDATE submission_artifacts SET object_key = $2 WHERE id = $1",
+      [prepared.artifact.id, "private/tampered"],
+    )).rejects.toThrow();
+
+    const mismatch = await repo.prepare({
+      actor: BOB,
+      operation_id: "prepare-mismatch",
+      artifact: { ...execution, submission_id: "sub-b", sha256: "b".repeat(64) },
+    });
+    if (!mismatch.ok) throw new Error("fixture prepare failed");
+    await expect(repo.recordUpload({ actor: BOB, artifact_id: mismatch.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "checksum_mismatch" },
+      artifact: { state: "rejected" },
+    });
+    await expect(repo.recordUpload({ actor: BOB, artifact_id: mismatch.artifact.id, sha256: "b".repeat(64), compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+    await expect(repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 })).resolves.toEqual({ ok: false, error: { code: "invalid_state" } });
+  });
+
+  it("fails closed for missing actors, cross-owner writes, and incomplete policy evidence", async () => {
+    const repo = traces();
+    await expect(repo.prepare({ actor: null, operation_id: "prepare-anonymous", artifact: execution }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(repo.prepare({ actor: BOB, operation_id: "prepare-foreign", artifact: execution }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-ownership", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(repo.recordUpload({ actor: null, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "unauthenticated" } });
+    await expect(repo.recordUpload({ actor: BOB, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.finalize({ actor: BOB, artifact_id: prepared.artifact.id, sha256: SHA }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+
+    await repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy: { verified_sha256: "b".repeat(64), scan_revision: "trace-policy.v1" } }))
+      .resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+    await expect(repo.finalize({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, policy: { verified_sha256: SHA, scan_revision: "INVALID REVISION" } }))
+      .resolves.toEqual({ ok: false, error: { code: "policy_required" } });
+
+    await expect(repo.settleReconciliation({ artifact_id: "00000000-0000-0000-0000-000000000999", state: "verified", verified_sha256: SHA }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: "b".repeat(64) }))
+      .resolves.toEqual({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("derives storage keys only from server IDs, never owner-controlled submission text", async () => {
+    await db.exec(`INSERT INTO submission_bindings (submission_id, competition_id, entrant_id) VALUES ('../../escape', 'comp-a', '${ALICE.id}')`);
+    const prepared = await traces().prepare({ actor: ALICE, operation_id: "prepare-path", artifact: { ...execution, submission_id: "../../escape" } });
+    expect(prepared).toMatchObject({ ok: true, artifact: { submission_id: "../../escape", object_key: expect.stringMatching(/^private\/artifacts\/[0-9a-f-]{36}$/) } });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    expect(prepared.artifact.object_key).not.toContain("..");
+  });
+
+  it("denies cross-user reads and returns public metadata DTOs without bytes, prompts, tokens, or URLs", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-private", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await expect(repo.getForOwner({ actor: BOB, artifact_id: prepared.artifact.id })).resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    const own = await repo.getForOwner({ actor: ALICE, artifact_id: prepared.artifact.id });
+    expect(own).toMatchObject({ ok: true, artifact: { id: prepared.artifact.id, submission_id: "sub-a" } });
+    if (!own.ok) throw new Error("fixture owner read failed");
+    for (const field of ["bytes", "body", "prompt", "token", "url", "signed_url", "object_key", "owner_entrant_id"] as const) expect(own.artifact).not.toHaveProperty(field);
+  });
+
+  it("separates the internal storage lookup from owner-safe submission status listing", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "prepare-internal", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+
+    await expect(repo.getInternalForOwner({ actor: BOB, artifact_id: prepared.artifact.id }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.getInternalForOwner({ actor: ALICE, artifact_id: prepared.artifact.id }))
+      .resolves.toMatchObject({
+        ok: true,
+        artifact: {
+          id: prepared.artifact.id,
+          owner_entrant_id: ALICE.id,
+          object_key: expect.stringMatching(/^private\/artifacts\//),
+        },
+      });
+
+    const status = await repo.listForOwner({ actor: ALICE, submission_id: "sub-a" });
+    expect(status).toMatchObject({ ok: true, traces: [expect.objectContaining({ id: prepared.artifact.id })] });
+    if (!status.ok) throw new Error("fixture status failed");
+    for (const trace of status.traces) {
+      for (const field of ["object_key", "owner_entrant_id", "token", "url", "bytes", "body"] as const) {
+        expect(trace).not.toHaveProperty(field);
+      }
+    }
+    await expect(repo.listForOwner({ actor: BOB, submission_id: "sub-a" }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+  });
+
+  it("settles reconciliation durably: an approved policy trace alone is eligible, while manual review and rejection are terminally ineligible", async () => {
+    const repo = reconcilerPort();
+    const artifactRepo = traces();
+
+    const approved = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-approved", artifact: execution });
+    const manual = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-manual", artifact: { ...execution, kind: "rationale", schema_version: "rationale.v1" } });
+    const rejected = await artifactRepo.prepare({ actor: BOB, operation_id: "reconcile-rejected", artifact: { ...execution, submission_id: "sub-b" } });
+    if (!approved.ok || !manual.ok || !rejected.ok) throw new Error("fixture prepare failed");
+
+    for (const artifact of [approved, manual, rejected]) {
+      const actor = artifact.artifact.submission_id === "sub-b" ? BOB : ALICE;
+      await expect(artifactRepo.recordUpload({ actor, artifact_id: artifact.artifact.id, sha256: artifact.artifact.sha256, compressed_bytes: 128 }))
+        .resolves.toMatchObject({ ok: true, artifact: { state: "uploaded" } });
+    }
+
+    await expect(repo.settleReconciliation({ artifact_id: approved.artifact.id, state: "verified", verified_sha256: SHA }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "verified", scan_state: "approved", policy_verified_at: expect.any(String) } });
+    await expect(repo.settleReconciliation({ artifact_id: manual.artifact.id, state: "pending_upload", reason: "invalid_json" }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "pending_upload", scan_state: "manual_review" } });
+    await expect(repo.settleReconciliation({ artifact_id: rejected.artifact.id, state: "rejected", reason: "sensitive_content" }))
+      .resolves.toMatchObject({ ok: true, artifact: { state: "rejected", scan_state: "rejected" } });
+
+    await expect(repo.eligibleVerifiedArtifacts({ submission_id: "sub-a" })).resolves.toEqual([
+      expect.objectContaining({ id: approved.artifact.id, sha256: SHA, state: "verified", immutable: true }),
+    ]);
+    await expect(repo.eligibleVerifiedArtifacts({ submission_id: "sub-b" })).resolves.toEqual([]);
+  });
+
+  it("serializes finalization and closing per submission, rejecting a close before every trace has policy approval", async () => {
+    const port = reconcilerPort();
+    const artifactRepo = traces();
+    const prepared = await artifactRepo.prepare({ actor: ALICE, operation_id: "reconcile-close", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await artifactRepo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+
+    // The first close observes an uploaded (not policy-approved) trace and
+    // must not create an eligibility-bearing close.  The second runs through
+    // the same submission lock after reconciliation has advanced it.
+    await expect(port.withSubmissionLock("sub-a", async () => port.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })))
+      .resolves.toEqual({ ok: false, error: { code: "traces_not_eligible" } });
+
+    await port.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+    await expect(port.withSubmissionLock("sub-a", async () => port.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] })))
+      .resolves.toMatchObject({ ok: true });
+
+    const audit = await db.query<{ action: string; safe_metadata: unknown }>(
+      "SELECT action, safe_metadata FROM domain_audit_events WHERE entity_id = $1 ORDER BY occurred_at",
+      ["sub-a"],
+    );
+    expect(audit.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "entrant.trace.submission_closed" }),
+    ]));
+    expect(JSON.stringify(audit.rows)).not.toContain("object_key");
+  });
+
+  it("refuses mismatched close snapshots and treats a durable repeated close as a replay", async () => {
+    const repo = traces();
+    const prepared = await repo.prepare({ actor: ALICE, operation_id: "close-mismatch", artifact: execution });
+    if (!prepared.ok) throw new Error("fixture prepare failed");
+    await repo.recordUpload({ actor: ALICE, artifact_id: prepared.artifact.id, sha256: SHA, compressed_bytes: 128 });
+    await repo.settleReconciliation({ artifact_id: prepared.artifact.id, state: "verified", verified_sha256: SHA });
+
+    await expect(repo.closeSubmission({ submission_id: "missing-submission", artifact_shas: [SHA] }))
+      .resolves.toEqual({ ok: false, error: { code: "not_found" } });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: ["b".repeat(64)] }))
+      .resolves.toEqual({ ok: false, error: { code: "traces_not_eligible" } });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA, SHA] }))
+      .resolves.toEqual({ ok: true });
+    await expect(repo.closeSubmission({ submission_id: "sub-a", artifact_shas: [SHA] }))
+      .resolves.toEqual({ ok: true, already_closed: true });
+  });
+});

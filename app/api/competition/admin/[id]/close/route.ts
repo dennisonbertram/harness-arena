@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { competitionAdminToken } from "@/lib/competition-config";
+import { agentNetworkEntriesEnabled, markCompetitionEntriesClosed } from "@/lib/competition-entry-lifecycle-runtime";
 import { log } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -35,13 +36,26 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: "competition not found" }, { status: 404 });
   }
 
-  // Closing is deliberately idempotent: retrying a successful admin request
-  // returns the original closure record without moving its closed_at timestamp.
-  if (competition.status === "closed") {
-    return NextResponse.json(competition);
+  const proposedClosedAt = competition.status === "closed" && competition.closed_at
+    ? competition.closed_at
+    : new Date().toISOString();
+  let closedAt = proposedClosedAt;
+  if (agentNetworkEntriesEnabled()) {
+    try {
+      const marker = await markCompetitionEntriesClosed({ competition_id: competition.id, closed_at: proposedClosedAt });
+      closedAt = marker.closed_at;
+    } catch {
+      log("error", "competition.admin.close_coordination_failed", { competition_id: competition.id });
+      return NextResponse.json({ error: "competition close coordination unavailable" }, { status: 503 });
+    }
   }
 
-  const closed = { ...competition, status: "closed" as const, closed_at: new Date().toISOString() };
+  // Closing is deliberately idempotent. Once durable entries are enabled the
+  // SQL marker is written first, so a failed Blob update leaves submissions
+  // safely closed and a retry reuses the original close timestamp.
+  if (competition.status === "closed" && competition.closed_at === closedAt) return NextResponse.json(competition);
+
+  const closed = { ...competition, status: "closed" as const, closed_at: closedAt };
   await getStorage().putCompetition(closed);
   return NextResponse.json(closed);
 }

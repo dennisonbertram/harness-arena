@@ -118,6 +118,17 @@ describe("MemoryStorage", () => {
     expect(secondBatch.map((e) => e.seq)).toEqual([3]);
   });
 
+  it("ensures one deterministic run.created event without an append-after-read probe", async () => {
+    const storage = new MemoryStorage();
+
+    await storage.ensureRunCreatedEvent({ run_id: "run-1", submission_id: "sub-1" });
+    await storage.ensureRunCreatedEvent({ run_id: "run-1", submission_id: "sub-1" });
+
+    await expect(storage.listRunEvents("run-1")).resolves.toMatchObject([
+      { run_id: "run-1", seq: 1, type: "run.created", payload: { submission_id: "sub-1" } },
+    ]);
+  });
+
   it("listRunEvents returns events in strict seq order", async () => {
     const storage = new MemoryStorage();
     const runId = "run-1";
@@ -300,6 +311,20 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     ]);
     expect(new Set(pathnames).size).toBe(3);
     expect(pathnames.some((p) => p.endsWith(`${runId}.jsonl`))).toBe(false);
+  });
+
+  it("uses the deterministic seq-one pathname to ensure run.created without listing first", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(put).mockResolvedValue({ url: "https://blob.example/events/run-1/0000000001.json" } as never);
+
+    await storage.ensureRunCreatedEvent({ run_id: "run-1", submission_id: "sub-1" });
+
+    expect(list).not.toHaveBeenCalled();
+    expect(put).toHaveBeenCalledWith(
+      "events/run-1/0000000001.json",
+      expect.stringContaining('"submission_id":"sub-1"'),
+      expect.objectContaining({ allowOverwrite: false, addRandomSuffix: false }),
+    );
   });
 
   it("appendRunEvents continues seq monotonically across two batches (second call lists the first batch's blobs)", async () => {

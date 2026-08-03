@@ -14,6 +14,8 @@ export interface Storage {
   listRuns(): Promise<Run[]>;
   /** Assigns each event a monotonic seq (1..n, continuing across batches) and returns them with seq/run_id filled in. */
   appendRunEvents(runId: string, events: NewRunEvent[]): Promise<RunEvent[]>;
+  /** Creates the one immutable first event for a run, or verifies the same deterministic event already exists. */
+  ensureRunCreatedEvent(input: { run_id: string; submission_id: string }): Promise<void>;
   /** Returns all events for a run in strict seq order. Best-effort: skips any event that can't be read. */
   listRunEvents(runId: string): Promise<RunEvent[]>;
   /**
@@ -89,6 +91,13 @@ export class MemoryStorage implements Storage {
     });
     this.events.set(runId, [...existing, ...appended]);
     return appended;
+  }
+
+  async ensureRunCreatedEvent({ run_id, submission_id }: { run_id: string; submission_id: string }): Promise<void> {
+    const existing = this.events.get(run_id) ?? [];
+    if (existing.some((event) => event.type === "run.created" && event.payload.submission_id === submission_id)) return;
+    if (existing.some((event) => event.seq === 1)) throw new Error("run.created event identity conflict");
+    this.events.set(run_id, [{ run_id, seq: 1, ts: new Date().toISOString(), type: "run.created", payload: { submission_id } }, ...existing]);
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {
@@ -404,6 +413,22 @@ export class BlobStorage implements Storage {
       }
     }
     return appended;
+  }
+
+  async ensureRunCreatedEvent({ run_id, submission_id }: { run_id: string; submission_id: string }): Promise<void> {
+    const pathname = `events/${run_id}/0000000001.json`;
+    const event: RunEvent = { run_id, seq: 1, ts: new Date().toISOString(), type: "run.created", payload: { submission_id } };
+    try {
+      await put(pathname, JSON.stringify(event), {
+        access: "public", addRandomSuffix: false, allowOverwrite: false, contentType: "application/json",
+      });
+      return;
+    } catch (writeError) {
+      const existing = await withRetry(() => getJson<RunEvent>(pathname));
+      if (existing.run_id === run_id && existing.seq === 1 && existing.type === "run.created"
+        && existing.payload.submission_id === submission_id) return;
+      throw writeError;
+    }
   }
 
   async listRunEvents(runId: string): Promise<RunEvent[]> {

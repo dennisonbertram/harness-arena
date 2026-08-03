@@ -33,5 +33,12 @@ describe("agent tokens", () => {
 
   it("rejects malformed tokens", async () => {
     await expect(verifyAgentToken("not-a-jwt")).rejects.toMatchObject({ code: "malformed" });
+    await expect(verifyAgentToken("x.y.z")).rejects.toMatchObject({ code: "malformed" });
+  });
+
+  it("fails closed when the signing secret is absent", async () => {
+    vi.stubEnv("AUTH_SECRET", "");
+    await expect(mintAgentToken({ githubId: 42, githubLogin: "octocat" })).rejects.toThrow("AUTH_SECRET is not configured on the server");
+    vi.stubEnv("AUTH_SECRET", "agent-token-test-secret");
   });
 });

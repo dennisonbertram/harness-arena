@@ -1,9 +1,10 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { HarnessArenaClient } from "./client.js";
 import { FileCredentialStore } from "./credentials.js";
+import { FileDeviceAttemptStore } from "./device-attempt-store.js";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain" } });
@@ -12,6 +13,10 @@ const authenticatedStore = () => ({
   get: vi.fn().mockResolvedValue({ token: "token", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" }),
   set: vi.fn().mockResolvedValue(undefined),
 });
+const isolatedAttemptStore = async (now: () => number = Date.now) => {
+  const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-device-attempts-"));
+  return new FileDeviceAttemptStore(join(directory, "device-attempts.json"), { now });
+};
 
 describe("HarnessArenaClient", () => {
   it("polls pending device login until successful and stores the token", async () => {
@@ -21,8 +26,12 @@ describe("HarnessArenaClient", () => {
       .mockResolvedValueOnce(json(202, { status: "pending" }))
       .mockResolvedValueOnce(json(200, { token: "token", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" }));
     const announced = vi.fn();
-    const client = new HarnessArenaClient({ credentials: store, fetch: fetcher, now: () => now, sleep: async (ms) => { now += ms; }, onDeviceCode: announced });
-    await expect(client.login()).resolves.toMatchObject({ status: "authenticated", github_login: "octo", authorization: { user_code: "ABCD" } });
+    const client = new HarnessArenaClient({ credentials: store, fetch: fetcher, now: () => now, sleep: async (ms) => { now += ms; }, onDeviceCode: announced, deviceAttempts: await isolatedAttemptStore(() => now) });
+    await expect(client.login()).resolves.toMatchObject({
+      status: "authenticated",
+      github_login: "octo",
+      authorization: { user_code: "ABCD", expires_in: 60 },
+    });
     expect(announced).toHaveBeenCalledWith(expect.objectContaining({ user_code: "ABCD", verification_uri: "https://github.com/login/device" }));
     expect(store.set).toHaveBeenCalledWith("https://harness-arena-psi.vercel.app", expect.objectContaining({ token: "token" }));
     expect(fetcher).toHaveBeenCalledTimes(3);
@@ -34,7 +43,7 @@ describe("HarnessArenaClient", () => {
       .mockResolvedValueOnce(json(200, { device_code: "secret", user_code: "ABCD", verification_uri: "https://example.test", expires_in: 60, interval: 1 }))
       .mockResolvedValueOnce(json(429, { interval: 4 }))
       .mockResolvedValueOnce(json(200, { token: "token", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" }));
-    const client = new HarnessArenaClient({ credentials: store, fetch: fetcher, now: () => now, sleep: async (ms) => { waits.push(ms); now += ms; } });
+    const client = new HarnessArenaClient({ credentials: store, fetch: fetcher, now: () => now, sleep: async (ms) => { waits.push(ms); now += ms; }, deviceAttempts: await isolatedAttemptStore(() => now) });
     await client.login();
     expect(waits).toEqual([1_000, 4_000]);
   });
@@ -46,6 +55,68 @@ describe("HarnessArenaClient", () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     await expect(store.get("https://local.example.test")).resolves.toMatchObject({ github_login: "octo" });
     await expect(store.get("https://harness-arena-psi.vercel.app")).resolves.toBeUndefined();
+  });
+
+  it("rejects a symlinked credential path without reading or overwriting its target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-link-"));
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const target = join(directory, "attacker-target.json");
+    const path = join(nested, "credentials.json");
+    const targetContents = `${JSON.stringify({
+      version: 1,
+      credentials: { "https://arena.example.test": { token: "attacker-token", github_login: "attacker", expires_at: "2099-01-01T00:00:00Z" } },
+    })}\n`;
+    await writeFile(target, targetContents);
+    await symlink(target, path);
+    const store = new FileCredentialStore(path);
+
+    await expect(store.get("https://arena.example.test")).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(store.set("https://arena.example.test", {
+      token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z",
+    })).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(readFile(target, "utf8")).resolves.toBe(targetContents);
+  });
+
+  it("rejects a symlinked credential directory before the first write", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-directory-link-"));
+    const attackerDirectory = join(directory, "attacker");
+    const linkedDirectory = join(directory, "linked");
+    await mkdir(attackerDirectory, { mode: 0o700 });
+    await symlink(attackerDirectory, linkedDirectory);
+    const path = join(linkedDirectory, "credentials.json");
+
+    await expect(new FileCredentialStore(path).set("https://arena.example.test", {
+      token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z",
+    })).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(stat(join(attackerDirectory, "credentials.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects malformed stored credential values instead of returning them as authenticated", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-schema-"));
+    const path = join(directory, "credentials.json");
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      credentials: { "https://arena.example.test": { token: "", github_login: 42, expires_at: "never" } },
+    }), { mode: 0o600 });
+
+    await expect(new FileCredentialStore(path).get("https://arena.example.test"))
+      .rejects.toThrow("Unable to read Harness Arena credentials");
+  });
+
+  it("rejects an existing credential file readable by group or other users", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-mode-"));
+    const path = join(directory, "credentials.json");
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      credentials: {
+        "https://arena.example.test": { token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" },
+      },
+    }), { mode: 0o600 });
+    await chmod(path, 0o644);
+
+    await expect(new FileCredentialStore(path).get("https://arena.example.test"))
+      .rejects.toThrow("Unable to read Harness Arena credentials");
   });
 
   it("fails auth-required tools helpfully when no token exists", async () => {
@@ -101,6 +172,65 @@ describe("HarnessArenaClient", () => {
     expect(fetcher).toHaveBeenCalledWith(new URL("/api/competition/submissions?mine=true", client.baseUrl), expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }));
   });
 
+  it("submits the exact versioned entry contract to the durable entries route", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(202, { entry: { submission_id: "submission-1", run_id: "run-1", status: "queued" } }));
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+    const entry = {
+      schema_version: "submit_entry.v1" as const,
+      competition_id: "live-cup",
+      idempotency_key: "entry-key-1",
+      entry: { kind: "prompt.v1" as const, agent_name: "solver", prompt: "Find the invariant." },
+    };
+
+    await expect(client.submitEntry(entry)).resolves.toEqual({ entry: { submission_id: "submission-1", run_id: "run-1", status: "queued" } });
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competition/entries", client.baseUrl),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer token" }),
+        body: JSON.stringify(entry),
+      }),
+    );
+  });
+
+  it("routes legacy submitPrompt through submit_entry.v1 without dropping a caller idempotency key", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(202, { entry: { submission_id: "submission-1", status: "queued" } }));
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+
+    await client.submitPrompt({
+      competition_id: "live-cup",
+      agent_name: "solver",
+      prompt: "Find the invariant.",
+      idempotency_key: "legacy-entry-key-1",
+    } as never);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competition/entries", client.baseUrl),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          schema_version: "submit_entry.v1",
+          competition_id: "live-cup",
+          idempotency_key: "legacy-entry-key-1",
+          entry: { kind: "prompt.v1", agent_name: "solver", prompt: "Find the invariant." },
+        }),
+      }),
+    );
+  });
+
+  it("forwards chat subscription cancellation to the underlying HTTP request", async () => {
+    const fetcher = vi.fn().mockResolvedValue(json(200, { messages: [], next_cursor: "cursor-1" }));
+    const controller = new AbortController();
+    const client = new HarnessArenaClient({ credentials: authenticatedStore(), fetch: fetcher });
+
+    await client.readCompetitionChat({ competition_id: "live-cup", wait_seconds: 25, signal: controller.signal } as any);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("/api/competitions/live-cup/chat?wait_seconds=25", client.baseUrl),
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
   it.each([
     [401, { error: "ignored" }, "Not authenticated; run the login tool first."],
     [404, { error: "ignored" }, "The requested Harness Arena resource was not found."],
@@ -148,7 +278,7 @@ describe("HarnessArenaClient", () => {
       const fetcher = vi.fn()
         .mockResolvedValueOnce(json(200, { device_code: "secret", user_code: "ABCD", verification_uri: "https://example.test", expires_in: 60, interval: 1 }))
         .mockResolvedValueOnce(json(200, { token: "token", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" }));
-      const client = new HarnessArenaClient({ credentials: testStore(), fetch: fetcher });
+      const client = new HarnessArenaClient({ credentials: testStore(), fetch: fetcher, deviceAttempts: await isolatedAttemptStore() });
       const login = client.login();
       await vi.advanceTimersByTimeAsync(1_000);
       await expect(login).resolves.toMatchObject({ github_login: "octo" });
@@ -166,19 +296,22 @@ describe("HarnessArenaClient", () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(json(200, { device_code: "secret", user_code: "ABCD", verification_uri: "https://example.test", expires_in: 60, interval: 0 }))
       .mockResolvedValueOnce(json(400, error === undefined ? {} : { error }));
-    const client = new HarnessArenaClient({ credentials: testStore(), fetch: fetcher, now: () => now, sleep: async (ms) => { now += ms; } });
+    const client = new HarnessArenaClient({ credentials: testStore(), fetch: fetcher, now: () => now, sleep: async (ms) => { now += ms; }, deviceAttempts: await isolatedAttemptStore(() => now) });
     await expect(client.login()).rejects.toThrow(message);
   });
 
   it("reports device expiry and unexpected poll responses", async () => {
     let now = 0;
+    const expiringAttempts = await isolatedAttemptStore(() => now);
     const expiringClient = new HarnessArenaClient({
       credentials: testStore(),
       fetch: vi.fn().mockResolvedValue(json(200, { device_code: "secret", user_code: "ABCD", verification_uri: "https://example.test", expires_in: 1, interval: 1 })),
       now: () => now,
       sleep: async (ms) => { now += ms; },
+      deviceAttempts: expiringAttempts,
     });
     await expect(expiringClient.login()).rejects.toThrow("Device login expired before it was approved. Run login again to get a new code.");
+    expect(JSON.parse(await readFile(expiringAttempts.path, "utf8")).attempts).toEqual({});
 
     now = 0;
     const unexpectedClient = new HarnessArenaClient({
@@ -188,6 +321,7 @@ describe("HarnessArenaClient", () => {
         .mockResolvedValueOnce(json(500, { error: "poll failed" })),
       now: () => now,
       sleep: async (ms) => { now += ms; },
+      deviceAttempts: await isolatedAttemptStore(() => now),
     });
     await expect(unexpectedClient.login()).rejects.toThrow("Harness Arena request failed: poll failed");
   });

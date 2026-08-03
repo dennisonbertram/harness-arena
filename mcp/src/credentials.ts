@@ -1,6 +1,10 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+
+const READ_ERROR = "Unable to read Harness Arena credentials. Fix or remove the credentials file and run login again.";
+const pathLocks = new Map<string, Promise<void>>();
 
 export interface Credentials {
   token: string;
@@ -28,27 +32,70 @@ export class FileCredentialStore implements CredentialStore {
   }
 
   async get(baseUrl: string): Promise<Credentials | undefined> {
-    const file = await this.read();
-    return file.credentials[normalizeBaseUrl(baseUrl)];
+    return this.withLock(async () => {
+      const file = await this.read();
+      return file.credentials[normalizeBaseUrl(baseUrl)];
+    });
   }
 
   async set(baseUrl: string, credentials: Credentials): Promise<void> {
-    const file = await this.read();
-    file.credentials[normalizeBaseUrl(baseUrl)] = credentials;
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await writeFile(this.path, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    // Existing files retain their old mode with writeFile, so enforce it every time.
-    await chmod(this.path, 0o600);
+    if (!isCredentials(credentials)) throw new Error("Invalid Harness Arena credentials.");
+    await this.withLock(async () => {
+      const file = await this.read();
+      file.credentials[normalizeBaseUrl(baseUrl)] = credentials;
+      await this.write(file);
+    });
   }
 
   private async read(): Promise<CredentialFile> {
+    const directory = dirname(this.path);
+    await assertPrivateDirectory(directory, true);
     try {
+      const metadata = await lstat(this.path);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata)) {
+        throw new Error(READ_ERROR);
+      }
       const parsed: unknown = JSON.parse(await readFile(this.path, "utf8"));
-      if (!isCredentialFile(parsed)) return { version: 1, credentials: {} };
+      if (!isCredentialFile(parsed)) throw new Error(READ_ERROR);
       return parsed;
     } catch (error: unknown) {
-      if (isMissingFile(error)) return { version: 1, credentials: {} };
-      throw new Error("Unable to read Harness Arena credentials. Fix or remove the credentials file and run login again.");
+      if (isMissingFile(error)) {
+        await assertPrivateDirectory(directory, true);
+        return { version: 1, credentials: {} };
+      }
+      if (error instanceof Error && error.message === READ_ERROR) throw error;
+      throw new Error(READ_ERROR);
+    }
+  }
+
+  private async write(file: CredentialFile): Promise<void> {
+    const directory = dirname(this.path);
+    const directoryExists = await assertPrivateDirectory(directory, true);
+    if (!directoryExists) await mkdir(directory, { recursive: true, mode: 0o700 });
+    await assertPrivateDirectory(directory, false);
+    const temporary = join(directory, `.${basename(this.path)}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await assertPrivateDirectory(directory, false);
+      await rename(temporary, this.path);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async withLock<Value>(operation: () => Promise<Value>): Promise<Value> {
+    const previous = pathLocks.get(this.path) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    pathLocks.set(this.path, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (pathLocks.get(this.path) === queued) pathLocks.delete(this.path);
     }
   }
 }
@@ -56,8 +103,48 @@ export class FileCredentialStore implements CredentialStore {
 const isMissingFile = (error: unknown): error is NodeJS.ErrnoException =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 
-const isCredentialFile = (value: unknown): value is CredentialFile =>
-  typeof value === "object" && value !== null &&
-  (value as CredentialFile).version === 1 &&
-  typeof (value as CredentialFile).credentials === "object" &&
-  (value as CredentialFile).credentials !== null;
+const isPrivatePosixMetadata = (metadata: { mode: number; uid: number }): boolean => {
+  if (process.platform === "win32") return true;
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return (metadata.mode & 0o077) === 0 && (currentUid === undefined || metadata.uid === currentUid);
+};
+
+const assertPrivateDirectory = async (directory: string, allowMissing: boolean): Promise<boolean> => {
+  try {
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata)) {
+      throw new Error(READ_ERROR);
+    }
+    return true;
+  } catch (error: unknown) {
+    if (allowMissing && isMissingFile(error)) return false;
+    if (error instanceof Error && error.message === READ_ERROR) throw error;
+    throw new Error(READ_ERROR);
+  }
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasExactKeys = (value: Record<string, unknown>, keys: string[]) => {
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+};
+
+const isCredentials = (value: unknown): value is Credentials => {
+  if (!isRecord(value) || !hasExactKeys(value, ["token", "github_login", "expires_at"])) return false;
+  return typeof value.token === "string" && value.token.length > 0 && value.token.length <= 16_384
+    && typeof value.github_login === "string" && value.github_login.length > 0 && value.github_login.length <= 100
+    && typeof value.expires_at === "string" && Number.isFinite(Date.parse(value.expires_at));
+};
+
+const isCredentialFile = (value: unknown): value is CredentialFile => {
+  if (!isRecord(value) || !hasExactKeys(value, ["version", "credentials"]) || value.version !== 1 || !isRecord(value.credentials)) return false;
+  return Object.entries(value.credentials).every(([origin, credentials]) => {
+    try {
+      return normalizeBaseUrl(origin) === origin && isCredentials(credentials);
+    } catch {
+      return false;
+    }
+  });
+};

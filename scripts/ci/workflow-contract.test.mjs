@@ -27,6 +27,7 @@ describe("CI workflow contract", () => {
     expect(workflow).toMatch(
       /pr-lineage:[\s\S]*?permissions:\s*\n\s+contents:\s*read\s*\n\s+issues:\s*read\s*\n\s+pull-requests:\s*read/,
     );
+    expect(workflow).toMatch(/mcp:[\s\S]*?permissions:\s*\n\s+contents:\s*read[\s\S]*?runs-on:/);
   });
 
   it("pins every third-party action to the reviewed full SHA", () => {
@@ -38,7 +39,8 @@ describe("CI workflow contract", () => {
 
   it("prevents checkout from persisting GitHub credentials", () => {
     const checkoutSteps = [...workflow.matchAll(/uses:\s+actions\/checkout@[^\n]+\n([\s\S]*?)(?=\n\s+- (?:uses|run):)/g)];
-    expect(checkoutSteps).toHaveLength(2);
+    const runnerJobs = [...workflow.matchAll(/^\s{4}runs-on:\s*ubuntu-latest\s*$/gm)];
+    expect(checkoutSteps).toHaveLength(runnerJobs.length);
     for (const [, config] of checkoutSteps) {
       expect(config).toMatch(/with:\s*\n\s+persist-credentials:\s*false/);
     }
