@@ -148,6 +148,48 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
+  it("keeps late arrivals protected through the bounded third export batch", async () => {
+    vi.useFakeTimers();
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => {
+      setTimeout(() => callback({ code: 0 }), 4_500);
+    });
+    const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("late-third-batch-root-drain");
+    const root = tracer.startSpan("request-root");
+    const rootContext = trace.setSpan(context.active(), root);
+    for (let index = 0; index < 31; index += 1) {
+      tracer.startSpan(`initial-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
+    }
+
+    root.end();
+    expect(waitUntilTasks).toHaveLength(1);
+    let lifecycleSettled = false;
+    void waitUntilTasks[0]!.then(() => { lifecycleSettled = true; });
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(exportSpans).toHaveBeenCalledTimes(2);
+    for (let index = 0; index < 16; index += 1) {
+      tracer.startSpan(`late-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
+    }
+
+    await vi.advanceTimersByTimeAsync(5_250);
+    expect(exportSpans).toHaveBeenCalledTimes(3);
+    expect(lifecycleSettled).toBe(false);
+    expect(structuredSpanReadiness().structured.queued).toBe(16);
+
+    await vi.advanceTimersByTimeAsync(3_250);
+    await waitUntilTasks[0];
+    expect(lifecycleSettled).toBe(true);
+    expect(structuredSpanReadiness().structured.queued).toBe(0);
+    await provider.shutdown();
+  });
+
   it("binds one aggregate two-sink lifecycle task to each concurrent root request context in the same incoming trace", async () => {
     const tasksByRequest = new Map<string, Promise<unknown>[]>([["request-a", []], ["request-b", []]]);
     let activeRequest = "request-a";
