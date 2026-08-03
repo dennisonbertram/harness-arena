@@ -61,13 +61,28 @@ production deployment.
 The sole approved mutation entry point is:
 
 ```sh
-node scripts/ops/vercel-development.mjs deploy
+VERCEL_TOKEN='<development-token>' node scripts/ops/vercel-development.mjs deploy <exact-reviewed-origin-dev-sha>
 ```
 
-It resolves `.vercel/project.json` locally and fails before spawning unless
-that project is exactly `prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`, the tree is clean,
-the branch is `dev` or `codex/*`, and the manifest fully verifies. Its one
-allowlisted argv targets `development`; it does not accept extra options.
+It queries the protected `origin/dev` ref read-only and requires the explicit
+reviewed SHA to equal that exact remote tip with valid local ancestry. Branch
+names and worktree cleanliness are not provenance. The wrapper uploads only a
+validated temporary `git archive` of that SHA, never the mutable or ignored
+working tree, and always removes the temporary snapshot.
+
+Before upload it reads the actual project, Preview callback, and Blob-store
+metadata and compares their non-secret identities with the manifest. It then
+uses the pinned local Vercel CLI version `56.5.0` through the absolute Node
+executable, with a minimal environment fixed to project
+`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`, team
+`team_cwyLpng8LCwWgINdiQ27hHYa`, scope `dennisons-projects`, and the supplied
+token. Preview is Vercel's built-in non-production deploy mode. The option
+`--target development` is forbidden. A read-only postflight must prove the
+deployment's project, owner, Preview target, URL, and reviewed SHA before
+success is reported.
+
+The repository manifest must fully verify before any mutation. The CLI accepts
+no extra options.
 Raw write-capable Vercel CLI commands are forbidden in this runbook. This
 includes deploys with production targets, promote/rollback, alias/domain,
 environment, and store mutation. Read-only production `inspect`, `ls`, `logs`,

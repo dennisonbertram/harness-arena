@@ -18,8 +18,8 @@ import type { Run } from "@/lib/types";
 
 const GOLDEN_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
 const NETWORK_ALLOWLIST = [
+  "cb.example.test",
   "ai-gateway.vercel.sh",
-  "harness-arena-psi.vercel.app",
   "*.public.blob.vercel-storage.com",
   "astral.sh",
   "pypi.org",
@@ -50,6 +50,7 @@ const ENV_KEYS = [
   "RUNNER_AGENT_TIMEOUT_CAP",
   "RUNNER_VERIFY_TIMEOUT_CAP",
   "VERCEL_GIT_COMMIT_SHA",
+  "VERCEL_ENV",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -101,6 +102,7 @@ describe("createRunSandbox", () => {
     delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
     delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
     delete process.env.VERCEL_GIT_COMMIT_SHA;
+    delete process.env.VERCEL_ENV;
   });
 
   afterEach(() => {
@@ -236,14 +238,35 @@ describe("createRunSandbox", () => {
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
-  it("refuses the known production callback origin even when it is explicitly configured", async () => {
-    process.env.CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
+  it.each([
+    "harness-arena-psi.vercel.app",
+    "harness-arena-dennisons-projects.vercel.app",
+    "harness-arena-git-main-dennisons-projects.vercel.app",
+  ])("refuses known production callback origin %s in Development/local execution", async (hostname) => {
+    process.env.CALLBACK_BASE = `https://${hostname}`;
     mockCreate.mockResolvedValue(makeSandbox());
 
     await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
       "sandbox: production callback origin denied",
     );
 
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "http://cb.example.test",
+    "https://user@cb.example.test",
+    "https://cb.example.test/runner",
+    "https://cb.example.test?mode=dev",
+    "https://cb.example.test#fragment",
+    "https://cb.example.test/",
+  ])("refuses non-canonical CALLBACK_BASE %s", async (callbackBase) => {
+    process.env.CALLBACK_BASE = callbackBase;
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: invalid CALLBACK_BASE",
+    );
     expect(mockCreate).not.toHaveBeenCalled();
   });
 

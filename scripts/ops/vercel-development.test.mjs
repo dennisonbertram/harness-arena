@@ -1,6 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import * as subject from "./vercel-development.mjs";
@@ -13,6 +15,7 @@ const REVIEWED_SHA = "a".repeat(40);
 const LIVE_STORE_ID = "store_SgaF1fm7nkPQPCKq";
 const TOKEN = "test-vercel-token-never-print";
 const UPSTREAM_URL = "https://github.com/dennisonbertram/harness-arena.git";
+const execFileAsync = promisify(execFile);
 
 function manifest(overrides = {}) {
   return {
@@ -103,6 +106,7 @@ function dependencies(overrides = {}) {
       preflight: vi.fn(async () => preflight()),
       deployment: vi.fn(async () => deployment()),
     },
+    verifyCliModule: vi.fn(async () => {}),
     spawn: vi.fn(async () => ({
       stdout: "https://harness-arena-development-preview.vercel.app\n",
       stderr: "",
@@ -187,6 +191,7 @@ describe("Development-only Vercel Preview deployment", () => {
     expect(options.env).not.toHaveProperty("NODE_OPTIONS");
     expect(options.env).not.toHaveProperty("VERCEL_TARGET_ENV");
     expect(deps.createSnapshot).toHaveBeenCalledWith({ cwd: "/repo", reviewedSha: REVIEWED_SHA });
+    expect(deps.verifyCliModule).toHaveBeenCalledTimes(1);
     expect(deps.cleanup).toHaveBeenCalledTimes(1);
   });
 
@@ -312,6 +317,19 @@ describe("Development-only Vercel Preview deployment", () => {
     expect(error.message).toBe("Development Vercel operation denied by local safety policy");
     expect(error.message).not.toContain(TOKEN);
   });
+
+  it("fails closed when the immutable snapshot cannot be removed", async () => {
+    const cleanup = vi.fn(async () => { throw new Error(TOKEN); });
+    const deps = dependencies({
+      cleanup,
+      createSnapshot: vi.fn(async () => ({ path: "/immutable/snapshot", cleanup })),
+    });
+
+    const error = await subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps }).catch((value) => value);
+    expect(error.message).toBe("Development snapshot cleanup failed");
+    expect(error.message).not.toContain(TOKEN);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("reviewed Git archive snapshots", () => {
@@ -337,10 +355,21 @@ describe("reviewed Git archive snapshots", () => {
     ]))).toEqual(["app/", "app/page.tsx"]);
   });
 
+  it("accepts Git's one exact commit-comment global header before safe entries", () => {
+    const comment = `52 comment=${REVIEWED_SHA}\n`;
+    expect(subject.validateTarArchive(tarBuffer([
+      { name: "pax_global_header", type: "g", body: comment },
+      { name: "tracked.txt", body: "reviewed" },
+    ]))).toEqual(["tracked.txt"]);
+  });
+
   it("archives the exact reviewed object, validates before extraction, and cleans temporary state", async () => {
     const temp = await mkdtemp(path.join(os.tmpdir(), "issue175-test-"));
     const events = [];
-    const archive = tarBuffer([{ name: "tracked.txt", body: "reviewed" }]);
+    const archive = tarBuffer([
+      { name: "pax_global_header", type: "g", body: `52 comment=${REVIEWED_SHA}\n` },
+      { name: "tracked.txt", body: "reviewed" },
+    ]);
     try {
       const snapshot = await subject.createReviewedSnapshot({
         cwd: "/mutable/repo",
@@ -366,6 +395,118 @@ describe("reviewed Git archive snapshots", () => {
     } finally {
       await rm(temp, { recursive: true, force: true });
     }
+  });
+
+  it("rejects an otherwise-safe archive whose Git commit header is not the reviewed SHA", () => {
+    const otherSha = "b".repeat(40);
+    const archive = tarBuffer([
+      { name: "pax_global_header", type: "g", body: `52 comment=${otherSha}\n` },
+      { name: "tracked.txt", body: "reviewed" },
+    ]);
+    expect(() => subject.validateTarArchive(archive, { expectedSha: REVIEWED_SHA })).toThrow(/archive denied/i);
+  });
+
+  it("ignores untracked/ignored files and working-tree races by archiving only the reviewed commit", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "issue175-repo-"));
+    let snapshot;
+    const runGit = (...args) => execFileAsync("/usr/bin/git", args, {
+      cwd: repo,
+      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+    });
+    try {
+      await runGit("init", "--quiet");
+      await runGit("config", "user.name", "Test");
+      await runGit("config", "user.email", "test@example.test");
+      await writeFile(path.join(repo, ".gitignore"), "ignored-secret.txt\n");
+      await writeFile(path.join(repo, "tracked.txt"), "reviewed\n");
+      await runGit("add", ".gitignore", "tracked.txt");
+      await runGit("commit", "--quiet", "-m", "reviewed");
+      const { stdout } = await runGit("rev-parse", "HEAD");
+      const reviewedSha = stdout.trim();
+
+      await writeFile(path.join(repo, "tracked.txt"), "mutable-race\n");
+      await writeFile(path.join(repo, "ignored-secret.txt"), TOKEN);
+      snapshot = await subject.createReviewedSnapshot({ cwd: repo, reviewedSha });
+
+      await expect(readFile(path.join(snapshot.path, "tracked.txt"), "utf8")).resolves.toBe("reviewed\n");
+      await expect(access(path.join(snapshot.path, "ignored-secret.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await snapshot?.cleanup();
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("read-only Vercel metadata adapter", () => {
+  it("reads only the fixed project, Preview callback value, store, and deployment metadata", async () => {
+    const requests = [];
+    const fetchImpl = vi.fn(async (input, options) => {
+      const url = new URL(input);
+      requests.push({ url, options });
+      let value;
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) {
+        value = { id: DEVELOPMENT_PROJECT_ID, accountId: TEAM_ID, name: "harness-arena-development" };
+      } else if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
+        value = {
+          envs: [
+            { id: "env_callback", key: "CALLBACK_BASE", target: ["preview"] },
+            { id: "env_secret", key: "BLOB_READ_WRITE_TOKEN", target: ["preview"] },
+          ],
+        };
+      } else if (url.pathname.endsWith("/env/env_callback")) {
+        value = { value: "https://harness-arena-development.vercel.app" };
+      } else if (url.pathname === "/v1/storage/stores/store_development") {
+        value = {
+          id: "store_development",
+          ownerId: TEAM_ID,
+          type: "blob",
+          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
+        };
+      } else if (url.pathname === "/v13/deployments/harness-arena-development-preview.vercel.app") {
+        value = deployment();
+      } else {
+        throw new Error(`unexpected request ${url.pathname}`);
+      }
+      return { ok: true, json: async () => value };
+    });
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+
+    await expect(api.preflight({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: "store_development",
+      token: TOKEN,
+    })).resolves.toEqual(preflight());
+    await expect(api.deployment({
+      url: "https://harness-arena-development-preview.vercel.app",
+      teamId: TEAM_ID,
+      token: TOKEN,
+    })).resolves.toEqual(deployment());
+
+    expect(requests).toHaveLength(5);
+    expect(requests.every(({ url }) => url.searchParams.get("teamId") === TEAM_ID)).toBe(true);
+    expect(requests.every(({ options }) => options.headers.Authorization === `Bearer ${TOKEN}`)).toBe(true);
+    expect(requests.some(({ url }) => url.pathname.endsWith("/env/env_secret"))).toBe(false);
+    expect(requests.find(({ url }) => url.pathname.endsWith("/env/env_callback")).url.searchParams.get("decrypt"))
+      .toBe("true");
+  });
+
+  it("fails with a constant secret-safe error on malformed or rejected API responses", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: vi.fn(async () => ({
+        ok: false,
+        json: async () => ({ error: TOKEN }),
+      })),
+    });
+
+    const error = await api.preflight({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: "store_development",
+      token: TOKEN,
+    }).catch((value) => value);
+    expect(error.message).toBe("Development Vercel operation denied by local safety policy");
+    expect(error.message).not.toContain(TOKEN);
   });
 });
 
