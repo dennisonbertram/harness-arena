@@ -8,6 +8,7 @@ const MAX_STRING_CHARS = 2_048;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 50;
 const MAX_DEPTH = 6;
+const TRUNCATION_MARKER = "...[Truncated]";
 
 const SECRET_KEY = /(?:authorization|api[_-]?key|secret|token|password|cookie|prompt|signature|credential)/i;
 const BEARER = /\bBearer\s+[^\s,;]+/gi;
@@ -35,7 +36,8 @@ function configuredSecrets(): Set<string> {
 
 function truncate(value: string, max = MAX_STRING_CHARS): string {
   if (value.length <= max) return value;
-  return `${value.slice(0, Math.max(0, max - 13))}...[Truncated]`;
+  if (max <= TRUNCATION_MARKER.length) return TRUNCATION_MARKER.slice(0, Math.max(0, max));
+  return `${value.slice(0, max - TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`;
 }
 
 function replaceAll(value: string, needle: string): string {
@@ -45,9 +47,9 @@ function replaceAll(value: string, needle: string): string {
 function redactString(value: string, secrets: Set<string>): string {
   // Do not run global redaction regexes or configured-secret replacement over
   // attacker-sized input. Content outside this prefix cannot reach telemetry.
-  const contentLimit = MAX_STRING_CHARS - 13;
-  const wasTruncated = value.length > contentLimit;
-  let safe = value.slice(0, contentLimit);
+  const contentLimit = MAX_STRING_CHARS - TRUNCATION_MARKER.length;
+  const wasTruncated = value.length > MAX_STRING_CHARS;
+  let safe = wasTruncated ? value.slice(0, contentLimit) : value;
   // Longest first prevents overlapping values from leaving a secret suffix.
   for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
     const fullMatch = safe.indexOf(secret);
@@ -59,20 +61,35 @@ function redactString(value: string, secrets: Set<string>): string {
     // only a constant-size prefix, then discard the overlapping tail.
     if (wasTruncated && secret.length >= 8) {
       const probe = secret.slice(0, Math.min(64, secret.length));
-      const overlap = safe.indexOf(probe);
-      if (overlap >= 0 && overlap + secret.length > safe.length) safe = `${safe.slice(0, overlap)}[REDACTED]`;
+      const overlap = safe.lastIndexOf(probe);
+      if (overlap >= 0 && overlap + secret.length > safe.length) {
+        safe = `${safe.slice(0, overlap)}[REDACTED]`;
+        continue;
+      }
+      // If fewer than 64 secret characters fit before the bound, compare the
+      // bounded retained suffix against progressively shorter secret prefixes.
+      const maxSuffix = Math.min(63, safe.length, secret.length - 1);
+      for (let length = maxSuffix; length >= 1; length -= 1) {
+        if (safe.endsWith(secret.slice(0, length))) {
+          safe = `${safe.slice(0, -length)}[REDACTED]`;
+          break;
+        }
+      }
     }
   }
   safe = safe.replace(ABSOLUTE_URL_WITH_QUERY, "$1");
   safe = safe.replace(RELATIVE_URL_WITH_QUERY, "$1$2");
   safe = safe.replace(BEARER, "Bearer [REDACTED]");
-  return wasTruncated ? `${safe}...[Truncated]` : safe;
+  return truncate(wasTruncated ? `${safe}${TRUNCATION_MARKER}` : safe);
 }
 
 function errorClass(error: unknown): "error" | "type_error" | "range_error" | "syntax_error" | "abort_error" | "non_error" {
-  if (!(error instanceof Error)) return "non_error";
+  let isError = false;
+  try { isError = error instanceof Error; } catch { return "error"; }
+  if (!isError) return "non_error";
+  const candidate = error as Error;
   let name = "Error";
-  try { name = error.name; } catch { /* hostile getters classify as a generic Error */ }
+  try { name = candidate.name; } catch { /* hostile getters classify as a generic Error */ }
   switch (name) {
     case "TypeError": return "type_error";
     case "RangeError": return "range_error";
