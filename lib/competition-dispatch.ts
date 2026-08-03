@@ -22,7 +22,12 @@ export function isInfraFailedRun(run: Run | undefined): boolean {
     run.status === "completed" &&
     run.task_results.length > 0 &&
     run.task_results.every((result) => {
-      if (!result.attempted || result.passed || (result.output_tokens ?? 0) !== 0) return false;
+      if (!result.attempted || result.passed) return false;
+      // Task-container setup is runner-owned infrastructure both before Pi
+      // starts and after Pi has produced evidence but before verification can
+      // begin. Its retryability must not depend on productive output/cost.
+      if (result.failure_stage === "task_setup_error") return true;
+      if ((result.output_tokens ?? 0) !== 0) return false;
       const surfacedEarlyFailure =
         (result.failure_stage === "provider_error" ||
           result.failure_stage === "provider_timeout" ||
