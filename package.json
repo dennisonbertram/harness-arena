@@ -6,6 +6,7 @@
     "dev": "next dev",
     "prebuild": "node scripts/build-runner-bundle.mjs",
     "build": "next build",
+    "postbuild": "node scripts/check-voice-audio-nft.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",

@@ -203,6 +203,30 @@ describe("POST /api/voice/judgments", () => {
       expect(await storedJudgmentCount()).toBe(0);
     });
 
+    it("returns 413 for chunked JSON over 64KB despite a deceptive content-length", async () => {
+      const oversized = JSON.stringify({ ...validPayload(), padding: "x".repeat(70_000) });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(oversized.slice(0, 40_000)));
+          controller.enqueue(new TextEncoder().encode(oversized.slice(40_000)));
+          controller.close();
+        },
+      });
+      const request = new NextRequest(new Request("http://localhost/api/voice/judgments", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": "1",
+          "x-forwarded-for": "4.4.4.22",
+          cookie: `voice_evaluator=${voiceCapabilityCookie(evaluatorId)}`,
+        },
+        body: stream,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }));
+      expect((await POST(request)).status).toBe(413);
+      expect(await storedJudgmentCount()).toBe(0);
+    });
+
     it("returns 429 once the per-IP rate limit (120/hour) is exceeded", async () => {
       const ip = "4.4.4.3";
       for (let i = 0; i < 120; i++) {

@@ -5,7 +5,8 @@ const listRuns = vi.fn();
 const listSubmissions = vi.fn();
 const getManifest = vi.fn();
 vi.mock("@/lib/storage", () => ({ getStorage: () => ({ listRuns, listSubmissions, checkReady: readiness }) }));
-vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => ({ getManifest }) }));
+const getVoiceStorage = vi.fn(() => ({ getManifest }));
+vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage }));
 import { GET } from "./route";
 
 describe("GET /api/ready", () => {
@@ -17,6 +18,7 @@ describe("GET /api/ready", () => {
     getManifest.mockReset().mockResolvedValue(undefined);
     vi.stubEnv("LOCAL_INSTANCE_NONCE", "nonce-1");
     vi.stubEnv("LOCAL_INSTANCE_PID", String(process.pid));
+    getVoiceStorage.mockClear();
   });
   it("binds readiness to the current process instance and verifies seed/writeability", async () => {
     vi.stubEnv("HARNESS_LOCAL_INIT", "1");
@@ -34,6 +36,8 @@ describe("GET /api/ready", () => {
   });
   it("keeps hosted readiness bounded and never enumerates production storage", async () => {
     vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, storage: "ready" });
@@ -41,6 +45,24 @@ describe("GET /api/ready", () => {
     expect(listRuns).not.toHaveBeenCalled();
     expect(listSubmissions).not.toHaveBeenCalled();
     expect(getManifest).not.toHaveBeenCalled();
+    expect(getVoiceStorage).toHaveBeenCalledOnce();
+  });
+
+  it.each(["AUTH_SECRET", "OPS_READ_TOKEN"])("returns 503 when hosted %s capability is missing", async (key) => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "auth-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "ops-secret");
+    vi.stubEnv(key, "");
+    expect((await GET()).status).toBe(503);
+  });
+
+  it("returns 503 when hosted credentials overlap and never exposes their values", async () => {
+    vi.stubEnv("STORAGE", "blob");
+    vi.stubEnv("AUTH_SECRET", "shared-secret");
+    vi.stubEnv("OPS_READ_TOKEN", "shared-secret");
+    const response = await GET();
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain("shared-secret");
   });
   it("refuses a local-init marker unless the file-backed local storage mode is selected", async () => {
     vi.stubEnv("HARNESS_LOCAL_INIT", "1");

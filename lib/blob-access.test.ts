@@ -29,8 +29,30 @@ describe("resolveBlobAccess", () => {
   });
 
   it("rejects a Development store identity missing or mixed with the configured store", () => {
-    const base = { BLOB_READ_WRITE_TOKEN: "rw", VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" };
+    const base = { BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret", VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" };
     expect(() => resolveBlobAccess(base)).toThrow("Development Blob store identity is required");
     expect(() => resolveBlobAccess({ ...base, HARNESS_BLOB_STORE_ID: "store_dev", BLOB_STORE_ID: "store_other" })).toThrow("Blob store identity mismatch");
+  });
+
+  it("verifies the active read-write token is bound to the declared Development store", () => {
+    const base = {
+      VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+      HARNESS_BLOB_STORE_ID: "store_dev",
+      BLOB_STORE_ID: "store_dev",
+    };
+    expect(resolveBlobAccess({ ...base, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret" })).toEqual({ access: "private" });
+    expect(() => resolveBlobAccess({ ...base, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_other_secret" }))
+      .toThrow("Blob credential store identity mismatch");
+    expect(() => resolveBlobAccess({ ...base, BLOB_READ_WRITE_TOKEN: "opaque-token" }))
+      .toThrow("Blob credential store identity unavailable");
+  });
+
+  it("requires BLOB_STORE_ID to bind OIDC and harness identity consistently in Development", () => {
+    expect(() => resolveBlobAccess({
+      VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+      HARNESS_BLOB_STORE_ID: "store_dev",
+      BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret",
+      VERCEL_OIDC_TOKEN: "oidc",
+    })).toThrow("Development BLOB_STORE_ID is required");
   });
 });

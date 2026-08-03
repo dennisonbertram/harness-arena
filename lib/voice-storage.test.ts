@@ -278,6 +278,28 @@ describe("BlobVoiceStorage (contract, @vercel/blob mocked)", () => {
     expect(vi.mocked(get)).toHaveBeenCalledWith("voice/manifest.json", { access: "public" });
   });
 
+  it("rejects a valid manifest JSON response whose observed chunks exceed the ceiling", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/manifest.json", url: "https://blob.example/voice/manifest.json" }],
+      hasMore: false,
+    } as never);
+    const oversized = JSON.stringify({ ...makeManifest(), ignored_padding: "x".repeat(1024 * 1024 + 1) });
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(oversized).body } as never);
+    await expect(storage.getManifest()).rejects.toThrow(/limit|large|bytes/i);
+  });
+
+  it("counts an oversized judgment Blob JSON response as unreadable", async () => {
+    const storage = new BlobVoiceStorage();
+    vi.mocked(list).mockResolvedValueOnce({
+      blobs: [{ pathname: "voice/judgments/eval-1/c1.json", url: "https://blob.example/c1.json" }],
+      hasMore: false,
+    } as never);
+    const oversized = JSON.stringify({ ...makeJudgment(), ignored_padding: "x".repeat(1024 * 1024 + 1) });
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(oversized).body } as never);
+    await expect(storage.listAllJudgments()).resolves.toEqual({ judgments: [], unreadable: 1 });
+  });
+
   it("putManifest writes voice/manifest.json with allowOverwrite:true", async () => {
     const storage = new BlobVoiceStorage();
     vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/voice/manifest.json" } as never);

@@ -100,6 +100,25 @@ describe("POST /api/runs/[id]/trace", () => {
     expect(response.status).toBe(400);
   });
 
+  it("rejects a safe-looking task id that does not belong to the run", async () => {
+    await storageRef.current.putRun({
+      id: "run-1", submission_id: "sub-1", status: "running",
+      task_results: [{ task_id: "real-task", attempted: true, passed: false }],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+    const response = await POST(traceRequest("run-1", "task_id=other-task&name=pi-stdout.txt", "x"), {
+      params: Promise.resolve({ id: "run-1" }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("allows _run only for runner-log.txt", async () => {
+    await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-07-21T00:00:00.000Z" });
+    expect((await POST(traceRequest("run-1", "task_id=_run&name=session.jsonl", "x"), {
+      params: Promise.resolve({ id: "run-1" }),
+    })).status).toBe(400);
+  });
+
   it("rejects a chunked body over the byte ceiling despite a misleading content-length", async () => {
     await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-07-21T00:00:00.000Z" });
     const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(3 * 1024 * 1024)); controller.enqueue(new Uint8Array(2 * 1024 * 1024)); } });

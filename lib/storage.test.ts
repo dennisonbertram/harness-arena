@@ -1138,6 +1138,21 @@ describe("partial reads fail loud (regression: fabricated leaderboard standings)
     } as never;
   }
 
+  it("rejects a syntactically valid entity JSON response over the observed-byte ceiling", async () => {
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce(blobs("submissions/", ["large"]));
+    const oversized = JSON.stringify({
+      id: "large",
+      agent_name: "agent",
+      prompt: "p",
+      status: "pending_review",
+      created_at: "2026-08-03T00:00:00.000Z",
+      ignored_padding: "x".repeat(1024 * 1024 + 1),
+    });
+    vi.mocked(get).mockResolvedValue({ statusCode: 200, stream: new Response(oversized).body } as never);
+    await expect(storage.getSubmission("large")).rejects.toThrow(/limit|large|bytes/i);
+  });
+
   // Rate-limited Blob reads return an HTML error page, not JSON.
   function fetchWhereOneFails(failingId: string, build: (id: string) => object) {
     return vi.fn().mockImplementation((url: string) => {
