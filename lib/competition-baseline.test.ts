@@ -5,6 +5,7 @@ vi.mock("@/lib/run-trigger", () => ({ startRun: vi.fn().mockResolvedValue(undefi
 
 import { judgeSubmission } from "@/lib/judge";
 import { ensureBaseline, ensureBaselines } from "./competition-baseline";
+import { isInfraFailedRun } from "./competition-dispatch";
 import { MemoryStorage } from "./storage";
 import type { Competition, Run, Submission } from "./types";
 
@@ -34,6 +35,63 @@ async function baselinesFor(storage: MemoryStorage, competitionId: string): Prom
 
 beforeEach(() => {
   vi.mocked(judgeSubmission).mockReset();
+});
+
+describe("isInfraFailedRun", () => {
+  const completedRun = (task_results: Run["task_results"]): Run => ({
+    id: "run-infra",
+    submission_id: "submission-infra",
+    status: "completed",
+    task_results,
+    created_at: "2026-08-04T00:00:00.000Z",
+  });
+
+  // task_setup_error is host/container infrastructure whether it happens
+  // before Pi starts or after Pi has already produced billable evidence.
+  it.each([
+    {
+      name: "pre-Pi container setup failure with no output",
+      result: {
+        task_id: "task-a",
+        attempted: true,
+        passed: false,
+        turns: 0,
+        output_tokens: 0,
+        cost_source: "unmeasured",
+        failure_stage: "task_setup_error",
+      },
+    },
+    {
+      name: "post-Pi verifier setup failure with productive output and cost",
+      result: {
+        task_id: "task-a",
+        attempted: true,
+        passed: false,
+        turns: 2,
+        output_tokens: 128,
+        cost_usd: 0.25,
+        cost_source: "stdout",
+        failure_stage: "task_setup_error",
+      },
+    },
+  ])("treats $name as retryable infrastructure", ({ result }) => {
+    expect(isInfraFailedRun(completedRun([result]))).toBe(true);
+  });
+
+  it("does not treat unrelated productive provider/agent failures as retryable infrastructure", () => {
+    for (const failure_stage of ["provider_error", "agent_process_error"]) {
+      expect(isInfraFailedRun(completedRun([{
+        task_id: "task-a",
+        attempted: true,
+        passed: false,
+        turns: 2,
+        output_tokens: 128,
+        cost_usd: 0.25,
+        cost_source: "stdout",
+        failure_stage,
+      }]))).toBe(false);
+    }
+  });
 });
 
 describe("ensureBaseline", () => {

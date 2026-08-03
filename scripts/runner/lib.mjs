@@ -654,6 +654,68 @@ export function agentProcessFailure(result) {
     .join(" ");
 }
 
+// Keep this canonical list in lockstep with runner.mjs's `setup(...)` calls.
+// Tests inspect both sides so a new required container setup step cannot be
+// added without a fail-closed operation classification and regression case.
+export const REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS = Object.freeze([
+  "container_create",
+  "models_directory",
+  "models_config_copy",
+  "settings_config_copy",
+  "agentkit_copy",
+  "agentkit_extract",
+  "system_prompt_copy",
+  "verifier_tests_remove",
+  "verifier_tests_copy",
+  "verifier_logs_directory",
+]);
+
+function truncateSetupDiagnosticUtf8(value, maxBytes) {
+  const text = String(value);
+  let result = "";
+  let bytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+// Required task-container setup commands run before Pi. Their diagnostics can
+// become public task evidence, so deliberately expose only a stable operation
+// classification plus bounded, redacted command output. Never include argv:
+// Pi's later docker exec carries credential environment-variable names and a
+// future setup command could carry an actual credential value.
+export function taskSetupFailureDiagnostic({ operation, result, secrets = [], maxBytes = 4096 }) {
+  const redact = (value) => redactSecrets(
+    Buffer.isBuffer(value) ? value.toString("utf8") : String(value ?? ""),
+    secrets,
+  );
+  const base = {
+    operation,
+    code: typeof result?.code === "number" ? result.code : 1,
+    timedOut: Boolean(result?.timedOut),
+    stdout: "",
+    stderr: "",
+  };
+  const baseJson = JSON.stringify(base);
+  const available = Math.max(0, maxBytes - Buffer.byteLength(baseJson, "utf8"));
+  // A byte can expand to a six-byte JSON escape (for example a control
+  // character). Divide the remaining final-JSON budget across both streams
+  // using that worst case, then serialize once to preserve valid JSON.
+  const perStreamBytes = Math.floor(available / 12);
+  const diagnostic = JSON.stringify({
+    ...base,
+    stdout: truncateSetupDiagnosticUtf8(redact(result?.stdout), perStreamBytes),
+    stderr: truncateSetupDiagnosticUtf8(redact(result?.stderr), perStreamBytes),
+  });
+  // baseJson itself carries the required fields. maxBytes is always the
+  // runner's safe diagnostic budget (4KiB by default), comfortably above it.
+  return diagnostic;
+}
+
 // Wrap a fetch call with a request-scoped abort deadline so a hung
 // callback endpoint can never block the runner indefinitely. `fetchImpl`
 // is injected for testability (no network needed to unit test this).

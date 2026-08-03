@@ -31,6 +31,7 @@ import {
   buildTaskVerifiedEventPayload,
   PI_MODELS_CONFIG_PATH,
   PI_SETTINGS_CONFIG_PATH,
+  REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS,
   preflightProxy,
   resolvePinnedProvider,
   computeTotals,
@@ -53,6 +54,7 @@ import {
   sh,
   shAsync,
   summarizeGatewayRequests,
+  taskSetupFailureDiagnostic,
   trustedGatewayPricing,
   VERIFIER_TRACE_NAME,
 } from "./lib.mjs";
@@ -364,6 +366,10 @@ function cleanupContainer(containerName) {
   sh(DOCKER_CMD, ["rm", "-f", containerName]);
 }
 
+function runDocker(args, opts) {
+  return sh(DOCKER_CMD, args, opts);
+}
+
 function writeTempFile(content) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "runner-"));
   const file = path.join(dir, "content");
@@ -468,12 +474,64 @@ async function runOneTask(task, index, systemPrompt) {
   gatewayDiagnosticLog.beginScope();
   currentGatewayTaskId = task.id;
 
+  const setupSecrets = [
+    process.env.AI_GATEWAY_API_KEY,
+    process.env.OPENROUTER_API_KEY,
+    RUNNER_CALLBACK_SECRET,
+  ];
+  const failSetup = async (operation, result, agentEvidence) => {
+    const error = taskSetupFailureDiagnostic({
+      operation,
+      result,
+      secrets: setupSecrets,
+    });
+    log(`task ${task.id} setup failure ${error}`);
+    const { traceBlobUrl, traceUploads } = agentEvidence
+      ? await uploadAgentTraces(task.id, agentEvidence.sessionText, agentEvidence.piStdout)
+      : { traceBlobUrl: undefined, traceUploads: [] };
+    queueAgentFailureEvents(queueEvent, traceUploads, {
+      task_id: task.id,
+      stage: "task_setup_error",
+      error,
+      duration_s: (Date.now() - taskStart) / 1000,
+      ...(agentEvidence ? { agent_duration_s: agentEvidence.agentDurationS } : {}),
+    });
+    await flushEvents();
+    return {
+      task_id: task.id,
+      attempted: true,
+      passed: false,
+      reward: 0,
+      ...(agentEvidence
+        ? {
+            cost_usd: agentEvidence.totalCost === null ? undefined : agentEvidence.totalCost,
+            cost_source: agentEvidence.costSource,
+            turns: agentEvidence.turns,
+            agent_duration_s: agentEvidence.agentDurationS,
+            ...(agentEvidence.outputTokens === undefined ? {} : { output_tokens: agentEvidence.outputTokens }),
+            ...agentEvidence.normalizedCostFields,
+            trace_blob_url: traceBlobUrl,
+          }
+        : { cost_source: "unmeasured", turns: 0, agent_duration_s: 0 }),
+      duration_s: (Date.now() - taskStart) / 1000,
+      failure_stage: "task_setup_error",
+      error,
+    };
+  };
+  const setup = (operation, args) => {
+    if (!REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS.includes(operation)) {
+      throw new Error(`unknown required task-container setup operation: ${operation}`);
+    }
+    const result = runDocker(args);
+    return result.code === 0 ? undefined : result;
+  };
+
   try {
     queueEvent("task.started", { task_id: task.id, index });
     await flushEvents();
 
     cleanupContainer(containerName);
-    sh(DOCKER_CMD, [
+    const createFailure = setup("container_create", [
       "run",
       "-d",
       // Lets pi inside the container reach the pinning sidecar running on the
@@ -487,6 +545,7 @@ async function runOneTask(task, index, systemPrompt) {
       "-c",
       `sleep ${task.agent_timeout_sec + 900}`,
     ]);
+    if (createFailure) return await failSetup("container_create", createFailure);
 
     {
       // pi cannot add the gateway's providerOptions itself, but it can take a
@@ -501,21 +560,26 @@ async function runOneTask(task, index, systemPrompt) {
       tempDirs.push(cfgFile);
       // pi only reads this path (see PI_MODELS_CONFIG_PATH); mkdir -p because
       // the agent/ directory does not exist in a bare container.
-      sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", path.posix.dirname(PI_MODELS_CONFIG_PATH)]);
-      sh(DOCKER_CMD, ["cp", cfgFile, `${containerName}:${PI_MODELS_CONFIG_PATH}`]);
+      const modelsDirFailure = setup("models_directory", ["exec", containerName, "mkdir", "-p", path.posix.dirname(PI_MODELS_CONFIG_PATH)]);
+      if (modelsDirFailure) return await failSetup("models_directory", modelsDirFailure);
+      const modelsCopyFailure = setup("models_config_copy", ["cp", cfgFile, `${containerName}:${PI_MODELS_CONFIG_PATH}`]);
+      if (modelsCopyFailure) return await failSetup("models_config_copy", modelsCopyFailure);
 
       const settings = buildPiSettings({ model: RUNNER_MODEL });
       if (settings) {
         const settingsFile = path.join(os.tmpdir(), `settings-${RUN_ID}-${index}.json`);
         writeFileSync(settingsFile, settings);
         tempDirs.push(settingsFile);
-        sh(DOCKER_CMD, ["cp", settingsFile, `${containerName}:${PI_SETTINGS_CONFIG_PATH}`]);
+        const settingsCopyFailure = setup("settings_config_copy", ["cp", settingsFile, `${containerName}:${PI_SETTINGS_CONFIG_PATH}`]);
+        if (settingsCopyFailure) return await failSetup("settings_config_copy", settingsCopyFailure);
       }
     }
 
     if (PI_INSTALL_MODE === "agentkit") {
-      sh(DOCKER_CMD, ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
-      sh(DOCKER_CMD, ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
+      const agentkitCopyFailure = setup("agentkit_copy", ["cp", AGENTKIT_TGZ, `${containerName}:/tmp/agentkit.tgz`]);
+      if (agentkitCopyFailure) return await failSetup("agentkit_copy", agentkitCopyFailure);
+      const agentkitExtractFailure = setup("agentkit_extract", ["exec", containerName, "tar", "-xzf", "/tmp/agentkit.tgz", "-C", "/usr/local"]);
+      if (agentkitExtractFailure) return await failSetup("agentkit_extract", agentkitExtractFailure);
     }
 
     // NOTE: an earlier global 8192-token anti-runaway cap backfired badly for
@@ -532,7 +596,8 @@ async function runOneTask(task, index, systemPrompt) {
     if (hasSystemPrompt) {
       const promptHostFile = writeTempFile(systemPrompt);
       tempDirs.push(path.dirname(promptHostFile));
-      sh(DOCKER_CMD, ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
+      const promptCopyFailure = setup("system_prompt_copy", ["cp", promptHostFile, `${containerName}:${PROMPT_FILE}`]);
+      if (promptCopyFailure) return await failSetup("system_prompt_copy", promptCopyFailure);
     }
 
     // Test-only: force an exception mid-task to prove the finally block
@@ -780,16 +845,28 @@ async function runOneTask(task, index, systemPrompt) {
     }
 
     // Verification against a clean copy of the task's tests.
-    sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
-    sh(DOCKER_CMD, ["cp", path.join(RUNNER_TASKS_DIR, task.id, "tests"), `${containerName}:/tests`]);
-    sh(DOCKER_CMD, ["exec", containerName, "mkdir", "-p", "/logs/verifier"]);
+    const agentEvidence = {
+      sessionText,
+      piStdout,
+      totalCost,
+      costSource,
+      turns,
+      agentDurationS,
+      outputTokens: parsed.validOutputTokenCount > 0 ? parsed.totalOutputTokens : undefined,
+      normalizedCostFields,
+    };
+    const testsRemoveFailure = setup("verifier_tests_remove", ["exec", containerName, "rm", "-rf", "/tests"]);
+    if (testsRemoveFailure) return await failSetup("verifier_tests_remove", testsRemoveFailure, agentEvidence);
+    const testsCopyFailure = setup("verifier_tests_copy", ["cp", path.join(RUNNER_TASKS_DIR, task.id, "tests"), `${containerName}:/tests`]);
+    if (testsCopyFailure) return await failSetup("verifier_tests_copy", testsCopyFailure, agentEvidence);
+    const verifierLogsFailure = setup("verifier_logs_directory", ["exec", containerName, "mkdir", "-p", "/logs/verifier"]);
+    if (verifierLogsFailure) return await failSetup("verifier_logs_directory", verifierLogsFailure, agentEvidence);
 
     queueEvent("task.verify_started", { task_id: task.id });
     await flushEvents();
 
     const verifyStart = Date.now();
-    const verifyResult = sh(
-      DOCKER_CMD,
+    const verifyResult = runDocker(
       ["exec", "-w", "/app", containerName, "sh", "-c", `timeout ${task.verifier_timeout_sec} bash /tests/test.sh`],
       { maxBuffer: 20 * 1024 * 1024 },
     );
