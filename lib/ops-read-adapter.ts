@@ -36,17 +36,19 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
   async read({ pathname, maxBytes, timeoutMs }: { pathname: string; maxBytes: number; timeoutMs: number }): Promise<OpsReadResult> {
     const controller=new AbortController(),deadlineAt=Date.now()+timeoutMs,timer=setTimeout(()=>controller.abort(),timeoutMs);
     let metadata: OpsRecordMetadata | undefined;
+    let matchedBlob: Awaited<ReturnType<typeof list>>["blobs"][number] | undefined;
     try {
       let page:Awaited<ReturnType<typeof list>>|undefined;
       for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list(blobCommandOptions({prefix:pathname,limit:2,abortSignal:controller.signal})),Math.max(1,deadlineAt-Date.now()));break;}catch(error){if(attempt===1)throw error;}}
-      metadata = page?.blobs.filter((record)=>record.pathname===pathname).map((record)=>({pathname:record.pathname,size:record.size,uploaded_at:record.uploadedAt.toISOString(),etag:record.etag}))[0];
+      matchedBlob = page?.blobs.find((record)=>record.pathname===pathname);
+      metadata = matchedBlob ? {pathname:matchedBlob.pathname,size:matchedBlob.size,uploaded_at:matchedBlob.uploadedAt.toISOString(),etag:matchedBlob.etag} : undefined;
       if (!metadata) {clearTimeout(timer);return { status: "not_found" };}
       if (metadata.size > maxBytes) {clearTimeout(timer);return { status: "too_large", size: metadata.size, limit: maxBytes };}
     } catch (error) {
       clearTimeout(timer);return { status: "transient", error: controller.signal.aborted||error instanceof Error&&error.message === "read_timeout" ? "read_timeout" : "read_failed" };
     }
     try { for (let attempt = 0; attempt < 2; attempt++) {
-      try { const result = await timeout(get(pathname,blobCommandOptions({abortSignal:controller.signal})),Math.max(1,deadlineAt-Date.now()));
+      try { const result = await timeout(get(matchedBlob!.url,blobCommandOptions({abortSignal:controller.signal,useCache:false})),Math.max(1,deadlineAt-Date.now()));
         if (!result) { if(attempt===1)return {status:"transient",error:"read_failed"}; continue; }
         if (result.statusCode !== 200 || !result.stream) throw new Error("read_failed");
         const bytes = await boundedBytes(result.stream, maxBytes, deadlineAt, controller);

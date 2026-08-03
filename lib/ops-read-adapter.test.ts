@@ -26,7 +26,7 @@ describe("Blob ops read adapter", () => {
     blob.get.mockResolvedValueOnce(null).mockResolvedValueOnce({ statusCode: 200, stream: new Response("ok").body });
     await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toMatchObject({ status: "ok", bytes: Buffer.from("ok") });
     expect(blob.list).toHaveBeenCalledWith(expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
-    expect(blob.get).toHaveBeenCalledWith("traces/r/t/log.txt", expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
+    expect(blob.get).toHaveBeenCalledWith("https://blob.test/a?token=secret", expect.objectContaining({ abortSignal: expect.any(AbortSignal), useCache: false }));
     blob.get.mockReset().mockResolvedValue(null);
     await expect(new BlobOpsReadAdapter().read({ pathname: "traces/r/t/log.txt", maxBytes: 10, timeoutMs: 100 })).resolves.toMatchObject({ status: "transient" });
     expect(blob.get).toHaveBeenCalledTimes(2);
@@ -35,6 +35,7 @@ describe("Blob ops read adapter", () => {
     expect(blob.get).not.toHaveBeenCalled();
   });
   it("reads the exact listed version privately instead of a stale bare pathname", async () => {
+    vi.stubEnv("BLOB_ACCESS", "private");
     const listed = metadata(7);
     blob.list.mockResolvedValue({ blobs: [listed], hasMore: false });
     blob.get.mockImplementation(async (identifier) => ({
@@ -45,7 +46,7 @@ describe("Blob ops read adapter", () => {
     await expect(new BlobOpsReadAdapter().read({ pathname: listed.pathname, maxBytes: 20, timeoutMs: 100 }))
       .resolves.toMatchObject({ status: "ok", bytes: Buffer.from("current") });
     expect(blob.get).toHaveBeenCalledWith(listed.url, expect.objectContaining({
-      access: "public",
+      access: "private",
       abortSignal: expect.any(AbortSignal),
       useCache: false,
     }));

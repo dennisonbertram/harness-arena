@@ -9,7 +9,7 @@ export default function VoicePromptCapabilityGate({ children }: { children: Reac
     let active = true;
     fetch("/api/voice/capability", { method: "POST", credentials: "same-origin" })
       .then((response) => {
-        if (!response.ok) throw new Error("capability bootstrap failed");
+        if (response.status !== 204) throw new Error("capability bootstrap failed");
         if (active) setState("ready");
       })
       .catch(() => { if (active) setState("failed"); });
