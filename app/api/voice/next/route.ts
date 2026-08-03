@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { log } from "@/lib/log";
 import type { NextComparison, Progress } from "@/lib/voice-session";
 import { enumerateComparisons, pickNext, progress } from "@/lib/voice-session";
 import type { VoiceManifest } from "@/lib/voice-types";
 import { getVoiceStorage } from "@/lib/voice-storage";
+import { verifyVoiceCapability } from "@/lib/voice-capability";
+import { setVoiceCapabilityCookie, VOICE_CAPABILITY_COOKIE_NAME } from "@/lib/voice-capability-cookie";
 
-const COOKIE_NAME = "voice_evaluator";
-const COOKIE_MAX_AGE_SECONDS = 31536000; // ~1 year
+const COOKIE_NAME = VOICE_CAPABILITY_COOKIE_NAME;
 const EXCLUDE_CAP = 25;
 
-const EvaluatorIdSchema = z.uuid();
+const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;
 
 // ponytail: naive in-memory per-IP cap on cookie *minting* — POC-level, not
 // a real abuse boundary, and per-process (serverless cold starts reset it;
@@ -37,10 +37,7 @@ function clientIp(request: NextRequest): string {
 // A malformed cookie value is treated the same as an absent one -- re-mint
 // rather than 500 or trust an unvalidated value as an evaluator identity.
 function validEvaluatorId(request: NextRequest): string | undefined {
-  const raw = request.cookies.get(COOKIE_NAME)?.value;
-  if (!raw) return undefined;
-  const parsed = EvaluatorIdSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
+  return verifyVoiceCapability(request.cookies.get(COOKIE_NAME)?.value);
 }
 
 function parseExclude(request: NextRequest): string[] {
@@ -55,16 +52,6 @@ function parseExclude(request: NextRequest): string[] {
   return ids.length > EXCLUDE_CAP ? ids.slice(-EXCLUDE_CAP) : ids;
 }
 
-function setEvaluatorCookie(response: NextResponse, evaluatorId: string): void {
-  response.cookies.set(COOKIE_NAME, evaluatorId, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: COOKIE_MAX_AGE_SECONDS,
-    secure: true,
-  });
-}
-
 // Never include model_id/name here -- this payload is the blinding boundary.
 function buildComparisonPayload(manifest: VoiceManifest, result: NextComparison, currentProgress: Progress) {
   const prompt = manifest.prompts.find((p) => p.id === result.promptId);
@@ -77,9 +64,9 @@ function buildComparisonPayload(manifest: VoiceManifest, result: NextComparison,
   }
   return {
     comparisonId: result.comparisonId,
-    prompt: { audioUrl: prompt.audio_url, text: prompt.text },
-    clipA: { responseId: first.id, audioUrl: first.audio_url },
-    clipB: { responseId: second.id, audioUrl: second.audio_url },
+    prompt: { audioUrl: audioUrl("prompts", prompt.id), text: prompt.text },
+    clipA: { responseId: first.id, audioUrl: audioUrl("responses", first.id) },
+    clipB: { responseId: second.id, audioUrl: audioUrl("responses", second.id) },
     progress: currentProgress,
   };
 }
@@ -107,7 +94,7 @@ export async function GET(request: NextRequest) {
   const manifest = await storage.getManifest();
   if (!manifest) {
     const response = NextResponse.json({ not_seeded: true });
-    if (minted) setEvaluatorCookie(response, evaluatorId);
+    if (minted) setVoiceCapabilityCookie(response, evaluatorId);
     return response;
   }
 
@@ -128,6 +115,6 @@ export async function GET(request: NextRequest) {
     : buildComparisonPayload(manifest, result, currentProgress);
 
   const response = NextResponse.json(body);
-  if (minted) setEvaluatorCookie(response, evaluatorId);
+  if (minted) setVoiceCapabilityCookie(response, evaluatorId);
   return response;
 }

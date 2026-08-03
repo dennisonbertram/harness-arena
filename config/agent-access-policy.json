@@ -22,7 +22,7 @@
       "methods": ["GET"],
       "write_methods": ["POST", "PUT", "PATCH", "DELETE"],
       "write_expected_status": 405,
-      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"],
+      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "VERCEL_OIDC_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"],
       "targets": {
         "production": {
           "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
@@ -146,6 +146,7 @@
       "VERCEL": { "purpose": "Vercel runtime marker", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "boolean_presence" },
       "VERCEL_ENV": { "purpose": "Vercel deployment environment", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "value_non_secret" },
       "VERCEL_GIT_COMMIT_SHA": { "purpose": "Vercel deployment Git SHA", "environments": ["production", "development"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "value_non_secret" },
+      "VERCEL_OIDC_TOKEN": { "purpose": "Vercel runtime workload identity credential", "environments": ["production", "development"], "secret": true, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_PROJECT_ID": { "purpose": "Vercel project identity", "environments": ["production", "development", "local"], "secret": false, "owner": "vercel-platform", "required": "platform", "safe_diagnostic": "value_non_secret" },
       "VERCEL_READ_TOKEN": { "purpose": "Passive monitor read-only Vercel evidence credential", "environments": ["development"], "secret": true, "owner": "vercel-platform", "required": "monitor", "safe_diagnostic": "metadata_presence_only" },
       "VERCEL_TEAM_ID": { "purpose": "Vercel team identity", "environments": ["production", "development", "local"], "secret": false, "owner": "vercel-platform", "required": "conditional", "safe_diagnostic": "value_non_secret" },

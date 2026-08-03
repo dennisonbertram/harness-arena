@@ -207,6 +207,9 @@ export const RunSchema = z.object({
   // the capture, and on any run whose model never reached the sidecar.
   resolved_system_prompt: z.string().optional(),
   model: z.string().optional(),
+  // Exact task manifest selected for this run and persisted before the runner
+  // starts. Trace uploads can precede task_results callbacks.
+  selected_task_ids: z.array(z.string().min(1)).optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),
 });

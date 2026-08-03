@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { countJudgmentsByPrompt } from "@/lib/voice-results";
+import VoicePromptCapabilityGate from "./VoicePromptCapabilityGate";
 
 // Mirrors app/voice/results/page.tsx: shared storage means a build-time-cached
 // page would never show new judgments, so ISR re-renders it at most every 15s.
 export const revalidate = 15;
+const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;
 
 export default async function VoicePromptsPage() {
   const storage = getVoiceStorage();
@@ -54,7 +56,7 @@ export default async function VoicePromptsPage() {
           No prompts yet.
         </div>
       ) : (
-        <>
+        <VoicePromptCapabilityGate>
           <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 24 }}>
             Comparing {pairLabel} · {manifest.prompts.length} prompt
             {manifest.prompts.length === 1 ? "" : "s"} · {matchedJudgments} judgment
@@ -76,7 +78,7 @@ export default async function VoicePromptsPage() {
                     {prompt.category ?? "Uncategorized"}
                   </p>
                   {prompt.text && <p style={{ fontSize: 14, marginBottom: 8 }}>{prompt.text}</p>}
-                  <audio controls preload="none" src={prompt.audio_url} style={{ display: "block", width: "100%" }} />
+                  <audio controls preload="none" src={audioUrl("prompts", prompt.id)} style={{ display: "block", width: "100%" }} />
                   {responses.length > 0 && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 10 }}>
                       {responses.map((r, i) => (
@@ -84,7 +86,7 @@ export default async function VoicePromptsPage() {
                           <p className="label" style={{ color: "var(--gray-700)", marginBottom: 4 }}>
                             Response {i + 1} (model hidden)
                           </p>
-                          <audio controls preload="none" src={r.audio_url} style={{ display: "block", width: "100%" }} />
+                          <audio controls preload="none" src={audioUrl("responses", r.id)} style={{ display: "block", width: "100%" }} />
                         </div>
                       ))}
                     </div>
@@ -104,7 +106,7 @@ export default async function VoicePromptsPage() {
               );
             })}
           </section>
-        </>
+        </VoicePromptCapabilityGate>
       )}
     </div>
   );

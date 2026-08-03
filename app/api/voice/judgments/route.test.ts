@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { comparisonIdFor } from "@/lib/voice-session";
 import { resetVoiceStorage, voiceStorageRef } from "@/lib/test-support/voice-storage-ref";
+import { installVoiceCapabilityTestSecret, voiceCapabilityCookie } from "@/lib/test-support/voice-capability";
 import type { VoiceManifest } from "@/lib/voice-types";
 
 vi.mock("@/lib/voice-storage", async (importOriginal) => {
@@ -61,7 +62,7 @@ function postRequest(
     "content-type": "application/json",
     "x-forwarded-for": opts.ip ?? "1.1.1.1",
   };
-  if (opts.evaluatorId) headers.cookie = `voice_evaluator=${opts.evaluatorId}`;
+  if (opts.evaluatorId) headers.cookie = `voice_evaluator=${opts.evaluatorId === "not-a-uuid" ? opts.evaluatorId : voiceCapabilityCookie(opts.evaluatorId)}`;
   return new NextRequest("http://localhost/api/voice/judgments", {
     method: "POST",
     headers,
@@ -75,7 +76,7 @@ function postRequestRaw(
   opts: { evaluatorId?: string; ip?: string } = {},
 ): NextRequest {
   const allHeaders: Record<string, string> = { "x-forwarded-for": opts.ip ?? "1.1.1.1", ...headers };
-  if (opts.evaluatorId) allHeaders.cookie = `voice_evaluator=${opts.evaluatorId}`;
+  if (opts.evaluatorId) allHeaders.cookie = `voice_evaluator=${opts.evaluatorId === "not-a-uuid" ? opts.evaluatorId : voiceCapabilityCookie(opts.evaluatorId)}`;
   return new NextRequest("http://localhost/api/voice/judgments", { method: "POST", headers: allHeaders, body });
 }
 
@@ -88,6 +89,7 @@ describe("POST /api/voice/judgments", () => {
   let evaluatorId: string;
 
   beforeEach(async () => {
+    installVoiceCapabilityTestSecret();
     resetVoiceStorage();
     evaluatorId = randomUUID();
     await voiceStorageRef.current.putManifest(buildManifest());
@@ -198,6 +200,30 @@ describe("POST /api/voice/judgments", () => {
       );
 
       expect(response.status).toBe(413);
+      expect(await storedJudgmentCount()).toBe(0);
+    });
+
+    it("returns 413 for chunked JSON over 64KB despite a deceptive content-length", async () => {
+      const oversized = JSON.stringify({ ...validPayload(), padding: "x".repeat(70_000) });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(oversized.slice(0, 40_000)));
+          controller.enqueue(new TextEncoder().encode(oversized.slice(40_000)));
+          controller.close();
+        },
+      });
+      const request = new NextRequest(new Request("http://localhost/api/voice/judgments", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": "1",
+          "x-forwarded-for": "4.4.4.22",
+          cookie: `voice_evaluator=${voiceCapabilityCookie(evaluatorId)}`,
+        },
+        body: stream,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }));
+      expect((await POST(request)).status).toBe(413);
       expect(await storedJudgmentCount()).toBe(0);
     });
 

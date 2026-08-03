@@ -46,6 +46,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { get, put } from "@vercel/blob";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
+import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
@@ -356,25 +358,22 @@ async function fetchPriorManifestRaw() {
   // through VoiceManifestSchema, which strips the `key` fields ID reuse
   // depends on. Read the raw JSON directly, same style as
   // lib/storage.ts's readJson.
-  const result = await get(MANIFEST_PATH, { access: "public" });
-  if (!result) return undefined;
-  const text = await new Response(result.stream).text();
-  return JSON.parse(text);
+  return readBlobJson(MANIFEST_PATH);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function headPollUntilReady(url, { attempts = 10, delayMs = 300 } = {}) {
+async function pollUntilReady(pathname, { attempts = 10, delayMs = 300 } = {}) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5000) });
-      if (res.ok) return;
+      const res = await get(pathname, blobCommandOptions({ abortSignal: AbortSignal.timeout(5000), useCache: false }));
+      if (res?.statusCode === 200) { await res.stream.cancel(); return; }
     } catch {
       // transient -- including a timed-out/aborted request -- retry
     }
     await sleep(delayMs);
   }
-  throw new Error(`gave up waiting for ${url} to become readable (HEAD never returned 200 after ${attempts} attempts)`);
+  throw new Error(`gave up waiting for ${pathname} to become readable`);
 }
 
 async function main() {
@@ -403,32 +402,30 @@ async function main() {
     const priorManifestRaw = await fetchPriorManifestRaw();
     const { manifest, uploads, counts } = assembleManifest(input, priorManifestRaw, hashesByFile);
 
-    const idToUrl = new Map();
+    const idToPathname = new Map();
     for (const upload of uploads) {
       const data = readFileSync(upload.file);
-      const { url } = await put(upload.blobPath, data, {
-        access: "public",
+      await put(upload.blobPath, data, blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
-      });
-      idToUrl.set(upload.id, url);
+      }));
+      idToPathname.set(upload.id, upload.blobPath);
     }
 
-    for (const p of manifest.prompts) p.audio_url = idToUrl.get(p.id) ?? p.audio_url;
-    for (const r of manifest.responses) r.audio_url = idToUrl.get(r.id) ?? r.audio_url;
+    for (const p of manifest.prompts) p.audio_url = idToPathname.get(p.id) ?? p.audio_url;
+    for (const r of manifest.responses) r.audio_url = idToPathname.get(r.id) ?? r.audio_url;
 
-    for (const url of idToUrl.values()) {
-      await headPollUntilReady(url);
+    for (const pathname of idToPathname.values()) {
+      await pollUntilReady(pathname);
     }
 
     // Write last: this is the commit marker. Everything it references is
     // already uploaded and confirmed readable.
-    await put(MANIFEST_PATH, JSON.stringify(manifest), {
-      access: "public",
+    await put(MANIFEST_PATH, JSON.stringify(manifest), blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
-    });
+    }));
 
     console.log(
       `Seeded voice/manifest.json: ${manifest.models.length} models, ${manifest.prompts.length} prompts, ${manifest.responses.length} responses`,

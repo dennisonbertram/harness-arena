@@ -82,6 +82,7 @@ function seed({
 
 describe("archiveAndDeleteCompetitionSubmissions", () => {
   beforeEach(() => {
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
     blob.objects.clear();
     blob.operations.length = 0;
     blob.failCopyOf = undefined;

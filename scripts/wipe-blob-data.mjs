@@ -20,6 +20,7 @@
 //   node scripts/wipe-blob-data.mjs --yes      # actually delete
 
 import { del, list } from "@vercel/blob";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
 
 const PREFIXES_IN_DELETE_ORDER = ["events/", "traces/", "runs/", "submissions/"];
 // Vercel's own "deleting all blobs" example batches del() calls rather than
@@ -30,7 +31,7 @@ async function listAllBlobs(prefix) {
   const blobs = [];
   let cursor;
   do {
-    const page = await list({ prefix, cursor });
+    const page = await list(blobCommandOptions({ prefix, cursor }));
     blobs.push(...page.blobs);
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
@@ -71,7 +72,7 @@ export async function wipeBlobData({ confirm = false } = {}) {
     }
     try {
       for (const batch of chunk(blobs.map((b) => b.url), DELETE_BATCH_SIZE)) {
-        await del(batch);
+        await del(batch, blobCommandOptions());
       }
       results.push({ prefix, count: blobs.length, sampleUrl, deleted: true });
     } catch (err) {
