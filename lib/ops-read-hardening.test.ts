@@ -70,6 +70,18 @@ describe("ops read hardening contract", () => {
     expect(output).not.toContain("server-long-bare");
   });
 
+  it("shares JSON escape decoding, delimiter scanning, and descriptor-only traversal with the CLI", () => {
+    const calls: string[] = [];
+    const hostile: Record<string, unknown> = {};
+    Object.defineProperty(hostile, "access_token", { enumerable: true, get() { calls.push("getter"); return "server-getter-leak"; } });
+    const serialized = String.raw`{"access_\u0074oken":"server-unicode-leak","nested":{"client\u0053ecret":"server-nested-leak"},"payload":"x]refresh_token=server-delimiter-leak"}`;
+    const output = redactOpsValue({ hostile, serialized, free: "x|api_key=server-free-leak", author: "Ada", token_count: 8 }) as Record<string, unknown>;
+    const text = JSON.stringify(output);
+    expect(calls).toEqual([]);
+    for (const leaked of ["server-getter-leak", "server-unicode-leak", "server-nested-leak", "server-delimiter-leak", "server-free-leak"]) expect(text).not.toContain(leaked);
+    expect(output).toMatchObject({ author: "Ada", token_count: 8 });
+  });
+
   it("normalizes the full credential-key grammar, URL schemes, Error fields, and short configured secrets", () => {
     const previous = { token: process.env.OPS_READ_TOKEN, session: process.env.SESSION_SECRET };
     process.env.OPS_READ_TOKEN = "q";

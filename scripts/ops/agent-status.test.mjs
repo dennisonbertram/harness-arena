@@ -391,6 +391,36 @@ describe("ops evidence and verdict honesty", () => {
     expect(symbolReads).toBe(0);
   });
 
+  it("normalizes hostile external fetch failures without inspecting them and aborts every attempt", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const mode of ["throw", "reject", "thenable"]) {
+        const traps = [];
+        const hostile = new Proxy(Object.create(null), {
+          getPrototypeOf() { traps.push("getPrototypeOf"); throw new Error("prototype trap"); },
+          get(_target, key) { traps.push(`get:${String(key)}`); throw new Error("get trap"); },
+          ownKeys() { traps.push("ownKeys"); throw new Error("keys trap"); },
+        });
+        let signal;
+        const fetchImpl = vi.fn((_url, init) => {
+          signal = init.signal;
+          if (mode === "throw") throw hostile;
+          if (mode === "reject") return Promise.reject(hostile);
+          return { then(_resolve, reject) { reject(hostile); } };
+        });
+        const result = await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0 });
+        expect(result).toEqual(expect.objectContaining({ ok: false, status: 0, error: "request_failed", kind: "transport", attempts: 1 }));
+        expect(result).not.toHaveProperty("detail");
+        expect(signal.aborted).toBe(true);
+        expect(traps).toEqual([]);
+      }
+      await delay(0);
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  });
+
   it("checks intrinsic chunk byte lengths before any copy or attacker-controlled index read", async () => {
     const typed = new Uint8Array(32);
     const arrayBuffer = new ArrayBuffer(32);
@@ -611,6 +641,55 @@ describe("redaction, platform wiring, and process bounds", () => {
     expect(redactSensitive(`${"x".repeat(cap)} access_token=oversized-leak`)).toBe("[REDACTED]");
     const assignmentOverflow = `${Array.from({ length: 257 }, (_, index) => `safe_${index}=value`).join(" ")} access_token=count-overflow-leak`;
     expect(redactSensitive(assignmentOverflow)).toBe("[REDACTED]");
+  });
+
+  it("redacts credentials after arbitrary separators and in query-like text without hiding operational keys", () => {
+    const input = [
+      "call(access_token=paren-leak)",
+      "pipe|client_secret=pipe-leak",
+      "closed]refresh_token=bracket-leak",
+      "/callback?access_token=query-leak&author=Ada",
+      "fragment#client_secret=fragment-leak",
+      "author=Ada authority=maintainer session_count=7 token_count=8 authentication_method=passkey oauth_provider=github",
+    ].join("\n");
+    const output = redactSensitive(input);
+    for (const leaked of ["paren-leak", "pipe-leak", "bracket-leak", "query-leak", "fragment-leak"]) expect(output).not.toContain(leaked);
+    for (const truth of ["author=Ada", "authority=maintainer", "session_count=7", "token_count=8", "authentication_method=passkey", "oauth_provider=github"]) expect(output).toContain(truth);
+  });
+
+  it("parses bounded serialized JSON first, decodes escaped keys recursively, and fails closed on invalid or excessive records", () => {
+    const serialized = String.raw`{"access_\u0074oken":"unicode-leak","nested":{"client\u0053ecret":"nested-leak"},"array":[{"refresh_token":"array-leak"}],"payload":"prefix|api_key=embedded-leak","public":"\uD83D\uDE80"}`;
+    const output = redactSensitive(serialized);
+    for (const leaked of ["unicode-leak", "nested-leak", "array-leak", "embedded-leak"]) expect(output).not.toContain(leaked);
+    expect(JSON.parse(output)).toMatchObject({ access_token: "[REDACTED]", nested: { clientSecret: "[REDACTED]" }, array: [{ refresh_token: "[REDACTED]" }], public: "🚀" });
+    expect(redactSensitive(String.raw`{"access_\uZZZZ":"invalid-escape-leak"}`)).toBe("[REDACTED]");
+    expect(redactSensitive('{"access_token":"truncated-leak"')).toBe("[REDACTED]");
+    const excessive = JSON.stringify(Object.fromEntries([...Array.from({ length: 257 }, (_, index) => [`safe_${index}`, "ok"]), ["access_token", "overflow-leak"]]));
+    expect(redactSensitive(excessive)).toBe("[REDACTED]");
+  });
+
+  it("uses own descriptors only and never executes accessors, coercion hooks, iterators, or Proxy traps", () => {
+    const calls = [];
+    const hostile = {};
+    Object.defineProperty(hostile, "visible", { enumerable: true, get() { calls.push("getter"); return "getter-leak"; } });
+    Object.defineProperty(hostile, "access_token", { enumerable: true, set() { calls.push("setter"); } });
+    Object.defineProperty(hostile, Symbol.iterator, { enumerable: true, get() { calls.push("iterator"); return () => {}; } });
+    Object.defineProperty(hostile, "toJSON", { enumerable: true, value() { calls.push("toJSON"); return "json-leak"; } });
+    Object.defineProperty(hostile, "valueOf", { enumerable: true, value() { calls.push("valueOf"); return "value-leak"; } });
+    const error = new Error("safe message");
+    Object.defineProperty(error, "context", { enumerable: true, get() { calls.push("error-getter"); return "error-leak"; } });
+    const proxy = new Proxy({ access_token: "proxy-leak" }, {
+      ownKeys() { calls.push("proxy-ownKeys"); throw new Error("ownKeys trap"); },
+      getOwnPropertyDescriptor() { calls.push("proxy-descriptor"); throw new Error("descriptor trap"); },
+      getPrototypeOf() { calls.push("proxy-prototype"); throw new Error("prototype trap"); },
+      get() { calls.push("proxy-get"); throw new Error("get trap"); },
+    });
+    const output = redactSensitive({ hostile, error, proxy });
+    expect(calls).toEqual([]);
+    expect(JSON.stringify(output)).not.toMatch(/getter-leak|error-leak|proxy-leak|json-leak|value-leak/);
+    expect(output.hostile.visible).toMatch(/REDACTED/);
+    expect(output.error.context).toMatch(/REDACTED/);
+    expect(output.proxy).toMatch(/REDACTED/);
   });
 
   it("uses one normalized sentinel matrix for URLs, credential keys, Errors, and every nonempty secret", () => {
