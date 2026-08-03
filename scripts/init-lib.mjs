@@ -228,7 +228,7 @@ export async function spawnSupervisedProcess(command, args, options = {}, {
     if (!outcomeSettled) { outcomeSettled = true; resolveOutcome({ error: new Error(`supervisor exited before command outcome (${exitSignal ?? code})`) }); }
   });
   const owned = Object.freeze({ child, supervisorPid: child.pid, outcome });
-  const record = { child, nonce, supervisorPid: child.pid, groupPid: undefined, authenticatedReaped: false };
+  const record = { child, nonce, supervisorPid: child.pid, groupPid: undefined, authenticatedReaped: false, cleanupOperation: undefined };
   SUPERVISOR_OWNERSHIP.set(owned, record);
   try {
     const started = await supervisorHandshake(child, nonce, handshakeTimeoutMs, signal);
@@ -293,12 +293,21 @@ export async function terminateOwnedSupervisor(owned, {
 } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
   if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
-    || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
-  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS);
-  try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs, killWaitMs }); }
-  catch { return false; }
-  if (beforeEscalate) await beforeEscalate();
-  return completed;
+    || !Number.isSafeInteger(record.groupPid)) return false;
+  if (record.cleanupOperation) return record.cleanupOperation;
+  if (!liveChild(record.child) || !record.child.connected) return false;
+  const operation = (async () => {
+    const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS);
+    try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs, killWaitMs }); }
+    catch { return false; }
+    if (beforeEscalate) await beforeEscalate();
+    return completed;
+  })();
+  record.cleanupOperation = operation;
+  try { return await operation; }
+  finally {
+    if (record.cleanupOperation === operation) record.cleanupOperation = undefined;
+  }
 }
 
 function liveChild(child) { return child.exitCode === null && child.signalCode === null; }
@@ -319,6 +328,10 @@ export async function detachOwnedSupervisor(owned, { signal, beforeCommit, befor
     || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
   const detachId = randomUUID();
   const cleanupAfterFailure = async () => {
+    if (record.cleanupOperation) {
+      if (!await record.cleanupOperation) throw new Error("durable detach cleanup could not be authenticated");
+      return false;
+    }
     // A generic parent-side IPC disconnect makes an acknowledgement impossible;
     // supervisor exit is the only remaining observable proof for that failure mode.
     if (!record.child.connected) {
@@ -328,11 +341,9 @@ export async function detachOwnedSupervisor(owned, { signal, beforeCommit, befor
       return false;
     }
     if (record.child.connected && liveChild(record.child)) {
-      // Arm the bounded proof when cleanup starts. A caller-controlled detach
-      // barrier may be arbitrarily long and must not consume this deadline.
-      const cleanupProof = waitForAuthenticatedExit(record, "group-reaped", 3_500);
-      try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs: 100, killWaitMs: 2_000 }); } catch {}
-      if (!await cleanupProof) throw new Error("durable detach cleanup could not be authenticated");
+      if (!await terminateOwnedSupervisor(owned, { graceMs: 100, killWaitMs: 2_000 })) {
+        throw new Error("durable detach cleanup could not be authenticated");
+      }
       return false;
     }
     return false;
