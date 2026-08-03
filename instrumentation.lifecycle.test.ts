@@ -148,7 +148,7 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
-  it("keeps late arrivals protected through the bounded third export batch", async () => {
+  it("binds each post-snapshot arrival generation while a fourth export batch is active", async () => {
     vi.useFakeTimers();
     const waitUntilTasks: Promise<unknown>[] = [];
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
@@ -159,33 +159,49 @@ describe("hosted request span lifecycle", () => {
     });
     const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
     const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
-    const tracer = provider.getTracer("late-third-batch-root-drain");
+    const tracer = provider.getTracer("late-generation-root-drain");
     const root = tracer.startSpan("request-root");
     const rootContext = trace.setSpan(context.active(), root);
     for (let index = 0; index < 31; index += 1) {
       tracer.startSpan(`initial-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
     }
+    const firstLateGeneration = Array.from({ length: 16 }, (_, index) =>
+      tracer.startSpan(`first-late-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext));
+    const secondLateGeneration = Array.from({ length: 16 }, (_, index) =>
+      tracer.startSpan(`second-late-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext));
 
     root.end();
     expect(waitUntilTasks).toHaveLength(1);
-    let lifecycleSettled = false;
-    void waitUntilTasks[0]!.then(() => { lifecycleSettled = true; });
+    const lifecycleSettled: boolean[] = [];
+    const observeLifecycleTasks = () => {
+      for (let index = lifecycleSettled.length; index < waitUntilTasks.length; index += 1) {
+        lifecycleSettled[index] = false;
+        void waitUntilTasks[index]!.then(() => { lifecycleSettled[index] = true; });
+      }
+    };
+    observeLifecycleTasks();
 
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(exportSpans).toHaveBeenCalledTimes(2);
-    for (let index = 0; index < 16; index += 1) {
-      tracer.startSpan(`late-server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
-    }
+    for (const span of firstLateGeneration) span.end();
+    expect(waitUntilTasks).toHaveLength(2);
+    observeLifecycleTasks();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(exportSpans).toHaveBeenCalledTimes(3);
+    for (const span of secondLateGeneration) span.end();
+    expect(waitUntilTasks).toHaveLength(3);
+    observeLifecycleTasks();
 
     await vi.advanceTimersByTimeAsync(5_250);
-    expect(exportSpans).toHaveBeenCalledTimes(3);
-    expect(lifecycleSettled).toBe(false);
+    expect(exportSpans).toHaveBeenCalledTimes(4);
+    expect(lifecycleSettled).toEqual([true, true, false]);
     expect(structuredSpanReadiness().structured.queued).toBe(16);
 
-    await vi.advanceTimersByTimeAsync(3_250);
-    await waitUntilTasks[0];
-    expect(lifecycleSettled).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_750);
+    await Promise.all(waitUntilTasks);
+    expect(lifecycleSettled).toEqual([true, true, true]);
     expect(structuredSpanReadiness().structured.queued).toBe(0);
     await provider.shutdown();
   });
