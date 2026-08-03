@@ -37,8 +37,20 @@ retained span crosses the safe-clone boundary. A flushable queue retains only
 root/server/error spans, caps the pending queue at 32 spans and batches at 16;
 automatic child spans therefore cannot synchronously flood runtime logs.
 `trace.span_dropped` is rate-limited and the safe `structuredSpanReadiness()`
-surface exposes queued/dropped counts and an unready reason without collector
-headers or their values. Serverless shutdown/force-flush drains the bounded queue.
+surface exposes aggregate and sink-specific (`structured` and `otlp`) queued/
+dropped counts and an unready reason without collector headers or their values.
+The OTLP queue retains a failed batch until a later request or shutdown flush
+acknowledges it; it remains capped at 32 spans, records
+`export_unacknowledged`, and does not loop inside a single `forceFlush` call.
+Vercel's supported request context registers flush work with `waitUntil`, so a
+normal request can drain the bounded queue before function termination.
+
+`structuredSpanReadiness()` is process-local diagnostic state, not evidence of
+cross-instance or cross-lambda health. Establish hosted health from the
+redacted structured runtime logs and the collector's own receipt/metrics across
+the deployment being investigated. A successful structured log sink cannot
+clear an invalid or failed optional OTLP sink; OTLP is truthfully degraded while
+the structured source-of-truth remains available.
 
 OTLP is enabled only for an explicit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_ENDPOINT`, or Vercel's discovered HTTP/protobuf collector.
@@ -47,6 +59,9 @@ their general `OTEL_EXPORTER_OTLP_PROTOCOL`/`_HEADERS` counterparts; supported
 protocols are `http/protobuf` and `http/json`. Invalid endpoints or headers and
 unsupported protocols fail closed before a request is sent. Header values must
 never be printed, copied into diagnostics, or pasted into an incident.
+Standard percent-encoded OTLP header values are decoded exactly before export;
+malformed encodings or decoded control characters fail closed and are never
+logged.
 
 ## Rollback
 

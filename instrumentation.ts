@@ -11,12 +11,41 @@ const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 
-export type StructuredSpanReadiness = { ready: boolean; queued: number; dropped: number; reason?: "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" };
+type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
+type SinkReadiness = { configured: boolean; ready: boolean; queued: number; dropped: number; reason?: ReadinessReason };
+export type StructuredSpanReadiness = SinkReadiness & { structured: SinkReadiness; otlp: SinkReadiness };
 
-let structuredReadiness: StructuredSpanReadiness = { ready: true, queued: 0, dropped: 0 };
+let structuredReadiness: StructuredSpanReadiness = createReadiness();
+
+function createReadiness(): StructuredSpanReadiness {
+  const structured: SinkReadiness = { configured: true, ready: true, queued: 0, dropped: 0 };
+  const otlp: SinkReadiness = { configured: false, ready: true, queued: 0, dropped: 0 };
+  return { ...structured, structured, otlp };
+}
+
+function updateSinkReadiness(sink: "structured" | "otlp", changes: Partial<SinkReadiness>): void {
+  const nextSink = { ...structuredReadiness[sink], ...changes };
+  const structured = sink === "structured" ? nextSink : structuredReadiness.structured;
+  const otlp = sink === "otlp" ? nextSink : structuredReadiness.otlp;
+  const ready = structured.ready && (!otlp.configured || otlp.ready);
+  const reason = !structured.ready ? structured.reason : !otlp.ready ? otlp.reason : undefined;
+  structuredReadiness = {
+    configured: structured.configured,
+    ready,
+    queued: structured.queued + otlp.queued,
+    dropped: structured.dropped + otlp.dropped,
+    ...(reason ? { reason } : {}),
+    structured,
+    otlp,
+  };
+}
 
 export function structuredSpanReadiness(): StructuredSpanReadiness {
-  return { ...structuredReadiness };
+  return {
+    ...structuredReadiness,
+    structured: { ...structuredReadiness.structured },
+    otlp: { ...structuredReadiness.otlp },
+  };
 }
 
 function safeAttributes(attributes: Attributes): Attributes {
@@ -96,7 +125,7 @@ export class StructuredSpanExporter implements SpanExporter {
       }
       callback({ code: 0 });
     } catch (error) {
-      structuredReadiness = { ...structuredReadiness, ready: false, reason: "log_unacknowledged" };
+      updateSinkReadiness("structured", { ready: false, reason: "log_unacknowledged" });
       callback({ code: 1, error: error instanceof Error ? error : new Error("structured span export failed") });
     }
   }
@@ -104,15 +133,17 @@ export class StructuredSpanExporter implements SpanExporter {
   shutdown(): Promise<void> { return Promise.resolve(); }
 }
 
-function parseHeaders(value: string | undefined): Record<string, string> | null {
+export function parseOtlpHeaders(value: string | undefined): Record<string, string> | null {
   if (!value?.trim()) return {};
   const headers: Record<string, string> = {};
   for (const entry of value.split(",")) {
     const delimiter = entry.indexOf("=");
     if (delimiter < 1) return null;
     const key = entry.slice(0, delimiter).trim();
-    const headerValue = entry.slice(delimiter + 1).trim();
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || !headerValue || /[\r\n]/.test(headerValue)) return null;
+    const encodedValue = entry.slice(delimiter + 1).trim();
+    let headerValue: string;
+    try { headerValue = decodeURIComponent(encodedValue); } catch { return null; }
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || !headerValue || /[\u0000-\u001F\u007F]/.test(headerValue)) return null;
     headers[key] = headerValue;
   }
   return headers;
@@ -125,8 +156,8 @@ function configuredCollector(): CollectorConfiguration {
   const endpoint = tracesEndpoint || process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim().replace(/\/$/, "");
   const url = tracesEndpoint ? tracesEndpoint : endpoint ? `${endpoint}/v1/traces` : null;
   const protocol = process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL?.trim() || process.env.OTEL_EXPORTER_OTLP_PROTOCOL?.trim() || "http/protobuf";
-  const generalHeaders = parseHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS);
-  const traceHeaders = parseHeaders(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS);
+  const generalHeaders = parseOtlpHeaders(process.env.OTEL_EXPORTER_OTLP_HEADERS);
+  const traceHeaders = parseOtlpHeaders(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS);
   const headers = generalHeaders && traceHeaders ? { ...generalHeaders, ...traceHeaders } : null;
   if (url) {
     if (protocol !== "http/protobuf" && protocol !== "http/json") return { reason: "unsupported_protocol" };
@@ -155,38 +186,58 @@ export class BoundedSpanProcessor implements SpanProcessor {
   private queue: ReadableSpan[] = [];
   private dropped = 0;
   private closed = false;
-  constructor(private readonly exporter: SpanExporter) {}
+  private flushInFlight?: Promise<void>;
+  constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
+    if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
+  }
   onStart(): void {}
   onEnd(span: ReadableSpan): void {
     if (this.closed || !shouldRetainSpan(span)) return;
     if (this.queue.length >= MAX_BUFFERED_SPANS) {
       this.dropped += 1;
-      structuredReadiness = { ...structuredReadiness, queued: this.queue.length, dropped: structuredReadiness.dropped + 1 };
+      const sinkReadiness = structuredReadiness[this.sink];
+      updateSinkReadiness(this.sink, { queued: this.queue.length, dropped: sinkReadiness.dropped + 1 });
       if (this.dropped % DROP_SIGNAL_EVERY === 1) log("warn", "trace.span_dropped", { reason: "queue_full", dropped: this.dropped });
       return;
     }
     this.queue.push(span);
-    structuredReadiness = { ...structuredReadiness, queued: this.queue.length };
+    updateSinkReadiness(this.sink, { queued: this.queue.length });
+  }
+  private async drain(): Promise<void> {
+    while (this.queue.length) {
+      // Keep a batch in the bounded queue until the exporter acknowledges it.
+      // A rejected flush returns to Vercel's waitUntil lifecycle rather than
+      // spinning, and the next request/shutdown may retry the same spans.
+      const batchLength = Math.min(this.queue.length, MAX_EXPORT_BATCH);
+      const batch = this.queue.slice(0, batchLength).map(safeExportSpan);
+      try {
+        await new Promise<void>((resolve, reject) => this.exporter.export(batch, (result) => {
+          if (result.code === 0) resolve();
+          else reject(result.error ?? new Error("span exporter did not acknowledge retention"));
+        }));
+      } catch (error) {
+        updateSinkReadiness(this.sink, { ready: false, queued: this.queue.length, reason: "export_unacknowledged" });
+        throw error;
+      }
+      this.queue.splice(0, batchLength);
+      updateSinkReadiness(this.sink, { ready: true, queued: this.queue.length, reason: undefined });
+    }
   }
   async forceFlush(): Promise<void> {
-    while (this.queue.length) {
-      const batch = this.queue.splice(0, MAX_EXPORT_BATCH).map(safeExportSpan);
-      structuredReadiness = { ...structuredReadiness, queued: this.queue.length };
-      await new Promise<void>((resolve, reject) => this.exporter.export(batch, (result) => {
-        if (result.code === 0) {
-          structuredReadiness = { ...structuredReadiness, ready: true, reason: undefined };
-          resolve();
-        }
-        else reject(result.error ?? new Error("span exporter did not acknowledge retention"));
-      }));
+    if (this.flushInFlight) return this.flushInFlight;
+    const flush = this.drain();
+    this.flushInFlight = flush;
+    try { await flush; }
+    finally {
+      if (this.flushInFlight === flush) this.flushInFlight = undefined;
     }
   }
   async shutdown(): Promise<void> { this.closed = true; await this.forceFlush(); await this.exporter.shutdown(); }
 }
 
 /** Uses the supported onEnd/export lifecycle; readonly SDK spans are never mutated. */
-export function createSafeSpanProcessor(exporter: SpanExporter = new StructuredSpanExporter()): SpanProcessor {
-  return new BoundedSpanProcessor(new SafeSpanExporter(exporter));
+export function createSafeSpanProcessor(exporter: SpanExporter = new StructuredSpanExporter(), sink: "structured" | "otlp" = "structured"): SpanProcessor {
+  return new BoundedSpanProcessor(new SafeSpanExporter(exporter), sink);
 }
 
 /**
@@ -194,17 +245,21 @@ export function createSafeSpanProcessor(exporter: SpanExporter = new StructuredS
  * environment proves a collector exists, avoiding silent localhost export.
  */
 export function createSafeSpanProcessors(): SpanProcessor[] {
+  // Module state can be reused by a warm serverless instance. Re-evaluate the
+  // optional collector's configuration each registration without allowing a
+  // structured sink success to erase an OTLP configuration/export failure.
+  updateSinkReadiness("otlp", { configured: false, ready: true, queued: 0, dropped: 0, reason: undefined });
   const processors: SpanProcessor[] = [createSafeSpanProcessor()];
   const collector = configuredCollector();
   if (collector && "reason" in collector) {
-    structuredReadiness = { ...structuredReadiness, ready: false, reason: collector.reason };
+    updateSinkReadiness("otlp", { configured: true, ready: false, reason: collector.reason });
     return processors;
   }
   if (collector) {
     const exporter = collector.protocol === "http/json"
       ? new OTLPHttpJsonTraceExporter({ url: collector.url, headers: collector.headers })
       : new OTLPHttpProtoTraceExporter({ url: collector.url, headers: collector.headers });
-    processors.push(createSafeSpanProcessor(exporter));
+    processors.push(createSafeSpanProcessor(exporter, "otlp"));
   }
   return processors;
 }
