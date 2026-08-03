@@ -28,7 +28,11 @@ token. Missing credentials, 401/403 responses, malformed metadata, and
 unavailable endpoints are `access_blocked`. Unobserved environment variables,
 runtime logs, cron configuration, and deployment identity remain explicitly
 unknown; the monitor does not manufacture missing variables, an empty error
-list, or a ready deployment. The stable requested alias is retained separately
+list, or a ready deployment. HTTP 200 bodies are still untrusted: only the
+documented environment containers, typed entries and targets, and runtime-log
+singleton/array/data containers with valid entries become observed evidence;
+malformed containers or any malformed entry remain unknown and add
+`platform_evidence_invalid`. The stable requested alias is retained separately
 from Vercel's returned unique deployment URL, and deployment evidence is
 accepted only when the deployment ID, project ID, and alias all match the fixed
 target. `expected_sha` remains unknown unless a future independent GET supplies
