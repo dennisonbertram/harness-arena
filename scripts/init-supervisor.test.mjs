@@ -53,10 +53,6 @@ function processGroupId(pid) {
   return pgid;
 }
 
-function processGroupAlive(pgid) {
-  try { process.kill(-pgid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
-}
-
 async function waitForGone(pids, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -207,15 +203,15 @@ describe("authenticated prerequisite supervisor", () => {
     const script = [
       "const { spawn } = require('node:child_process');",
       "const { writeFileSync } = require('node:fs');",
-      "const descendant = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+      "const descendant = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); process.send('ready'); setInterval(() => {}, 1000)`], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });",
       "process.on('SIGTERM', () => { try { process.kill(process.ppid, 'SIGKILL'); } catch {} });",
-      "writeFileSync(process.argv[1], JSON.stringify({ command: process.pid, descendant: descendant.pid }));",
+      "descendant.once('message', () => writeFileSync(process.argv[1], JSON.stringify({ command: process.pid, descendant: descendant.pid })));",
       "setInterval(() => {}, 1000);",
     ].join("\n");
     const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", script, marker], { cwd: root, stdio: "ignore" });
     const tree = await waitForJson(marker);
     try {
-      await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 250 })).resolves.toBe(false);
+      await expect(init.terminateOwnedSupervisor(owned, { graceMs: 200, killWaitMs: 250 })).resolves.toBe(false);
       expect(processAlive(tree.descendant)).toBe(true);
     } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });

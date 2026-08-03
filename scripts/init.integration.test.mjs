@@ -100,7 +100,7 @@ async function createHermeticCheckout(prefix, { withFakeNext = false } = {}) {
   checkoutRoots.add(checkout);
   await mkdir(join(checkout, "scripts"), { recursive: true });
   await mkdir(join(checkout, "lib"), { recursive: true });
-  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
+  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/init-command-group-anchor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
     await cp(join(repositoryRoot, path), join(checkout, path));
   }
   await chmod(join(checkout, "scripts/init.sh"), 0o755);

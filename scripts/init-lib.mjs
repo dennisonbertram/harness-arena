@@ -177,7 +177,7 @@ export async function spawnSupervisedProcess(command, args, options = {}, {
   const outcome = new Promise((resolve) => { resolveOutcome = resolve; });
   let outcomeSettled = false;
   const onOutcome = (message) => {
-    if (message?.type !== "outcome" || message.nonce !== nonce || outcomeSettled) return;
+    if (message?.type !== "outcome" || message.nonce !== nonce || message.supervisorPid !== child.pid || outcomeSettled) return;
     outcomeSettled = true;
     resolveOutcome(message.error ? { error: Object.assign(new Error(message.error.message), { code: message.error.code }) } : { code: message.code, signal: message.signal });
   };
@@ -186,13 +186,15 @@ export async function spawnSupervisedProcess(command, args, options = {}, {
     if (!outcomeSettled) { outcomeSettled = true; resolveOutcome({ error: new Error(`supervisor exited before command outcome (${exitSignal ?? code})`) }); }
   });
   const owned = Object.freeze({ child, supervisorPid: child.pid, outcome });
-  const record = { child, nonce, supervisorPid: child.pid };
+  const record = { child, nonce, supervisorPid: child.pid, groupPid: undefined };
   SUPERVISOR_OWNERSHIP.set(owned, record);
   try {
-    await supervisorHandshake(child, nonce, handshakeTimeoutMs, signal);
+    const started = await supervisorHandshake(child, nonce, handshakeTimeoutMs, signal);
+    record.groupPid = started.groupPid;
     return owned;
   } catch (error) {
-    await terminateOwnedSupervisor(owned, { graceMs: 50, killWaitMs: 500 }).catch(() => {});
+    try { child.send({ type: "terminate", nonce, graceMs: 50, killWaitMs: 500 }); } catch {}
+    await waitForChildExit(child, 1_500).catch(() => {});
     throw error;
   }
 }
@@ -209,7 +211,12 @@ async function supervisorHandshake(child, nonce, timeoutMs, signal) {
         startRequested = true;
         try { signal?.throwIfAborted(); child.send({ type: "start", nonce }); }
         catch (error) { finish(error); }
-      } else if (message.type === "started" && startRequested) finish(undefined, message);
+      } else if (message.type === "started" && startRequested) {
+        if (!Number.isSafeInteger(message.groupPid) || message.groupPid <= 0 || message.groupPid === child.pid
+          || !Number.isSafeInteger(message.commandPid) || message.commandPid <= 0) {
+          finish(new Error("supervisor returned invalid command group ownership"));
+        } else finish(undefined, message);
+      }
     };
     const onError = (error) => finish(error);
     const onExit = (code, exitSignal) => finish(new Error(`supervisor exited before ownership handshake (${exitSignal ?? code})`));
@@ -235,46 +242,16 @@ async function supervisorHandshake(child, nonce, timeoutMs, signal) {
 export async function terminateOwnedSupervisor(owned, {
   graceMs = 500,
   killWaitMs = 1_000,
-  signalGroup = (pid, signal) => process.kill(-pid, signal),
   beforeEscalate,
 } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
-  if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid || !liveChild(record.child)) return false;
-  try { record.child.send({ type: "terminate", nonce: record.nonce }); } catch {}
-  if (await waitForChildExit(record.child, graceMs)) return true;
+  if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
+    || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
+  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + 1_000);
+  try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs, killWaitMs }); }
+  catch { return false; }
   if (beforeEscalate) await beforeEscalate();
-  if (!liveChild(record.child)) return false;
-  const verified = await waitForSupervisorVerification(record, Math.min(250, killWaitMs));
-  if (!verified || !liveChild(record.child)) return false;
-  try { signalGroup(record.supervisorPid, "SIGKILL"); } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  if (!await waitForChildExit(record.child, killWaitMs)) throw new Error(`owned supervisor ${record.supervisorPid} survived SIGKILL`);
-  return true;
-}
-
-function waitForSupervisorVerification(record, timeoutMs) {
-  if (!record.child.connected) return Promise.resolve(false);
-  return new Promise((resolveVerified) => {
-    let settled = false;
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref();
-    const onMessage = (message) => {
-      if (message?.type === "verified" && message.nonce === record.nonce && message.supervisorPid === record.supervisorPid) finish(true);
-    };
-    const onExit = () => finish(false);
-    record.child.on("message", onMessage);
-    record.child.once("exit", onExit);
-    try { record.child.send({ type: "verify", nonce: record.nonce }); } catch { finish(false); }
-    function finish(value) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      record.child.off("message", onMessage);
-      record.child.off("exit", onExit);
-      resolveVerified(value);
-    }
-  });
+  return completed;
 }
 
 function liveChild(child) { return child.exitCode === null && child.signalCode === null; }
@@ -283,7 +260,6 @@ function waitForChildExit(child, timeoutMs) {
   if (!liveChild(child)) return Promise.resolve(true);
   return new Promise((resolveExit) => {
     const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref();
     child.once("exit", onExit);
     function onExit() { finish(true); }
     function finish(value) { clearTimeout(timer); child.off("exit", onExit); resolveExit(value); }
@@ -306,7 +282,7 @@ function waitForAuthenticatedMessage(record, type, timeoutMs) {
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref();
     const onMessage = (message) => {
-      if (message?.type === type && message.nonce === record.nonce && message.supervisorPid === record.supervisorPid) finish(true);
+      if (authenticatedSupervisorMessage(message, record, type)) finish(true);
     };
     const onExit = () => finish(false);
     record.child.on("message", onMessage);
@@ -320,6 +296,39 @@ function waitForAuthenticatedMessage(record, type, timeoutMs) {
       resolveMatched(value);
     }
   });
+}
+
+function waitForAuthenticatedExit(record, type, timeoutMs) {
+  return new Promise((resolveComplete) => {
+    let settled = false;
+    let acknowledged = false;
+    let exited = !liveChild(record.child);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const onMessage = (message) => {
+      if (!authenticatedSupervisorMessage(message, record, type)) return;
+      acknowledged = true;
+      if (exited) finish(true);
+    };
+    const onExit = () => {
+      exited = true;
+      if (acknowledged) finish(true);
+    };
+    record.child.on("message", onMessage);
+    record.child.once("exit", onExit);
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      record.child.off("message", onMessage);
+      record.child.off("exit", onExit);
+      resolveComplete(value);
+    }
+  });
+}
+
+function authenticatedSupervisorMessage(message, record, type) {
+  return message?.type === type && message.nonce === record.nonce
+    && message.supervisorPid === record.supervisorPid && message.groupPid === record.groupPid;
 }
 
 export async function failTimedOutStart({ worktree, owned, pid, nonce, port, logPath }) {

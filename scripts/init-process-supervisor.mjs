@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
+const ANCHOR_PATH = fileURLToPath(new URL("./init-command-group-anchor.mjs", import.meta.url));
 const nonce = process.env.HARNESS_INIT_SUPERVISOR_NONCE;
 let config;
 try { config = JSON.parse(process.env.HARNESS_INIT_SUPERVISOR_CONFIG ?? ""); } catch {}
@@ -7,78 +10,187 @@ if (!nonce || !config || typeof config.command !== "string" || !Array.isArray(co
   throw new Error("init process supervisor requires an authenticated command configuration");
 }
 
-let child;
-let childSettled = false;
+let anchor;
+let anchorNonce;
+let commandPid;
 let detached = false;
-let terminating = false;
+let lifecycle;
+let outcomeSent = false;
 let started = false;
 
-for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => beginTermination(signal));
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { void beginCleanup(signal); });
+process.on("disconnect", () => {
+  if (!detached) void beginCleanup("SIGTERM");
+});
 process.on("message", (message) => {
   if (!message || message.nonce !== nonce) return;
-  if (message.type === "start" && !started && !terminating) startCommand();
-  else if (message.type === "terminate") beginTermination("SIGTERM", true);
-  else if (message.type === "verify" && terminating) send({ type: "verified", nonce, supervisorPid: process.pid });
-  else if (message.type === "detach" && started && !terminating) {
-    detached = true;
-    send({ type: "detached", nonce, supervisorPid: process.pid }, () => process.disconnect());
-  }
-});
-process.on("disconnect", () => {
-  if (!detached && !childSettled) beginTermination("SIGTERM");
+  if (message.type === "start" && !started && !lifecycle) startAnchor();
+  else if (message.type === "terminate") void beginCleanup("SIGTERM", true, message);
+  else if (message.type === "detach" && started && !lifecycle) void beginDetach();
 });
 
 send({ type: "supervisor-ready", nonce, supervisorPid: process.pid });
 
-function startCommand() {
+function startAnchor() {
   started = true;
-  const childEnv = { ...process.env };
-  for (const key of ["HARNESS_INIT_SUPERVISOR_NONCE", "HARNESS_INIT_SUPERVISOR_CONFIG", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"]) delete childEnv[key];
-  childEnv.HARNESS_INIT_SUPERVISOR_PID = String(process.pid);
-  childEnv.HARNESS_INIT_LAUNCHER_PID = String(process.ppid);
-  const stdio = Array.from({ length: config.stdioLength }, () => "inherit");
+  anchorNonce = randomUUID();
+  const anchorConfig = JSON.stringify({ ...config, supervisorPid: process.pid, launcherPid: process.ppid });
+  const anchorEnv = { ...process.env, HARNESS_INIT_ANCHOR_NONCE: anchorNonce, HARNESS_INIT_ANCHOR_CONFIG: anchorConfig };
+  const stdio = [...Array.from({ length: config.stdioLength }, () => "inherit"), "ipc"];
   try {
-    child = spawn(config.command, config.args, { cwd: config.cwd, env: childEnv, stdio });
+    anchor = spawn(process.execPath, [ANCHOR_PATH], { cwd: config.cwd, detached: true, env: anchorEnv, stdio });
   } catch (error) {
-    send({ type: "outcome", nonce, error: serializeError(error) }, () => process.exit(1));
+    emitOutcome({ error: serializeError(error) });
     return;
   }
-  child.once("spawn", () => send({ type: "started", nonce, supervisorPid: process.pid, commandPid: child.pid }));
-  child.once("error", (error) => finishCommand({ error: serializeError(error) }));
-  child.once("close", (code, signal) => finishCommand({ code, signal }));
-}
-
-function beginTermination(signal = "SIGTERM", authenticated = false) {
-  if (terminating) return;
-  terminating = true;
-  send({ type: "terminating", nonce, supervisorPid: process.pid, authenticated });
-  if (!child) {
-    process.exitCode = signal === "SIGINT" ? 130 : 143;
-    process.disconnect?.();
-    return;
-  }
-  try { process.kill(-process.pid, signal); } catch { try { child.kill(signal); } catch {} }
-  // If the authenticated parent disappears, the still-live group leader owns
-  // the only safe numeric group identity and must finish cleanup itself.
-  if (!process.connected) {
-    setTimeout(() => {
-      try { process.kill(-process.pid, "SIGKILL"); } catch { process.kill(process.pid, "SIGKILL"); }
-    }, 500);
-  }
-}
-
-function finishCommand(outcome) {
-  if (childSettled) return;
-  childSettled = true;
-  send({ type: "outcome", nonce, ...outcome }, () => {
-    if (terminating) return;
-    // Stay group leader until the authenticated parent has observed the
-    // outcome and asked us to clean the whole group. A detached/orphaned
-    // supervisor owns that cleanup itself.
-    if (process.connected) return;
-    beginTermination("SIGTERM");
+  anchor.on("message", onAnchorMessage);
+  anchor.once("error", (error) => emitOutcome({ error: serializeError(error) }));
+  anchor.once("exit", (code, signal) => {
+    if (!outcomeSent) emitOutcome({ error: { message: `command group anchor exited before command outcome (${signal ?? code})` } });
+    if (!lifecycle && !detached) process.exitCode = 1;
+    if (detached) process.exit(code ?? 1);
   });
 }
+
+function onAnchorMessage(message) {
+  if (!message || message.nonce !== anchorNonce || message.anchorPid !== anchor?.pid) return;
+  if (message.type === "anchor-ready") {
+    try { anchor.send({ type: "start", nonce: anchorNonce }); } catch (error) { emitOutcome({ error: serializeError(error) }); }
+  } else if (message.type === "started") {
+    commandPid = message.commandPid;
+    send({ type: "started", nonce, supervisorPid: process.pid, groupPid: anchor.pid, commandPid });
+  } else if (message.type === "outcome") {
+    emitOutcome(message.error ? { error: message.error } : { code: message.code, signal: message.signal });
+  }
+}
+
+function emitOutcome(outcome) {
+  if (outcomeSent) return;
+  outcomeSent = true;
+  send({ type: "outcome", nonce, supervisorPid: process.pid, ...outcome });
+}
+
+function beginCleanup(signal = "SIGTERM", authenticated = false, settings = {}) {
+  if (lifecycle) return lifecycle;
+  lifecycle = cleanupGroup(signal, authenticated, settings).catch(() => false).then((reaped) => {
+    if (reaped) {
+      send({ type: "group-reaped", nonce, supervisorPid: process.pid, groupPid: anchor?.pid }, () => process.exit(0));
+    } else {
+      process.exitCode = 1;
+      process.disconnect?.();
+    }
+    return reaped;
+  });
+  return lifecycle;
+}
+
+async function cleanupGroup(signal, authenticated, settings) {
+  send({ type: "terminating", nonce, supervisorPid: process.pid, groupPid: anchor?.pid, authenticated });
+  if (!anchor) return true;
+  const graceMs = positiveTimeout(settings.graceMs, 500);
+  const killWaitMs = positiveTimeout(settings.killWaitMs, 1_000);
+  if (!await verifyAnchor(Math.min(250, killWaitMs)) || !liveChild(anchor)) return false;
+  try { process.kill(-anchor.pid, signal); } catch { return false; }
+  await delay(graceMs);
+  if (!await verifyAnchor(Math.min(250, killWaitMs)) || !liveChild(anchor)) return false;
+  try { process.kill(-anchor.pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") return false; }
+  const [anchorGone, commandGone, groupGone] = await Promise.all([
+    waitForChildExit(anchor, killWaitMs),
+    waitForPidExit(commandPid, killWaitMs),
+    waitForGroupExit(anchor.pid, killWaitMs),
+  ]);
+  return anchorGone && commandGone && groupGone;
+}
+
+function verifyAnchor(timeoutMs) {
+  if (!liveChild(anchor) || !anchor.connected) return Promise.resolve(false);
+  return waitForAnchorMessage("verified", timeoutMs, () => anchor.send({ type: "verify", nonce: anchorNonce }));
+}
+
+async function beginDetach() {
+  if (lifecycle) return;
+  const detachLifecycle = (async () => {
+    if (!anchor || !await verifyAnchor(250)) return false;
+    const acknowledged = await waitForAnchorMessage("detached", 500, () => anchor.send({ type: "detach", nonce: anchorNonce }));
+    if (!acknowledged || !liveChild(anchor)) return false;
+    detached = true;
+    send({ type: "detached", nonce, supervisorPid: process.pid, groupPid: anchor.pid }, () => process.disconnect());
+    return true;
+  })();
+  lifecycle = detachLifecycle;
+  const succeeded = await detachLifecycle;
+  lifecycle = undefined;
+  if (!succeeded) void beginCleanup("SIGTERM");
+}
+
+function waitForAnchorMessage(type, timeoutMs, request) {
+  return new Promise((resolveMatched) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    const onMessage = (message) => {
+      if (message?.type === type && message.nonce === anchorNonce && message.anchorPid === anchor.pid) finish(true);
+    };
+    const onExit = () => finish(false);
+    anchor.on("message", onMessage);
+    anchor.once("exit", onExit);
+    try { request(); } catch { finish(false); }
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      anchor.off("message", onMessage);
+      anchor.off("exit", onExit);
+      resolveMatched(value);
+    }
+  });
+}
+
+function liveChild(child) { return child && child.exitCode === null && child.signalCode === null; }
+
+function waitForChildExit(child, timeoutMs) {
+  if (!liveChild(child)) return Promise.resolve(true);
+  return new Promise((resolveExit) => {
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once("exit", onExit);
+    function onExit() { finish(true); }
+    function finish(value) { clearTimeout(timer); child.off("exit", onExit); resolveExit(value); }
+  });
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!pidAlive(pid)) return true;
+    await delay(10);
+  }
+  return !pidAlive(pid);
+}
+
+async function waitForGroupExit(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!groupAlive(pgid)) return true;
+    await delay(10);
+  }
+  return !groupAlive(pgid);
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+function groupAlive(pgid) {
+  try { process.kill(-pgid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+function positiveTimeout(value, fallback) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function delay(ms) { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
 
 function send(message, callback) {
   if (!process.connected) { callback?.(); return; }
