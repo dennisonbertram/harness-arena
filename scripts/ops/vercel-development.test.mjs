@@ -106,21 +106,34 @@ function jsonResponse(value) {
   });
 }
 
-function verifierApiFetch({ aliases, envs }) {
+function productionDomain(overrides = {}) {
+  return {
+    name: "harness-arena-development.vercel.app",
+    apexName: "vercel.app",
+    projectId: DEVELOPMENT_PROJECT_ID,
+    verified: true,
+    ...overrides,
+  };
+}
+
+function verifierApiFetch({ aliases, domains, domainsAfter, envs }) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
     accountId: TEAM_ID,
     name: DEVELOPMENT_PROJECT_NAME,
     link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-    alias: aliases ?? [{
-      domain: "harness-arena-development.vercel.app",
-      environment: "production",
-      target: "PRODUCTION",
-    }],
+    alias: aliases ?? [],
   };
+  let domainReads = 0;
   return vi.fn(async (input) => {
     const url = new URL(input);
     if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+    if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+      domainReads += 1;
+      return jsonResponse({
+        domains: domainReads === 1 ? (domains ?? [productionDomain()]) : (domainsAfter ?? domains ?? [productionDomain()]),
+      });
+    }
     if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
       return jsonResponse({ envs: envs ?? [
         { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
@@ -273,6 +286,20 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("uses the verified stable domain inventory when project aliases are empty", async () => {
+    const fetchImpl = verifierApiFetch({ aliases: [] });
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+
+    expect(fetchImpl.mock.calls.filter(([input]) => new URL(input).pathname.endsWith("/domains"))).toHaveLength(2);
+  });
+
   it.each([
     [
       "copied duplicate metadata",
@@ -313,15 +340,26 @@ describe("bounded read-only Vercel adapter", () => {
   });
 
   it.each([
-    ["redirect", { redirect: manifest().live.aliases[0], target: "PRODUCTION" }],
-    ["live-alias target", { target: manifest().live.aliases[0] }],
-    ["live-project target", { target: LIVE_PROJECT_ID }],
-  ])("preserves alias %s metadata and rejects routing the Development host to a live identity", async (_name, routing) => {
-    const domain = "harness-arena-development.vercel.app";
+    ["redirect", productionDomain({ redirect: manifest().live.aliases[0] })],
+    ["git branch", productionDomain({ gitBranch: "dev" })],
+    ["custom environment", productionDomain({ customEnvironmentId: "env_development" })],
+    ["unverified", productionDomain({ verified: false })],
+    ["malformed", { ...productionDomain(), name: 7 }],
+  ])("rejects unsafe project domain inventory entries: %s", async (_name, domain) => {
     const api = subject.createReadOnlyVercelApi({
-      fetchImpl: verifierApiFetch({
-        aliases: [{ domain, environment: "production", ...routing }],
-      }),
+      fetchImpl: verifierApiFetch({ domains: [domain] }),
+    });
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("returns a live alias only for the preflight to reject", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ domains: [productionDomain({ name: manifest().live.aliases[0] })] }),
     });
     const actual = await api.inspect({
       projectId: DEVELOPMENT_PROJECT_ID,
@@ -330,8 +368,23 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
     });
 
-    expect(actual.project.aliases[0]).toMatchObject({ domain, ...routing });
+    expect(actual.project.aliases[0].domain).toBe(manifest().live.aliases[0]);
     await expectDenied(dependencies({ readOnlyApi: { inspect: vi.fn(async () => actual) } }));
+  });
+
+  it("fails closed when the domain inventory changes during inspection", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        domainsAfter: [productionDomain({ name: "replacement-development.vercel.app" })],
+      }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
   });
 
   it("uses only fixed GET requests, rechecks project settings, and decrypts only CALLBACK_BASE", async () => {
@@ -341,12 +394,15 @@ describe("bounded read-only Vercel adapter", () => {
       accountId: TEAM_ID,
       name: DEVELOPMENT_PROJECT_NAME,
       link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-      alias: [{ domain: "harness-arena-development.vercel.app", environment: "production", target: "PRODUCTION" }],
+      alias: [],
     };
     const fetchImpl = vi.fn(async (input, options) => {
       const url = new URL(input);
       requests.push({ url, options });
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+        return jsonResponse({ domains: [productionDomain()] });
+      }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [
           { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
@@ -375,7 +431,7 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
     })).resolves.toEqual(inspection());
 
-    expect(requests).toHaveLength(5);
+    expect(requests).toHaveLength(7);
     expect(requests.every(({ options }) => options.method === "GET")).toBe(true);
     expect(requests.every(({ options }) => options.redirect === "error")).toBe(true);
     expect(requests.filter(({ url }) => url.searchParams.get("decrypt") === "true"))
@@ -415,6 +471,9 @@ describe("bounded read-only Vercel adapter", () => {
           },
           alias: [{ domain: "harness-arena-development.vercel.app" }],
         });
+      }
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+        return jsonResponse({ domains: [productionDomain()] });
       }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [

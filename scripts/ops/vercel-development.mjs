@@ -159,13 +159,53 @@ function normalizeProject(value) {
       repo: value?.link?.repo,
       productionBranch: value?.link?.productionBranch,
     },
-    aliases: Array.isArray(value?.alias) ? value.alias.map((entry) => ({
-      domain: entry?.domain,
-      environment: entry?.environment,
-      target: entry?.target,
-      redirect: entry?.redirect,
-    })) : undefined,
   };
+}
+
+function normalizeProductionDomains(value, projectId) {
+  if (!exactKeys(value, ["domains"]) || !Array.isArray(value.domains)) throw denied();
+  const domains = value.domains.map((domain) => {
+    const allowed = [
+      "name",
+      "apexName",
+      "projectId",
+      "verified",
+      "redirect",
+      "redirectStatusCode",
+      "gitBranch",
+      "customEnvironmentId",
+      "updatedAt",
+      "createdAt",
+      "verification",
+    ];
+    if (
+      !domain
+      || typeof domain !== "object"
+      || Array.isArray(domain)
+      || Object.keys(domain).some((key) => !allowed.includes(key))
+      || typeof domain.name !== "string"
+      || !domain.name
+      || typeof domain.apexName !== "string"
+      || !domain.apexName
+      || domain.projectId !== projectId
+      || domain.verified !== true
+      || (domain.redirect !== undefined && domain.redirect !== null)
+      || (domain.redirectStatusCode !== undefined && domain.redirectStatusCode !== null)
+      || (domain.gitBranch !== undefined && domain.gitBranch !== null)
+      || (domain.customEnvironmentId !== undefined && domain.customEnvironmentId !== null)
+    ) {
+      throw denied();
+    }
+    return {
+      domain: domain.name,
+      environment: "production",
+      target: "PRODUCTION",
+      redirect: undefined,
+    };
+  });
+  domains.sort((left, right) => left.domain.localeCompare(right.domain));
+  if (domains.some((domain, index) => index > 0 && domain.domain === domains[index - 1].domain)) throw denied();
+  return domains;
 }
 
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
@@ -200,6 +240,8 @@ export function createReadOnlyVercelApi({
       try {
         const projectUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}`, { teamId });
         const projectBefore = normalizeProject(await get(token, projectUrl));
+        const domainsUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}/domains`, { teamId });
+        const domainsBefore = normalizeProductionDomains(await get(token, domainsUrl), projectId);
         const environments = await get(
           token,
           requestUrl(`/v10/projects/${encodeURIComponent(projectId)}/env`, { teamId }),
@@ -235,7 +277,11 @@ export function createReadOnlyVercelApi({
           requestUrl(`/v1/storage/stores/${encodeURIComponent(storeId)}`, { teamId }),
         );
         const projectAfter = normalizeProject(await get(token, projectUrl));
-        if (JSON.stringify(projectBefore) !== JSON.stringify(projectAfter)) throw denied();
+        const domainsAfter = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        if (
+          JSON.stringify(projectBefore) !== JSON.stringify(projectAfter)
+          || JSON.stringify(domainsBefore) !== JSON.stringify(domainsAfter)
+        ) throw denied();
         const projectConnections = Array.isArray(store?.projects) ? store.projects : [];
         const connection = projectConnections.find((item) => item?.projectId === projectId);
         const environmentStoreIds = [...new Set(entries.flatMap((entry) => {
@@ -243,7 +289,7 @@ export function createReadOnlyVercelApi({
           return typeof id === "string" && id ? [id] : [];
         }))];
         return {
-          project: projectAfter,
+          project: { ...projectAfter, aliases: domainsAfter },
           environment: {
             callbackBase: callback?.value,
             networkModeConfigured: entries.some((entry) => entry?.key === "RUNNER_NETWORK_MODE"),
