@@ -1,31 +1,7 @@
 import type { Storage } from "./storage";
-import { buildRunnerTasks } from "./tasks-for-runner";
 import type { Run } from "./types";
-
-const REAP_SAFETY_MARGIN_MINUTES = 10;
-const REAP_WINDOW_ROUNDING_MINUTES = 10;
-
-// A healthy runner emits no events between task.started and the end of the
-// agent/verifier stages. Derive the stale window from the longest task instead
-// of maintaining a second hand-written timeout that can drift below it.
-function defaultReapStaleMinutes(): number {
-  const maxQuietSeconds = Math.max(
-    0,
-    ...buildRunnerTasks().map((task) => task.agent_timeout_sec + task.verifier_timeout_sec),
-  );
-  const requiredMinutes = maxQuietSeconds / 60 + REAP_SAFETY_MARGIN_MINUTES;
-  return (
-    Math.ceil(requiredMinutes / REAP_WINDOW_ROUNDING_MINUTES) *
-    REAP_WINDOW_ROUNDING_MINUTES
-  );
-}
-
-export function reapThresholdMs(): number {
-  const fallbackMinutes = defaultReapStaleMinutes();
-  const configured = Number(process.env.REAP_STALE_MINUTES ?? fallbackMinutes);
-  const minutes = Number.isFinite(configured) && configured > 0 ? configured : fallbackMinutes;
-  return minutes * 60 * 1000;
-}
+import { isRunOperationallyStale, reapThresholdMs } from "./stale-policy";
+export { reapThresholdMs } from "./stale-policy";
 
 // A run is a reap candidate only if it's actively occupying a sandbox slot: a
 // running run, or a QUEUED run that the dispatcher has claimed (dispatched_at
@@ -53,14 +29,7 @@ async function markSubmissionFailed(storage: Storage, run: Run): Promise<void> {
  * as activity, so it isn't reaped before its sandbox posts its first event.
  * Terminal runs and undispatched-queued (waiting) runs are never reaped.
  */
-export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now()): boolean {
-  if (!isReapCandidate(run)) return false;
-  const lastActivity = Math.max(
-    new Date(lastEventTs).getTime(),
-    run.dispatched_at ? new Date(run.dispatched_at).getTime() : 0,
-  );
-  return now - lastActivity > reapThresholdMs();
-}
+export function shouldReap(run: Run, lastEventTs: string, now: number = Date.now()): boolean { return isRunOperationallyStale(run,lastEventTs,now); }
 
 /**
  * Reaps a single run if it's stale, returning the (possibly updated) run.

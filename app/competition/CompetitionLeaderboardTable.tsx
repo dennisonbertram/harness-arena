@@ -128,6 +128,7 @@ function ComparisonCell({
 export function CompetitionLeaderboardTable({
   ranked,
   belowBaseline = [],
+  unpriced = 0,
   baselineRow = null,
   rankless = false,
   baselineModel = "",
@@ -138,6 +139,7 @@ export function CompetitionLeaderboardTable({
 }: {
   ranked: CompetitionRow[];
   belowBaseline?: CompetitionRow[];
+  unpriced?: number;
   currentGithubLogin: string | undefined;
   /** Rendered between ranked and below-baseline rows: the bar every ranked entry cleared. */
   baselineRow?: CompetitionRow | null;
@@ -206,7 +208,10 @@ export function CompetitionLeaderboardTable({
             {row.tasksPassed}/{row.totalTasks}
           </div>
         </td>
-        <td style={cellStyle} className="tabular-nums">{formatUsd(row.totalCostUsd)}</td>
+        <td style={cellStyle} className="tabular-nums">
+          <div>{formatUsd(row.totalCostUsd)}</div>
+          <div style={{ color: "var(--gray-700)", fontSize: 11 }}>billed {formatUsd(row.billedCostUsd)}</div>
+        </td>
         <CostPerSolvedTaskCell row={row} baselineRow={baselineRow} />
         <ComparisonCell row={row} reference={baselineRow} label="baseline" column="baseline" />
         <ComparisonCell row={row} reference={nextRow} label={nextLabel} column="next" />
@@ -226,7 +231,7 @@ export function CompetitionLeaderboardTable({
           {!rankless && <th scope="col" className="label" style={cellStyle}>Rank</th>}
           <th scope="col" className="label" style={cellStyle}>Entrant</th>
           <th scope="col" className="label" style={cellStyle}>Tasks solved</th>
-          <th scope="col" className="label" style={comparisonCellStyle}>Total run cost</th>
+          <th scope="col" className="label" style={comparisonCellStyle}>Normalized run cost</th>
           <th scope="col" className="label" style={comparisonCellStyle}>Cost / solved task</th>
           <th scope="col" className="label" style={comparisonCellStyle}>vs baseline</th>
           <th scope="col" className="label" style={comparisonCellStyle}>vs next</th>
@@ -268,7 +273,10 @@ export function CompetitionLeaderboardTable({
                 {baselineRow.tasksPassed}/{baselineRow.totalTasks}
               </div>
             </td>
-            <td style={cellStyle} className="tabular-nums">{formatUsd(baselineRow.totalCostUsd)}</td>
+            <td style={cellStyle} className="tabular-nums">
+              <div>{formatUsd(baselineRow.totalCostUsd)}</div>
+              <div style={{ color: "var(--gray-700)", fontSize: 11 }}>billed {formatUsd(baselineRow.billedCostUsd)}</div>
+            </td>
             <CostPerSolvedTaskCell row={baselineRow} />
             <td data-comparison-column="baseline" style={comparisonCellStyle} className="tabular-nums">—</td>
             <td data-comparison-column="next" style={comparisonCellStyle} className="tabular-nums">—</td>
@@ -281,7 +289,15 @@ export function CompetitionLeaderboardTable({
           <tr data-row-kind="baseline-state" style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
             <td colSpan={columnCount} style={{ padding: "16px 12px", color: baselineState === "rejected" ? "var(--red-700)" : "var(--gray-700)" }}>
               {baselineState === "running" && "Baseline running…"}
+              {baselineState === "unpriced" && "Baseline completed before normalized pricing was recorded — backfill required before ranking."}
               {baselineState === "rejected" && `Baseline was rejected by the fairness judge — this needs admin attention.${baselineRejectionReason ? ` Reason: ${baselineRejectionReason}` : ""}`}
+            </td>
+          </tr>
+        )}
+        {unpriced > 0 && (
+          <tr data-row-kind="unpriced" style={{ borderBottom: "1px solid var(--gray-alpha-400)" }}>
+            <td colSpan={columnCount} style={{ padding: "12px", color: "var(--gray-700)" }}>
+              {unpriced} completed {unpriced === 1 ? "entry is" : "entries are"} withheld from ranking because normalized pricing is unavailable or uses a different table version.
             </td>
           </tr>
         )}

@@ -71,7 +71,7 @@ describe("CompetitionPage", () => {
     expect(html).toContain("Find the best prompt");
     expect(html).toContain("Submit a system prompt for this harness, model, and provider.");
     expect(html).toContain("Every prompt gets one run.");
-    expect(html).toContain("Highest task score wins; ties go to the lower total cost.");
+    expect(html).toContain("ties use a fixed-table normalized cost");
     expect(html).not.toContain("The main arena uses five runs, so its ranking is separate.");
   });
 
@@ -145,6 +145,7 @@ describe("CompetitionPage", () => {
       arena: "harness-arena",
       harness: "pi",
       model: "zai/glm-5.2",
+      pricing_version: "inkling-small-2026-08-03-v1",
       status: "live",
       created_at: "2026-07-25T00:00:00.000Z",
       ...overrides,
@@ -164,6 +165,8 @@ describe("CompetitionPage", () => {
       status: "completed",
       tasks_passed: 10,
       total_cost_usd: 1.0,
+      normalized_total_cost_usd: 1.0,
+      pricing_version: "inkling-small-2026-08-03-v1",
       task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }),
       created_at: "2026-07-25T00:00:00.000Z",
       ...overrides,
@@ -452,7 +455,7 @@ describe("CompetitionPage", () => {
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain('aria-label="Total inference cost versus tasks passed for each scored run (hover a point for detail)"');
+    expect(html).toContain('aria-label="Normalized scoring cost versus tasks passed for each scored run (hover a point for detail)"');
     expect(html).toContain("one dot per scored run");
     expect(html.indexOf('aria-label="Total inference cost versus tasks passed')).toBeLessThan(html.indexOf("Leaderboard"));
     expect((html.match(/href="\/runs\/r-/g) ?? []).length).toBe(3);
@@ -571,6 +574,7 @@ function defaultCompetition(overrides: Partial<Competition> = {}): Competition {
     arena: "harness-arena",
     harness: "pi",
     model: "zai/glm-5.2",
+    pricing_version: "inkling-small-2026-08-03-v1",
     prize_amount_usd: null,
     prize_cadence: null,
     status: "live",
@@ -598,6 +602,8 @@ function run(id: string, overrides: Partial<Run> = {}): Run {
     status: "completed",
     tasks_passed: 10,
     total_cost_usd: 1,
+    normalized_total_cost_usd: 1,
+    pricing_version: "inkling-small-2026-08-03-v1",
     task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }),
     created_at: "2026-07-25T00:00:00.000Z",
     ...overrides,

@@ -26,6 +26,8 @@ interface Props {
   padding: number;
   xMax: number;
   yMax: number;
+  /** Axis/accessible label for the cost metric; defaults to actual inference cost. */
+  costLabel?: string;
   /** Optional controlled hover state for linked views such as a leaderboard. */
   hoveredRunId?: string | null;
   onHoveredRunIdChange?: (runId: string | null) => void;
@@ -34,7 +36,17 @@ interface Props {
 // Full-width cost-vs-tasks chart. Detail is revealed on hover (the dots
 // cluster tightly, so static labels overlapped) via an SVG-native tooltip
 // that scales with the chart.
-export function ScatterChart({ items, width, height, padding, xMax, yMax, hoveredRunId, onHoveredRunIdChange }: Props) {
+export function ScatterChart({
+  items,
+  width,
+  height,
+  padding,
+  xMax,
+  yMax,
+  costLabel = "Total inference cost",
+  hoveredRunId,
+  onHoveredRunIdChange,
+}: Props) {
   const [uncontrolledHoveredRunId, setUncontrolledHoveredRunId] = useState<string | null>(null);
   const hovered = hoveredRunId === undefined ? uncontrolledHoveredRunId : hoveredRunId;
   const setHovered = onHoveredRunIdChange ?? setUncontrolledHoveredRunId;
@@ -52,7 +64,7 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax, hovere
       width="100%"
       style={{ display: "block", color: "var(--gray-1000)" }}
       role="img"
-      aria-label="Total inference cost versus tasks passed for each scored run (hover a point for detail)"
+      aria-label={`${costLabel} versus tasks passed for each scored run (hover a point for detail)`}
     >
       {/* Horizontal gridlines + Y ticks */}
       {yTicks.map((t) => {
@@ -93,7 +105,7 @@ export function ScatterChart({ items, width, height, padding, xMax, yMax, hovere
         fill="var(--gray-900)"
         className="label"
       >
-        Total inference cost (USD)
+        {costLabel} (USD)
       </text>
       <text
         x={18}

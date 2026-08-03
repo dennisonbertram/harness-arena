@@ -10,6 +10,8 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
+    "ops:status": "node scripts/ops/agent-status.mjs",
+    "verify:development-environment": "node scripts/ci/verify-development-environment.mjs",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {

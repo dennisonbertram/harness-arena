@@ -1,0 +1,863 @@
+import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { PassThrough } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
+import {
+  EXIT_CODES,
+  collectAgentOpsStatus,
+  collectPlatformEvidence,
+  createGitHubCommandAdapter,
+  createVercelCommandAdapter,
+  executeCli,
+  formatHumanStatus,
+  parseCliArgs,
+  parseGitHubExpectedSha,
+  parseVercelEnvironment,
+  parseVercelInspect,
+  parseVercelList,
+  parseVercelLogs,
+  redactSensitive,
+  requestOpsJson,
+  spawnCommand,
+} from "./agent-status.mjs";
+
+const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hardBound = async (promise, timeoutMs = 150) => {
+  const timedOut = Symbol("timed-out");
+  return Promise.race([promise, delay(timeoutMs).then(() => timedOut)]);
+};
+
+function healthyApiFetch({ missingCursor = false, missingHasMore = false, missingTerminalCursor = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, runRecords, integrity, serverPageLimit = false } = {}) {
+  return vi.fn(async (rawUrl, init) => {
+    expect(init.method).toBe("GET");
+    const url = new URL(rawUrl);
+    if (url.pathname === "/api/health") return jsonResponse({ ok: healthOk, sha: "abc123", storage: "up", gateway_key_present: true, runner_secret_present: true });
+    if (url.pathname === "/api/ops/v1") return jsonResponse({ schema_version: "ops.v1", kinds: advertisedKinds ?? [{ kind: "runs" }, { kind: "events" }, { kind: "competitions" }], inventory: "/api/ops/v1/inventory", read: "/api/ops/v1/read", summary: "/api/ops/v1/summary" });
+    if (url.pathname === "/api/ops/v1/summary") return jsonResponse({ schema_version: "ops.v1", scan: { complete: true }, latest: { runs: unknownFreshness ? null : "2026-08-03T00:05:00.000Z", events: "2026-08-03T00:06:00.000Z" }, run_states: { queued: 0, running: 1, failed: 0, stale: 0 }, integrity: integrity ?? { unreadable: 0, corrupt: 0, event_holes: 0 } });
+    if (url.pathname === "/api/ops/v1/inventory") {
+      const kind = url.searchParams.get("kind"), cursor = url.searchParams.get("cursor");
+      if (kind === "runs" && serverPageLimit) return jsonResponse({ schema_version: "ops.v1", kind, error: { code: "page_item_limit", limit: 100, received: 101 }, partial: true }, 503);
+      if (kind === "runs" && runRecords) return jsonResponse({ schema_version: "ops.v1", kind, items: runRecords, has_more: false, next_cursor: null });
+      if (kind === "runs" && runCount) return jsonResponse({ schema_version: "ops.v1", kind, items: Array.from({ length: runCount }, (_, index) => ({ pathname: `runs/r${index + 1}.json`, uploaded_at: "2026-08-03T00:05:00.000Z" })), has_more: false, next_cursor: null });
+      if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], ...(missingHasMore ? {} : { has_more: true }), next_cursor: missingCursor ? null : "runs-2" });
+      if (kind === "runs") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r2.json", uploaded_at: "2026-08-03T00:04:00.000Z" }], has_more: false, ...(missingTerminalCursor ? {} : { next_cursor: null }) });
+      if (kind === "events") return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "events/r1/0000000002.json", uploaded_at: "2026-08-03T00:06:00.000Z" }, { pathname: "events/r2/0000000003.json", uploaded_at: "2026-08-03T00:06:00.000Z" }], has_more: false, next_cursor: null });
+      return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "competitions/c1.json", uploaded_at: "2026-08-03T00:01:00.000Z" }], has_more: false, next_cursor: null });
+    }
+    if (url.pathname === "/api/ops/v1/read" && url.searchParams.get("kind") === "runs") {
+      const id = url.searchParams.get("id");
+      return jsonResponse({ schema_version: "ops.v1", kind: "runs", item: { id, status: id === "r1" ? "running" : "completed", sandbox_id: id === "r1" ? "sbx-1" : "sbx-2", callback_status: "delivered", total_cost_usd: 1.25, task_results: [{ passed: true }, { passed: false }], provider: "vercel-ai-gateway", model: "test/model" } });
+    }
+    if (url.pathname === "/api/ops/v1/read" && url.searchParams.get("kind") === "events") return jsonResponse({ schema_version: "ops.v1", kind: "events", item: { type: "task.completed", action: "judge", created_at: "2026-08-03T00:06:00.000Z" } });
+    throw new Error(`unexpected URL ${url}`);
+  });
+}
+
+const healthyPlatform = {
+  state: "ok",
+  expected_sha: "abc123",
+  deployment: { hostname: "arena.example", id: "dpl_1", state: "READY", created_at: "2026-08-03T00:00:00.000Z", ref: "main", sha: "abc123", git_dirty: false },
+  environment: { records: [], required_missing: [] },
+  logs: { recent_errors: [] },
+  cron: { state: "configured" },
+  command_provenance: [],
+};
+
+describe("CLI contract and command safety", () => {
+  it("implements the documented production invocation and safe environment mapping", () => {
+    expect(parseCliArgs(["--env", "production", "--json"], {})).toMatchObject({ environment: "production", json: true, expected_ref: "main", collect_platform: true });
+    expect(parseCliArgs(["--env", "development"], {})).toMatchObject({ environment: "development", json: false, expected_ref: "dev", collect_platform: true });
+    expect(parseCliArgs(["--env", "local"], {})).toMatchObject({ environment: "local", collect_platform: false, base_url: "http://127.0.0.1:3000" });
+    expect(() => parseCliArgs(["--env", "staging"], {})).toThrow("invalid_environment");
+    expect(() => parseCliArgs(["--env", "production"], { HARNESS_ARENA_PRODUCTION_URL: "https://user:pass@arena.example" })).toThrow("invalid_base_url");
+  });
+
+  it("uses exact Vercel argv grammars and rejects mutation and option injection", async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "", exitCode: 0 });
+    const adapter = createVercelCommandAdapter(run);
+    await expect(adapter.run(["ls", "--json", "--environment", "production"])).resolves.toMatchObject({ exitCode: 0 });
+    for (const args of [["env", "rm", "FOO", "production"], ["env", "add", "FOO", "production"], ["inspect", "--token=leak", "--json"], ["logs", "--evil", "--json", "--since", "1h"], ["deploy"], ["alias"], ["promote"], ["rollback"]]) await expect(adapter.run(args)).rejects.toThrow("unsafe_vercel_command");
+    expect(run).toHaveBeenCalledWith("vercel", ["ls", "--json", "--environment", "production"], expect.objectContaining({ timeoutMs: expect.any(Number) }));
+  });
+
+  it("uses an exact read-only GitHub expected-SHA grammar", async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: "abc123\n", stderr: "", exitCode: 0 });
+    const adapter = createGitHubCommandAdapter(run);
+    await expect(adapter.expectedSha("main")).resolves.toMatchObject({ exitCode: 0 });
+    expect(run).toHaveBeenCalledWith("gh", ["api", "repos/dennisonbertram/harness-arena/commits/main", "--jq", ".sha"], expect.any(Object));
+    await expect(adapter.expectedSha("--hostname=evil")).rejects.toThrow("unsafe_github_ref");
+  });
+});
+
+describe("fixture-driven evidence parsers", () => {
+  it("parses Vercel list metadata", () => expect(parseVercelList(fixture("vercel-list.json"))).toMatchObject({ deployments: [{ hostname: "arena.example", id: "dpl_1", state: "READY", ref: "main", sha: "abc123", git_dirty: false }] }));
+  it("parses Vercel inspect metadata and cron capability", () => expect(parseVercelInspect(fixture("vercel-inspect.json"))).toMatchObject({ deployment: { hostname: "arena.example", id: "dpl_1", created_at: "2026-08-03T00:00:00.000Z", ref: "main", sha: "abc123", git_dirty: false }, cron: { state: "configured" } }));
+  it("parses environment metadata without values and reports required names", () => {
+    const parsed = parseVercelEnvironment(fixture("vercel-env.json"), "production");
+    expect(parsed).toMatchObject({ records: expect.arrayContaining([{ name: "OPS_READ_TOKEN", targets: ["production"], type: "encrypted", created_at: expect.any(String), age_ms: expect.any(Number) }]), required_missing: ["OPS_READ_CURSOR_SECRET"] });
+    expect(JSON.stringify(parsed)).not.toContain("super-secret-value");
+  });
+  it("parses recent Vercel errors from bounded NDJSON", () => expect(parseVercelLogs(fixture("vercel-logs.ndjson"))).toMatchObject({ recent_errors: [{ level: "error", status_code: 503, message: "gateway failed Bearer [REDACTED]" }] }));
+  it("parses only a complete expected GitHub SHA", () => { expect(parseGitHubExpectedSha(fixture("github-sha.txt"))).toBe("abc123"); expect(() => parseGitHubExpectedSha("main\nabc123")).toThrow("invalid_expected_sha"); });
+
+  it("maps requested environments to actual Vercel metadata targets", async () => {
+    const commandRunner = vi.fn(async (binary, args) => {
+      if (binary === "gh") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (args[0] === "ls") return { stdout: fixture("vercel-list.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "inspect") return { stdout: fixture("vercel-inspect.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "env") return { stdout: fixture("vercel-env-preview.json"), stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const development = await collectPlatformEvidence({ environment: "development", target: "preview.example", expectedRef: "dev", commandRunner });
+    expect(development).toMatchObject({ requested_environment: "development", environment: { target: "preview", required_missing: [] } });
+    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "preview", "--json"], expect.any(Object)]);
+    const production = await collectPlatformEvidence({ environment: "production", target: "arena.example", commandRunner });
+    expect(production).toMatchObject({ requested_environment: "production", environment: { target: "production" } });
+    const localRunner = vi.fn();
+    await expect(collectPlatformEvidence({ environment: "local", commandRunner: localRunner })).resolves.toMatchObject({ requested_environment: "local", state: "not_applicable" });
+    expect(localRunner).not.toHaveBeenCalled();
+  });
+});
+
+describe("ops evidence and verdict honesty", () => {
+  it("rejects a real 302 without issuing a second request or forwarding the bearer token", async () => {
+    const requests = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        url: request.url,
+        authorization: request.headers.authorization,
+        contentLength: request.headers["content-length"],
+        transferEncoding: request.headers["transfer-encoding"],
+      });
+      if (request.url === "/api/health") {
+        response.writeHead(302, { location: "/credential-capture" });
+        response.end("redirecting");
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+    const port = await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+    });
+    try {
+      const result = await requestOpsJson({ baseUrl: new URL(`http://127.0.0.1:${port}`), path: "/api/health", token: "redirect-secret", timeoutMs: 1_000, retries: 0 });
+      expect(result).toMatchObject({ ok: false, status: 302, error: "redirect_rejected", kind: "redirect", attempts: 1 });
+      expect(requests).toEqual([{ url: "/api/health", authorization: "Bearer redirect-secret", contentLength: undefined, transferEncoding: undefined }]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("rejects every redirect status without reading its body or retrying", async () => {
+    const statuses = [300, 301, 302, 303, 307, 308, 399];
+    const cancellations = [];
+    const requests = statuses.map((status) => {
+      const cancel = vi.fn(() => new Promise(() => {}));
+      cancellations.push(cancel);
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, headers: new Headers({ location: "/elsewhere" }), body: { locked: false, cancel }, json: vi.fn() });
+      return requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", token: "redirect-secret", fetchImpl, timeoutMs: 25, retries: 2 });
+    });
+    const results = await hardBound(Promise.all(requests));
+    expect(results).toEqual(statuses.map((status) => expect.objectContaining({ ok: false, status, error: "redirect_rejected", kind: "redirect", attempts: 1 })));
+    expect(cancellations.every((cancel) => cancel.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("bounds declared and chunked JSON responses and cancels overflow streams", async () => {
+    for (const declared of [true, false]) {
+      let cancelled = false;
+      const payload = JSON.stringify({ data: "x".repeat(64) });
+      const body = new ReadableStream({
+        start(controller) { controller.enqueue(Buffer.from(payload)); },
+        cancel() { cancelled = true; },
+      });
+      let signal;
+      const fetchImpl = vi.fn(async (_url, init) => {
+        signal = init.signal;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(declared ? { "content-length": String(Buffer.byteLength(payload)) } : {}),
+          body,
+          json: async () => JSON.parse(payload),
+        };
+      });
+      await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0, maxResponseBytes: 16 })).resolves.toMatchObject({
+        ok: false,
+        status: 200,
+        error: "response_too_large",
+        kind: "response_too_large",
+      });
+      expect(cancelled).toBe(true);
+      expect(signal.aborted).toBe(true);
+      expect(fetchImpl).toHaveBeenCalledWith("https://arena.example/api/health", expect.objectContaining({ method: "GET", redirect: "manual" }));
+    }
+  });
+
+  it("applies the request deadline while streaming and cleans up the reader", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      pull() { return new Promise(() => {}); },
+      cancel() { cancelled = true; },
+    });
+    let signal;
+    const fetchImpl = vi.fn(async (_url, init) => {
+      signal = init.signal;
+      return { ok: true, status: 200, headers: new Headers(), body, json: async () => { throw new Error("legacy unbounded json path called"); } };
+    });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 10, retries: 0, maxResponseBytes: 16 })).resolves.toMatchObject({ error: "request_timeout", kind: "timeout" });
+    expect(cancelled).toBe(true);
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("fails closed on a malformed content-length before consuming JSON", async () => {
+    let cancelled = false;
+    const json = vi.fn(async () => ({ ok: true }));
+    const body = new ReadableStream({ cancel() { cancelled = true; } });
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "12, 13" }), body, json });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0 })).resolves.toMatchObject({
+      ok: false,
+      status: 200,
+      error: "invalid_content_length",
+      kind: "invalid_content_length",
+    });
+    expect(cancelled).toBe(true);
+    expect(json).not.toHaveBeenCalled();
+  });
+
+  it("settles within a hard bound when cancellation never settles across every cleanup path", async () => {
+    const never = () => new Promise(() => {});
+    const declaredCancel = vi.fn(never);
+    const malformedCancel = vi.fn(never);
+    const chunkedCancel = vi.fn(never);
+    const timeoutCancel = vi.fn(never);
+    const requests = [
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "99" }), body: { locked: false, cancel: declaredCancel } }), maxResponseBytes: 8, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "0, 1" }), body: { locked: false, cancel: malformedCancel } }), maxResponseBytes: 8, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value: Buffer.from("too large") }), cancel: chunkedCancel, releaseLock: vi.fn() }) } }), maxResponseBytes: 2, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), body: { getReader: () => ({ read: never, cancel: timeoutCancel, releaseLock: vi.fn() }) } }), maxResponseBytes: 8, timeoutMs: 10, retries: 0 }),
+    ];
+    const results = await hardBound(Promise.all(requests));
+    expect(results).toEqual([
+      expect.objectContaining({ error: "response_too_large" }),
+      expect.objectContaining({ error: "invalid_content_length" }),
+      expect.objectContaining({ error: "response_too_large" }),
+      expect.objectContaining({ error: "request_timeout" }),
+    ]);
+    expect([declaredCancel, malformedCancel, chunkedCancel, timeoutCancel].every((cancel) => cancel.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("absorbs thrown cancellation rejections without changing the bounded result", async () => {
+    const cancel = vi.fn(() => Promise.reject(new Error("hostile cancel rejection")));
+    const result = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "99" }), body: { locked: false, cancel } }),
+      maxResponseBytes: 8,
+      timeoutMs: 25,
+      retries: 0,
+    });
+    expect(result).toMatchObject({ error: "response_too_large" });
+    expect(cancel).toHaveBeenCalledOnce();
+    await delay(0);
+  });
+
+  it("fails closed without calling response.json when no readable stream is available", async () => {
+    const json = vi.fn(async () => ({ secret: "post-hoc" }));
+    let signal;
+    const fetchImpl = vi.fn(async (_url, init) => {
+      signal = init.signal;
+      return { ok: true, status: 200, headers: new Headers({ "content-length": "2" }), body: null, json };
+    });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 25, retries: 0 })).resolves.toMatchObject({
+      ok: false,
+      error: "response_stream_unavailable",
+      kind: "response_stream_unavailable",
+    });
+    expect(json).not.toHaveBeenCalled();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("treats a syntactically valid zero content-length as bounded malformed JSON", async () => {
+    const response = new Response("", { status: 200, headers: { "content-length": "0" } });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue(response), timeoutMs: 25, retries: 0 })).resolves.toMatchObject({ error: "invalid_json" });
+  });
+
+  it("bounds fetch itself and disposes a response that arrives after the absolute deadline", async () => {
+    let signal;
+    let resolveFetch;
+    const cancel = vi.fn(() => Promise.reject(new Error("late cancel rejection")));
+    const fetchImpl = vi.fn((_url, init) => {
+      signal = init.signal;
+      return new Promise((resolve) => { resolveFetch = resolve; });
+    });
+    const started = Date.now();
+    const pending = requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 10, retries: 0 });
+    const result = await hardBound(pending, 100);
+    expect(result).toMatchObject({ error: "request_timeout", kind: "timeout", attempts: 1 });
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(signal.aborted).toBe(true);
+    resolveFetch({ status: 200, headers: new Headers(), body: { locked: false, cancel } });
+    await delay(0);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("normalizes every hostile response surface behind one fail-closed boundary", async () => {
+    const forged = Object.assign(new Error("forged"), { code: "request_timeout", kind: "timeout" });
+    const validHeaders = () => new Headers();
+    const validBody = () => ({ locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }), cancel: vi.fn(), releaseLock: vi.fn() }) });
+    const cases = [
+      ["undefined response", undefined],
+      ["primitive response", 7],
+      ["throwing status", { get status() { throw forged; }, headers: validHeaders(), body: validBody() }],
+      ["invalid status type", { status: "200", headers: validHeaders(), body: validBody() }],
+      ["throwing headers", { status: 200, get headers() { throw forged; }, body: validBody() }],
+      ["throwing header getter", { status: 200, headers: { get() { throw forged; } }, body: validBody() }],
+      ["non-string content length", { status: 200, headers: { get: () => ({ value: "1" }) }, body: validBody() }],
+      ["disturbed body", { status: 200, headers: validHeaders(), bodyUsed: true, body: validBody() }],
+      ["locked body", { status: 200, headers: validHeaders(), body: { ...validBody(), locked: true } }],
+      ["throwing body getter", { status: 200, headers: validHeaders(), get body() { throw forged; } }],
+      ["throwing getReader", { status: 200, headers: validHeaders(), body: { locked: false, getReader() { throw forged; }, cancel: vi.fn() } }],
+      ["invalid reader", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => null, cancel: vi.fn() } }],
+      ["throwing read getter", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ get read() { throw forged; }, cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["forged read rejection", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: () => Promise.reject(forged), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid read result", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue("done"), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid done flag", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: "yes" }), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+      ["invalid chunk", { status: 200, headers: validHeaders(), body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value: { bytes: 2 } }), cancel: vi.fn(), releaseLock: vi.fn() }) } }],
+    ];
+    for (const [label, response] of cases) {
+      let signal;
+      const result = await hardBound(requestOpsJson({
+        baseUrl: new URL("https://arena.example"),
+        path: "/api/health",
+        fetchImpl: vi.fn(async (_url, init) => { signal = init.signal; return response; }),
+        timeoutMs: 25,
+        retries: 0,
+      }));
+      expect(result, label).toMatchObject({ ok: false, error: "invalid_response", kind: "transport", attempts: 1 });
+      expect(signal.aborted, label).toBe(true);
+    }
+  });
+
+  it("captures cleanup handles once and absorbs cancel/release failures without unhandled rejection", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const cancel = vi.fn(() => Promise.reject(new Error("cancel rejection")));
+    const releaseLock = vi.fn(() => { throw new Error("release throw"); });
+    const reader = { read: () => Promise.reject(Object.assign(new Error("hostile read"), { code: "response_too_large" })), cancel, releaseLock };
+    try {
+      const result = await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ status: 200, headers: new Headers(), body: { locked: false, getReader: () => reader } }), timeoutMs: 25, retries: 0 });
+      expect(result).toMatchObject({ error: "invalid_response", kind: "transport" });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(releaseLock).toHaveBeenCalledOnce();
+      await delay(0);
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  });
+
+  it("does not trust Proxy Symbol traps as internal failure brands", async () => {
+    let symbolReads = 0;
+    const forged = new Proxy(new Error("hostile transport"), {
+      get(target, key, receiver) {
+        if (typeof key === "symbol") { symbolReads += 1; return "request_timeout"; }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const fetchFailure = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockRejectedValue(forged),
+      timeoutMs: 25,
+      retries: 0,
+    });
+    const readFailure = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockResolvedValue({
+        status: 200,
+        headers: new Headers(),
+        body: { locked: false, getReader: () => ({ read: () => Promise.reject(forged), cancel: vi.fn(), releaseLock: vi.fn() }) },
+      }),
+      timeoutMs: 25,
+      retries: 0,
+    });
+    expect(fetchFailure).toMatchObject({ error: "request_failed", kind: "transport" });
+    expect(readFailure).toMatchObject({ error: "invalid_response", kind: "transport" });
+    expect(symbolReads).toBe(0);
+  });
+
+  it("normalizes hostile external fetch failures without inspecting them and aborts every attempt", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const mode of ["throw", "reject", "thenable"]) {
+        const traps = [];
+        const hostile = new Proxy(Object.create(null), {
+          getPrototypeOf() { traps.push("getPrototypeOf"); throw new Error("prototype trap"); },
+          get(_target, key) { traps.push(`get:${String(key)}`); throw new Error("get trap"); },
+          ownKeys() { traps.push("ownKeys"); throw new Error("keys trap"); },
+        });
+        let signal;
+        let calls = 0;
+        const fetchImpl = (_url, init) => {
+          calls += 1;
+          signal = init.signal;
+          if (mode === "throw") throw hostile;
+          if (mode === "reject") return Promise.reject(hostile);
+          return { then(_resolve, reject) { reject(hostile); } };
+        };
+        const result = await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0 });
+        expect(result).toEqual(expect.objectContaining({ ok: false, status: 0, error: "request_failed", kind: "transport", attempts: 1 }));
+        expect(result).not.toHaveProperty("detail");
+        expect(signal.aborted).toBe(true);
+        expect(calls).toBe(1);
+        expect(traps).toEqual([]);
+      }
+      await delay(0);
+      expect(unhandled).toEqual([]);
+    } finally { process.off("unhandledRejection", onUnhandled); }
+  });
+
+  it("checks intrinsic chunk byte lengths before any copy or attacker-controlled index read", async () => {
+    const typed = new Uint8Array(32);
+    const arrayBuffer = new ArrayBuffer(32);
+    const dataView = new DataView(new ArrayBuffer(32));
+    const proxied = new Proxy(new Uint8Array(32), {});
+    let indexReads = 0;
+    const forgedTypedArray = Object.setPrototypeOf({
+      length: 32,
+      get 0() { indexReads += 1; return 65; },
+    }, Uint8Array.prototype);
+    const values = [typed, arrayBuffer, dataView, proxied, forgedTypedArray];
+    const copiedInputs = [];
+    const originalFrom = Buffer.from;
+    const from = vi.spyOn(Buffer, "from").mockImplementation(function (...args) {
+      copiedInputs.push(args[0]);
+      return originalFrom.apply(Buffer, args);
+    });
+    try {
+      const results = [];
+      for (const value of values) {
+        const cancel = vi.fn();
+        results.push(await requestOpsJson({
+          baseUrl: new URL("https://arena.example"),
+          path: "/api/health",
+          fetchImpl: vi.fn().mockResolvedValue({
+            status: 200,
+            headers: new Headers(),
+            body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value }), cancel, releaseLock: vi.fn() }) },
+          }),
+          maxResponseBytes: 8,
+          timeoutMs: 25,
+          retries: 0,
+        }));
+        expect(cancel).toHaveBeenCalledOnce();
+      }
+      expect(results.slice(0, 2)).toEqual([
+        expect.objectContaining({ error: "response_too_large" }),
+        expect.objectContaining({ error: "response_too_large" }),
+      ]);
+      expect(results.slice(2)).toEqual([
+        expect.objectContaining({ error: "invalid_response" }),
+        expect.objectContaining({ error: "invalid_response" }),
+        expect.objectContaining({ error: "invalid_response" }),
+      ]);
+      expect(copiedInputs.some((input) => values.includes(input))).toBe(false);
+      expect(indexReads).toBe(0);
+    } finally { from.mockRestore(); }
+  });
+
+  it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
+    const fetchImpl = healthyApiFetch();
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(result).toMatchObject({ schema_version: "agent_ops_status.v1", verdict: "healthy", exit_code: EXIT_CODES.healthy, ops: { inventory: { runs: { records: 2, pages: 2, complete: true }, events: { records: 2 }, competitions: { records: 1 } }, runs: expect.arrayContaining([expect.objectContaining({ run_id: "r1", state: "running", sandbox_id: "sbx-1", callback: "delivered", cost_usd: 1.25, tasks: { total: 2, passed: 1 }, provider: "vercel-ai-gateway", latest_event: expect.objectContaining({ seq: 2, type: "task.completed", action: "judge" }) })]) } });
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("not-for-output");
+  });
+
+  it("classifies false health, partial pagination, and unknown freshness honestly", async () => {
+    const failed = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ healthOk: false }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(failed).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
+    const partial = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ missingCursor: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(partial).toMatchObject({ verdict: "degraded", exit_code: EXIT_CODES.degraded, ops: { inventory: { runs: { complete: false, error: "missing_cursor" } } } });
+    const unknown = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ unknownFreshness: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(unknown).toMatchObject({ verdict: "degraded", exit_code: EXIT_CODES.degraded, freshness: { state: "unknown" } });
+  });
+
+  it("separates access blockers, transient failures, invalid JSON, and bounded retries", async () => {
+    expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: vi.fn().mockResolvedValue(jsonResponse({ error: "unauthorized" }, 401)), platform: healthyPlatform })).verdict).toBe("access_blocked");
+    expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: vi.fn().mockRejectedValue(new Error("socket failed token=leak")), platform: healthyPlatform })).verdict).toBe("failed");
+    const invalidJson = vi.fn().mockResolvedValue(new Response("{", { status: 200, headers: { "content-type": "application/json" } }));
+    expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: invalidJson, platform: healthyPlatform })).verdict).toBe("failed");
+    const transient = vi.fn().mockResolvedValueOnce(jsonResponse({ error: "busy" }, 503)).mockResolvedValueOnce(jsonResponse({ ok: true }, 200));
+    expect(await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: transient, timeoutMs: 100, retries: 1 })).toMatchObject({ ok: true, attempts: 2 });
+  });
+
+  it("surfaces dirty/non-main/SHA drift, logs, missing env, cron, provider, and capability evidence", async () => {
+    const platform = { ...healthyPlatform, expected_sha: "expected", deployment: { ...healthyPlatform.deployment, sha: "served", ref: "feature", git_dirty: true }, environment: { records: [], required_missing: ["OPS_READ_TOKEN"] }, logs: { recent_errors: [{ level: "error", status_code: 500, message: "boom" }] }, cron: { state: "unknown" } };
+    const fetchImpl = healthyApiFetch();
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform, environment: "production" });
+    expect(result.verdict).toBe("failed");
+    expect(result.findings.map(({ code }) => code)).toEqual(expect.arrayContaining(["deployment_sha_drift", "deployment_ref_drift", "deployment_git_dirty", "required_environment_missing", "recent_runtime_errors", "cron_unknown"]));
+    expect(result.ops.capabilities).toMatchObject({ gateway: "present", callback: "present" });
+  });
+
+  it("requires a READY serving deployment with identity even when SHA and ref match", async () => {
+    for (const deployment of [
+      { ...healthyPlatform.deployment, state: "ERROR" },
+      { ...healthyPlatform.deployment, state: "FAILED" },
+      { ...healthyPlatform.deployment, state: "CANCELED" },
+      { ...healthyPlatform.deployment, state: null },
+      { ...healthyPlatform.deployment, id: null },
+      { ...healthyPlatform.deployment, hostname: null },
+      { ...healthyPlatform.deployment, sha: null },
+      { ...healthyPlatform.deployment, ref: null },
+    ]) {
+      const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch(), now: "2026-08-03T00:10:00.000Z", platform: { ...healthyPlatform, deployment }, environment: "production" });
+      expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
+      expect(result.findings.map(({ code }) => code)).toEqual(expect.arrayContaining([expect.stringMatching(/^deployment_(?:not_ready|lineage_missing)$/)]));
+    }
+  });
+
+  it("treats malformed pagination and advertised-kind/run caps as explicit degraded scope", async () => {
+    const malformed = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ missingHasMore: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(malformed).toMatchObject({ verdict: "degraded", exit_code: EXIT_CODES.degraded, ops: { inventory: { runs: { complete: false, error: "malformed_pagination" } } } });
+
+    const kindNames = ["runs", "events", ..."abcdefghijklmnopqrs"].map((kind) => ({ kind }));
+    const kinds = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ advertisedKinds: kindNames }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(kinds).toMatchObject({ verdict: "degraded", ops: { inventory_scope: { advertised: 21, selected: 20, truncated: true } } });
+    expect(kinds.findings.map(({ code }) => code)).toContain("inventory_kind_limit");
+
+    const runs = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 21 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(runs).toMatchObject({ verdict: "degraded", ops: { run_correlation_scope: { available: 21, selected: 20, truncated: true } } });
+    expect(runs.findings.map(({ code }) => code)).toContain("run_correlation_limit");
+
+    const pageOverflow = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 101 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(pageOverflow).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { records: 0, pages: 0, complete: false, error: "page_item_limit" } } } });
+    const serverPageOverflow = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ serverPageLimit: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(serverPageOverflow).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { complete: false, error: "page_item_limit" } } } });
+  });
+
+  it("classifies unreadable, corrupt, and event-hole integrity evidence as failed", async () => {
+    for (const integrity of [{ unreadable: 1, corrupt: 0, event_holes: 0 }, { unreadable: 0, corrupt: 1, event_holes: 0 }, { unreadable: 0, corrupt: 0, event_holes: 1 }]) {
+      const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ integrity }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+      expect(result).toMatchObject({ verdict: "failed", exit_code: EXIT_CODES.failed });
+      expect(result.findings).toContainEqual(expect.objectContaining({ code: "ops_integrity", severity: "failed" }));
+    }
+  });
+
+  it("turns malformed ops-root kinds into operational evidence, never usage exit 64", async () => {
+    for (const advertisedKinds of [{ runs: true }, [{ kind: "runs" }, { kind: "BAD!" }]]) {
+      const writes = [];
+      const exit = await executeCli(["--env", "local", "--json"], { fetchImpl: healthyApiFetch({ advertisedKinds }), env: {}, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
+      expect(exit).toBe(EXIT_CODES.failed);
+      expect(JSON.parse(writes[0])).toMatchObject({ verdict: "failed", findings: expect.arrayContaining([expect.objectContaining({ code: "ops_root_contract" })]) });
+    }
+  });
+
+  it("reserves exit 64 for argv misuse rather than invalid environment configuration", async () => {
+    const writes = [];
+    expect(await executeCli(["--env", "local", "--json"], { env: { HARNESS_ARENA_LOCAL_URL: "not a URL" }, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value) })).toBe(EXIT_CODES.failed);
+    expect(JSON.parse(writes[0])).toMatchObject({ verdict: "failed", findings: expect.arrayContaining([expect.objectContaining({ code: "environment_configuration" })]) });
+    expect(await executeCli(["--env", "bogus"], { env: {}, writeOut: vi.fn(), writeErr: vi.fn() })).toBe(EXIT_CODES.usage_error);
+  });
+
+  it("reports malformed run inventory records instead of silently dropping them", async () => {
+    const records = [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }, { pathname: "runs/../../hidden.json", uploaded_at: "2026-08-03T00:04:00.000Z" }];
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runRecords: records }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(result).toMatchObject({ verdict: "failed", ops: { run_correlation_scope: { available: 2, valid: 1, selected: 1, invalid: 1, truncated: false } } });
+    expect(result.findings).toContainEqual(expect.objectContaining({ code: "run_inventory_record_invalid" }));
+  });
+
+  it("requires an explicit null next_cursor on a terminal inventory page", async () => {
+    const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ missingTerminalCursor: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(result).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { complete: false, error: "malformed_pagination" } } } });
+  });
+});
+
+describe("redaction, platform wiring, and process bounds", () => {
+  it("sanitizes untrusted object and Error keys collision-safely while preserving truthful fields", () => {
+    const knownSecret = "client-known-key-needle";
+    const sentinels = {
+      knownKey: knownSecret,
+      credentialKey: "client-credential-key-sentinel",
+      errorKey: "client-error-key-sentinel",
+      urlUserA: "client-url-user-a",
+      urlPassA: "client-url-pass-a",
+      urlQueryA: "client-url-query-a",
+      urlUserB: "client-url-user-b",
+      urlPassB: "client-url-pass-b",
+      urlQueryB: "client-url-query-b",
+      sensitiveValue: "client-sensitive-value",
+      callbackValue: "client-callback-value",
+    };
+    const error = new Error("truthful error message");
+    error[`apiToken=${sentinels.errorKey}`] = sentinels.sensitiveValue;
+    error[`https://${sentinels.urlUserA}:${sentinels.urlPassA}@x.test/error?sig=${sentinels.urlQueryA}`] = "error-url-value";
+    const output = redactSensitive({
+      truth: {
+        author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+        authentication_method: "passkey", oauth_provider: "github", authors: "compiler team",
+      },
+      collisions: {
+        [`https://${sentinels.urlUserA}:${sentinels.urlPassA}@x.test/a?sig=${sentinels.urlQueryA}`]: "collision-value-a",
+        [`https://${sentinels.urlUserB}:${sentinels.urlPassB}@x.test/a?sig=${sentinels.urlQueryB}`]: "collision-value-b",
+      },
+      [`prefix-${knownSecret}-suffix`]: "known-key-value",
+      [`accessToken=${sentinels.credentialKey}`]: sentinels.sensitiveValue,
+      callback: { toJSON: () => ({ leak: sentinels.callbackValue }) },
+      error,
+    }, [knownSecret]);
+    const text = JSON.stringify(output);
+    for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+    expect(output.truth).toEqual({
+      author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+      authentication_method: "passkey", oauth_provider: "github", authors: "compiler team",
+    });
+    expect(Object.keys(output.collisions)).toHaveLength(2);
+    expect(Object.values(output.collisions).sort()).toEqual(["collision-value-a", "collision-value-b"]);
+    expect(Object.values(output)).toContain("known-key-value");
+  });
+
+  it("scans long, escaped, near-cap, and malformed assignments or fails closed before processing", () => {
+    const cap = 64 * 1024;
+    const quotedKey = `${"q".repeat(129)}AccessToken`;
+    const bareKey = `${"b".repeat(82)}_client_secret`;
+    const sentinels = ["quoted-long-leak", "bare-long-leak", "escaped-leak", "malformed-leak", "near-cap-leak"];
+    const escapedKey = `${"e".repeat(129)}\\\"refresh_token`;
+    const input = [
+      JSON.stringify({ [quotedKey]: sentinels[0] }),
+      `${bareKey}=${sentinels[1]}`,
+      `{"${escapedKey}":"${sentinels[2]}"}`,
+      `{"${quotedKey}":"${sentinels[3]}`,
+    ].join("\n");
+    const nearAssignment = ` access_token="${sentinels[4]}"`;
+    const nearCap = `${"x".repeat(cap - nearAssignment.length)}${nearAssignment}`;
+    const redacted = `${redactSensitive(input)}\n${redactSensitive(nearCap)}`;
+    for (const sentinel of sentinels) expect(redacted).not.toContain(sentinel);
+    expect(redactSensitive(`${"x".repeat(cap)} access_token=oversized-leak`)).toBe("[REDACTED]");
+    const assignmentOverflow = `${Array.from({ length: 257 }, (_, index) => `safe_${index}=value`).join(" ")} access_token=count-overflow-leak`;
+    expect(redactSensitive(assignmentOverflow)).toBe("[REDACTED]");
+  });
+
+  it("redacts credentials after arbitrary separators and in query-like text without hiding operational keys", () => {
+    const input = [
+      "call(access_token=paren-leak)",
+      "pipe|client_secret=pipe-leak",
+      "closed]refresh_token=bracket-leak",
+      "/callback?access_token=query-leak&author=Ada",
+      "fragment#client_secret=fragment-leak",
+      "author=Ada authority=maintainer session_count=7 token_count=8 authentication_method=passkey oauth_provider=github",
+    ].join("\n");
+    const output = redactSensitive(input);
+    for (const leaked of ["paren-leak", "pipe-leak", "bracket-leak", "query-leak", "fragment-leak"]) expect(output).not.toContain(leaked);
+    for (const truth of ["author=Ada", "authority=maintainer", "session_count=7", "token_count=8", "authentication_method=passkey", "oauth_provider=github"]) expect(output).toContain(truth);
+  });
+
+  it("parses bounded serialized JSON first, decodes escaped keys recursively, and fails closed on invalid or excessive records", () => {
+    const serialized = String.raw`{"access_\u0074oken":"unicode-leak","nested":{"client\u0053ecret":"nested-leak"},"array":[{"refresh_token":"array-leak"}],"payload":"prefix|api_key=embedded-leak","public":"\uD83D\uDE80"}`;
+    const output = redactSensitive(serialized);
+    for (const leaked of ["unicode-leak", "nested-leak", "array-leak", "embedded-leak"]) expect(output).not.toContain(leaked);
+    expect(JSON.parse(output)).toMatchObject({ access_token: "[REDACTED]", nested: { clientSecret: "[REDACTED]" }, array: [{ refresh_token: "[REDACTED]" }], public: "🚀" });
+    expect(redactSensitive(String.raw`{"access_\uZZZZ":"invalid-escape-leak"}`)).toBe("[REDACTED]");
+    expect(redactSensitive('{"access_token":"truncated-leak"')).toBe("[REDACTED]");
+    const excessive = JSON.stringify(Object.fromEntries([...Array.from({ length: 257 }, (_, index) => [`safe_${index}`, "ok"]), ["access_token", "overflow-leak"]]));
+    expect(redactSensitive(excessive)).toBe("[REDACTED]");
+  });
+
+  it.each([
+    ["truncated object", "{"],
+    ["truncated array", "["],
+    ["missing object quotes and separator", "{public}"],
+    ["missing array comma", "[1 2]"],
+    ["unterminated array quote", "[\"unterminated]"],
+    ["trailing array comma", "[1,]"],
+    ["missing object comma", '{"first":1 "second":2}'],
+    ["mismatched nested closer", '{"outer":[1,2}'],
+    ["missing nested separator", '{"outer":{"value" "nested-leak"}}'],
+    ["invalid Unicode escape", String.raw`["\uZZZZ"]`],
+    ["BOM and JSON whitespace", "\uFEFF \t\r\n[true false]"],
+    ["whitespace-prefixed malformed object", " \t\r\n{public}"],
+  ])("fails closed for a %s JSON candidate without relying on assignment punctuation", (_label, candidate) => {
+    expect(redactSensitive(candidate)).toBe("[REDACTED]");
+  });
+
+  it("keeps non-JSON free text truthful while continuing to scan assignments", () => {
+    const output = redactSensitive("\uFEFF \tstatus=ready author=Ada token_count=8 access_token=free-text-leak");
+    expect(output).not.toBe("[REDACTED]");
+    expect(output).toContain("status=ready");
+    expect(output).toContain("author=Ada");
+    expect(output).toContain("token_count=8");
+    expect(output).not.toContain("free-text-leak");
+  });
+
+  it("uses own descriptors only and never executes accessors, coercion hooks, iterators, or Proxy traps", () => {
+    const calls = [];
+    const hostile = {};
+    Object.defineProperty(hostile, "visible", { enumerable: true, get() { calls.push("getter"); return "getter-leak"; } });
+    Object.defineProperty(hostile, "access_token", { enumerable: true, set() { calls.push("setter"); } });
+    Object.defineProperty(hostile, Symbol.iterator, { enumerable: true, get() { calls.push("iterator"); return () => {}; } });
+    Object.defineProperty(hostile, "toJSON", { enumerable: true, value() { calls.push("toJSON"); return "json-leak"; } });
+    Object.defineProperty(hostile, "valueOf", { enumerable: true, value() { calls.push("valueOf"); return "value-leak"; } });
+    const error = new Error("safe message");
+    Object.defineProperty(error, "context", { enumerable: true, get() { calls.push("error-getter"); return "error-leak"; } });
+    const proxy = new Proxy({ access_token: "proxy-leak" }, {
+      ownKeys() { calls.push("proxy-ownKeys"); throw new Error("ownKeys trap"); },
+      getOwnPropertyDescriptor() { calls.push("proxy-descriptor"); throw new Error("descriptor trap"); },
+      getPrototypeOf() { calls.push("proxy-prototype"); throw new Error("prototype trap"); },
+      get() { calls.push("proxy-get"); throw new Error("get trap"); },
+    });
+    const output = redactSensitive({ hostile, error, proxy });
+    expect(calls).toEqual([]);
+    expect(JSON.stringify(output)).not.toMatch(/getter-leak|error-leak|proxy-leak|json-leak|value-leak/);
+    expect(output.hostile.visible).toMatch(/REDACTED/);
+    expect(output.error.context).toMatch(/REDACTED/);
+    expect(output.proxy).toMatch(/REDACTED/);
+  });
+
+  it("uses one normalized sentinel matrix for URLs, credential keys, Errors, and every nonempty secret", () => {
+    const sentinels = {
+      tokenHeader: "sentinel-token-header",
+      headerToken: "sentinel-header-token",
+      sessionCookie: "sentinel-session-cookie",
+      apiKeyHeader: "sentinel-api-key-header",
+      authToken: "sentinel-auth-token",
+      credentialHeader: "sentinel-credential-header",
+      shortOne: "q",
+      shortTwo: "yz",
+      errorName: "sentinel-error-name",
+      errorMessage: "sentinel-error-message",
+      errorStack: "sentinel-error-stack",
+      errorCause: "sentinel-error-cause",
+      errorEnumerable: "sentinel-error-enumerable",
+      urlUser: "sentinel-url-user",
+      urlPass: "sentinel-url-pass",
+      urlQuery: "sentinel-url-query",
+      urlHash: "sentinel-url-hash",
+    };
+    const error = new Error(`auth token=${sentinels.errorMessage}`, { cause: { "credential header": sentinels.errorCause } });
+    error.name = `authToken=${sentinels.errorName}`;
+    error.stack = `sessionCookie=${sentinels.errorStack}`;
+    error.context = { session_id: sentinels.errorEnumerable };
+    const output = redactSensitive({
+      error,
+      object: {
+        tokenHeader: sentinels.tokenHeader,
+        "header-token": sentinels.headerToken,
+        sessionCookie: sentinels.sessionCookie,
+        api_key_header: sentinels.apiKeyHeader,
+        authToken: sentinels.authToken,
+        "credential header": sentinels.credentialHeader,
+      },
+      serialized: JSON.stringify({ setCookieHeader: sentinels.sessionCookie, x_auth_token: sentinels.authToken, "Header.API-Key": sentinels.apiKeyHeader }),
+      urls: [`HTTPS://${sentinels.urlUser}:${sentinels.urlPass}@x.test/a?sig=${sentinels.urlQuery}#${sentinels.urlHash}`, "https://token:password@x.test/b?auth=q#secret"],
+      arbitrary: `${sentinels.shortOne}/${sentinels.shortTwo}`,
+    }, [sentinels.shortOne, sentinels.shortTwo]);
+    const text = JSON.stringify(output);
+    for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+    expect(output.error).toHaveProperty("stack");
+    expect(text).toContain("https://x.test/a");
+    expect(text).toContain("https://x.test/b");
+  });
+  it("recursively redacts headers, sensitive fields, URLs, arbitrary errors, and supplied literals", () => {
+    const value = { Authorization: "Basic dXNlcjpwYXNz", Cookie: "sid=secret", "Set-Cookie": "sid=secret", "x-api-key": "key", nested: [{ password: "pw", detail: "failed with Bearer abc and literal-needle at https://x.test/a?token=literal-needle" }] };
+    const output = JSON.stringify(redactSensitive(value, ["literal-needle", "secret"]));
+    for (const leaked of ["dXNlcjpwYXNz", "sid=secret", "literal-needle", "Bearer abc", "https://x.test/a?token="]) expect(output).not.toContain(leaked);
+  });
+
+  it("redacts credential-shaped keys and complete semicolon-delimited cookie headers recursively", () => {
+    const value = {
+      payload: [{ client_secret: "alpha", access_token: "beta", refresh_token: "csrf", apiKey: "alpha" }],
+      error: "upstream failed access_token=beta client_secret=alpha",
+      headers: ["Cookie: alpha=one; beta=two; csrf=three", "Set-Cookie: alpha=one; beta=two; csrf=three; Secure"],
+    };
+    const output = JSON.stringify(redactSensitive(value, ["alpha", "beta", "csrf"]));
+    for (const leaked of ["alpha", "beta", "csrf", "one", "two", "three", "access_token=beta", "client_secret=alpha"]) expect(output).not.toContain(leaked);
+    expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("redacts quoted and camel-case credentials inside nested JSON strings and Error causes", () => {
+    const cause = new Error('cause={"access_token":"cause-access","clientSecret":"cause-client"}');
+    cause.context = { serialized: '{"refresh_token":"cause-refresh"}' };
+    const error = new Error('upstream={"access_token":"error-access","refresh_token":"error-refresh","clientSecret":"error-client"}', { cause });
+    const value = {
+      error,
+      nested: [
+        '{"access_token":"nested-access","refresh_token":"nested-refresh","clientSecret":"nested-client"}',
+        "clientSecret='single-client' access_token=bare-access",
+      ],
+    };
+    const output = JSON.stringify(redactSensitive(value));
+    for (const leaked of ["cause-access", "cause-client", "cause-refresh", "error-access", "error-refresh", "error-client", "nested-access", "nested-refresh", "nested-client", "single-client", "bare-access"]) expect(output).not.toContain(leaked);
+    expect(output).toContain('"name":"Error"');
+    expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("strips URL userinfo and redacts quoted cookie and header variants in hostile strings", () => {
+    const error = new Error('upstream={"cookie":"error-cookie","setCookie":"error-set","proxyAuthorization":"error-proxy"} at https://error-user:error-pass@x.test/a?token=q#fragment');
+    const output = JSON.stringify(redactSensitive({
+      error,
+      urls: ["https://user:pass@x.test/a?token=q#fragment", "https://us%65r:p%40ss@x.test/b?sig=signed#secret"],
+      nested: [
+        '{"cookie":"nested-cookie","setCookie":"nested-set","set-cookie":"nested-dash","Cookie":"upper-cookie","cookieHeader":"header-cookie"}',
+        "Cookie: sid=one; csrf=two",
+        "set_cookie='snake-cookie' xApiKey='header-key'",
+      ],
+    }));
+    for (const leaked of ["user", "pass", "us%65r", "p%40ss", "error-user", "error-pass", "error-cookie", "error-set", "error-proxy", "nested-cookie", "nested-set", "nested-dash", "upper-cookie", "header-cookie", "sid=one", "csrf=two", "snake-cookie", "header-key", "token=q", "sig=signed", "fragment"]) expect(output).not.toContain(leaked);
+    expect(output).toContain("[REDACTED]");
+  });
+
+  it("wires the production CLI through injected Vercel/GitHub commands and emits JSON or human output", async () => {
+    const commandRunner = vi.fn(async (binary, args) => {
+      if (binary === "gh") return { stdout: fixture("github-sha.txt"), stderr: "", exitCode: 0 };
+      if (args[0] === "ls") return { stdout: fixture("vercel-list.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "inspect") return { stdout: fixture("vercel-inspect.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "env") return { stdout: fixture("vercel-env.json"), stderr: "", exitCode: 0 };
+      return { stdout: fixture("vercel-logs.ndjson"), stderr: "", exitCode: 0 };
+    });
+    const writes = [];
+    const jsonRun = await executeCli(["--env", "production", "--json"], { commandRunner, fetchImpl: healthyApiFetch(), env: { OPS_READ_TOKEN: "literal-secret", HARNESS_ARENA_PRODUCTION_URL: "https://arena.example" }, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
+    expect(commandRunner.mock.calls.map(([binary]) => binary)).toEqual(expect.arrayContaining(["vercel", "gh"]));
+    expect(JSON.parse(writes[0])).toMatchObject({ schema_version: "agent_ops_status.v1" });
+    expect(writes.join("\n")).not.toContain("literal-secret");
+    expect(jsonRun).toBe(EXIT_CODES.failed);
+    writes.length = 0;
+    await executeCli(["--env", "local"], { commandRunner, fetchImpl: healthyApiFetch(), env: {}, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
+    expect(writes[0]).toContain("STATUS:");
+  });
+
+  it("turns command-not-found and timeout into explicit platform access blockers", async () => {
+    for (const code of ["ENOENT", "command_timeout"]) {
+      const commandRunner = vi.fn().mockRejectedValue(Object.assign(new Error(code), { code }));
+      const result = await collectPlatformEvidence({ environment: "production", commandRunner });
+      expect(result).toMatchObject({ state: "access_blocked", blockers: expect.arrayContaining([expect.objectContaining({ code: expect.stringContaining("command") })]) });
+    }
+  });
+
+  it("caps subprocess output and escalates SIGTERM to bounded SIGKILL", async () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn((signal) => { if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", null, signal)); return true; });
+    const pending = spawnCommand("vercel", ["ls"], { spawnImpl: () => child, timeoutMs: 1, killGraceMs: 1, maxBufferBytes: 8 });
+    child.stdout.write("0123456789");
+    await expect(pending).rejects.toThrow(/command_(?:output_limit|timeout)/);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("bounds a silent subprocess timeout through SIGTERM and SIGKILL", async () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = vi.fn((signal) => { if (signal === "SIGKILL") queueMicrotask(() => child.emit("close", null, signal)); return true; });
+    await expect(spawnCommand("vercel", ["ls"], { spawnImpl: () => child, timeoutMs: 1, killGraceMs: 1 })).rejects.toThrow("command_timeout");
+    expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("keeps human output concise and names contradictory evidence", () => {
+    const output = formatHumanStatus({ verdict: "degraded", exit_code: EXIT_CODES.degraded, findings: [{ code: "contradictory_evidence", detail: "Basic abc" }], blockers: [], freshness: { state: "unknown" }, ops: { inventory: {} } });
+    expect(output).toContain("STATUS: DEGRADED"); expect(output).toContain("contradictory_evidence"); expect(output).not.toContain("abc");
+  });
+});

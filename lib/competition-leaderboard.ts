@@ -11,7 +11,11 @@ export interface CompetitionRow {
   tied: boolean;
   tasksPassed: number;
   totalTasks: number;
+  /** Fixed-table cost used for competition ranking and comparisons. */
   totalCostUsd: number;
+  /** Actual provider-billed spend, retained for operational transparency. */
+  billedCostUsd: number;
+  pricingVersion: string;
   submittedAt: string;
   // The entrant's GitHub login (already-public GitHub data) — the leaderboard
   // identity axis now that submissions require sign-in. Falls back to
@@ -28,7 +32,7 @@ export interface CompetitionPendingRow {
   status: "queued" | "running";
 }
 
-export type BaselineState = "none" | "running" | "rejected" | "ready";
+export type BaselineState = "none" | "running" | "rejected" | "unpriced" | "ready";
 
 export interface CompetitionBoard {
   baseline: CompetitionRow | null;
@@ -43,6 +47,8 @@ export interface CompetitionBoard {
    * appear alongside those that did. Empty until a baseline is ready.
    */
   belowBaseline: CompetitionRow[];
+  /** Completed entries withheld because fixed-table pricing is unavailable or mismatched. */
+  unpriced: number;
   pending: number;
   /** Exact runs the open homepage should poll until they become terminal. */
   pendingRunIds: string[];
@@ -120,9 +126,17 @@ function joinCompetitionEntries(
     }));
 }
 
-function toRow(entry: JoinedEntry): CompetitionRow | null {
+function toRow(entry: JoinedEntry, expectedPricingVersion: string | undefined): CompetitionRow | null {
   const { submission, run } = entry;
-  if (!run || run.status !== "completed" || run.tasks_passed === undefined || run.total_cost_usd === undefined) {
+  if (
+    !run ||
+    run.status !== "completed" ||
+    run.tasks_passed === undefined ||
+    run.total_cost_usd === undefined ||
+    run.normalized_total_cost_usd === undefined ||
+    !expectedPricingVersion ||
+    run.pricing_version !== expectedPricingVersion
+  ) {
     return null;
   }
   return {
@@ -132,7 +146,9 @@ function toRow(entry: JoinedEntry): CompetitionRow | null {
     tied: false,
     tasksPassed: run.tasks_passed,
     totalTasks: run.task_results.length,
-    totalCostUsd: run.total_cost_usd,
+    totalCostUsd: run.normalized_total_cost_usd,
+    billedCostUsd: run.total_cost_usd,
+    pricingVersion: run.pricing_version,
     submittedAt: submission.created_at,
     githubLogin: submission.github_login ?? UNKNOWN_GITHUB_LOGIN,
   };
@@ -217,6 +233,7 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
     storage.listCompetitions(),
   ]);
   const entries = joinCompetitionEntries(runs, submissions, competitionId, legacyOwnerId(competitions));
+  const expectedPricingVersion = competitions.find((competition) => competition.id === competitionId)?.pricing_version;
 
   const baselineEntry = entries.find((e) => e.submission.competition_baseline === true);
   let baseline: CompetitionRow | null = null;
@@ -227,10 +244,12 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
       baselineState = "rejected";
       baselineRejectionReason = baselineEntry.submission.judge_reason;
     } else {
-      const row = toRow(baselineEntry);
+      const row = toRow(baselineEntry, expectedPricingVersion);
       if (row) {
         baseline = row;
         baselineState = "ready";
+      } else if (baselineEntry.run?.status === "completed") {
+        baselineState = "unpriced";
       } else {
         baselineState = "running";
       }
@@ -238,7 +257,12 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
   }
 
   const competitorEntries = entries.filter((e) => e.submission.competition_baseline !== true);
-  const rows = competitorEntries.map(toRow).filter((r): r is CompetitionRow => r !== null);
+  const rows = competitorEntries
+    .map((entry) => toRow(entry, expectedPricingVersion))
+    .filter((r): r is CompetitionRow => r !== null);
+  const unpriced = competitorEntries.filter(
+    (entry) => entry.run?.status === "completed" && toRow(entry, expectedPricingVersion) === null,
+  ).length;
   // With no baseline there is no bar to clear, so everyone stays ranked --
   // filtering against a reference that does not exist yet would silently hide
   // every entry until the baseline finishes.
@@ -264,5 +288,5 @@ export async function getCompetitionBoard(storage: Storage, competitionId: strin
       status: run.status === "running" ? ("running" as const) : ("queued" as const),
     }));
 
-  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, pending, pendingRunIds, pendingRows };
+  return { baseline, baselineState, baselineRejectionReason, ranked, belowBaseline, unpriced, pending, pendingRunIds, pendingRows };
 }

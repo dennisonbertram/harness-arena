@@ -19,6 +19,8 @@ function row(overrides: Partial<CompetitionRow> = {}): CompetitionRow {
     tasksPassed: 10,
     totalTasks: 16,
     totalCostUsd: 1.2345,
+    billedCostUsd: 1.2345,
+    pricingVersion: "inkling-small-2026-08-03-v1",
     submittedAt: "2026-07-25T00:00:00.000Z",
     githubLogin: "octocat",
     ...overrides,
