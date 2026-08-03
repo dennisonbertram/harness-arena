@@ -12,6 +12,7 @@ public/runner-bundle.tgz
 !.env.example
 .vercel
 .env*
+.harness-arena/
 
 # MCP package build output and deps
 mcp/dist/

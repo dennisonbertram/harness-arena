@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { get, list, put } from "@vercel/blob";
-import { BlobVoiceStorage, getVoiceStorage, MemoryVoiceStorage } from "./voice-storage";
+import { BlobVoiceStorage, FileVoiceStorage, getVoiceStorage, MemoryVoiceStorage } from "./voice-storage";
 import type { VoiceJudgment, VoiceManifest } from "./voice-types";
 
 vi.mock("@vercel/blob", () => ({
@@ -64,6 +67,61 @@ describe("MemoryVoiceStorage", () => {
     await storage.putJudgment(makeJudgment());
     const { unreadable } = await storage.listAllJudgments();
     expect(unreadable).toBe(0);
+  });
+});
+
+describe("FileVoiceStorage", () => {
+  let root: string;
+  let outside: string | undefined;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "voice-file-storage-")); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); if (outside) await rm(outside, { recursive: true, force: true }); outside = undefined; });
+
+  it("atomically writes and schema-validates manifests", async () => {
+    const storage = new FileVoiceStorage(root);
+    await Promise.all(Array.from({ length: 10 }, (_, index) => storage.putManifest(makeManifest({ created_at: `2026-07-24T00:00:0${index}.000Z` }))));
+    expect((await storage.getManifest())?.version).toBe("1");
+    expect((await readdir(join(root, "voice"))).filter((name) => name.includes(".tmp"))).toEqual([]);
+    await writeFile(join(root, "voice", "manifest.json"), JSON.stringify({ version: "2" }));
+    await expect(storage.getManifest()).rejects.toThrow(/manifest|schema|invalid/i);
+  });
+
+  it("publishes write-once judgments only after a complete temp file and recovers after interruption", async () => {
+    const FaultInjectableFileVoiceStorage = FileVoiceStorage as unknown as new (
+      storageRoot: string,
+      options: { beforeJudgmentPublish?: () => void | Promise<void> },
+    ) => FileVoiceStorage;
+    const interrupted = new FaultInjectableFileVoiceStorage(root, {
+      beforeJudgmentPublish: () => { throw new Error("injected judgment publication interruption"); },
+    });
+    const path = join(root, "voice", "judgments", "eval-1", "resp-a_resp-b.json");
+
+    await expect(interrupted.putJudgment(makeJudgment())).rejects.toThrow(/injected judgment publication interruption/);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const retry = new FileVoiceStorage(root);
+    await expect(retry.putJudgment(makeJudgment({ outcome: "a" }))).resolves.toEqual({ created: true });
+    await expect(retry.putJudgment(makeJudgment({ outcome: "b" }))).resolves.toEqual({ created: false });
+    expect(JSON.parse(await readFile(path, "utf8")).outcome).toBe("a");
+  });
+
+  it.each([".", "..", "../escape", "a/b", "a\\b", "%2e%2e%2fescape"])("rejects unsafe judgment/evaluator path %j", async (part) => {
+    const storage = new FileVoiceStorage(root);
+    await expect(storage.putJudgment(makeJudgment({ evaluator_id: part }))).rejects.toThrow(/path segment/);
+    await expect(storage.putJudgment(makeJudgment({ comparison_id: part }))).rejects.toThrow(/path segment/);
+    await expect(storage.listJudgmentKeys(part)).rejects.toThrow(/path segment/);
+  });
+
+  it("rejects a symlink component before manifest reads or atomic writes and preserves the external target", async () => {
+    outside = await mkdtemp(join(tmpdir(), "voice-file-storage-outside-"));
+    const original = JSON.stringify(makeManifest({ created_at: "2026-07-24T00:00:00.000Z" }));
+    await writeFile(join(outside, "manifest.json"), original);
+    await symlink(outside, join(root, "voice"));
+    const storage = new FileVoiceStorage(root);
+
+    const readOutcome = await storage.getManifest().then(() => "resolved", () => "rejected");
+    const writeOutcome = await storage.putManifest(makeManifest({ created_at: "2026-07-24T00:00:09.000Z" })).then(() => "resolved", () => "rejected");
+    const externalValue = await readFile(join(outside, "manifest.json"), "utf8").catch(() => "missing");
+    expect({ readOutcome, writeOutcome, externalValue }).toEqual({ readOutcome: "rejected", writeOutcome: "rejected", externalValue: original });
   });
 });
 
