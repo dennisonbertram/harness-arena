@@ -9,6 +9,7 @@ const REQUEST_CONTEXT = Symbol.for("@vercel/request-context");
 describe("hosted request span lifecycle", () => {
   afterEach(() => {
     trace.disable();
+    vi.useRealTimers();
     delete (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT];
   });
 
@@ -110,6 +111,40 @@ describe("hosted request span lifecycle", () => {
       expect(exportSpans).toHaveBeenCalledTimes(1);
       expect(structuredSpanReadiness().structured.queued).toBe(0);
     });
+    await provider.shutdown();
+  });
+
+  it("keeps the request lifetime open for two serial slow-success batches at maximum queue capacity", async () => {
+    vi.useFakeTimers();
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => {
+      setTimeout(() => callback({ code: 0 }), 3_000);
+    });
+    const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("two-batch-root-drain");
+    const root = tracer.startSpan("request-root");
+    const rootContext = trace.setSpan(context.active(), root);
+    for (let index = 0; index < 31; index += 1) {
+      tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
+    }
+
+    root.end();
+    expect(waitUntilTasks).toHaveLength(1);
+    let lifecycleSettled = false;
+    void waitUntilTasks[0]!.then(() => { lifecycleSettled = true; });
+
+    await vi.advanceTimersByTimeAsync(5_500);
+    expect(exportSpans).toHaveBeenCalledTimes(2);
+    expect(lifecycleSettled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await waitUntilTasks[0];
+    expect(lifecycleSettled).toBe(true);
+    expect(structuredSpanReadiness().structured.queued).toBe(0);
     await provider.shutdown();
   });
 });
