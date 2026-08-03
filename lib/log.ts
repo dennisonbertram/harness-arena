@@ -8,7 +8,6 @@ const MAX_STRING_CHARS = 2_048;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 50;
 const MAX_DEPTH = 6;
-const MAX_STACK_LINES = 8;
 
 const SECRET_KEY = /(?:authorization|api[_-]?key|secret|token|password|cookie|prompt|signature|credential)/i;
 const BEARER = /\bBearer\s+[^\s,;]+/gi;
@@ -20,16 +19,17 @@ interface Budget {
 }
 
 export interface NormalizedError {
+  error_schema: "v1";
   error_class: string;
-  error_digest?: string;
   error_stage: string;
-  error_message: string;
-  error_stack: string[];
+  error_fingerprint: string;
 }
 
 function configuredSecrets(): Set<string> {
   return new Set(Object.entries(process.env)
-    .filter(([key, value]) => SECRET_KEY.test(key) && typeof value === "string" && value.length > 0)
+    // One-character environment flags are not secrets and would corrupt stable
+    // schema values (for example, replacing every "1" in "v1").
+    .filter(([key, value]) => SECRET_KEY.test(key) && typeof value === "string" && value.length >= 8)
     .map(([, value]) => value!));
 }
 
@@ -43,7 +43,9 @@ function replaceAll(value: string, needle: string): string {
 }
 
 function redactString(value: string, secrets: Set<string>): string {
-  let safe = value;
+  // Do not run global redaction regexes or configured-secret replacement over
+  // attacker-sized input. Content outside this prefix cannot reach telemetry.
+  let safe = truncate(value);
   // Longest first prevents overlapping values from leaving a secret suffix.
   for (const secret of [...secrets].sort((a, b) => b.length - a.length)) safe = replaceAll(safe, secret);
   safe = safe.replace(ABSOLUTE_URL_WITH_QUERY, "$1");
@@ -52,39 +54,43 @@ function redactString(value: string, secrets: Set<string>): string {
   return truncate(safe);
 }
 
+function errorClass(error: unknown): "error" | "type_error" | "range_error" | "syntax_error" | "abort_error" | "non_error" {
+  if (!(error instanceof Error)) return "non_error";
+  switch (error.name) {
+    case "TypeError": return "type_error";
+    case "RangeError": return "range_error";
+    case "SyntaxError": return "syntax_error";
+    case "AbortError": return "abort_error";
+    default: return "error";
+  }
+}
+
+function safeStage(stage: string): string {
+  return /^[a-z_]{1,64}$/.test(stage) ? stage : "unknown";
+}
+
+function fingerprint(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 export function normalizeError(error: unknown, stage: string, secrets = configuredSecrets()): NormalizedError {
-  const isError = error instanceof Error;
-  const candidate = typeof error === "object" && error !== null ? error as Record<string, unknown> : undefined;
-  let digest: string | undefined;
-  try {
-    if (typeof candidate?.digest === "string") digest = redactString(candidate.digest, secrets);
-  } catch {
-    // A hostile thrown object may expose digest through a throwing getter.
-  }
-  let errorClass = isError ? "Error" : "NonError";
-  let rawMessage = "unavailable error detail";
-  try {
-    if (isError) {
-      errorClass = error.name || "Error";
-      rawMessage = error.message;
-    } else {
-      rawMessage = typeof error === "string" ? error : String(error);
-    }
-  } catch {
-    // Keep stable fallbacks for hostile thrown values.
-  }
-  let stack: string[] = [];
-  try {
-    if (isError && error.stack) stack = error.stack.split("\n").slice(0, MAX_STACK_LINES).map((line) => redactString(line, secrets));
-  } catch {
-    // Keep the stable empty stack when stack access itself is hostile.
-  }
+  void secrets; // Preserves the established call signature without inspecting untrusted details.
+  // Never read Error.message, Error.stack, custom digest, or non-Error values:
+  // those fields are provider/request controlled and must not enter telemetry.
+  const error_class = errorClass(error);
+  const error_stage = safeStage(stage);
   return {
-    error_class: redactString(errorClass, secrets),
-    ...(digest ? { error_digest: digest } : {}),
-    error_stage: redactString(stage, secrets),
-    error_message: redactString(rawMessage, secrets),
-    error_stack: stack,
+    error_schema: "v1",
+    error_class,
+    error_stage,
+    // This groups only public, allowlisted classifications; it cannot encode
+    // a provider message, payload, stack, digest, or arbitrary thrown value.
+    error_fingerprint: fingerprint(`${error_class}:${error_stage}`),
   };
 }
 

@@ -6,22 +6,22 @@ active OpenTelemetry span, `trace_id` and `span_id`. Domain events add stable
 identifiers such as `run_id` and `submission_id`; they never add request bodies,
 headers, cookies, prompts, credentials, provider tokens, or Blob query strings.
 
-## Delivery dependency and proof status
+## Development-only delivery boundary
 
-This change explicitly depends on PR #171 for `/api/ops/v1`. Until #171 lands,
-this PR must remain draft: it does not contain or claim ops-endpoint logging.
-After #171 merges, rebase this branch and add tested `/api/ops/v1` domain events
-before requesting final review. Production trace/redaction proof is also pending;
-local and preview evidence must not be described as live production proof.
+This integration is development-only. It may be tested only against the protected
+development branch and the isolated `harness-arena-development` Vercel project.
+Do not deploy this work to production, change production Vercel configuration,
+alter production environment variables, or mutate production project settings.
+Local and isolated-development evidence must never be described as production proof.
 
 ## Vercel investigation
 
-Start from the deployment serving the hostname, then query its logs with the
-Vercel CLI. Filter JSON messages by `event`, `run_id`, or `trace_id`; compare
-the deployment SHA in each event with the deployment under investigation. Trace
-availability and Vercel retention are plan/provider dependent: Vercel-native
-telemetry is the source of truth, and a missing trace is not proof that an
-application event did not occur. PostHog is not configured or claimed live.
+For the isolated development project only, start from the deployment serving its
+development hostname, then query its logs with the Vercel CLI. Filter JSON
+messages by `event`, `run_id`, or `trace_id`; compare the deployment SHA in each
+event with the deployment under investigation. Trace availability and retention
+are plan/provider dependent: Vercel-native telemetry is the source of truth,
+and a missing trace is not proof that an application event did not occur.
 
 For an error, begin with `request.error`, then follow the trace/span fields to
 storage, sandbox, dispatch, provider, callback, or cron events. Route-level
@@ -38,7 +38,9 @@ trace/span IDs when no active span is exposed.
 
 ## Rollback
 
-Roll back to the previous Vercel deployment or revert the observability commit.
+In the isolated development project, roll back to the previous development
+deployment or revert the observability commit. Never use this runbook to alter
+or roll back production. Do not disable redaction to debug an incident.
 Do not disable redaction to debug an incident. The logger is intentionally
 best-effort and synchronous to avoid making telemetry failures alter request
 outcomes; inspect the deployment/runtime error separately if log delivery is

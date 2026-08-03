@@ -51,7 +51,7 @@ describe("onRequestError", () => {
       "server.address": "arena.example",
       "custom.attribute": "safe",
     } };
-    sanitizer.onStart(span as never, {} as never);
+    sanitizer.onStart(span as never);
     sanitizer.onEnding?.(span as never);
     expect(span.attributes).toEqual({
       "http.request.method": "POST",
