@@ -460,6 +460,35 @@ describe("authenticated prerequisite supervisor", () => {
     } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
+  it("coalesces concurrent authenticated cleanup into one bounded operation", async () => {
+    const root = await temp();
+    const marker = join(root, "coalesced-cleanup.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const entered = deferred();
+    const release = deferred();
+    const escalations = [];
+    const operations = [
+      init.terminateOwnedSupervisor(owned, {
+        beforeEscalate: async () => { escalations.push("first"); entered.resolve(); await release.promise; },
+      }),
+    ];
+    await entered.promise;
+    operations.push(init.terminateOwnedSupervisor(owned, {
+      beforeEscalate: async () => { escalations.push("second"); },
+    }));
+    try {
+      await delay(25);
+      expect(escalations).toEqual(["first"]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(operations);
+    }
+    await expect(Promise.all(operations)).resolves.toEqual([true, true]);
+    await waitForExit(owned.child);
+    await waitForGone([tree.command, tree.descendant]);
+  });
+
   it.each([
     ["prepared", "missing"],
     ["prepared", "spoofed"],
