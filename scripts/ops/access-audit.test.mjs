@@ -76,8 +76,8 @@ describe("least-privilege access policy", () => {
     const requests = [];
     const fetchImpl = vi.fn(async (url, init) => {
       requests.push([String(url), init?.method]);
-      const body = String(url).endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10 } }
-        : String(url).endsWith("/api/ops/v1") ? { schema_version: "ops.v1", kinds: [{ kind: "runs", prefix: "runs/", format: "json" }], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
+      const body = String(url).endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10, policy_size: 10 } }
+        : String(url).endsWith("/api/ops/v1") ? { schema_version: "ops.v1", credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 10, policy_size: 10 }, kinds: [{ kind: "runs", prefix: "runs/", format: "json" }], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
           : String(url).includes("/api/ops/v1/inventory?kind=runs&limit=1") ? { schema_version: "ops.v1", kind: "runs", items: [], has_more: false, next_cursor: null }
             : String(url).endsWith("/api/ops/v1/summary") ? { schema_version: "ops.v1", counts: {}, latest: {}, run_states: {}, integrity: {}, scan: { records: 0, complete: true, truncated: false } }
               : String(url).includes("/v2/user") ? { id: "viewer-user" }
@@ -95,7 +95,8 @@ describe("least-privilege access policy", () => {
       HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app",
     };
     const collected = await audit.collectActiveAccessEvidence({ policy, role: "monitor", cwd: repo, env, commandRunner, fetchImpl, now: "2026-08-03T10:00:00.000Z" });
-    expect(audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).overall).toBe("observable");
+    const report = audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" });
+    expect(report.overall, JSON.stringify({ collected, report, requests })).toBe("observable");
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
@@ -115,9 +116,11 @@ describe("least-privilege access policy", () => {
     const policy = await audit.loadPolicy(policyPath);
     const projectId = policy.capabilities.vercel.project_ids[0];
     expect(audit.resolveOpsTarget(policy, { url: "https://harness-arena-psi.vercel.app", projectId })).toMatchObject({ environment: "production" });
+    expect(audit.resolveOpsTarget(policy, { url: "https://harness-arena-development.vercel.app", projectId: policy.capabilities.vercel.project_ids[1] })).toMatchObject({ environment: "development" });
     expect(audit.resolveOpsTarget(policy, { url: "http://127.0.0.1:3000", projectId: undefined })).toMatchObject({ environment: "local" });
     for (const input of [
       { url: "http://harness-arena-psi.vercel.app", projectId },
+      { url: "https://harness-arena-psi.vercel.app:444", projectId },
       { url: "https://attacker.example", projectId },
       { url: "https://harness-arena-psi.vercel.app", projectId: policy.capabilities.vercel.project_ids[1] },
       { url: "http://localhost.evil:3000", projectId: undefined },
@@ -152,6 +155,7 @@ describe("least-privilege access policy", () => {
 
   it("normalizes a project-scoped Vercel token with the inherited Viewer role", async () => {
     const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
     expect(audit.normalizeVercelAccess({
       projectId: "project-one",
       userId: "user-one",
@@ -162,6 +166,12 @@ describe("least-privilege access policy", () => {
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }] } }).project_role).toBe("VIEWER");
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_DEVELOPER" }] } }).project_role).toBe("DEVELOPER");
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "ADMIN" }] } }).project_role).toBe("ADMIN");
+    expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "project-admin" }] } }).project_role).toBe("ADMIN");
+    for (const role of ["PROJECT_DEVELOPER", "ADMIN", "project-admin"]) {
+      const raw = await evidence("viewer");
+      raw.vercel.project_role = role;
+      expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "vercel")?.state, role).toBe("overprivileged");
+    }
   });
 
   it("derives every runtime credential-separation class from one central policy", async () => {
@@ -173,7 +183,14 @@ describe("least-privilege access policy", () => {
       const attestation = separation.credentialSeparationAttestation({ OPS_READ_TOKEN: "collision", [name]: "collision" });
       expect(attestation, name).toMatchObject({ schema_version: "credential_separation.v1", state: "invalid", checked_count: 1 });
       expect(JSON.stringify(attestation)).not.toContain("collision");
+      expect(() => separation.assertOpsReadCredentialSeparation({ OPS_READ_TOKEN: "collision", [name]: "collision" }), name).toThrow("credential_separation_invalid");
     }
+    vi.stubEnv("OPS_READ_TOKEN", "attested-read-token");
+    const loader = routeModules["../../app/api/ops/v1/route.ts"];
+    const { GET } = await loader();
+    const response = await GET(new Request("http://localhost/api/ops/v1", { headers: { authorization: "Bearer attested-read-token" } }));
+    expect(await response.json()).toMatchObject({ credential_separation: { schema_version: "credential_separation.v1", state: "ok", policy_size: separation.OPS_READ_SEPARATE_FROM.length } });
+    vi.unstubAllEnvs();
   });
 
   it("fails closed when AUTH_SECRET collides with OPS_READ_TOKEN", async () => {
@@ -285,15 +302,14 @@ describe("least-privilege access policy", () => {
   });
 
   it("fails closed when OPS_READ_TOKEN collides with a mutation credential", async () => {
-    const audit = await subject();
     vi.stubEnv("OPS_READ_TOKEN", "collision-token");
     vi.stubEnv("COMPETITION_ADMIN_TOKEN", "collision-token");
     vi.stubEnv("RUNNER_CALLBACK_SECRET", "collision-token");
-    const collisions = audit.findOpsCredentialCollisions(process.env, await audit.loadPolicy(policyPath));
-    expect(collisions).toEqual(expect.arrayContaining(["COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET"]));
+    const { credentialSeparationAttestation } = await import("../../lib/credential-separation.mjs");
+    expect(credentialSeparationAttestation(process.env)).toMatchObject({ state: "invalid" });
     const { competitionAdminToken } = await import("../../lib/competition-config");
     const { verifyRunnerSecret } = await import("../../lib/runner-auth");
-    expect(competitionAdminToken()).toBeUndefined();
+    expect(() => competitionAdminToken()).toThrow("credential_separation_invalid");
     expect(verifyRunnerSecret(new Request("http://localhost", { headers: { "x-runner-secret": "collision-token" } }))).toBe(false);
     vi.unstubAllEnvs();
   });

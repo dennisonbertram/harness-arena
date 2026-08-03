@@ -27,7 +27,7 @@ identities and the application operations API. It uses only documented
 read-only `gh api`, Vercel CLI/API, and HTTP GET operations:
 
 ```bash
-HARNESS_ARENA_URL=https://development.example \
+HARNESS_ARENA_URL=https://harness-arena-development.vercel.app \
 VERCEL_TEAM_ID=team_id VERCEL_PROJECT_ID=project_id \
 pnpm ops:access-audit -- --role monitor --json
 ```
@@ -36,7 +36,21 @@ GitHub CLI and Vercel CLI must already be authenticated as the identity being
 audited. Tokens are never accepted as CLI arguments. The audit checks the
 active GitHub repository permissions, Vercel team role plus explicit or
 inherited project role, deployment/log/environment-metadata reads, and three
-authenticated operations GET endpoints. It does not issue POST, PUT, PATCH, or
+authenticated operations GET endpoints. Hosted targets must be an exact
+versioned hostname/project pair: the canonical production hostname belongs to
+the live project, while the stable Development hostnames belong to the isolated
+Development project. Hosted HTTP, nonstandard ports, unknown hosts, project
+mismatches, credentials in URLs, paths, queries, fragments, and redirects are
+rejected before `OPS_READ_TOKEN` is attached. HTTP is allowed only for exact
+loopback hosts in local mode.
+
+The application health response is fetched first without authorization and
+must attest `credential_separation.v1: ok`. Only then does the audit attach the
+read token to `/api/ops/v1`. The root must validate as `ops.v1`, advertise a
+valid record kind and canonical inventory/summary routes, and attest the same
+credential separation. The audit derives `inventory?kind=<advertised>&limit=1`
+from that response and schema-checks both inventory and summary responses. An
+arbitrary HTTP 200 is not evidence. It does not issue POST, PUT, PATCH, or
 DELETE probes.
 
 Fixtures or previously captured metadata may be checked only with the explicit
@@ -48,6 +62,14 @@ pnpm ops:access-audit -- --offline-evidence /protected/path/access-evidence.json
 
 Offline evidence can expose missing or overprivileged access, but can never
 produce exit 0 or final `observable` proof.
+
+`lib/credential-separation.mjs` is the single runtime policy for credentials
+that must never equal `OPS_READ_TOKEN`. Startup, Auth.js, agent-token signing,
+admin authorization, runner callbacks, operations authorization, and cursor
+signing fail closed if any configured policy credential collides. The health
+and operations attestations expose only schema/state/counts—never credential
+values or hashes. The versioned JSON policy must exactly match this runtime
+list or the audit itself refuses to run.
 
 Exit codes are 0 observable, 2 missing, 3 overprivileged, and 64 invalid input.
 The command also scans app, library, and operational source for `process.env`
@@ -70,6 +92,11 @@ Therefore do not reuse the current owner token. Invite a dedicated non-human or
 service user to the team as Viewer, grant Viewer access only to the live and
 Development projects, and authenticate its CLI/session separately. If the plan
 cannot constrain that identity this way, Vercel remains `missing`, not green.
+Documented Vercel project roles are normalized before evaluation:
+`PROJECT_VIEWER` is the only project-scoped role equivalent to Viewer;
+`PROJECT_DEVELOPER` and `ADMIN`/`PROJECT_ADMIN` are write-capable and always
+overprivileged. A team Viewer role is inherited only when there is no explicit
+project role.
 
 The separately authorized ephemeral secret-value broker is also an external
 configuration step. Until it exists, agents receive environment metadata only;

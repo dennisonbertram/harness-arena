@@ -24,6 +24,7 @@
     "state": "authenticated",
     "token_present": true,
     "methods": ["GET"],
+    "credential_separation_attested": true,
     "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 }
   },
   "blob": { "credential_present": false, "read_via": "get_only_ops" },

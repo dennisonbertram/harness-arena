@@ -20,7 +20,7 @@
     "deployments": true,
     "logs": true
   },
-  "ops": { "state": "authenticated", "token_present": true, "methods": ["GET"], "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 } },
+  "ops": { "state": "authenticated", "token_present": true, "methods": ["GET"], "credential_separation_attested": true, "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 } },
   "blob": { "credential_present": true, "read_via": "direct_rw_token" },
   "sandbox": { "credential_present": true, "read_via": "owner_token" },
   "ai_gateway": { "spend_credential_present": true, "read_via": "owner_token" },

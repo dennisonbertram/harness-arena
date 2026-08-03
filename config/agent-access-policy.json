@@ -22,7 +22,24 @@
       "methods": ["GET"],
       "write_methods": ["POST", "PUT", "PATCH", "DELETE"],
       "write_expected_status": 405,
-      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "VERCEL_TOKEN"]
+      "separate_from": ["AUTH_SECRET", "AUTH_GITHUB_SECRET", "COMPETITION_ADMIN_TOKEN", "RUNNER_CALLBACK_SECRET", "OPS_READ_CURSOR_SECRET", "BLOB_READ_WRITE_TOKEN", "AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "VERCEL_TOKEN"],
+      "targets": {
+        "production": {
+          "project_id": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
+          "hosts": ["harness-arena-psi.vercel.app"],
+          "https_required": true
+        },
+        "development": {
+          "project_id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+          "hosts": ["harness-arena-development.vercel.app", "harness-arena-git-codex-dev-environme-19f8e1-dennisons-projects.vercel.app"],
+          "https_required": true
+        },
+        "local": {
+          "project_id": null,
+          "hosts": ["127.0.0.1", "localhost", "[::1]"],
+          "https_required": false
+        }
+      }
     },
     "blob": { "direct_credential_allowed": false, "read_via": "get_only_ops" },
     "sandbox": { "direct_credential_allowed": false, "read_via": "get_only_ops" },

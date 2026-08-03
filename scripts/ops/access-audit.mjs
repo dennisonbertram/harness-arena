@@ -4,6 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { redactOpsText, redactOpsValue } from "../../lib/ops-redaction.mjs";
+import { OPS_READ_SEPARATE_FROM } from "../../lib/credential-separation.mjs";
 import { spawnCommand } from "./agent-status.mjs";
 
 export const ACCESS_AUDIT_SCHEMA_VERSION = "agent_access_audit.v1";
@@ -56,6 +57,9 @@ export function validatePolicy(policy) {
     || !Array.isArray(policy.environment_inventory.exclude_directories)
     || !Array.isArray(policy.environment_inventory.exclude_suffixes)
     || !Array.isArray(policy.environment_inventory.approved_dynamic_access)) throw new Error("invalid_environment_inventory_config");
+  if (JSON.stringify(policy.capabilities?.get_only_ops?.separate_from) !== JSON.stringify(OPS_READ_SEPARATE_FROM)) throw new Error("invalid_credential_separation_policy");
+  const targets = policy.capabilities?.get_only_ops?.targets;
+  if (!targets || !["production", "development", "local"].every((name) => Array.isArray(targets[name]?.hosts) && targets[name].hosts.length > 0)) throw new Error("invalid_ops_target_policy");
   return policy;
 }
 
@@ -153,6 +157,15 @@ function auditGitHub(policy, evidence, now) {
   return capability("github", "observable");
 }
 
+function normalizeVercelRole(role) {
+  const value = role ? String(role).trim().toUpperCase().replaceAll("-", "_") : null;
+  if (value === "PROJECT_VIEWER") return "VIEWER";
+  if (value === "PROJECT_DEVELOPER") return "DEVELOPER";
+  if (value === "PROJECT_ADMIN") return "ADMIN";
+  if (value === "PROJECT_GUEST") return "GUEST";
+  return value;
+}
+
 export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}, project = {} }) {
   const tokenProjectId = token.projectId ?? token.project_id ?? token.scope?.projectId ?? null;
   const teamRole = team.membership?.role ?? team.currentUserRole ?? team.role ?? null;
@@ -162,8 +175,8 @@ export function normalizeVercelAccess({ projectId, userId, token = {}, team = {}
   return {
     project_id: project.id ?? project.uid ?? projectId ?? null,
     token_project_id: tokenProjectId,
-    team_role: teamRole ? String(teamRole).toUpperCase() : null,
-    project_role: explicitRole ? String(explicitRole).toUpperCase() : teamRole ? String(teamRole).toUpperCase() : null,
+    team_role: normalizeVercelRole(teamRole),
+    project_role: normalizeVercelRole(explicitRole ?? teamRole),
     role_source: explicitRole ? "project_explicit" : teamRole ? "team_inherited" : "unknown",
   };
 }
@@ -183,15 +196,17 @@ export function selectActiveVercelToken(tokensResponse, tokenValue) {
 
 function auditVercel(policy, evidence) {
   if (missingState(evidence)) return capability("vercel", "missing", ["vercel_viewer_identity_missing"]);
+  const teamRole = normalizeVercelRole(evidence.team_role);
+  const projectRole = normalizeVercelRole(evidence.project_role);
   const reasons = [];
   if (/owner|admin|developer/i.test(String(evidence.identity_kind ?? ""))) reasons.push("vercel_identity_kind_can_write");
-  if (VERCEL_WRITE_ROLES.has(String(evidence.team_role ?? "").toUpperCase())) reasons.push("vercel_team_role_can_write");
-  if (VERCEL_WRITE_ROLES.has(String(evidence.project_role ?? "").toUpperCase())) reasons.push("vercel_project_role_can_write");
+  if (VERCEL_WRITE_ROLES.has(teamRole)) reasons.push("vercel_team_role_can_write");
+  if (VERCEL_WRITE_ROLES.has(projectRole)) reasons.push("vercel_project_role_can_write");
   if (evidence.decrypted_environment_values) reasons.push("vercel_static_identity_can_decrypt_secrets");
   if (reasons.length) return capability("vercel", "overprivileged", reasons);
   const allowedProject = policy.capabilities.vercel.project_ids.includes(evidence.project_id)
     && (!evidence.token_project_id || evidence.token_project_id === evidence.project_id);
-  if (String(evidence.team_role).toUpperCase() !== "VIEWER" || String(evidence.project_role).toUpperCase() !== "VIEWER" || !allowedProject || !evidence.environment_metadata || !evidence.deployments || !evidence.logs) {
+  if (teamRole !== "VIEWER" || projectRole !== "VIEWER" || !allowedProject || !evidence.environment_metadata || !evidence.deployments || !evidence.logs) {
     return capability("vercel", "missing", ["vercel_viewer_evidence_incomplete"]);
   }
   return capability("vercel", "observable");
@@ -203,6 +218,7 @@ function auditOps(evidence) {
   if (!methods.includes("GET")) return capability("get_only_ops", "missing", ["ops_get_read_unproven"]);
   if (methods.some((method) => method !== "GET")) return capability("get_only_ops", "overprivileged", ["ops_token_allows_non_get"]);
   if (evidence.get_probes && Object.values(evidence.get_probes).some((status) => status !== 200)) return capability("get_only_ops", "missing", ["ops_get_read_failed"]);
+  if (evidence.credential_separation_attested !== true) return capability("get_only_ops", "missing", ["ops_credential_separation_unattested"]);
   if (evidence.credential_collisions?.length) return capability("get_only_ops", "overprivileged", ["ops_credential_collision"]);
   return evidence.mutation_guards_derived === false ? capability("get_only_ops", "missing", ["ops_mutation_guards_unproven"]) : capability("get_only_ops", "observable");
 }
@@ -269,14 +285,6 @@ export async function deriveProtectedMutationRoutes({ cwd }) {
   return routes.sort((left, right) => `${left.file}:${left.method}`.localeCompare(`${right.file}:${right.method}`));
 }
 
-export function findOpsCredentialCollisions(env, policy) {
-  const token = env.OPS_READ_TOKEN;
-  if (!token) return [];
-  return (policy.capabilities.get_only_ops.separate_from ?? [])
-    .filter((name) => typeof env[name] === "string" && env[name].length > 0 && env[name] === token)
-    .sort();
-}
-
 async function runJsonCommand(commandRunner, binary, args) {
   const result = await commandRunner(binary, args, { timeoutMs: 10_000, maxBufferBytes: MAX_JSON_BYTES });
   if (result?.exitCode !== 0) throw new Error(`${binary}_read_probe_failed`);
@@ -337,10 +345,62 @@ async function safeGetJson(fetchImpl, url, headers = {}) {
   try { return JSON.parse(text); } catch { throw new Error("read_probe_invalid_json"); }
 }
 
-function safeHarnessBase(value) {
-  const url = new URL(value);
-  if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("invalid_harness_arena_url");
-  return url.toString().replace(/\/$/, "");
+export function resolveOpsTarget(policy, { url: value, projectId }) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error("ops_target_invalid"); }
+  if (url.username || url.password || !["", "/"].includes(url.pathname) || url.search || url.hash) throw new Error("ops_target_invalid");
+  const targets = policy.capabilities.get_only_ops.targets;
+  for (const [environment, target] of Object.entries(targets)) {
+    if (!target.hosts.includes(url.hostname)) continue;
+    if (target.https_required && url.protocol !== "https:") throw new Error("ops_target_invalid");
+    if (target.https_required && url.port) throw new Error("ops_target_invalid");
+    if (!target.https_required && !["http:", "https:"].includes(url.protocol)) throw new Error("ops_target_invalid");
+    if ((target.project_id ?? null) !== (projectId ?? null)) throw new Error("ops_target_invalid");
+    return { environment, project_id: target.project_id, hostname: url.hostname, origin: url.origin };
+  }
+  throw new Error("ops_target_invalid");
+}
+
+function plainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function validAttestation(value) {
+  return plainObject(value)
+    && value.schema_version === "credential_separation.v1"
+    && value.state === "ok"
+    && Number.isInteger(value.checked_count) && value.checked_count >= 0
+    && value.policy_size === OPS_READ_SEPARATE_FROM.length;
+}
+function validHealth(value) { return plainObject(value) && value.ok === true && validAttestation(value.credential_separation); }
+function validRoot(value) {
+  return plainObject(value) && value.schema_version === "ops.v1" && validAttestation(value.credential_separation)
+    && value.inventory === "/api/ops/v1/inventory" && value.summary === "/api/ops/v1/summary"
+    && Array.isArray(value.kinds) && value.kinds.some((item) => /^[a-z][a-z0-9_]*$/.test(typeof item === "string" ? item : item?.kind ?? ""));
+}
+function validInventory(value, kind) {
+  return plainObject(value) && value.schema_version === "ops.v1" && value.kind === kind
+    && Array.isArray(value.items) && typeof value.has_more === "boolean"
+    && (value.next_cursor === null || typeof value.next_cursor === "string");
+}
+function validSummary(value) {
+  return plainObject(value) && value.schema_version === "ops.v1"
+    && plainObject(value.counts) && plainObject(value.latest) && plainObject(value.run_states)
+    && plainObject(value.integrity) && plainObject(value.scan);
+}
+
+async function fetchOpsJson(fetchImpl, url, { origin, token }) {
+  const headers = token ? { authorization: `Bearer ${token}` } : {};
+  let response;
+  try { response = await fetchImpl(url, { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
+  catch { throw new Error("ops_get_probe_failed"); }
+  if (!response?.ok || response.status !== 200 || response.redirected === true) throw new Error("ops_get_probe_failed");
+  if (response.url) {
+    let responseUrl;
+    try { responseUrl = new URL(response.url); } catch { throw new Error("ops_get_probe_failed"); }
+    if (responseUrl.origin !== origin) throw new Error("ops_get_probe_failed");
+  }
+  let text;
+  try { text = await response.text(); } catch { throw new Error("ops_get_probe_failed"); }
+  if (Buffer.byteLength(text) > MAX_JSON_BYTES) throw new Error("ops_get_probe_failed");
+  try { return JSON.parse(text); } catch { throw new Error("ops_get_probe_failed"); }
 }
 
 async function probeVercel(policy, env, commandRunner, fetchImpl) {
@@ -379,27 +439,31 @@ async function probeVercel(policy, env, commandRunner, fetchImpl) {
 async function probeOps(policy, env, fetchImpl, cwd) {
   const token = env.OPS_READ_TOKEN;
   if (!token || !env.HARNESS_ARENA_URL) throw new Error("ops_active_identity_missing");
-  const base = safeHarnessBase(env.HARNESS_ARENA_URL);
-  const getProbes = {};
-  for (const path of ["/api/ops/v1", "/api/ops/v1/summary", "/api/ops/v1/inventory"]) {
-    let response;
-    try { response = await fetchImpl(`${base}${path}`, { method: "GET", headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) }); }
-    catch { throw new Error("ops_get_probe_failed"); }
-    getProbes[path] = response.status;
-  }
+  const target = resolveOpsTarget(policy, { url: env.HARNESS_ARENA_URL, projectId: env.VERCEL_PROJECT_ID });
+  const health = await fetchOpsJson(fetchImpl, `${target.origin}/api/health`, { origin: target.origin });
+  if (!validHealth(health)) throw new Error("ops_health_schema_invalid");
+  const root = await fetchOpsJson(fetchImpl, `${target.origin}/api/ops/v1`, { origin: target.origin, token });
+  if (!validRoot(root)) throw new Error("ops_root_schema_invalid");
+  const kind = root.kinds.map((item) => typeof item === "string" ? item : item?.kind).find((item) => /^[a-z][a-z0-9_]*$/.test(item ?? ""));
+  const inventoryPath = `${root.inventory}?kind=${encodeURIComponent(kind)}&limit=1`;
+  const inventory = await fetchOpsJson(fetchImpl, `${target.origin}${inventoryPath}`, { origin: target.origin, token });
+  if (!validInventory(inventory, kind)) throw new Error("ops_inventory_schema_invalid");
+  const summary = await fetchOpsJson(fetchImpl, `${target.origin}${root.summary}`, { origin: target.origin, token });
+  if (!validSummary(summary)) throw new Error("ops_summary_schema_invalid");
   const routes = await deriveProtectedMutationRoutes({ cwd });
   return {
     state: "authenticated",
     token_present: true,
     methods: ["GET"],
-    get_probes: getProbes,
+    get_probes: { "/api/health": 200, "/api/ops/v1": 200, [inventoryPath]: 200, [root.summary]: 200 },
+    credential_separation_attested: true,
+    target: { environment: target.environment, project_id: target.project_id, hostname: target.hostname },
     mutation_guards_derived: routes.length > 0,
-    credential_collisions: findOpsCredentialCollisions(env, policy),
   };
 }
 
 export async function collectActiveAccessEvidence({ policy, role, cwd, env = process.env, commandRunner = spawnCommand, fetchImpl = fetch, now = new Date().toISOString() }) {
-  const guarded = async (probe, missing) => { try { return await probe(); } catch { return missing; } };
+  const guarded = async (probe, missing) => { try { return await probe(); } catch (error) { return { ...missing, reason: error instanceof Error ? error.message : "probe_failed" }; } };
   const [github, vercel, ops] = await Promise.all([
     guarded(() => probeGitHub(policy, commandRunner), { state: "missing" }),
     guarded(() => probeVercel(policy, env, commandRunner, fetchImpl), { state: "missing" }),
