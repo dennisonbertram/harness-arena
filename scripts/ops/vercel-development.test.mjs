@@ -100,6 +100,47 @@ function jsonResponse(value) {
   });
 }
 
+function verifierApiFetch({ aliases, envs }) {
+  const project = {
+    id: DEVELOPMENT_PROJECT_ID,
+    accountId: TEAM_ID,
+    name: DEVELOPMENT_PROJECT_NAME,
+    link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
+    alias: aliases ?? [{
+      domain: "harness-arena-development.vercel.app",
+      environment: "production",
+      target: "PRODUCTION",
+    }],
+  };
+  return vi.fn(async (input) => {
+    const url = new URL(input);
+    if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+    if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
+      return jsonResponse({ envs: envs ?? [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
+        {
+          id: "env_blob",
+          key: "BLOB_READ_WRITE_TOKEN",
+          target: ["production"],
+          contentHint: { storeId: DEVELOPMENT_STORE_ID },
+        },
+      ] });
+    }
+    if (url.pathname.endsWith("/env/env_callback")) {
+      return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
+    }
+    if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
+      return jsonResponse({
+        id: DEVELOPMENT_STORE_ID,
+        ownerId: TEAM_ID,
+        type: "blob",
+        projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
+      });
+    }
+    throw new Error(`unexpected request ${url.pathname}`);
+  });
+}
+
 describe("native-Git Development project verifier", () => {
   it("is read-only and proves the exact stable remote dev SHA plus isolated project settings", async () => {
     const deps = dependencies();
@@ -221,6 +262,67 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it.each([
+    [
+      "copied duplicate metadata",
+      [
+        { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        { id: "env_blob_copy", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+      ],
+    ],
+    [
+      "an unknown store",
+      [{ id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: "store_unknown" } }],
+    ],
+    [
+      "the live store",
+      [{ id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: LIVE_STORE_ID } }],
+    ],
+    [
+      "raw token metadata without a content hint",
+      [{ id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], value: "raw-token-never-print" }],
+    ],
+  ])("rejects BLOB_READ_WRITE_TOKEN bound through %s even when an unused variable hints at the Development store", async (_name, blobEntries) => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        envs: [
+          { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
+          { id: "env_unused", key: "UNUSED_STORE_URL", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+          ...blobEntries,
+        ],
+      }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it.each([
+    ["redirect", { redirect: manifest().live.aliases[0], target: "PRODUCTION" }],
+    ["live-alias target", { target: manifest().live.aliases[0] }],
+    ["live-project target", { target: LIVE_PROJECT_ID }],
+  ])("preserves alias %s metadata and rejects routing the Development host to a live identity", async (_name, routing) => {
+    const domain = "harness-arena-development.vercel.app";
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        aliases: [{ domain, environment: "production", ...routing }],
+      }),
+    });
+    const actual = await api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    });
+
+    expect(actual.project.aliases[0]).toMatchObject({ domain, ...routing });
+    await expectDenied(dependencies({ readOnlyApi: { inspect: vi.fn(async () => actual) } }));
+  });
+
   it("uses only fixed GET requests, rechecks project settings, and decrypts only CALLBACK_BASE", async () => {
     const requests = [];
     const project = {
