@@ -13,6 +13,17 @@ const live = {
   storeIds: ["store_SgaF1fm7nkPQPCKq"],
 };
 
+const hostedAcceptance = {
+  runsPerSubmission: 1,
+  maxConcurrentRuns: 1,
+  maxStartsPerTick: 1,
+  runBudgetCapUsd: 0.25,
+  runnerAgentTimeoutCapSeconds: 30,
+  runnerVerifyTimeoutCapSeconds: 30,
+  runnerSandboxTimeoutMinutes: 60,
+  gatewayProjectBudgetUsd: 1,
+};
+
 function development(overrides = {}) {
   return {
     environment: "development",
@@ -29,6 +40,7 @@ function development(overrides = {}) {
     host: null,
     store: { id: null },
     callbackOrigin: null,
+    hostedAcceptance,
     ...overrides,
   };
 }
@@ -50,6 +62,53 @@ describe("verifyDevelopmentEnvironment", () => {
       callbackOrigin: "https://harness-arena-development.vercel.app",
     });
     expect(manifest.live).toEqual(live);
+  });
+
+  it("pins the bounded hosted-acceptance controls for one Development-only lifecycle probe", async () => {
+    const manifest = JSON.parse(
+      await readFile(new URL("../../config/development-environment.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest.hostedAcceptance).toEqual(hostedAcceptance);
+    expect(verifyDevelopmentEnvironment({ development: manifest, live: manifest.live })).toEqual({
+      ok: true,
+      missing: [],
+      violations: [],
+    });
+  });
+
+  it.each([
+    ["runsPerSubmission", 5],
+    ["maxConcurrentRuns", 2],
+    ["maxStartsPerTick", 2],
+    ["runBudgetCapUsd", 1],
+    ["runnerAgentTimeoutCapSeconds", 60],
+    ["runnerVerifyTimeoutCapSeconds", 60],
+    ["runnerSandboxTimeoutMinutes", 120],
+    ["gatewayProjectBudgetUsd", 5],
+  ])("rejects a widened hosted acceptance control: %s", (key, value) => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, [key]: value } }),
+      live,
+    });
+
+    expect(result.violations).toContain(`hostedAcceptance.${key}`);
+  });
+
+  it("fails closed when hosted acceptance controls are missing or have unknown fields", () => {
+    const missing = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, gatewayProjectBudgetUsd: undefined } }),
+      live,
+    });
+    const unknown = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, providerKey: "never" } }),
+      live,
+    });
+
+    expect(missing.missing).toContain("hostedAcceptance.gatewayProjectBudgetUsd");
+    expect(unknown.violations).toEqual(expect.arrayContaining([
+      "hostedAcceptance.providerKey",
+    ]));
   });
 
   it("reports missing host, store, and callback infrastructure without exposing secrets", () => {

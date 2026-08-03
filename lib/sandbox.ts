@@ -115,6 +115,23 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function isDevelopmentVercelProject(): boolean {
+  return process.env.VERCEL === "1" && process.env.VERCEL_PROJECT_ID === DEVELOPMENT_PROJECT_ID;
+}
+
+// The isolated Development project must use only its metered AI Gateway key.
+// These checks deliberately do not apply to local work or any other project.
+function assertDevelopmentGatewayBinding(aiGatewayApiKey: string): void {
+  if (!isDevelopmentVercelProject()) return;
+  if (process.env.RUNNER_PROVIDER !== undefined || process.env.OPENROUTER_API_KEY !== undefined) {
+    throw new Error("sandbox: alternate provider denied in Development Vercel");
+  }
+  const keyPartial = requireEnv("AI_GATEWAY_KEY_PARTIAL");
+  if (!aiGatewayApiKey.endsWith(keyPartial)) {
+    throw new Error("sandbox: Gateway key does not match Development key partial");
+  }
+}
+
 function callbackBase(): string {
   const value = requireEnv("CALLBACK_BASE");
   let parsed: URL;
@@ -168,6 +185,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const callbackOrigin = callbackBase();
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
+    assertDevelopmentGatewayBinding(aiGatewayApiKey);
     // Safety ceiling per run (not the metric). Headroom for pricier models like
     // Claude; glm-5.2 runs cost ~$1 and never approach it.
     const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "15";

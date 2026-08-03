@@ -19,6 +19,27 @@ const DEVELOPMENT_STORE_ID = "store_development";
 const TOKEN = "test-vercel-token-never-print";
 const UPSTREAM_URL = "https://github.com/dennisonbertram/harness-arena.git";
 const execFileAsync = promisify(execFile);
+const HOSTED_ACCEPTANCE = {
+  runsPerSubmission: 1,
+  maxConcurrentRuns: 1,
+  maxStartsPerTick: 1,
+  runBudgetCapUsd: 0.25,
+  runnerAgentTimeoutCapSeconds: 30,
+  runnerVerifyTimeoutCapSeconds: 30,
+  runnerSandboxTimeoutMinutes: 60,
+  gatewayProjectBudgetUsd: 1,
+};
+const HOSTED_ACCEPTANCE_ENV = {
+  RUNS_PER_SUBMISSION: "runsPerSubmission",
+  MAX_CONCURRENT_RUNS: "maxConcurrentRuns",
+  MAX_STARTS_PER_TICK: "maxStartsPerTick",
+  RUN_BUDGET_CAP_USD: "runBudgetCapUsd",
+  RUNNER_AGENT_TIMEOUT_CAP: "runnerAgentTimeoutCapSeconds",
+  RUNNER_VERIFY_TIMEOUT_CAP: "runnerVerifyTimeoutCapSeconds",
+  RUNNER_SANDBOX_TIMEOUT_MIN: "runnerSandboxTimeoutMinutes",
+};
+const DEVELOPMENT_GATEWAY_KEY_ID = "gateway-key-development";
+const DEVELOPMENT_GATEWAY_KEY_PARTIAL = "abc";
 
 function manifest(overrides = {}) {
   return {
@@ -33,6 +54,7 @@ function manifest(overrides = {}) {
     host: "harness-arena-development.vercel.app",
     store: { id: DEVELOPMENT_STORE_ID },
     callbackOrigin: "https://harness-arena-development.vercel.app",
+    hostedAcceptance: HOSTED_ACCEPTANCE,
     live: {
       projectId: LIVE_PROJECT_ID,
       aliases: [
@@ -70,6 +92,21 @@ function inspection(overrides = {}) {
       networkModeConfigured: false,
       blobStoreId: DEVELOPMENT_STORE_ID,
       storeIds: [DEVELOPMENT_STORE_ID],
+      hostedAcceptance: Object.fromEntries(Object.entries(HOSTED_ACCEPTANCE_ENV).map(([, acceptanceKey]) => [
+        acceptanceKey,
+        String(HOSTED_ACCEPTANCE[acceptanceKey]),
+      ])),
+      gatewayBudget: {
+        keyId: DEVELOPMENT_GATEWAY_KEY_ID,
+        keyName: "harness-arena-development-acceptance",
+        keyPartial: DEVELOPMENT_GATEWAY_KEY_PARTIAL,
+        quotaEntityId: `api_key_id_${DEVELOPMENT_GATEWAY_KEY_ID}`,
+        limitAmount: 1,
+        currentSpend: 0,
+        refreshPeriod: "monthly",
+        active: true,
+        archived: false,
+      },
     },
     store: {
       id: DEVELOPMENT_STORE_ID,
@@ -160,6 +197,69 @@ function currentDevelopmentStoreResponse() {
   };
 }
 
+function acceptanceEnvironmentEntries() {
+  return Object.keys(HOSTED_ACCEPTANCE_ENV).map((key) => ({
+    id: `env_${key.toLowerCase()}`,
+    key,
+    target: ["production"],
+    type: "encrypted",
+  }));
+}
+
+function gatewayBindingEnvironmentEntries() {
+  return [
+    { id: "env_gateway_key_id", key: "AI_GATEWAY_KEY_ID", target: ["production"], type: "encrypted" },
+    { id: "env_gateway_key_partial", key: "AI_GATEWAY_KEY_PARTIAL", target: ["production"], type: "encrypted" },
+  ];
+}
+
+function developmentGatewayKey(overrides = {}) {
+  return {
+    activeAt: 1785709088100,
+    createdAt: 1785709088100,
+    createdBy: "user_development",
+    createdByAppId: null,
+    expiresAt: null,
+    id: DEVELOPMENT_GATEWAY_KEY_ID,
+    leakedAt: null,
+    leakedUrl: null,
+    name: "harness-arena-development-acceptance",
+    partialKey: DEVELOPMENT_GATEWAY_KEY_PARTIAL,
+    projectId: DEVELOPMENT_PROJECT_ID,
+    purpose: "ai-gateway",
+    quota: {
+      active: true,
+      archived: false,
+      createdAt: 1785709088100,
+      currentByokSpend: 0,
+      currentSpend: 0,
+      includeByokInQuota: true,
+      limitAmount: 1,
+      quotaEntityId: `api_key_id_${DEVELOPMENT_GATEWAY_KEY_ID}`,
+      refreshPeriod: "monthly",
+      updatedAt: 1785709088100,
+    },
+    teamId: TEAM_ID,
+    ...overrides,
+  };
+}
+
+function decryptedEnvironmentValue(entry, value) {
+  return {
+    configurationId: null,
+    createdAt: 1785709088100,
+    createdBy: "user_development",
+    decrypted: true,
+    id: entry.id,
+    key: entry.key,
+    target: entry.target,
+    type: entry.type,
+    updatedAt: 1785709088100,
+    updatedBy: null,
+    value,
+  };
+}
+
 function verifierApiFetch({
   aliases,
   domains,
@@ -174,6 +274,8 @@ function verifierApiFetch({
   liveDeployment = {},
   liveEnvironment = {},
   developmentStore,
+  gatewayKeys,
+  runtimeValues = {},
 }) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
@@ -215,19 +317,46 @@ function verifierApiFetch({
         ...liveEnvironment,
       });
     }
-    if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
-      return jsonResponse({ envs: envs ?? [
-        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
+    const developmentEnvs = envs ?? [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
         {
           id: "env_blob",
           key: "BLOB_READ_WRITE_TOKEN",
           target: ["production"],
           contentHint: { storeId: DEVELOPMENT_STORE_ID },
         },
-      ] });
+        { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+        ...acceptanceEnvironmentEntries(),
+        ...gatewayBindingEnvironmentEntries(),
+      ];
+    if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
+      return jsonResponse({ envs: developmentEnvs });
     }
-    if (url.pathname.endsWith("/env/env_callback")) {
-      return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
+    const environmentEntry = developmentEnvs.find((entry) => url.pathname.endsWith(`/env/${entry.id}`));
+    if (environmentEntry) {
+      if (environmentEntry.key === "CALLBACK_BASE") {
+        return jsonResponse(decryptedEnvironmentValue(environmentEntry, "https://harness-arena-development.vercel.app"));
+      }
+      const acceptanceKey = HOSTED_ACCEPTANCE_ENV[environmentEntry.key];
+      if (acceptanceKey) {
+        return jsonResponse(decryptedEnvironmentValue(
+          environmentEntry,
+          runtimeValues[environmentEntry.key] ?? String(HOSTED_ACCEPTANCE[acceptanceKey]),
+        ));
+      }
+      if (environmentEntry.key === "AI_GATEWAY_KEY_ID") {
+        return jsonResponse(decryptedEnvironmentValue(environmentEntry, runtimeValues.AI_GATEWAY_KEY_ID ?? DEVELOPMENT_GATEWAY_KEY_ID));
+      }
+      if (environmentEntry.key === "AI_GATEWAY_KEY_PARTIAL") {
+        return jsonResponse(decryptedEnvironmentValue(environmentEntry, runtimeValues.AI_GATEWAY_KEY_PARTIAL ?? DEVELOPMENT_GATEWAY_KEY_PARTIAL));
+      }
+      throw new Error(`unexpected environment value read ${environmentEntry.key}`);
+    }
+    if (url.pathname === "/v1/api-keys") {
+      return jsonResponse({
+        apiKeys: gatewayKeys ?? [developmentGatewayKey()],
+        pagination: { count: (gatewayKeys ?? [developmentGatewayKey()]).length, next: null, prev: null },
+      });
     }
     if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
       return jsonResponse(developmentStore ?? developmentStoreResponse());
@@ -373,6 +502,121 @@ describe("bounded read-only Vercel adapter", () => {
       storeId: DEVELOPMENT_STORE_ID,
       token: TOKEN,
     })).resolves.toEqual(inspection());
+  });
+
+  it("rejects a Development project that lacks any declared hosted acceptance runtime control", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ envs: [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
+        { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+      ] }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("rejects a Development project with no active project-scoped Gateway quota", async () => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ gatewayKeys: [] }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("rejects a widened runtime acceptance value, scope, or metadata type", async () => {
+    const widened = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ runtimeValues: { RUNS_PER_SUBMISSION: "5" } }),
+    });
+    const widenedScope = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ envs: [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
+        { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+        ...acceptanceEnvironmentEntries().map((entry) => entry.key === "MAX_CONCURRENT_RUNS"
+          ? { ...entry, target: ["production", "preview"] }
+          : entry),
+      ] }),
+    });
+    const wrongType = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ envs: [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
+        { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+        ...acceptanceEnvironmentEntries().map((entry) => entry.key === "RUN_BUDGET_CAP_USD"
+          ? { ...entry, type: "plain" }
+          : entry),
+      ] }),
+    });
+
+    const input = { projectId: DEVELOPMENT_PROJECT_ID, teamId: TEAM_ID, storeId: DEVELOPMENT_STORE_ID, token: TOKEN };
+    await expect(widened.inspect(input)).rejects.toThrow(/read-only preflight denied/i);
+    await expect(widenedScope.inspect(input)).rejects.toThrow(/read-only preflight denied/i);
+    await expect(wrongType.inspect(input)).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it.each([
+    ["inactive", [developmentGatewayKey({ quota: { ...developmentGatewayKey().quota, active: false } })]],
+    ["wrong project quota entity", [developmentGatewayKey({ quota: { ...developmentGatewayKey().quota, quotaEntityId: "api_key_id_other" } })]],
+  ])("rejects a %s Gateway quota", async (_name, gatewayKeys) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ gatewayKeys }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it.each([
+    ["key id", { AI_GATEWAY_KEY_ID: "other-key" }],
+    ["key partial", { AI_GATEWAY_KEY_PARTIAL: "wrong" }],
+  ])("rejects a mismatched Gateway %s binding", async (_name, runtimeValues) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ runtimeValues }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it.each(["RUNNER_PROVIDER", "OPENROUTER_API_KEY"])("rejects alternate provider configuration %s", async (key) => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ envs: [
+        { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
+        { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+        ...acceptanceEnvironmentEntries(),
+        ...gatewayBindingEnvironmentEntries(),
+        { id: `env_${key.toLowerCase()}`, key, target: ["production"], type: "encrypted" },
+      ] }),
+    });
+    await expect(api.inspect({ projectId: DEVELOPMENT_PROJECT_ID, teamId: TEAM_ID, storeId: DEVELOPMENT_STORE_ID, token: TOKEN }))
+      .rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it.each([
+    ["excludes BYOK spend", { includeByokInQuota: false }],
+    ["is exhausted", { currentSpend: 1 }],
+  ])("rejects a quota that %s", async (_name, quota) => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ gatewayKeys: [developmentGatewayKey({ quota: { ...developmentGatewayKey().quota, ...quota } })] }),
+    });
+    await expect(api.inspect({ projectId: DEVELOPMENT_PROJECT_ID, teamId: TEAM_ID, storeId: DEVELOPMENT_STORE_ID, token: TOKEN }))
+      .rejects.toThrow(/read-only preflight denied/i);
   });
 
   it("accepts the real nested private Blob store metadata", async () => {
@@ -641,36 +885,8 @@ describe("bounded read-only Vercel adapter", () => {
     })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
   });
 
-  it("uses only fixed GET requests, rechecks project settings, and decrypts only CALLBACK_BASE", async () => {
-    const requests = [];
-    const project = {
-      id: DEVELOPMENT_PROJECT_ID,
-      accountId: TEAM_ID,
-      name: DEVELOPMENT_PROJECT_NAME,
-      link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-      alias: [],
-    };
-    const fetchImpl = vi.fn(async (input, options) => {
-      const url = new URL(input);
-      requests.push({ url, options });
-      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
-      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
-        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
-      }
-      if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
-        return jsonResponse({ envs: [
-          { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
-          { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
-        ] });
-      }
-      if (url.pathname.endsWith("/env/env_callback")) {
-        return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
-      }
-      if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse(developmentStoreResponse());
-      }
-      throw new Error(`unexpected request ${url.pathname}`);
-    });
+  it("uses only fixed GET requests, rechecks project settings, and decrypts only the declared non-secret controls", async () => {
+    const fetchImpl = verifierApiFetch({ aliases: [] });
 
     const api = subject.createReadOnlyVercelApi({ fetchImpl });
     await expect(api.inspect({
@@ -680,17 +896,20 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
     })).resolves.toEqual(inspection());
 
-    expect(requests).toHaveLength(7);
+    const requests = fetchImpl.mock.calls.map(([input, options]) => ({ url: new URL(input), options }));
+    expect(requests).toHaveLength(17);
     expect(requests.every(({ options }) => options.method === "GET")).toBe(true);
     expect(requests.every(({ options }) => options.redirect === "error")).toBe(true);
-    expect(requests.filter(({ url }) => url.searchParams.get("decrypt") === "true"))
-      .toHaveLength(1);
+    const decrypted = requests.filter(({ url }) => url.searchParams.get("decrypt") === "true");
+    expect(decrypted).toHaveLength(10);
+    expect(decrypted.some(({ url }) => url.pathname.endsWith("/env/env_gateway"))).toBe(false);
+    expect(decrypted.some(({ url }) => url.pathname.endsWith("/env/env_gateway_key_id"))).toBe(true);
+    expect(decrypted.some(({ url }) => url.pathname.endsWith("/env/env_gateway_key_partial"))).toBe(true);
     expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")))
       .toHaveLength(2);
     expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")).every(({ url }) => url.searchParams.get("limit") === "100"))
       .toBe(true);
-    expect(requests.find(({ url }) => url.searchParams.get("decrypt") === "true").url.pathname)
-      .toMatch(/env_callback$/);
+    expect(requests.filter(({ url }) => url.pathname === "/v1/api-keys")).toHaveLength(1);
   });
 
   it("bounds response bodies", async () => {
@@ -708,7 +927,8 @@ describe("bounded read-only Vercel adapter", () => {
 
   it("fails closed when project linkage changes during inspection", async () => {
     let projectReads = 0;
-    const fetchImpl = vi.fn(async (input) => {
+    const baseFetch = verifierApiFetch({ aliases: [] });
+    const fetchImpl = vi.fn(async (input, options) => {
       const url = new URL(input);
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) {
         projectReads += 1;
@@ -725,22 +945,7 @@ describe("bounded read-only Vercel adapter", () => {
           alias: [{ domain: "harness-arena-development.vercel.app" }],
         });
       }
-      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
-        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
-      }
-      if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
-        return jsonResponse({ envs: [
-          { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
-          { key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
-        ] });
-      }
-      if (url.pathname.endsWith("/env/env_callback")) {
-        return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
-      }
-      if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse(developmentStoreResponse());
-      }
-      throw new Error(`unexpected request ${url.pathname}`);
+      return baseFetch(input, options);
     });
     const api = subject.createReadOnlyVercelApi({ fetchImpl });
     await expect(api.inspect({

@@ -57,6 +57,7 @@ const NETWORK_ALLOWLIST = [
 const ENV_KEYS = [
   "RUNNER_CALLBACK_SECRET",
   "AI_GATEWAY_API_KEY",
+  "AI_GATEWAY_KEY_PARTIAL",
   "CALLBACK_BASE",
   "RUNNER_SNAPSHOT_ID",
   "RUN_BUDGET_CAP_USD",
@@ -64,6 +65,8 @@ const ENV_KEYS = [
   "VERCEL_TEAM_ID",
   "VERCEL_PROJECT_ID",
   "RUNNER_NETWORK_MODE",
+  "RUNNER_PROVIDER",
+  "OPENROUTER_API_KEY",
   "RUNNER_SANDBOX_TIMEOUT_MIN",
   "RUNNER_AGENT_TIMEOUT_CAP",
   "RUNNER_VERIFY_TIMEOUT_CAP",
@@ -117,6 +120,9 @@ describe("createRunSandbox", () => {
     delete process.env.VERCEL_TEAM_ID;
     delete process.env.VERCEL_PROJECT_ID;
     delete process.env.RUNNER_NETWORK_MODE;
+    delete process.env.AI_GATEWAY_KEY_PARTIAL;
+    delete process.env.RUNNER_PROVIDER;
+    delete process.env.OPENROUTER_API_KEY;
     delete process.env.RUNNER_SANDBOX_TIMEOUT_MIN;
     delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
     delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
@@ -149,6 +155,28 @@ describe("createRunSandbox", () => {
         timeout: expectedMinutes * 60 * 1000,
       }),
     );
+  });
+
+  it("rejects a Development Vercel run when the Gateway key does not match its safe partial", async () => {
+    process.env.VERCEL = "1";
+    process.env.VERCEL_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+    process.env.AI_GATEWAY_KEY_PARTIAL = "expected";
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(/gateway key/i);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(["RUNNER_PROVIDER", "OPENROUTER_API_KEY"])("rejects %s in a Development Vercel run", async (key) => {
+    process.env.VERCEL = "1";
+    process.env.VERCEL_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+    process.env.AI_GATEWAY_KEY_PARTIAL = "key";
+    process.env.AI_GATEWAY_API_KEY = "test-gw-key";
+    process.env[key] = "configured";
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(/alternate provider/i);
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 
   it("uses RUNNER_SANDBOX_TIMEOUT_MIN when it is longer than the task-derived floor", async () => {

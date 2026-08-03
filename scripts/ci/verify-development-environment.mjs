@@ -10,12 +10,33 @@ const DEVELOPMENT_KEYS = new Set([
   "host",
   "store",
   "callbackOrigin",
+  "hostedAcceptance",
   "live",
 ]);
 const VERCEL_PROJECT_KEYS = new Set(["id", "name"]);
 const GIT_KEYS = new Set(["provider", "repository", "productionBranch"]);
 const STORE_KEYS = new Set(["id"]);
+const HOSTED_ACCEPTANCE_KEYS = new Set([
+  "runsPerSubmission",
+  "maxConcurrentRuns",
+  "maxStartsPerTick",
+  "runBudgetCapUsd",
+  "runnerAgentTimeoutCapSeconds",
+  "runnerVerifyTimeoutCapSeconds",
+  "runnerSandboxTimeoutMinutes",
+  "gatewayProjectBudgetUsd",
+]);
 const LIVE_KEYS = new Set(["projectId", "aliases", "storeIds"]);
+const REQUIRED_HOSTED_ACCEPTANCE = Object.freeze({
+  runsPerSubmission: 1,
+  maxConcurrentRuns: 1,
+  maxStartsPerTick: 1,
+  runBudgetCapUsd: 0.25,
+  runnerAgentTimeoutCapSeconds: 30,
+  runnerVerifyTimeoutCapSeconds: 30,
+  runnerSandboxTimeoutMinutes: 60,
+  gatewayProjectBudgetUsd: 1,
+});
 
 const KNOWN_LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 const KNOWN_LIVE_ALIASES = [
@@ -73,6 +94,16 @@ function requiredString(value, path, missing, violations) {
     return null;
   }
   return normalized;
+}
+
+function requiredExactNumber(value, path, expected, missing, violations) {
+  if (value === null || value === undefined) {
+    addOnce(missing, path);
+    return;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value !== expected) {
+    addOnce(violations, path);
+  }
 }
 
 function normalizeIdentity(value) {
@@ -180,6 +211,9 @@ export function verifyDevelopmentEnvironment({ development, live }) {
   }
   for (const path of unknownKeyPaths(development.git, GIT_KEYS, "git")) addOnce(violations, path);
   for (const path of unknownKeyPaths(development.store, STORE_KEYS, "store")) addOnce(violations, path);
+  for (const path of unknownKeyPaths(development.hostedAcceptance, HOSTED_ACCEPTANCE_KEYS, "hostedAcceptance")) {
+    addOnce(violations, path);
+  }
   for (const path of unknownKeyPaths(live, LIVE_KEYS, "live")) addOnce(violations, path);
   if (Object.hasOwn(development, "live")) {
     if (!isObject(development.live)) addOnce(violations, "live");
@@ -233,6 +267,17 @@ export function verifyDevelopmentEnvironment({ development, live }) {
   }
 
   const callbackHost = callbackHostname(development.callbackOrigin, developmentHost, missing, violations);
+  if (!isObject(development.hostedAcceptance)) {
+    if (development.hostedAcceptance === null || development.hostedAcceptance === undefined) {
+      addOnce(missing, "hostedAcceptance");
+    } else {
+      addOnce(violations, "hostedAcceptance");
+    }
+  } else {
+    for (const [key, expected] of Object.entries(REQUIRED_HOSTED_ACCEPTANCE)) {
+      requiredExactNumber(development.hostedAcceptance[key], `hostedAcceptance.${key}`, expected, missing, violations);
+    }
+  }
   const liveProjectIdValue = requiredString(live.projectId, "live.projectId", missing, violations);
   const liveProjectId = liveProjectIdValue === null ? null : normalizeIdentity(liveProjectIdValue);
   const liveAliases = normalizedArray(live.aliases, "live.aliases", normalizeHostname, missing, violations);
