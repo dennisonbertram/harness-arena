@@ -112,6 +112,22 @@ describe("POST /api/runs/[id]/trace", () => {
     expect(response.status).toBe(400);
   });
 
+  it("accepts a selected task trace before task_results persistence and rejects a nonselected task", async () => {
+    await storageRef.current.putRun({
+      id: "run-selected", submission_id: "sub-1", status: "running",
+      selected_task_ids: ["selected-task"],
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    } as never);
+
+    expect((await POST(traceRequest("run-selected", "task_id=selected-task&name=pi-stdout.txt", "early"), {
+      params: Promise.resolve({ id: "run-selected" }),
+    })).status).toBe(200);
+    expect((await POST(traceRequest("run-selected", "task_id=other-task&name=pi-stdout.txt", "no"), {
+      params: Promise.resolve({ id: "run-selected" }),
+    })).status).toBe(400);
+  });
+
   it("allows _run only for runner-log.txt", async () => {
     await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [{ task_id: "t1", attempted: true, passed: false }], created_at: "2026-07-21T00:00:00.000Z" });
     expect((await POST(traceRequest("run-1", "task_id=_run&name=session.jsonl", "x"), {

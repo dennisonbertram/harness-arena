@@ -657,6 +657,24 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("reads the version returned by list after overwrite instead of a stale bare pathname", async () => {
+    const storage = new BlobStorage();
+    const stale = makeRun("run-1", "2026-07-21T00:00:00.000Z");
+    const current = { ...stale, status: "completed" as const, tasks_passed: 1 };
+    const versionedUrl = "https://store.private.blob.vercel-storage.com/runs/run-1.json?version=current";
+    vi.mocked(list).mockResolvedValue({
+      blobs: [{ url: versionedUrl, pathname: "runs/run-1.json", uploadedAt: "2026-08-03T00:00:00.000Z" }],
+      hasMore: false,
+    } as never);
+    vi.mocked(get).mockImplementation(async (identifier) => ({
+      statusCode: 200,
+      stream: new Response(JSON.stringify(identifier === versionedUrl ? current : stale)).body,
+    } as never));
+
+    await expect(storage.getRun("run-1")).resolves.toEqual(current);
+    expect(get).toHaveBeenCalledWith(versionedUrl, expect.objectContaining({ access: "public", useCache: false }));
+  });
+
   it("uses the authenticated Blob read without first waiting on a rate-limited public URL", async () => {
     const storage = new BlobStorage();
     const run = makeRun("run-1", "2026-07-21T00:00:00.000Z");
