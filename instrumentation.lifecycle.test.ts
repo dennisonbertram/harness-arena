@@ -1,5 +1,5 @@
-import { trace } from "@opentelemetry/api";
-import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
+import { context, SpanKind, trace } from "@opentelemetry/api";
+import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { registerOTel } from "@vercel/otel";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BoundedSpanProcessor, structuredSpanReadiness } from "./instrumentation";
@@ -67,5 +67,49 @@ describe("hosted request span lifecycle", () => {
         otlp: { configured: true, queued: 0 },
       });
     });
+    expect(waitUntilTasks).toHaveLength(3);
+  });
+
+  it("coalesces retained children behind one post-root request-lifetime drain", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const batches: ReadableSpan[][] = [];
+    const exporter = {
+      export: (spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { batches.push(spans); callback({ code: 0 }); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+    const tracer = provider.getTracer("coalesced-root-drain");
+    const root = tracer.startSpan("request-root");
+    const rootContext = trace.setSpan(context.active(), root);
+
+    for (let index = 0; index < 8; index += 1) {
+      tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }, rootContext).end();
+    }
+    expect(waitUntilTasks).toHaveLength(0);
+
+    root.end();
+    expect(waitUntilTasks).toHaveLength(1);
+    await Promise.all(waitUntilTasks);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(9);
+    await provider.shutdown();
+  });
+
+  it("runs the same bounded post-root drain as a local fallback without request context", async () => {
+    const exportSpans = vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 }));
+    const exporter = { export: exportSpans, forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [new BoundedSpanProcessor(exporter, "structured")] });
+
+    provider.getTracer("local-root-drain").startSpan("request-root").end();
+
+    await vi.waitFor(() => {
+      expect(exportSpans).toHaveBeenCalledTimes(1);
+      expect(structuredSpanReadiness().structured.queued).toBe(0);
+    });
+    await provider.shutdown();
   });
 });

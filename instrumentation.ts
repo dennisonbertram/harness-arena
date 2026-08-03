@@ -1,4 +1,5 @@
 import { JsonTraceSerializer, ProtobufTraceSerializer, type ISerializer } from "@opentelemetry/otlp-transformer";
+import { waitUntil } from "@vercel/functions";
 import { registerOTel } from "@vercel/otel";
 import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -13,6 +14,7 @@ const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
+const POST_ROOT_DRAIN_DEADLINE_MILLIS = 5_250;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
@@ -293,6 +295,7 @@ export class BoundedSpanProcessor implements SpanProcessor {
   private dropped = 0;
   private closed = false;
   private flushInFlight?: Promise<void>;
+  private postRootDrain?: Promise<void>;
   private inFlightBatchLength = 0;
   constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
     if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
@@ -313,6 +316,37 @@ export class BoundedSpanProcessor implements SpanProcessor {
     }
     this.queue.push(span);
     updateSinkReadiness(this.sink, { queued: this.queue.length });
+    if (spanPriority(span) === 2) this.schedulePostRootDrain();
+  }
+  private schedulePostRootDrain(): void {
+    if (this.postRootDrain || this.closed) return;
+    let completed = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const drain = Promise.resolve().then(() => this.forceFlush());
+    const bounded = Promise.race([
+      drain,
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new Error("post-root span drain deadline exceeded")), POST_ROOT_DRAIN_DEADLINE_MILLIS);
+      }),
+    ]).then(
+      () => { completed = true; },
+      () => undefined,
+    ).finally(() => {
+      if (deadline) clearTimeout(deadline);
+      if (this.postRootDrain === bounded) this.postRootDrain = undefined;
+      // A root can arrive after drain() observes an empty queue but before this
+      // continuation clears the coalescing task. Re-arm only after a successful
+      // drain; failed batches stay queued for the next request or shutdown.
+      if (completed && this.queue.some((queued) => spanPriority(queued) === 2)) this.schedulePostRootDrain();
+    });
+    this.postRootDrain = bounded;
+    try {
+      // Public Vercel request-lifetime API. Outside a hosted request it is a
+      // no-op, while the same catch-wrapped bounded task still runs locally.
+      waitUntil(bounded);
+    } catch {
+      // The local best-effort task is already running and cannot reject.
+    }
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;

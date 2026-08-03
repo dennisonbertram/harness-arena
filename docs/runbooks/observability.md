@@ -47,8 +47,13 @@ dropped counts and an unready reason without collector headers or their values.
 The OTLP queue retains a failed batch until a later request or shutdown flush
 acknowledges it; it remains capped at 32 spans, records
 `export_unacknowledged`, and does not loop inside a single `forceFlush` call.
-Vercel's supported request context registers flush work with `waitUntil`, so a
-normal request can drain the bounded queue before function termination.
+Because `@vercel/otel`'s root-start lifecycle wait is short, a retained root
+also registers one coalesced post-enqueue drain through the public
+`@vercel/functions` `waitUntil` API. Retained children do not schedule drains.
+The whole drain has a 5.25-second lifetime deadline; failures are consumed by
+the lifecycle task while the unacknowledged batch remains queued for a later
+request or shutdown retry. Without a hosted request context, the same bounded,
+catch-wrapped task runs locally as a best-effort fallback.
 
 `structuredSpanReadiness()` is process-local diagnostic state, not evidence of
 cross-instance or cross-lambda health. Establish hosted health from the
