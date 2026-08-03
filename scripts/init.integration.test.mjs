@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { atomicWriteFile } from "../lib/file-storage-lock.mjs";
+import { prerequisiteOperationDeadlineMs } from "./init-lib.mjs";
 
 const repositoryRoot = process.cwd();
 const cleanupRoots = new Set();
@@ -248,9 +249,10 @@ function processIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-async function fakeHungPnpm(checkout, label, eventPath) {
+async function fakeHungPnpm(checkout, label, eventPath, markerDelayMs = 0) {
   const bin = join(checkout, "..", `bin-${label}`);
   const marker = join(checkout, "..", `pnpm-${label}.json`);
+  const readyMarker = `${marker}.ready`;
   const events = eventPath ?? join(checkout, "..", `pnpm-${label}.events`);
   await mkdir(bin);
   const path = join(bin, "pnpm");
@@ -264,12 +266,14 @@ async function fakeHungPnpm(checkout, label, eventPath) {
     "process.on('SIGTERM', () => appendFileSync(events, 'leader:SIGTERM\\n'));",
     "const descendant = `const { appendFileSync } = require('node:fs'); const events = process.argv[1]; process.on('SIGTERM', () => appendFileSync(events, 'descendant:SIGTERM\\\\n')); appendFileSync(events, 'descendant:ready\\\\n'); setInterval(() => {}, 1000);`;",
     "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
-    "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
     `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
+    "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
+    `await atomicWriteFile(${JSON.stringify(readyMarker)}, "ready");`,
+    `if (${markerDelayMs} > 0) await new Promise((resolve) => setTimeout(resolve, ${markerDelayMs}));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(path, 0o700);
-  return { events, marker, path: `${bin}:${process.env.PATH}` };
+  return { events, marker, readyMarker, path: `${bin}:${process.env.PATH}` };
 }
 
 function cleanupHarness() {
@@ -422,21 +426,27 @@ describe.sequential("read-only init check integration", () => {
 
   it("bounds and reaps a hung pnpm prerequisite process group", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-hung-pnpm-");
-    const pnpm = await fakeHungPnpm(checkout, "hung");
-    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "500" }, "--check");
-    const pids = JSON.parse(await waitForFile(pnpm.marker));
+    const prerequisiteTimeoutMs = 1_500;
+    // The operation owns the prerequisite deadline, authenticated cleanup, and
+    // a bounded scheduling margin. PIDs are published before the deliberately
+    // delayed descendant readiness so cleanup remains observable under load.
+    const operationBoundMs = prerequisiteOperationDeadlineMs(prerequisiteTimeoutMs);
+    expect(operationBoundMs).toBe(4_500);
+    const pnpm = await fakeHungPnpm(checkout, "hung", undefined, prerequisiteTimeoutMs / 2);
+    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: String(prerequisiteTimeoutMs) }, "--check");
+    const pids = JSON.parse(await waitForFile(pnpm.marker, operationBoundMs));
     const started = Date.now();
-    const result = await Promise.race([invocation, delay(2_000).then(() => ({ timedOut: true }))]);
+    const result = await Promise.race([invocation, delay(operationBoundMs).then(() => ({ timedOut: true }))]);
     if (result.timedOut) {
       for (const pid of launcherGroups) await terminateProcessGroup(pid).catch(() => {});
     }
     expect(result.timedOut).not.toBe(true);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/timed out/i);
-    expect(Date.now() - started).toBeLessThan(2_500);
-    await expect(waitForProcessGroupExit(pids.leader, 2_000)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(operationBoundMs);
+    await expect(waitForProcessGroupExit(pids.leader, operationBoundMs)).resolves.toBeUndefined();
     expect(processIsAlive(pids.child)).toBe(false);
-  }, 10_000);
+  }, 15_000);
 
   it("creates no state or surviving prerequisite process in a valid checkout", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-valid-");
@@ -510,6 +520,7 @@ describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisit
     const initExitMarker = `${process.env.HARNESS_INIT_META_MARKER}.init-exit`;
     const invocation = runInitWithEnv({ PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "60000" }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker));
+    await waitForFile(pnpm.readyMarker);
     await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
       worker_pid: process.pid,
       init_pid: pids.init,

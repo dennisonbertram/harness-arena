@@ -17,11 +17,21 @@ const SAFE_LOCAL_KEYS = new Set([
 const DETERMINISTIC_SCENARIOS = new Set(["success", "task-failure", "callback-failure", "stale-reap", "budget-exceeded"]);
 const REQUIRED_NODE_VERSION = [20, 9, 0];
 const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
+export const DEFAULT_OWNED_SUPERVISOR_GRACE_MS = 500;
+export const DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS = 1_000;
+export const AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS = 1_000;
+export const PREREQUISITE_SCHEDULING_MARGIN_MS = 500;
 const SUPERVISOR_PATH = fileURLToPath(new URL("./init-process-supervisor.mjs", import.meta.url));
 const SUPERVISOR_OWNERSHIP = new WeakMap();
 export const INIT_CANCELLATION_PHASES = Object.freeze([
   "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle", "durable_detach",
 ]);
+
+export function prerequisiteOperationDeadlineMs(prerequisiteTimeoutMs) {
+  if (!Number.isFinite(prerequisiteTimeoutMs) || prerequisiteTimeoutMs <= 0) throw new Error("prerequisite timeout must be positive");
+  return prerequisiteTimeoutMs + DEFAULT_OWNED_SUPERVISOR_GRACE_MS + DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS
+    + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS + PREREQUISITE_SCHEDULING_MARGIN_MS;
+}
 
 export function choosePort(worktree) {
   let hash = 2166136261;
@@ -218,11 +228,16 @@ export async function spawnSupervisedProcess(command, args, options = {}, {
     if (!outcomeSettled) { outcomeSettled = true; resolveOutcome({ error: new Error(`supervisor exited before command outcome (${exitSignal ?? code})`) }); }
   });
   const owned = Object.freeze({ child, supervisorPid: child.pid, outcome });
-  const record = { child, nonce, supervisorPid: child.pid, groupPid: undefined };
+  const record = { child, nonce, supervisorPid: child.pid, groupPid: undefined, authenticatedReaped: false };
   SUPERVISOR_OWNERSHIP.set(owned, record);
   try {
     const started = await supervisorHandshake(child, nonce, handshakeTimeoutMs, signal);
     record.groupPid = started.groupPid;
+    const rememberAuthenticatedReap = (message) => {
+      if (authenticatedSupervisorMessage(message, record, "group-reaped")) record.authenticatedReaped = true;
+    };
+    child.on("message", rememberAuthenticatedReap);
+    child.once("exit", () => child.off("message", rememberAuthenticatedReap));
     return owned;
   } catch (error) {
     try { child.send({ type: "terminate", nonce, graceMs: 50, killWaitMs: 500 }); } catch {}
@@ -272,14 +287,14 @@ async function supervisorHandshake(child, nonce, timeoutMs, signal) {
 }
 
 export async function terminateOwnedSupervisor(owned, {
-  graceMs = 500,
-  killWaitMs = 1_000,
+  graceMs = DEFAULT_OWNED_SUPERVISOR_GRACE_MS,
+  killWaitMs = DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS,
   beforeEscalate,
 } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
   if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
     || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
-  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + 1_000);
+  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS);
   try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs, killWaitMs }); }
   catch { return false; }
   if (beforeEscalate) await beforeEscalate();
@@ -303,7 +318,6 @@ export async function detachOwnedSupervisor(owned, { signal, beforeCommit, befor
   if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
     || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
   const detachId = randomUUID();
-  const cleanupProof = waitForAuthenticatedExit(record, "group-reaped", 3_500);
   const cleanupAfterFailure = async () => {
     // A generic parent-side IPC disconnect makes an acknowledgement impossible;
     // supervisor exit is the only remaining observable proof for that failure mode.
@@ -314,9 +328,13 @@ export async function detachOwnedSupervisor(owned, { signal, beforeCommit, befor
       return false;
     }
     if (record.child.connected && liveChild(record.child)) {
+      // Arm the bounded proof when cleanup starts. A caller-controlled detach
+      // barrier may be arbitrarily long and must not consume this deadline.
+      const cleanupProof = waitForAuthenticatedExit(record, "group-reaped", 3_500);
       try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs: 100, killWaitMs: 2_000 }); } catch {}
+      if (!await cleanupProof) throw new Error("durable detach cleanup could not be authenticated");
+      return false;
     }
-    if (!await cleanupProof) throw new Error("durable detach cleanup could not be authenticated");
     return false;
   };
   try {
@@ -384,13 +402,15 @@ function waitForAuthenticatedMessage(record, type, timeoutMs, signal, expected =
 function waitForAuthenticatedExit(record, type, timeoutMs) {
   return new Promise((resolveComplete) => {
     let settled = false;
-    let acknowledged = false;
+    let acknowledged = type === "group-reaped" && record.authenticatedReaped === true;
     let exited = !liveChild(record.child);
+    if (acknowledged && exited) { resolveComplete(true); return; }
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref();
     const onMessage = (message) => {
       if (!authenticatedSupervisorMessage(message, record, type)) return;
       acknowledged = true;
+      if (type === "group-reaped") record.authenticatedReaped = true;
       if (exited) finish(true);
     };
     const onExit = () => {
