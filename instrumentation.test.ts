@@ -176,6 +176,32 @@ describe("onRequestError", () => {
     logSpy.mockRestore();
   });
 
+  it("evicts local children so a request root under a remote parent survives the bounded queue", async () => {
+    const captured: ReadableSpan[] = [];
+    const exporter = {
+      export: vi.fn((spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { captured.push(...spans); callback({ code: 0 }); }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "structured");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    const tracer = provider.getTracer("remote-priority-test");
+    const remoteParentContext = trace.setSpan(context.active(), trace.wrapSpanContext({
+      traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1, isRemote: true,
+    }));
+    const requestRoot = tracer.startSpan("request-root", { kind: SpanKind.INTERNAL }, remoteParentContext);
+    const requestRootSpanId = requestRoot.spanContext().spanId;
+    const requestContext = trace.setSpan(context.active(), requestRoot);
+
+    for (let index = 0; index < 32; index += 1) tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }, requestContext).end();
+    requestRoot.end();
+    await provider.forceFlush();
+
+    expect(captured).toHaveLength(32);
+    expect(captured.some((span) => span.spanContext().spanId === requestRootSpanId)).toBe(true);
+    await provider.shutdown();
+  });
+
   it("keeps a failed OTLP batch bounded and retryable without letting structured delivery hide its failure", async () => {
     let acknowledge = false;
     const exporter = {
