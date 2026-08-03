@@ -45,7 +45,7 @@ describe("observability logger contract", () => {
       callback: "https://blob.example/file",
       configured: "[REDACTED]",
       cycle: { password: "[REDACTED]", self: "[Circular]" },
-      err: { error_class: "Error", error_message: "provider timed out", error_stage: "unknown" },
+      err: { error_schema: "v1", error_class: "error", error_stage: "unknown", error_fingerprint: expect.any(String) },
     });
   });
 
@@ -99,17 +99,28 @@ describe("observability logger contract", () => {
     spy.mockRestore();
   });
 
-  it("normalizes Error and non-Error values to one stable bounded schema", () => {
+  it("emits only the allowlisted error schema and fingerprints arbitrary error text", () => {
     const error = Object.assign(new TypeError("bad token"), { digest: "digest-1", stack: `TypeError: bad token\n${"at frame\n".repeat(100)}` });
     expect(normalizeError(error, "provider_request", new Set(["token"]))).toMatchObject({
-      error_class: "TypeError",
-      error_digest: "digest-1",
+      error_schema: "v1",
+      error_class: "type_error",
+      error_fingerprint: expect.stringMatching(/^fnv1a-[0-9a-f]{8}$/),
       error_stage: "provider_request",
     });
     expect(normalizeError("plain failure", "callback_validation")).toMatchObject({
-      error_class: "NonError",
+      error_schema: "v1",
+      error_class: "non_error",
       error_stage: "callback_validation",
     });
-    expect(JSON.stringify(normalizeError(error, "provider_request", new Set(["token"])))).not.toContain("bad token");
+    const output = JSON.stringify(normalizeError(error, "provider_request", new Set(["token"])));
+    for (const forbidden of ["bad token", "digest-1", "TypeError:", "at frame"]) expect(output).not.toContain(forbidden);
+  });
+
+  it("bounds hostile strings before redaction work while retaining a bounded safe result", () => {
+    const hostile = `Bearer ${"x".repeat(4 * 1024 * 1024)} secret-after-the-boundary`;
+    const output = redactLogValue(hostile, new Set(["secret-after-the-boundary"]));
+    expect(typeof output).toBe("string");
+    expect((output as string).length).toBeLessThanOrEqual(2_048);
+    expect(output).not.toContain("secret-after-the-boundary");
   });
 });
