@@ -385,10 +385,12 @@ async function probeGitHub(policy, env, commandRunner) {
     identity: identity.login ?? identity.slug ?? null,
     repository_role: levelIsWrite(installationRepositoryRole) ? installationRepositoryRole : repositoryRole,
     expires_at: null,
-    // GitHub's GET-only installation-token endpoint proves repository scope and
-    // coarse repository access, but does not expose the token's App permission
-    // map. Successful GET probes cannot substitute for that map.
-    permissions: identityKind === "github_app" ? {} : { metadata: "read", contents: "read", actions: "read", issues: "read", pull_requests: "read" },
+    // Repository GETs establish endpoint reachability and coarse repository
+    // access only. They do not establish the five independent GitHub
+    // permissions required by this policy, particularly for a fine-grained
+    // PAT. Keep this empty until an authoritative token permission map is
+    // supplied (for example, a GitHub App installation permission response).
+    permissions: {},
   };
 }
 

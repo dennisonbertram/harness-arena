@@ -102,11 +102,29 @@ describe("least-privilege access policy", () => {
     };
     const collected = await audit.collectActiveAccessEvidence({ policy, role: "monitor", cwd: repo, env, commandRunner, fetchImpl, now: "2026-08-03T10:00:00.000Z" });
     const report = audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" });
-    expect(report.overall, JSON.stringify({ collected, report, requests })).toBe("observable");
+    expect(report.overall, JSON.stringify({ collected, report, requests })).toBe("missing");
+    expect(report.systems.find(({ name }) => name === "github")).toMatchObject({ state: "missing" });
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
     expect(requests.some(([url]) => url.includes("since=123"))).toBe(true);
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
+  });
+
+  it("never manufactures fine-grained GitHub permissions from successful user GET probes", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const commandRunner = vi.fn(async (_binary, args) => {
+      if (args[1] === "user") return { exitCode: 0, stdout: JSON.stringify({ login: "fine-grained-user" }) };
+      return { exitCode: 0, stdout: JSON.stringify({ permissions: { pull: true, push: false, admin: false } }) };
+    });
+
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo, env: { GH_TOKEN: "fine-grained-pat" }, commandRunner, fetchImpl: vi.fn(),
+    });
+
+    expect(collected.github).toMatchObject({ identity_kind: "authenticated_user", permissions: {} });
+    expect(audit.auditAccessEvidence(policy, collected, { authority: "authoritative" }).systems.find(({ name }) => name === "github"))
+      .toMatchObject({ state: "missing" });
   });
 
   it("fails closed when the official paginated project-members schema is absent, even if project.members is populated", async () => {
