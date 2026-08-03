@@ -148,7 +148,7 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
-  it("binds one aggregate two-sink lifecycle task to each concurrent root request context", async () => {
+  it("binds one aggregate two-sink lifecycle task to each concurrent root request context in the same incoming trace", async () => {
     const tasksByRequest = new Map<string, Promise<unknown>[]>([["request-a", []], ["request-b", []]]);
     let activeRequest = "request-a";
     (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
@@ -168,8 +168,16 @@ describe("hosted request span lifecycle", () => {
       new BoundedSpanProcessor(exporter(otlpSpans), "otlp"),
     ] });
     const tracer = provider.getTracer("concurrent-root-drains");
-    const rootA = tracer.startSpan("request-a-root");
-    const rootB = tracer.startSpan("request-b-root");
+    const incomingParent = trace.setSpan(context.active(), trace.wrapSpanContext({
+      traceId: "1".repeat(32),
+      spanId: "2".repeat(16),
+      traceFlags: 1,
+      isRemote: true,
+    }));
+    const rootA = tracer.startSpan("request-a-root", undefined, incomingParent);
+    const rootB = tracer.startSpan("request-b-root", undefined, incomingParent);
+    expect(rootA.spanContext().traceId).toBe(rootB.spanContext().traceId);
+    expect(rootA.spanContext().spanId).not.toBe(rootB.spanContext().spanId);
     const rootIds = [rootA.spanContext().spanId, rootB.spanContext().spanId].sort();
 
     activeRequest = "request-a";
