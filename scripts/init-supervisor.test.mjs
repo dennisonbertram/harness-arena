@@ -446,6 +446,10 @@ describe("authenticated prerequisite supervisor", () => {
         beforeDisconnect: async () => { entered.resolve(); await release.promise; },
       });
       await Promise.race([entered.promise, delay(1_000).then(() => { throw new Error("detach barrier was not entered"); })]);
+      // The detach callback is operator-owned work and may legitimately outlive
+      // the cleanup acknowledgement window. Cleanup proof must begin when
+      // cleanup begins, not when the detach handshake starts.
+      await delay(3_600);
       controller.abort(new Error("cancel after final commit ack"));
       const repeated = [init.terminateOwnedSupervisor(owned), init.terminateOwnedSupervisor(owned)];
       release.resolve();
