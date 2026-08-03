@@ -24,6 +24,14 @@ describe("log", () => {
 
     spy.mockRestore();
   });
+
+  it("acknowledges successful emission and reports console failure", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(log("info", "monitor.observation", { verdict: "healthy" })).toBe(true);
+    spy.mockImplementation(() => { throw new Error("stdout unavailable"); });
+    expect(log("error", "monitor.observation", { verdict: "failed" })).toBe(false);
+    spy.mockRestore();
+  });
 });
 
 describe("observability logger contract", () => {

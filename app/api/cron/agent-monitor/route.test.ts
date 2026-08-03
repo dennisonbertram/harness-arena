@@ -10,7 +10,7 @@ vi.mock("@/lib/passive-monitor-cron.mjs", () => ({
     ],
   }),
 }));
-vi.mock("@/lib/log", () => ({ log: vi.fn() }));
+vi.mock("@/lib/log", () => ({ log: vi.fn().mockReturnValue(true) }));
 
 import { executePassiveMonitorCron } from "@/lib/passive-monitor-cron.mjs";
 import { log } from "@/lib/log";
@@ -27,5 +27,12 @@ describe("GET /api/cron/agent-monitor", () => {
     expect(log).toHaveBeenNthCalledWith(1, "info", "monitor.observation", expect.objectContaining({ environment: "development", verdict: "healthy" }));
     expect(log).toHaveBeenNthCalledWith(2, "warn", "monitor.observation", expect.objectContaining({ environment: "production", verdict: "access_blocked" }));
     expect(JSON.stringify(vi.mocked(log).mock.calls)).not.toMatch(/route-secret|authorization/i);
+  });
+
+  it("returns non-success when the sole retained evidence cannot be emitted", async () => {
+    vi.mocked(log).mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const response = await GET(new Request("https://harness-arena-development.vercel.app/api/cron/agent-monitor", { headers: { authorization: "Bearer route-secret" } }));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ok: false, error: "observation_not_retained" });
   });
 });
