@@ -31,12 +31,13 @@ export function opsAuthorized(value: string | null) {
   return expected.length > 0 && Boolean(match) && equal;
 }
 const SECRET_KEY = /(authorization|cookie|password|secret|token|api[_-]?key|credential)/i;
-export function redactUrl(value: string) { return value.replace(/https?:\/\/[^\s"'<>]+/g,(candidate)=>{try{const url=new URL(candidate);url.search="";return url.toString();}catch{return candidate;}}); }
+export function redactUrl(value: string) { return value.replace(/https?:\/\/[^\s"'<>]+/g,(candidate)=>{try{const url=new URL(candidate);url.username="";url.password="";url.search="";url.hash="";return url.toString();}catch{return candidate;}}); }
 function redactOpsText(value:string) {
   const secrets = Object.entries(process.env).filter(([name, item]) => SECRET_KEY.test(name) && item).map(([, item]) => item!);
   let redacted=redactUrl(value)
     .replace(/Bearer\s+[^\s"'<>]+/g,"Bearer [REDACTED]")
-    .replace(/((?:["'])?\b(?:authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi,"$1[REDACTED]");
+    .replace(/((?:["'])?\b(?:cookie(?:[-_]?header)?|set[-_]?cookie)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)/gi,"$1[REDACTED]")
+    .replace(/((?:["'])?\b(?:authorization(?:[-_]?header)?|proxy[-_]?authorization(?:[-_]?header)?|x[-_]?api[-_]?key(?:[-_]?header)?|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi,"$1[REDACTED]");
   for(const secret of [...new Set(secrets)].sort((left,right)=>right.length-left.length))redacted=redacted.split(secret).join("[REDACTED]");
   return redacted;
 }

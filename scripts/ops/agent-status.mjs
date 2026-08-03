@@ -25,9 +25,10 @@ function redactText(value, knownSecrets) {
   let output = String(value)
     .replace(/\b(?:Bearer|Basic)\s+[^\s,"'<>]+/gi, (match) => `${match.split(/\s/, 1)[0]} [REDACTED]`)
     .replace(/\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, (match) => `${match.split(":", 1)[0]}: [REDACTED]`)
-    .replace(/((?:["'])?\b(?:authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi, "$1[REDACTED]")
+    .replace(/((?:["'])?\b(?:cookie(?:[-_]?header)?|set[-_]?cookie)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)/gi, "$1[REDACTED]")
+    .replace(/((?:["'])?\b(?:authorization(?:[-_]?header)?|proxy[-_]?authorization(?:[-_]?header)?|x[-_]?api[-_]?key(?:[-_]?header)?|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi, "$1[REDACTED]")
     .replace(/https?:\/\/[^\s,"'<>]+/g, (candidate) => {
-      try { const url = new URL(candidate); url.search = ""; url.hash = ""; return url.toString(); } catch { return candidate; }
+      try { const url = new URL(candidate); url.username = ""; url.password = ""; url.search = ""; url.hash = ""; return url.toString(); } catch { return candidate; }
     });
   for (const secret of [...new Set(knownSecrets.filter((item) => typeof item === "string" && item.length >= 3))].sort((left, right) => right.length - left.length)) output = output.split(secret).join("[REDACTED]");
   return output;
@@ -263,6 +264,7 @@ function requestKind(result) {
   if (result.error === "redirect_rejected") return "redirect";
   if (result.error === "response_too_large") return "response_too_large";
   if (result.error === "invalid_content_length") return "invalid_content_length";
+  if (result.error === "response_stream_unavailable") return "response_stream_unavailable";
   if (result.error === "invalid_json") return "invalid_json";
   if (result.error === "request_timeout") return "timeout";
   if (result.error === "request_failed") return "transport";
@@ -281,11 +283,11 @@ function withAbort(promise, signal) {
   });
 }
 
-async function cancelResponse(response, controller, reader) {
+function cancelResponse(response, controller, reader) {
   controller.abort();
   try {
-    if (reader) await reader.cancel();
-    else if (response.body && !response.body.locked) await response.body.cancel();
+    const cancellation = reader ? reader.cancel() : response.body && !response.body.locked ? response.body.cancel() : undefined;
+    if (cancellation !== undefined) Promise.resolve(cancellation).catch(() => {});
   } catch {}
 }
 
@@ -294,11 +296,11 @@ async function readBoundedJson(response, controller, maxBytes) {
   if (rawLength !== null && rawLength !== undefined) {
     const normalized = rawLength.trim();
     if (!/^(?:0|[1-9]\d*)$/.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
-      await cancelResponse(response, controller);
+      cancelResponse(response, controller);
       throw responseError("invalid_content_length");
     }
     if (Number(normalized) > maxBytes) {
-      await cancelResponse(response, controller);
+      cancelResponse(response, controller);
       throw responseError("response_too_large");
     }
   }
@@ -318,21 +320,14 @@ async function readBoundedJson(response, controller, maxBytes) {
       catch { throw responseError("invalid_json"); }
     } catch (error) {
       const normalized = error?.code ?? (controller.signal.aborted ? "request_timeout" : "invalid_json");
-      await cancelResponse(response, controller, reader);
+      cancelResponse(response, controller, reader);
       throw responseError(normalized);
     } finally {
       try { reader.releaseLock(); } catch {}
     }
   }
-  try {
-    const value = await withAbort(response.json(), controller.signal);
-    if (Buffer.byteLength(JSON.stringify(value) ?? "") > maxBytes) throw responseError("response_too_large");
-    return value;
-  } catch (error) {
-    const normalized = error?.code ?? (controller.signal.aborted ? "request_timeout" : "invalid_json");
-    await cancelResponse(response, controller);
-    throw responseError(normalized);
-  }
+  cancelResponse(response, controller);
+  throw responseError("response_stream_unavailable");
 }
 
 export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, retries = 1, maxResponseBytes = MAX_HTTP_RESPONSE_BYTES }) {
@@ -349,7 +344,7 @@ export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, 
       catch (error) { last = { ok: false, status: 0, error: controller.signal.aborted ? "request_timeout" : "request_failed", detail: redactSensitive(error instanceof Error ? error.message : "unknown", token ? [token] : []), attempts: attempt }; }
       if (response) {
         if (response.status >= 300 && response.status < 400) {
-          await cancelResponse(response, controller);
+          cancelResponse(response, controller);
           last = { ok: false, status: response.status, error: "redirect_rejected", attempts: attempt };
         } else {
           try {
@@ -374,7 +369,10 @@ async function inventoryKind({ kind, ...options }) {
     const query = new URLSearchParams({ kind, limit: "100" });
     if (cursor) query.set("cursor", cursor);
     const response = await requestOpsJson({ ...options, path: `/api/ops/v1/inventory?${query}` });
-    if (!response.ok) { complete = false; error = response.kind === "access" ? "access_blocked" : response.error ?? `http_${response.status}`; break; }
+    if (!response.ok) {
+      const remoteError = typeof response.body?.error === "string" ? response.body.error : typeof response.body?.error?.code === "string" ? response.body.error.code : undefined;
+      complete = false; error = response.kind === "access" ? "access_blocked" : remoteError ?? response.error ?? `http_${response.status}`; break;
+    }
     const body = response.body ?? {};
     if (body.schema_version !== "ops.v1" || body.kind !== kind || !Array.isArray(body.items)) { complete = false; error = "malformed_contract"; break; }
     const hasCursorField = Object.hasOwn(body, "next_cursor");
