@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getStorage } from "@/lib/storage";
 import { getVoiceStorage } from "@/lib/voice-storage";
 import { assertOpsReadCredentialSeparation } from "@/lib/credential-separation.mjs";
+import { probeBlobAccess } from "@/lib/blob-access";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,7 @@ export async function GET() {
       if (!process.env.AUTH_SECRET?.trim()) throw new Error("AUTH_SECRET capability is unavailable");
       if (!process.env.OPS_READ_TOKEN?.trim()) throw new Error("OPS_READ_TOKEN capability is unavailable");
       assertOpsReadCredentialSeparation(process.env);
+      await probeBlobAccess();
     }
     return NextResponse.json({
       ok: true,

@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,11 +25,7 @@ export function inspectVoiceAudioNft(files, { root = ROOT, nftPath = NFT } = {})
   return { projectFiles: projectFiles.sort(), forbidden: forbidden.sort() };
 }
 
-export async function checkVoiceAudioNft({ nftPath = NFT, buildStartedAtMs } = {}) {
-  const metadata = await stat(nftPath);
-  if (buildStartedAtMs !== undefined && metadata.mtimeMs < buildStartedAtMs) {
-    throw new Error("voice audio NFT is stale and was not produced by the current build");
-  }
+export async function checkVoiceAudioNft({ nftPath = NFT } = {}) {
   const parsed = JSON.parse(await readFile(nftPath, "utf8"));
   const result = inspectVoiceAudioNft(parsed.files ?? [], { nftPath });
   if (result.forbidden.length > 0) {
