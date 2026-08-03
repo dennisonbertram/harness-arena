@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_TRACE_NAMES,
   budgetExceeded,
   buildRunCompletedEventPayload,
   buildTaskAgentFinishedEventPayload,
@@ -28,6 +29,7 @@ import {
   normalizedCostForUsage,
   PRICING_VERSION,
   parseStdoutCost,
+  queueAgentFailureEvents,
   redactSecrets,
   resolveTaskCost,
   safeCleanup,
@@ -52,6 +54,18 @@ describe("runner event payload contract", () => {
       pricing_version: undefined,
       pricing_source: undefined,
     }, 0.25)).toEqual({ tasks_passed: 1, total_cost_usd: 0, duration_s: 0.25 });
+  });
+
+  it("queues every shared agent trace before the terminal task failure", () => {
+    const emitted = [];
+    const traces = AGENT_TRACE_NAMES.map((name) => ({ task_id: "t1", name }));
+    const failure = { task_id: "t1", stage: "agent_process_error", error: "failed" };
+
+    queueAgentFailureEvents((type, payload) => emitted.push({ type, payload }), traces, failure);
+
+    expect(emitted.filter(({ type }) => type === "task.trace_uploaded").map(({ payload }) => payload.name))
+      .toEqual(AGENT_TRACE_NAMES);
+    expect(emitted.at(-1)).toEqual({ type: "task.failed", payload: failure });
   });
 });
 
