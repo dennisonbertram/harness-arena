@@ -2,7 +2,7 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSafeSpanProcessors, createSafeSpanProcessor, onRequestError, StructuredSpanExporter, structuredSpanReadiness } from "./instrumentation";
+import { BoundedSpanProcessor, createSafeSpanProcessors, createSafeSpanProcessor, onRequestError, parseOtlpHeaders, StructuredSpanExporter, structuredSpanReadiness } from "./instrumentation";
 
 describe("onRequestError", () => {
   afterEach(() => vi.unstubAllEnvs());
@@ -146,6 +146,64 @@ describe("onRequestError", () => {
     logSpy.mockRestore();
   });
 
+  it("keeps a failed OTLP batch bounded and retryable without letting structured delivery hide its failure", async () => {
+    let acknowledge = false;
+    const exporter = {
+      export: vi.fn((_spans: ReadableSpan[], callback: (result: { code: number; error?: Error }) => void) =>
+        callback(acknowledge ? { code: 0 } : { code: 1, error: new Error("collector unavailable") })),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "otlp");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    provider.getTracer("test").startSpan("root").end();
+
+    await expect(provider.forceFlush()).rejects.toBeDefined();
+    expect(structuredSpanReadiness()).toMatchObject({
+      ready: false,
+      otlp: { configured: true, ready: false, queued: 1, reason: "export_unacknowledged" },
+    });
+
+    const structured = new BoundedSpanProcessor({
+      export: (_spans, callback) => callback({ code: 0 }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    }, "structured");
+    const structuredProvider = new BasicTracerProvider({ spanProcessors: [structured] });
+    structuredProvider.getTracer("test").startSpan("structured-root").end();
+    await structuredProvider.forceFlush();
+    expect(structuredSpanReadiness()).toMatchObject({ ready: false, otlp: { ready: false, reason: "export_unacknowledged" } });
+
+    acknowledge = true;
+    await provider.forceFlush();
+    expect(exporter.export).toHaveBeenCalledTimes(2);
+    expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { configured: true, ready: true, queued: 0 } });
+    await provider.shutdown();
+    await structuredProvider.shutdown();
+  });
+
+  it("coalesces concurrent flushes so one queued batch is exported exactly once", async () => {
+    const callbacks: Array<(result: { code: number }) => void> = [];
+    const exporter = {
+      export: vi.fn((_spans: ReadableSpan[], callback: (result: { code: number }) => void) => callbacks.push(callback)),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "structured");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    provider.getTracer("test").startSpan("one-root").end();
+
+    const flushes = [provider.forceFlush(), provider.forceFlush()];
+    try {
+      expect(exporter.export).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const callback of callbacks) callback({ code: 0 });
+      await Promise.allSettled(flushes);
+    }
+    expect(structuredSpanReadiness().structured.queued).toBe(0);
+    await provider.shutdown();
+  });
+
   it("fails closed for unsupported configured OTLP protocol without exposing header values", () => {
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc");
@@ -160,6 +218,27 @@ describe("onRequestError", () => {
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json");
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-tenant=arena,authorization=Bearer secret-value");
     expect(createSafeSpanProcessors()).toHaveLength(2);
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-value");
+    spy.mockRestore();
+  });
+
+  it("decodes valid percent-encoded OTLP header values exactly without logging them", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-tenant=arena%2Ceu,authorization=Bearer%20secret%2Dvalue");
+    expect(parseOtlpHeaders(process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS)).toEqual({ "x-tenant": "arena,eu", authorization: "Bearer secret-value" });
+    expect(createSafeSpanProcessors()).toHaveLength(2);
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-value");
+    spy.mockRestore();
+  });
+
+  it("fails closed for malformed percent-encoded OTLP headers without logging their values", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=Bearer%ZZsecret-value");
+    expect(createSafeSpanProcessors()).toHaveLength(1);
+    expect(structuredSpanReadiness()).toMatchObject({ ready: false, otlp: { configured: true, ready: false, reason: "invalid_headers" } });
     expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-value");
     spy.mockRestore();
   });
