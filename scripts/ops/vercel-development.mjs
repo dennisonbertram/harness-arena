@@ -159,7 +159,12 @@ function normalizeProject(value) {
       repo: value?.link?.repo,
       productionBranch: value?.link?.productionBranch,
     },
-    aliases: Array.isArray(value?.alias) ? value.alias.map((entry) => entry?.domain) : undefined,
+    aliases: Array.isArray(value?.alias) ? value.alias.map((entry) => ({
+      domain: entry?.domain,
+      environment: entry?.environment,
+      target: entry?.target,
+      redirect: entry?.redirect,
+    })) : undefined,
   };
 }
 
@@ -208,6 +213,16 @@ export function createReadOnlyVercelApi({
           && entry.target[0] === "production",
         );
         if (callbackEntries.length !== 1 || typeof callbackEntries[0].id !== "string") throw denied();
+        const blobTokenEntries = entries.filter((entry) => entry?.key === "BLOB_READ_WRITE_TOKEN");
+        if (
+          blobTokenEntries.length !== 1
+          || !Array.isArray(blobTokenEntries[0].target)
+          || blobTokenEntries[0].target.length !== 1
+          || blobTokenEntries[0].target[0] !== "production"
+          || blobTokenEntries[0]?.contentHint?.storeId !== storeId
+        ) {
+          throw denied();
+        }
         const callback = await get(
           token,
           requestUrl(
@@ -232,6 +247,7 @@ export function createReadOnlyVercelApi({
           environment: {
             callbackBase: callback?.value,
             networkModeConfigured: entries.some((entry) => entry?.key === "RUNNER_NETWORK_MODE"),
+            blobStoreId: blobTokenEntries[0].contentHint.storeId,
             storeIds: environmentStoreIds,
           },
           store: {
@@ -268,7 +284,7 @@ function validateInspection(actual, manifest) {
     !exactKeys(actual, ["project", "environment", "store"])
     || !exactKeys(actual.project, ["id", "ownerId", "name", "git", "aliases"])
     || !exactKeys(actual.project.git, ["type", "org", "repo", "productionBranch"])
-    || !exactKeys(actual.environment, ["callbackBase", "networkModeConfigured", "storeIds"])
+    || !exactKeys(actual.environment, ["callbackBase", "networkModeConfigured", "blobStoreId", "storeIds"])
     || !exactKeys(actual.store, ["id", "ownerId", "projectId", "type"])
     || actual.project.id !== DEVELOPMENT_PROJECT_ID
     || actual.project.id === LIVE_PROJECT_ID
@@ -277,12 +293,20 @@ function validateInspection(actual, manifest) {
     || Object.entries(EXPECTED_GIT).some(([key, value]) => actual.project.git[key] !== value)
     || !Array.isArray(actual.project.aliases)
     || actual.project.aliases.length === 0
-    || actual.project.aliases.some((alias) => typeof alias !== "string" || !alias)
-    || !actual.project.aliases.includes(manifest.host)
-    || actual.project.aliases.some((alias) => manifest.live.aliases.includes(alias))
+    || actual.project.aliases.some((alias) =>
+      !exactKeys(alias, ["domain", "environment", "target", "redirect"])
+      || typeof alias.domain !== "string"
+      || !alias.domain
+      || alias.environment !== "production"
+      || alias.target !== "PRODUCTION"
+      || (alias.redirect !== undefined && alias.redirect !== null)
+    )
+    || !actual.project.aliases.some((alias) => alias.domain === manifest.host)
+    || actual.project.aliases.some((alias) => manifest.live.aliases.includes(alias.domain))
     || actual.environment.callbackBase !== manifest.callbackOrigin
     || manifest.live.aliases.includes(new URL(actual.environment.callbackBase).hostname)
     || actual.environment.networkModeConfigured !== false
+    || actual.environment.blobStoreId !== manifest.store.id
     || !Array.isArray(actual.environment.storeIds)
     || actual.environment.storeIds.some((id) => typeof id !== "string" || !id)
     || !actual.environment.storeIds.includes(manifest.store.id)

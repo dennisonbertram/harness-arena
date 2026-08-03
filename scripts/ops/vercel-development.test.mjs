@@ -57,11 +57,17 @@ function inspection(overrides = {}) {
         repo: "harness-arena",
         productionBranch: "dev",
       },
-      aliases: ["harness-arena-development.vercel.app"],
+      aliases: [{
+        domain: "harness-arena-development.vercel.app",
+        environment: "production",
+        target: "PRODUCTION",
+        redirect: undefined,
+      }],
     },
     environment: {
       callbackBase: "https://harness-arena-development.vercel.app",
       networkModeConfigured: false,
+      blobStoreId: DEVELOPMENT_STORE_ID,
       storeIds: [DEVELOPMENT_STORE_ID],
     },
     store: {
@@ -186,7 +192,12 @@ describe("native-Git Development project verifier", () => {
     ["non-GitHub link", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, type: "gitlab" } } })],
     ["wrong repository", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, repo: "other" } } })],
     ["wrong production branch", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, productionBranch: "main" } } })],
-    ["live alias", inspection({ project: { ...inspection().project, aliases: manifest().live.aliases } })],
+    ["live alias", inspection({
+      project: {
+        ...inspection().project,
+        aliases: [{ ...inspection().project.aliases[0], domain: manifest().live.aliases[0] }],
+      },
+    })],
     ["live callback", inspection({ environment: { ...inspection().environment, callbackBase: `https://${manifest().live.aliases[0]}` } })],
     ["live store metadata", inspection({ environment: { ...inspection().environment, storeIds: [LIVE_STORE_ID] } })],
     ["live connected store", inspection({ store: { ...inspection().store, id: LIVE_STORE_ID } })],
@@ -298,7 +309,7 @@ describe("bounded read-only Vercel adapter", () => {
       teamId: TEAM_ID,
       storeId: DEVELOPMENT_STORE_ID,
       token: TOKEN,
-    })).rejects.toThrow(/read-only preflight denied/i);
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
   });
 
   it.each([

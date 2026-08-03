@@ -275,5 +275,10 @@ describe("verifyDevelopmentEnvironment", () => {
     expect(runbook).toMatch(/before any further push or deploy/i);
     expect(runbook).toMatch(/refresh the complete live alias and Blob store identifier inventory/i);
     expect(runbook).toMatch(/read-only/i);
+    expect(runbook).toMatch(/Issue #175 verifies this read-only metadata boundary/i);
+    expect(runbook).toMatch(
+      /Issue #148 must enforce a[\s\S]{0,20}least-privilege verifier identity with credential-level no-write authority/i,
+    );
+    expect(runbook).toMatch(/raw owner-authorized Vercel CLI/i);
   });
 });

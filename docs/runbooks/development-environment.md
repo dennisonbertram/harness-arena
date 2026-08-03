@@ -80,6 +80,12 @@ needed to prove isolation. `RUNNER_NETWORK_MODE` must not be configured in the
 Vercel project, and runtime code rejects `RUNNER_NETWORK_MODE=allow-all` in
 Production, Preview, and Development Vercel contexts.
 
+Issue #175 verifies this read-only metadata boundary; it does not remove write
+authority from an owner-capable Vercel credential. Issue #148 must enforce a
+least-privilege verifier identity with credential-level no-write authority.
+That credential restriction is the technical control: a repository wrapper
+cannot prevent an operator from invoking the raw owner-authorized Vercel CLI.
+
 Do not run write-capable Vercel commands from this repository. Do not manually
 upload, promote, roll back, or change aliases, domains, environments, stores,
 or Git linkage. A successful Development deployment is not production
