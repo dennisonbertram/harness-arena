@@ -23,6 +23,9 @@ const CallbackBodySchema = z
       .object({
         tasks_passed: z.number(),
         total_cost_usd: z.number(),
+        normalized_total_cost_usd: z.number().nonnegative().optional(),
+        pricing_version: z.string().min(1).optional(),
+        pricing_source: z.enum(["gateway-proxy", "gateway-generation-api"]).optional(),
         over_budget: z.boolean(),
       })
       .optional(),
@@ -88,6 +91,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (parsed.data.totals) {
     run.tasks_passed = parsed.data.totals.tasks_passed;
     run.total_cost_usd = parsed.data.totals.total_cost_usd;
+    run.normalized_total_cost_usd = parsed.data.totals.normalized_total_cost_usd;
+    run.pricing_version = parsed.data.totals.pricing_version;
+    run.pricing_source = parsed.data.totals.pricing_source;
     run.over_budget = parsed.data.totals.over_budget;
   }
   if (transitioned && (run.status === "completed" || run.status === "failed")) {

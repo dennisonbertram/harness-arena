@@ -18,9 +18,12 @@ import {
   isSessionTextUnreadable,
   parseSessionAgentError,
   summarizeGatewayRequests,
+  trustedGatewayPricing,
   parsePiCorrelation,
   parseReward,
   parseSessionCost,
+  normalizedCostForUsage,
+  PRICING_VERSION,
   parseStdoutCost,
   redactSecrets,
   resolveTaskCost,
@@ -47,10 +50,14 @@ describe("parseSessionCost", () => {
     expect(parseSessionCost("")).toEqual({
       totalCost: 0,
       turns: 0,
+      totalInputTokens: 0,
+      totalCacheReadTokens: 0,
+      totalCacheWriteTokens: 0,
       totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
       validOutputTokenCount: 0,
+      validNormalizedUsageCount: 0,
     });
   });
 
@@ -59,10 +66,14 @@ describe("parseSessionCost", () => {
     expect(result).toEqual({
       totalCost: 0,
       turns: 0,
+      totalInputTokens: 0,
+      totalCacheReadTokens: 0,
+      totalCacheWriteTokens: 0,
       totalOutputTokens: 0,
       negativeCostCount: 0,
       validCostCount: 0,
       validOutputTokenCount: 0,
+      validNormalizedUsageCount: 0,
     });
   });
 
@@ -99,6 +110,86 @@ describe("parseSessionCost", () => {
     ].join("\n");
 
     expect(parseSessionCost(jsonl)).toMatchObject({ totalOutputTokens: 200, validOutputTokenCount: 2 });
+  });
+
+  it("normalizes competition cost from token usage, not the provider's billed price at a different rate era", () => {
+    const usage = { input: 1_000, cacheRead: 400, cacheWrite: 100, output: 500 };
+    const beforeProviderPriceChange = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { ...usage, cost: { total: 0.003 } } },
+    });
+    const afterProviderPriceChange = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { ...usage, cost: { total: 3 } } },
+    });
+
+    const before = parseSessionCost(beforeProviderPriceChange, "thinkingmachines/inkling-small");
+    const after = parseSessionCost(afterProviderPriceChange, "thinkingmachines/inkling-small");
+    expect(before.totalCost).not.toBe(after.totalCost);
+    expect(before.scoreCost).toBeCloseTo(after.scoreCost, 10);
+    expect(before).toMatchObject({
+      totalInputTokens: 1_000,
+      totalCacheReadTokens: 400,
+      totalCacheWriteTokens: 100,
+      totalOutputTokens: 500,
+    });
+  });
+
+  it("fails closed for malformed or negative normalized usage", () => {
+    const jsonl = [
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 1, cacheRead: 1, output: -1 } } }),
+      JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: "bad", cacheRead: 1, output: 1 } } }),
+    ].join("\n");
+    expect(parseSessionCost(jsonl, "thinkingmachines/inkling-small").scoreCost).toBeUndefined();
+  });
+
+  it("treats missing optional cacheWrite as zero", () => {
+    const jsonl = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { input: 1_000_000, cacheRead: 1_000_000, output: 1_000_000 } },
+    });
+    const result = parseSessionCost(jsonl, "thinkingmachines/inkling-small");
+    expect(result.totalCacheWriteTokens).toBe(0);
+    expect(result.scoreCost).toBeCloseTo(1.8, 10);
+  });
+
+  it("prices cache creation like ordinary prompt input for Inkling", () => {
+    expect(normalizedCostForUsage("thinkingmachines/inkling-small", {
+      input: 0,
+      cacheRead: 0,
+      cacheWrite: 1_000_000,
+      output: 0,
+    })).toBeCloseTo(0.5, 10);
+  });
+
+  it("does not fabricate a normalized score for an unsupported model", () => {
+    const jsonl = JSON.stringify({
+      type: "message",
+      message: { role: "assistant", usage: { input: 1, cacheRead: 0, output: 1 } },
+    });
+    expect(parseSessionCost(jsonl, "unsupported/model").scoreCost).toBeUndefined();
+  });
+});
+
+describe("trustedGatewayPricing", () => {
+  const request = {
+    model: "thinkingmachines/inkling-small",
+    status: 200,
+    usage: { input_tokens: 1_000, cache_read_tokens: 400, cache_write_tokens: 100, output_tokens: 500 },
+  };
+
+  it("prices only complete host-side gateway diagnostics", () => {
+    expect(trustedGatewayPricing({ requests: [request], requestCount: 1, droppedEvents: 0, model: request.model }))
+      .toMatchObject({ normalizedCost: 0.00119, pricingVersion: PRICING_VERSION, pricingSource: "gateway-proxy" });
+  });
+
+  it.each([
+    { requests: [request], requestCount: 2, droppedEvents: 0 },
+    { requests: [request], requestCount: 1, droppedEvents: 1 },
+    { requests: [{ ...request, status: 500 }], requestCount: 1, droppedEvents: 0 },
+    { requests: [{ ...request, usage: undefined }], requestCount: 1, droppedEvents: 0 },
+  ])("fails closed for incomplete or unsuccessful diagnostics", (value) => {
+    expect(trustedGatewayPricing({ ...value, model: request.model })).toBeUndefined();
   });
 });
 
@@ -486,6 +577,7 @@ describe("computeTotals", () => {
     expect(computeTotals(taskResults)).toEqual({
       tasks_passed: 1,
       total_cost_usd: 0.8,
+      normalized_total_cost_usd: null,
     });
   });
 
@@ -494,7 +586,27 @@ describe("computeTotals", () => {
     expect(computeTotals(taskResults)).toEqual({
       tasks_passed: 1,
       total_cost_usd: 0,
+      normalized_total_cost_usd: null,
+      pricing_version: undefined,
     });
+  });
+
+  it("fails closed when a billed attempted task cannot be normalized", () => {
+    expect(
+      computeTotals([
+        { attempted: true, cost_usd: 1, normalized_cost_usd: 0.5, pricing_version: PRICING_VERSION },
+        { attempted: true, cost_usd: 1 },
+      ]),
+    ).toMatchObject({ normalized_total_cost_usd: null });
+  });
+
+  it("sums normalized cost only when every billed attempted task has it", () => {
+    expect(
+      computeTotals([
+        { attempted: true, cost_usd: 1, normalized_cost_usd: 0.5, pricing_version: PRICING_VERSION },
+        { attempted: true, cost_usd: 2, normalized_cost_usd: 0.75, pricing_version: PRICING_VERSION },
+      ]),
+    ).toMatchObject({ normalized_total_cost_usd: 1.25, pricing_version: PRICING_VERSION });
   });
 });
 

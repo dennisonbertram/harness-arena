@@ -86,6 +86,8 @@ export const SubmissionSchema = z.object({
   // on the submission makes the routing target auditable even if the
   // Competition record is edited after this entry was queued.
   gateway_provider: z.string().optional(),
+  // One immutable normalized-price table for every run on this board.
+  pricing_version: z.string().min(1).optional(),
   // The submitter's GitHub identity, stamped server-side from the session —
   // never from the request body. Optional at the schema level because the
   // admin-triggered competition baseline has no submitting user; both
@@ -103,6 +105,12 @@ export const TaskResultSchema = z.object({
   passed: z.boolean(),
   reward: z.number().optional(),
   cost_usd: z.number().optional(),
+  // Competition scoring cost from a fixed, versioned model price table.
+  // This is deliberately separate from cost_usd, which is actual billed
+  // spend and remains the budget/ledger signal.
+  normalized_cost_usd: z.number().nonnegative().optional(),
+  pricing_version: z.string().min(1).optional(),
+  pricing_source: z.enum(["gateway-proxy", "gateway-generation-api"]).optional(),
   // How cost_usd was derived: "session" | "stdout" | "unmeasured". Absent
   // cost_usd with cost_source "unmeasured" means no cost record existed — we
   // report it as unknown rather than inventing a number.
@@ -115,6 +123,9 @@ export const TaskResultSchema = z.object({
   // Sum of assistant output tokens for this task. Absent when the runner's
   // provider session did not report output usage.
   output_tokens: z.number().optional(),
+  input_tokens: z.number().int().nonnegative().optional(),
+  cache_read_tokens: z.number().int().nonnegative().optional(),
+  cache_write_tokens: z.number().int().nonnegative().optional(),
   trace_blob_url: z.string().optional(),
   failure_stage: z.string().optional(),
   error: z.string().optional(),
@@ -139,6 +150,8 @@ export const CompetitionSchema = z.object({
   // Optional for legacy competitions, which continue to use the historical
   // model-level default in PINNED_PROVIDERS.
   gateway_provider: z.string().optional(),
+  // Immutable normalized price table used to compare every row on this board.
+  pricing_version: z.string().min(1).optional(),
   // Prize amount/cadence are data, not a constant, but deliberately UNSET at
   // seed time (epic #74: "TBD, do not invent a figure"). Nullable because a
   // seeded row explicitly carries "no value yet" rather than omitting the
@@ -167,6 +180,9 @@ export const RunSchema = z.object({
   finished_at: z.iso.datetime().optional(),
   tasks_passed: z.number().optional(),
   total_cost_usd: z.number().optional(),
+  normalized_total_cost_usd: z.number().nonnegative().optional(),
+  pricing_version: z.string().min(1).optional(),
+  pricing_source: z.enum(["gateway-proxy", "gateway-generation-api"]).optional(),
   over_budget: z.boolean().optional(),
   sandbox_id: z.string().optional(),
   // When the dispatcher claimed this run and fired its sandbox. Set BEFORE the

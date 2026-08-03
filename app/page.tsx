@@ -32,6 +32,7 @@ const EMPTY_BOARD: CompetitionBoard = {
   baselineState: "none",
   ranked: [],
   belowBaseline: [],
+  unpriced: 0,
   pending: 0,
   pendingRunIds: [],
   pendingRows: [],
@@ -129,7 +130,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
           leaderboard.
         </p>
         <p style={{ fontSize: 14, color: "var(--gray-700)", maxWidth: 660 }}>
-          Highest task score wins; ties go to the lower total cost.
+          Highest task score wins; ties use a fixed-table normalized cost so provider price changes cannot move the ranking.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "12px 16px", marginTop: 20 }}>
           {competition?.status === "closed" ? (
@@ -169,6 +170,7 @@ export default async function CompetitionPage({ searchParams }: { searchParams?:
         chartModel={competitionChartModel}
         ranked={board.ranked}
         belowBaseline={board.belowBaseline}
+        unpriced={board.unpriced}
         baselineRow={board.baseline}
         baselineModel={competition?.model ?? ""}
         baselineState={board.baselineState}
