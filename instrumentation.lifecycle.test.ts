@@ -147,4 +147,41 @@ describe("hosted request span lifecycle", () => {
     expect(structuredSpanReadiness().structured.queued).toBe(0);
     await provider.shutdown();
   });
+
+  it("binds one aggregate two-sink lifecycle task to each concurrent root request context", async () => {
+    const tasksByRequest = new Map<string, Promise<unknown>[]>([["request-a", []], ["request-b", []]]);
+    let activeRequest = "request-a";
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({
+        waitUntil: (task: Promise<unknown>) => { tasksByRequest.get(activeRequest)!.push(task); },
+      }),
+    };
+    const structuredSpans: ReadableSpan[] = [];
+    const otlpSpans: ReadableSpan[] = [];
+    const exporter = (captured: ReadableSpan[]) => ({
+      export: (spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { captured.push(...spans); callback({ code: 0 }); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    }) satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [
+      new BoundedSpanProcessor(exporter(structuredSpans), "structured"),
+      new BoundedSpanProcessor(exporter(otlpSpans), "otlp"),
+    ] });
+    const tracer = provider.getTracer("concurrent-root-drains");
+    const rootA = tracer.startSpan("request-a-root");
+    const rootB = tracer.startSpan("request-b-root");
+    const rootIds = [rootA.spanContext().spanId, rootB.spanContext().spanId].sort();
+
+    activeRequest = "request-a";
+    rootA.end();
+    activeRequest = "request-b";
+    rootB.end();
+
+    expect(tasksByRequest.get("request-a")).toHaveLength(1);
+    expect(tasksByRequest.get("request-b")).toHaveLength(1);
+    await Promise.all([...tasksByRequest.values()].flat());
+    expect(structuredSpans.map((span) => span.spanContext().spanId).sort()).toEqual(rootIds);
+    expect(otlpSpans.map((span) => span.spanContext().spanId).sort()).toEqual(rootIds);
+    await provider.shutdown();
+  });
 });
