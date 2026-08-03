@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { appendRunEventsFile, assertSafeStoragePath, atomicWriteFile, latestEventTimestampFile, readRunEventsFile, safeStoragePart } from "./file-storage-lock.mjs";
-import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type Submission } from "./types";
+import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type RunEvent, type Submission } from "./types";
 import type { Storage } from "./storage";
 
 export class LocalStorageReadError extends Error {
