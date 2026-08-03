@@ -85,10 +85,10 @@ describe("least-privilege access policy", () => {
         : String(url).includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } }] }
           : String(url).includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [] }
             : String(url).includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
-              : String(url).includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) ? String(url).includes("cursor=member-page-2")
-                ? { value: [], pagination: { count: 0, nextCursor: null } }
-                : { value: [], pagination: { count: 0, nextCursor: "member-page-2" } }
-                : String(url).includes("/v1/access-groups?") ? { accessGroups: [], pagination: { count: 0, nextCursor: null } }
+              : String(url).includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) ? String(url).includes("since=123")
+                ? { members: [], pagination: { hasNext: false, count: 0, next: null, prev: 123 } }
+                : { members: [], pagination: { hasNext: true, count: 0, next: 123, prev: null } }
+                : String(url).includes("/v1/access-groups?") ? { accessGroups: [], pagination: { next: null } }
             : {};
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
     });
@@ -105,7 +105,7 @@ describe("least-privilege access policy", () => {
     expect(report.overall, JSON.stringify({ collected, report, requests })).toBe("observable");
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
-    expect(requests.some(([url]) => url.includes("cursor=member-page-2"))).toBe(true);
+    expect(requests.some(([url]) => url.includes("since=123"))).toBe(true);
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
   });
 
@@ -128,7 +128,7 @@ describe("least-privilege access policy", () => {
           // This legacy embedded field must never substitute for the endpoint below.
           : target.includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0], members: [{ uid: "viewer-user", role: "PROJECT_VIEWER" }] }
             : target.includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
-              : target.includes("/v1/access-groups?") ? { accessGroups: [], pagination: { count: 0, nextCursor: null } }
+              : target.includes("/v1/access-groups?") ? { accessGroups: [], pagination: { next: null } }
                 // Deliberately malformed: a real members response needs value plus pagination.
                 : target.includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) ? { members: [] }
                   : {};
@@ -142,6 +142,48 @@ describe("least-privilege access policy", () => {
     expect(collected.vercel).toMatchObject({ state: "missing" });
     expect(requested.some(([url]) => url.includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`))).toBe(true);
     expect(requested.every(([, method]) => method === "GET")).toBe(true);
+  });
+
+  it("uses Vercel's documented members and access-group schemas without understating effective write access", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const commandRunner = vi.fn(async (binary, args) => {
+      if (binary === "gh") return { exitCode: 0, stdout: args[1] === "user" ? JSON.stringify({ login: "monitor-bot" }) : "[]" };
+      if (binary === "vercel" && args[0] === "env") return { exitCode: 0, stdout: JSON.stringify({ envs: [] }) };
+      if (binary === "vercel" && args[0] === "ls") return { exitCode: 0, stdout: JSON.stringify({ deployments: [{ url: "monitor-deployment.vercel.app" }] }) };
+      if (binary === "vercel" && args[0] === "logs") return { exitCode: 0, stdout: "{}" };
+      throw new Error("unexpected command");
+    });
+    const requests = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      const target = String(url);
+      requests.push([target, init?.method]);
+      const body = target.includes("/v2/user") ? { id: "viewer-user" }
+        : target.includes("/v2/teams?") ? { teams: [{ id: "team-one", membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } }] }
+          : target.includes("/v9/projects/") ? { id: policy.capabilities.vercel.project_ids[0] }
+            : target.includes("/v6/user/tokens") ? { tokens: [{ prefix: "viewer-", suffix: "token", scopes: [{ type: "team", teamId: "team-one" }] }] }
+              : target.includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) ? target.includes("since=123")
+                ? { members: [], pagination: { hasNext: false, count: 0, next: null, prev: 123 } }
+                : { members: [{ uid: "viewer-user", computedProjectRole: "PROJECT_DEVELOPER" }], pagination: { hasNext: true, count: 1, next: 123, prev: null } }
+                : target.includes("/v1/access-groups?") ? target.includes("next=group-page-2")
+                  ? { accessGroups: [], pagination: { next: null } }
+                  : { accessGroups: [{ id: "group-one", teamRoles: ["VIEWER"], teamPermissions: ["FullProductionDeployment"] }], pagination: { next: "group-page-2" } }
+                  : target.includes("/v1/access-groups/group-one/members?") ? { members: [{ uid: "viewer-user", teamRole: "VIEWER" }], pagination: { next: null } }
+                    : target.includes("/v1/access-groups/group-one/projects?") ? { projects: [{ projectId: policy.capabilities.vercel.project_ids[0], role: "PROJECT_VIEWER" }], pagination: { next: null } }
+                      : {};
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    });
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: { GH_TOKEN: "github-read-token", VERCEL_TOKEN: "viewer-token", VERCEL_TEAM_ID: "team-one", VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0] },
+      commandRunner, fetchImpl,
+    });
+    const vercel = audit.auditAccessEvidence(policy, collected, { authority: "authoritative" }).systems.find(({ name }) => name === "vercel");
+    expect(collected.vercel).toMatchObject({ project_role: "DEVELOPER", team_permissions: ["FullProductionDeployment"], extended_permissions_complete: true });
+    expect(vercel).toMatchObject({ state: "overprivileged" });
+    expect(requests.every(([, method]) => method === "GET")).toBe(true);
+    expect(requests.some(([url]) => url.includes(`/v1/projects/${policy.capabilities.vercel.project_ids[0]}/members?`) && url.includes("limit=100") && url.includes("since=123"))).toBe(true);
+    expect(requests.some(([url]) => url.includes("/v1/access-groups?") && url.includes("next=group-page-2"))).toBe(true);
   });
 
   it.each(["GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"])("attests local %s before making any external request", async (collidingName) => {
