@@ -550,7 +550,7 @@ describe("ops evidence and verdict honesty", () => {
 
 describe("redaction, platform wiring, and process bounds", () => {
   it("sanitizes untrusted object and Error keys collision-safely while preserving truthful fields", () => {
-    const knownSecret = "client-known-key-secret";
+    const knownSecret = "client-known-key-needle";
     const sentinels = {
       knownKey: knownSecret,
       credentialKey: "client-credential-key-sentinel",

@@ -12,7 +12,7 @@ describe("ops read hardening contract", () => {
     const env = {
       AUTH_URL: "public-auth-route", SESSION_COUNT: "7", PUBLIC_TOKEN_COUNT: "8",
       AUTHENTICATION_METHOD: "public-auth-method", OAUTH_PROVIDER: "public-oauth-provider", AUTHORS: "public-authors-value",
-      SERVICE_TOKEN: "server-env-token", SERVICE_SECRET: "server-env-secret", SERVICE_PASSWORD: "server-env-password",
+      SERVICE_TOKEN: "server-env-token", SERVICE_SECRET: "server-env-needle", SERVICE_PASSWORD: "server-env-password",
       SIGNING_KEY: "server-env-signing-key",
     };
     const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));

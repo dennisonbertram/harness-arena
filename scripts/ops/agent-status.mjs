@@ -235,16 +235,16 @@ function requestKind(result) {
   return "http";
 }
 
-const INTERNAL_FAILURE = Symbol("ops-internal-failure");
+const INTERNAL_FAILURES = new WeakMap();
 const INTERNAL_FAILURE_CODES = new Set(["redirect_rejected", "response_too_large", "invalid_content_length", "response_stream_unavailable", "invalid_response", "invalid_json", "request_timeout", "request_failed"]);
 function responseError(code) {
   const error = new Error(code);
-  Object.defineProperty(error, INTERNAL_FAILURE, { value: code });
+  INTERNAL_FAILURES.set(error, code);
   return error;
 }
 function failureCode(error, fallback) {
   try {
-    const code = error?.[INTERNAL_FAILURE];
+    const code = error && (typeof error === "object" || typeof error === "function") ? INTERNAL_FAILURES.get(error) : undefined;
     return INTERNAL_FAILURE_CODES.has(code) ? code : fallback;
   } catch { return fallback; }
 }
@@ -338,6 +338,37 @@ function cancelResponse(response, controller, reader) {
   invokeCleanup(reader?.cancel ?? response?.bodyCancel);
 }
 
+const ARRAY_BUFFER_BYTE_LENGTH = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength").get;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
+const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength").get;
+const TYPED_ARRAY_BYTE_OFFSET = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteOffset").get;
+const TYPED_ARRAY_BUFFER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer").get;
+const TYPED_ARRAY_TAG = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag).get;
+
+function boundedChunk(value, remaining) {
+  try {
+    const byteLength = ARRAY_BUFFER_BYTE_LENGTH.call(value);
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) throw responseError("invalid_response");
+    if (byteLength > remaining) throw responseError("response_too_large");
+    return Buffer.from(value);
+  } catch (error) {
+    const code = failureCode(error, undefined);
+    if (code) throw responseError(code);
+  }
+  try {
+    const tag = TYPED_ARRAY_TAG.call(value);
+    if (tag !== "Uint8Array" && tag !== "Uint8ClampedArray") throw responseError("invalid_response");
+    const byteLength = TYPED_ARRAY_BYTE_LENGTH.call(value);
+    const byteOffset = TYPED_ARRAY_BYTE_OFFSET.call(value);
+    const buffer = TYPED_ARRAY_BUFFER.call(value);
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0 || !Number.isSafeInteger(byteOffset) || byteOffset < 0) throw responseError("invalid_response");
+    if (byteLength > remaining) throw responseError("response_too_large");
+    return Buffer.from(buffer, byteOffset, byteLength);
+  } catch (error) {
+    throw responseError(failureCode(error, "invalid_response"));
+  }
+}
+
 async function readBoundedJson(response, controller, maxBytes) {
   const reader = {};
   try {
@@ -357,11 +388,9 @@ async function readBoundedJson(response, controller, maxBytes) {
       if (typeof done !== "boolean") throw responseError("invalid_response");
       if (done) break;
       const value = result.value;
-      if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) throw responseError("invalid_response");
       let chunk;
-      try { chunk = Buffer.from(value); } catch { throw responseError("invalid_response"); }
+      try { chunk = boundedChunk(value, maxBytes - bytes); } catch (error) { throw responseError(failureCode(error, "invalid_response")); }
       bytes += chunk.byteLength;
-      if (bytes > maxBytes) throw responseError("response_too_large");
       chunks.push(chunk);
     }
     try { return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")); }
