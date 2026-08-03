@@ -22,11 +22,31 @@ describe("least-privilege access policy", () => {
     expect(inventory).toMatchObject({ missing: [], unapproved_dynamic: [] });
     expect(inventory.referenced).toContain("VERCEL_TEAM_ID");
     expect(inventory.referenced).toContain("HARNESS_ARENA_URL");
+    for (const name of ["CRON_SECRET", "DEVELOPMENT_OPS_READ_TOKEN", "PRODUCTION_OPS_READ_TOKEN", "VERCEL_READ_TOKEN"]) {
+      expect(inventory.referenced).toContain(name);
+      expect(policy.environment_inventory.variables[name]).toMatchObject({ secret: true, safe_diagnostic: "metadata_presence_only" });
+      expect(policy.environment_inventory.variables[name]).not.toHaveProperty("value");
+    }
     expect(inventory.files).toContain("mcp/src/index.ts");
     expect(audit.compareEnvironmentInventory(new Set(["OPS_READ_TOKEN", "NEW_UNMAPPED_ENV"]), policy)).toEqual(["NEW_UNMAPPED_ENV"]);
     expect(audit.deriveEnvironmentReferencesFromText("process.env.DIRECT; process.env['BRACKET']; const { DESTRUCTURED: alias } = process.env").names).toEqual(new Set(["BRACKET", "DESTRUCTURED", "DIRECT"]));
     expect(() => audit.validatePolicy({ ...policy, environment_inventory: { ...policy.environment_inventory, variables: { BAD: { secret: false } } } })).toThrow(/inventory/i);
-    expect(JSON.parse(await readFile(join(repo, "config", "agent-access-policy.schema.json"), "utf8")).$id).toContain("agent-access-policy.v1");
+    expect(() => audit.validatePolicy({
+      ...policy,
+      environment_inventory: {
+        ...policy.environment_inventory,
+        variables: {
+          ...policy.environment_inventory.variables,
+          CRON_SECRET: { purpose: "invalid", environments: ["development"], secret: true, owner: "application", required: "monitor", safe_diagnostic: "names_only" },
+        },
+      },
+    })).toThrow(/inventory/i);
+    const schema = JSON.parse(await readFile(join(repo, "config", "agent-access-policy.schema.json"), "utf8"));
+    expect(schema.$id).toContain("agent-access-policy.v1");
+    expect(schema.$defs.environmentVariable.properties.safe_diagnostic.enum).toContain("metadata_presence_only");
+    expect(schema.$defs.environmentVariable.allOf).toContainEqual(expect.objectContaining({
+      then: { properties: { safe_diagnostic: { const: "metadata_presence_only" } } },
+    }));
   });
 
   it.each([

@@ -100,7 +100,13 @@ list or the audit itself refuses to run.
 Exit codes are 0 observable, 2 missing, 3 overprivileged, and 64 invalid input.
 The command also scans app, library, and operational source for `process.env`
 references. A newly referenced variable or unapproved dynamic lookup makes the
-audit non-green until the versioned inventory is reviewed.
+audit non-green until the versioned inventory is reviewed. Runtime boundaries
+must enumerate the environment keys they hand off; passing the whole
+`process.env` object defeats static inventory and can expose unrelated secrets.
+The passive monitor route therefore passes only its four credentials and the
+two Vercel runtime guard fields. All four credentials are secret inventory
+records with `metadata_presence_only` diagnostics: their values are never
+printed, written, or retained as audit evidence.
 
 Monitor audits are green from metadata alone and classify any secret-value
 access as overprivileged. Secret values, when a later separately authorized diagnostic requires one,
