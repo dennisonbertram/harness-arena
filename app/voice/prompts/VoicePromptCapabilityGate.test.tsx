@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import VoicePromptCapabilityGate from "./VoicePromptCapabilityGate";
 
 describe("VoicePromptCapabilityGate", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
   it("renders no audio until same-origin capability bootstrap succeeds", async () => {
     let finish!: (value: Response) => void;
@@ -20,6 +20,13 @@ describe("VoicePromptCapabilityGate", () => {
 
   it("keeps audio unmounted and surfaces bootstrap failure", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
+    const { container } = render(<VoicePromptCapabilityGate><audio src="/api/voice/audio/prompts/p1" /></VoicePromptCapabilityGate>);
+    await screen.findByText(/could not authorize audio/i);
+    expect(container.querySelector("audio")).toBeNull();
+  });
+
+  it.each([200, 201, 202])("keeps audio unmounted when bootstrap returns %i instead of 204", async (status) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status })));
     const { container } = render(<VoicePromptCapabilityGate><audio src="/api/voice/audio/prompts/p1" /></VoicePromptCapabilityGate>);
     await screen.findByText(/could not authorize audio/i);
     expect(container.querySelector("audio")).toBeNull();

@@ -34,6 +34,22 @@ describe("Blob ops read adapter", () => {
     await expect(new BlobOpsReadAdapter().read({pathname:"traces/missing",maxBytes:10,timeoutMs:100})).resolves.toEqual({status:"not_found"});
     expect(blob.get).not.toHaveBeenCalled();
   });
+  it("reads the exact listed version privately instead of a stale bare pathname", async () => {
+    const listed = metadata(7);
+    blob.list.mockResolvedValue({ blobs: [listed], hasMore: false });
+    blob.get.mockImplementation(async (identifier) => ({
+      statusCode: 200,
+      stream: new Response(identifier === listed.url ? "current" : "stale").body,
+    }));
+
+    await expect(new BlobOpsReadAdapter().read({ pathname: listed.pathname, maxBytes: 20, timeoutMs: 100 }))
+      .resolves.toMatchObject({ status: "ok", bytes: Buffer.from("current") });
+    expect(blob.get).toHaveBeenCalledWith(listed.url, expect.objectContaining({
+      access: "public",
+      abortSignal: expect.any(AbortSignal),
+      useCache: false,
+    }));
+  });
   it("applies one deadline to a slow stream, aborts the SDK request, and cancels the reader", async()=>{
     let cancelled=false;blob.list.mockResolvedValue({blobs:[metadata(2)],hasMore:false});
     const stream=new ReadableStream<Uint8Array>({async pull(controller){await new Promise((resolve)=>setTimeout(resolve,30));controller.enqueue(new Uint8Array([1]));},cancel(){cancelled=true;}});
