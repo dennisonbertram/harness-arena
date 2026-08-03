@@ -94,6 +94,52 @@ needed to prove isolation. `RUNNER_NETWORK_MODE` must not be configured in the
 Vercel project, and runtime code rejects `RUNNER_NETWORK_MODE=allow-all` in
 Production, Preview, and Development Vercel contexts.
 
+## One-run hosted lifecycle acceptance
+
+`hostedAcceptance` in `config/development-environment.json` is the machine-readable
+contract for the single Development-only hosted lifecycle probe. The verifier
+requires every value exactly: one run per submission, one concurrent run, one
+start per dispatch tick, a `$0.25` reactive runner budget, 30-second agent and
+verifier task caps, a 60-minute Sandbox lifetime, and a `$1` Development
+AI Gateway project-key budget.
+
+The `$0.25` application cap is **reactive**: the runner checks it after each
+task has already reported its model cost, so it prevents later tasks but cannot
+guarantee the first task costs less than that amount. The `$1` project-scoped
+AI Gateway key budget is the enforced provider-side spend ceiling. It must be
+configured only on the dedicated Development key, never on the live project,
+and should be verified through Vercel metadata without exposing its value.
+
+Changing Development environment values does not update an existing deployment.
+After the values are configured by the authorized Development infrastructure
+owner, activate them only with a reviewed commit merged to protected `dev` and
+wait for Vercel native Git integration. Do not use `vercel redeploy`, a CLI
+upload, promote, alias operation, or any live-project action to activate this
+probe.
+
+After the exact Development deployment is verified, submit one empty-prompt
+baseline to the canonical Development host. An empty prompt intentionally
+skips the fairness judge; it does not bypass Sandbox, runner, model, trace, or
+callback behavior. Record the returned `run_id`, then poll without using the
+lazy dispatch/reap run routes:
+
+```text
+GET /api/ops/v1/read?kind=runs&id=<run_id>
+GET /api/runs/<run_id>/events?since=<last-seq>
+GET /api/ops/v1/inventory?kind=traces
+```
+
+Attach `Authorization: Bearer $OPS_READ_TOKEN` only to the `/api/ops/v1/*`
+requests. The run-event feed is read-only and incrementally resumable. Do not
+poll `GET /api/runs` or `GET /api/runs/<id>` during this acceptance check: they
+can lazily reap or dispatch queued work. Keep all request, run, event, trace,
+and Vercel-log evidence scoped to `harness-arena-development.vercel.app`.
+
+This proves the bounded Sandbox-to-model-to-callback lifecycle and its
+observability paths. It is deliberately not a representative 16-task benchmark
+result: the short task caps and enforced project budget are acceptance safety
+controls, not leaderboard evaluation settings.
+
 Issue #175 verifies this read-only metadata boundary; it does not remove write
 authority from an owner-capable Vercel credential. Issue #148 must enforce a
 least-privilege verifier identity with credential-level no-write authority.

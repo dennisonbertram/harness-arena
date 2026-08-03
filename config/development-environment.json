@@ -13,6 +13,16 @@
   "host": "harness-arena-development.vercel.app",
   "store": { "id": "store_9AIBHzkDp5mZ1SnM" },
   "callbackOrigin": "https://harness-arena-development.vercel.app",
+  "hostedAcceptance": {
+    "runsPerSubmission": 1,
+    "maxConcurrentRuns": 1,
+    "maxStartsPerTick": 1,
+    "runBudgetCapUsd": 0.25,
+    "runnerAgentTimeoutCapSeconds": 30,
+    "runnerVerifyTimeoutCapSeconds": 30,
+    "runnerSandboxTimeoutMinutes": 60,
+    "gatewayProjectBudgetUsd": 1
+  },
   "live": {
     "projectId": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
     "aliases": [

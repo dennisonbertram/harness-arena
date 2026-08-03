@@ -4,7 +4,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { verifyDevelopmentEnvironment } from "../ci/verify-development-environment.mjs";
+import {
+  HOSTED_ACCEPTANCE_CONTRACT,
+  HOSTED_ACCEPTANCE_RUNTIME,
+  verifyDevelopmentEnvironment,
+} from "../ci/verify-development-environment.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +32,53 @@ const EXPECTED_GIT = Object.freeze({
   repo: "harness-arena",
   productionBranch: "dev",
 });
+const DEFAULT_CALLBACK_ORIGIN = "https://harness-arena-development.vercel.app";
+const HOSTED_ACCEPTANCE_ENV = HOSTED_ACCEPTANCE_RUNTIME.environment;
+const GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY = HOSTED_ACCEPTANCE_RUNTIME.gatewayProjectBudgetAcceptanceKey;
+const DEFAULT_HOSTED_ACCEPTANCE = Object.freeze(Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+));
+const GATEWAY_KEY_KEYS = [
+  "activeAt",
+  "createdAt",
+  "createdBy",
+  "createdByAppId",
+  "expiresAt",
+  "id",
+  "leakedAt",
+  "leakedUrl",
+  "name",
+  "partialKey",
+  "projectId",
+  "purpose",
+  "quota",
+  "teamId",
+];
+const GATEWAY_QUOTA_KEYS = [
+  "active",
+  "archived",
+  "createdAt",
+  "currentByokSpend",
+  "currentSpend",
+  "includeByokInQuota",
+  "limitAmount",
+  "quotaEntityId",
+  "refreshPeriod",
+  "updatedAt",
+];
+const DECRYPTED_ENVIRONMENT_VALUE_KEYS = [
+  "configurationId",
+  "createdAt",
+  "createdBy",
+  "decrypted",
+  "id",
+  "key",
+  "target",
+  "type",
+  "updatedAt",
+  "updatedBy",
+  "value",
+];
 
 function denied() {
   return new Error("Development Vercel read-only preflight denied by local safety policy");
@@ -371,6 +422,119 @@ function normalizeDevelopmentStore(value, { storeId, projectId }) {
   };
 }
 
+function productionOnlyEncryptedEntry(entries, key) {
+  const matches = entries.filter((entry) => entry?.key === key);
+  if (
+    matches.length !== 1
+    || typeof matches[0].id !== "string"
+    || !matches[0].id
+    || matches[0].type !== "encrypted"
+    || !Array.isArray(matches[0].target)
+    || matches[0].target.length !== 1
+    || matches[0].target[0] !== "production"
+  ) throw denied();
+  return matches[0];
+}
+
+function productionOnlySensitiveEntry(entries, key) {
+  const matches = entries.filter((entry) => entry?.key === key);
+  if (
+    matches.length !== 1
+    || typeof matches[0].id !== "string"
+    || !matches[0].id
+    || matches[0].type !== "sensitive"
+    || !Array.isArray(matches[0].target)
+    || matches[0].target.length !== 1
+    || matches[0].target[0] !== "production"
+  ) throw denied();
+  return matches[0];
+}
+
+function normalizePlainEnvironmentValue(value, { entry, expected }) {
+  if (
+    !exactKeys(value, DECRYPTED_ENVIRONMENT_VALUE_KEYS)
+    || value.id !== entry.id
+    || value.key !== entry.key
+    || value.type !== "encrypted"
+    || !Array.isArray(value.target)
+    || value.target.length !== 1
+    || value.target[0] !== "production"
+    || value.decrypted !== true
+    || typeof value.value !== "string"
+    || (expected === undefined ? !value.value : value.value !== expected)
+    || (value.configurationId !== null && typeof value.configurationId !== "string")
+    || !Number.isSafeInteger(value.createdAt)
+    || value.createdAt < 0
+    || typeof value.createdBy !== "string"
+    || !value.createdBy
+    || !Number.isSafeInteger(value.updatedAt)
+    || value.updatedAt < 0
+    || (value.updatedBy !== null && (typeof value.updatedBy !== "string" || !value.updatedBy))
+  ) throw denied();
+  return value.value;
+}
+
+function normalizeDevelopmentGatewayKey(value, { projectId, teamId, limitAmount }) {
+  if (
+    !exactKeys(value, ["apiKeys", "pagination"])
+    || !Array.isArray(value.apiKeys)
+    || !exactKeys(value.pagination, ["count", "next", "prev"])
+    || !Number.isSafeInteger(value.pagination.count)
+    || value.pagination.count !== value.apiKeys.length
+    || value.pagination.next !== null
+    || value.pagination.prev !== null
+  ) throw denied();
+  const matches = value.apiKeys.filter((key) => key?.projectId === projectId && key?.purpose === "ai-gateway");
+  if (matches.length !== 1 || !exactKeys(matches[0], GATEWAY_KEY_KEYS)) throw denied();
+  const key = matches[0];
+  if (
+    key.teamId !== teamId
+    || typeof key.id !== "string"
+    || !key.id
+    || typeof key.name !== "string"
+    || !key.name
+    || typeof key.partialKey !== "string"
+    || !key.partialKey
+    || !Number.isSafeInteger(key.activeAt)
+    || key.activeAt <= 0
+    || key.expiresAt !== null
+    || key.leakedAt !== null
+    || key.leakedUrl !== null
+    || !exactKeys(key.quota, GATEWAY_QUOTA_KEYS)
+  ) throw denied();
+  const budget = key.quota;
+  if (
+    budget.quotaEntityId !== `api_key_id_${key.id}`
+    || budget.limitAmount !== limitAmount
+    || typeof budget.currentSpend !== "number"
+    || !Number.isFinite(budget.currentSpend)
+    || budget.currentSpend < 0
+    || budget.currentSpend >= budget.limitAmount
+    || typeof budget.currentByokSpend !== "number"
+    || !Number.isFinite(budget.currentByokSpend)
+    || budget.currentByokSpend < 0
+    || budget.refreshPeriod !== "monthly"
+    || budget.active !== true
+    || budget.archived !== false
+    || budget.includeByokInQuota !== true
+    || !Number.isSafeInteger(budget.createdAt)
+    || budget.createdAt < 0
+    || !Number.isSafeInteger(budget.updatedAt)
+    || budget.updatedAt < 0
+  ) throw denied();
+  return {
+    keyId: key.id,
+    keyName: key.name,
+    keyPartial: key.partialKey,
+    quotaEntityId: budget.quotaEntityId,
+    limitAmount: budget.limitAmount,
+    currentSpend: budget.currentSpend,
+    refreshPeriod: budget.refreshPeriod,
+    active: budget.active,
+    archived: budget.archived,
+  };
+}
+
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
 export function createReadOnlyVercelApi({
   fetchImpl = globalThis.fetch,
@@ -389,7 +553,15 @@ export function createReadOnlyVercelApi({
   const get = (token, url) => requestJson(fetchImpl, token, url, { timeoutMs, maxBodyBytes });
 
   return {
-    async inspect({ projectId, teamId, storeId, token, live }) {
+    async inspect({
+      projectId,
+      teamId,
+      storeId,
+      token,
+      live,
+      callbackOrigin = DEFAULT_CALLBACK_ORIGIN,
+      hostedAcceptance: expectedAcceptance = DEFAULT_HOSTED_ACCEPTANCE,
+    }) {
       if (
         projectId !== DEVELOPMENT_PROJECT_ID
         || teamId !== DEVELOPMENT_TEAM_ID
@@ -397,6 +569,10 @@ export function createReadOnlyVercelApi({
         || !storeId
         || typeof token !== "string"
         || !token
+        || typeof callbackOrigin !== "string"
+        || !callbackOrigin
+        || !expectedAcceptance
+        || typeof expectedAcceptance !== "object"
       ) {
         throw denied();
       }
@@ -427,13 +603,7 @@ export function createReadOnlyVercelApi({
         );
         const entries = environments?.envs;
         if (!Array.isArray(entries)) throw denied();
-        const callbackEntries = entries.filter((entry) =>
-          entry?.key === "CALLBACK_BASE"
-          && Array.isArray(entry.target)
-          && entry.target.length === 1
-          && entry.target[0] === "production",
-        );
-        if (callbackEntries.length !== 1 || typeof callbackEntries[0].id !== "string") throw denied();
+        const callbackEntry = productionOnlyEncryptedEntry(entries, "CALLBACK_BASE");
         const blobTokenEntries = entries.filter((entry) => entry?.key === "BLOB_READ_WRITE_TOKEN");
         if (
           blobTokenEntries.length !== 1
@@ -444,13 +614,43 @@ export function createReadOnlyVercelApi({
         ) {
           throw denied();
         }
-        const callback = await get(
-          token,
-          requestUrl(
-            `/v10/projects/${encodeURIComponent(projectId)}/env/${encodeURIComponent(callbackEntries[0].id)}`,
-            { teamId, decrypt: "true" },
+        productionOnlySensitiveEntry(entries, "AI_GATEWAY_API_KEY");
+        if (entries.some((entry) => entry?.key === "RUNNER_PROVIDER" || entry?.key === "OPENROUTER_API_KEY")) {
+          throw denied();
+        }
+        const controlEntries = Object.entries(HOSTED_ACCEPTANCE_ENV).map(([environmentKey, acceptanceKey]) => ({
+          environmentKey,
+          acceptanceKey,
+          entry: productionOnlyEncryptedEntry(entries, environmentKey),
+        }));
+        const readEnvironmentValue = async (entry, expected) => normalizePlainEnvironmentValue(
+          await get(
+            token,
+            requestUrl(`/v10/projects/${encodeURIComponent(projectId)}/env/${encodeURIComponent(entry.id)}`, {
+              teamId,
+              decrypt: "true",
+            }),
           ),
+          { entry, expected },
         );
+        const callback = await readEnvironmentValue(callbackEntry, callbackOrigin);
+        const runtimeAcceptance = Object.fromEntries(await Promise.all(controlEntries.map(async ({ acceptanceKey, entry }) => [
+          acceptanceKey,
+          await readEnvironmentValue(entry, String(expectedAcceptance[acceptanceKey] ?? "")),
+        ])));
+        const gatewayKeyId = await readEnvironmentValue(
+          productionOnlyEncryptedEntry(entries, "AI_GATEWAY_KEY_ID"),
+          undefined,
+        );
+        const gatewayKeyPartial = await readEnvironmentValue(
+          productionOnlyEncryptedEntry(entries, "AI_GATEWAY_KEY_PARTIAL"),
+          undefined,
+        );
+        const gatewayBudget = normalizeDevelopmentGatewayKey(
+          await get(token, requestUrl("/v1/api-keys", { teamId, limit: "100" })),
+          { projectId, teamId, limitAmount: expectedAcceptance[GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY] },
+        );
+        if (gatewayKeyId !== gatewayBudget.keyId || gatewayKeyPartial !== gatewayBudget.keyPartial) throw denied();
         const store = await get(
           token,
           requestUrl(`/v1/storage/stores/${encodeURIComponent(storeId)}`, { teamId }),
@@ -474,10 +674,12 @@ export function createReadOnlyVercelApi({
         return {
           project: { ...projectAfter, aliases: domainInventoryAfter.aliases },
           environment: {
-            callbackBase: callback?.value,
+            callbackBase: callback,
             networkModeConfigured: entries.some((entry) => entry?.key === "RUNNER_NETWORK_MODE"),
             blobStoreId: blobTokenEntries[0].contentHint.storeId,
             storeIds: environmentStoreIds,
+            hostedAcceptance: runtimeAcceptance,
+            gatewayBudget,
           },
           store: normalizedStore,
         };
@@ -508,7 +710,7 @@ function validateInspection(actual, manifest) {
     !exactKeys(actual, ["project", "environment", "store"])
     || !exactKeys(actual.project, ["id", "ownerId", "name", "git", "aliases"])
     || !exactKeys(actual.project.git, ["type", "org", "repo", "productionBranch"])
-    || !exactKeys(actual.environment, ["callbackBase", "networkModeConfigured", "blobStoreId", "storeIds"])
+    || !exactKeys(actual.environment, ["callbackBase", "networkModeConfigured", "blobStoreId", "storeIds", "hostedAcceptance", "gatewayBudget"])
     || !exactKeys(actual.store, ["id", "ownerId", "projectId", "type", "access", "status"])
     || actual.project.id !== DEVELOPMENT_PROJECT_ID
     || actual.project.id === LIVE_PROJECT_ID
@@ -528,6 +730,26 @@ function validateInspection(actual, manifest) {
     || !actual.project.aliases.some((alias) => alias.domain === manifest.host)
     || actual.project.aliases.some((alias) => manifest.live.aliases.includes(alias.domain))
     || actual.environment.callbackBase !== manifest.callbackOrigin
+    || !identical(actual.environment.hostedAcceptance, Object.fromEntries(Object.entries(HOSTED_ACCEPTANCE_ENV).map(([, acceptanceKey]) => [
+      acceptanceKey,
+      String(manifest.hostedAcceptance[acceptanceKey]),
+    ])))
+    || !exactKeys(actual.environment.gatewayBudget, ["keyId", "keyName", "keyPartial", "quotaEntityId", "limitAmount", "currentSpend", "refreshPeriod", "active", "archived"])
+    || typeof actual.environment.gatewayBudget.keyId !== "string"
+    || !actual.environment.gatewayBudget.keyId
+    || typeof actual.environment.gatewayBudget.keyName !== "string"
+    || !actual.environment.gatewayBudget.keyName
+    || typeof actual.environment.gatewayBudget.keyPartial !== "string"
+    || !actual.environment.gatewayBudget.keyPartial
+    || actual.environment.gatewayBudget.quotaEntityId !== `api_key_id_${actual.environment.gatewayBudget.keyId}`
+    || actual.environment.gatewayBudget.limitAmount !== manifest.hostedAcceptance[GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY]
+    || typeof actual.environment.gatewayBudget.currentSpend !== "number"
+    || !Number.isFinite(actual.environment.gatewayBudget.currentSpend)
+    || actual.environment.gatewayBudget.currentSpend < 0
+    || actual.environment.gatewayBudget.currentSpend >= actual.environment.gatewayBudget.limitAmount
+    || actual.environment.gatewayBudget.refreshPeriod !== "monthly"
+    || actual.environment.gatewayBudget.active !== true
+    || actual.environment.gatewayBudget.archived !== false
     || manifest.live.aliases.includes(new URL(actual.environment.callbackBase).hostname)
     || actual.environment.networkModeConfigured !== false
     || actual.environment.blobStoreId !== manifest.store.id
@@ -584,6 +806,8 @@ export async function verifyDevelopmentPreflight({
       storeId: manifest.store.id,
       token,
       live: manifest.live,
+      callbackOrigin: manifest.callbackOrigin,
+      hostedAcceptance: manifest.hostedAcceptance,
     });
     validateInspection(actual, manifest);
     const remoteAfter = await readRemoteSha({ cwd });

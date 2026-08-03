@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 
-import { verifyDevelopmentEnvironment } from "./verify-development-environment.mjs";
+import {
+  classifyHostedAcceptanceContract,
+  HOSTED_ACCEPTANCE_CONTRACT,
+  verifyDevelopmentEnvironment,
+} from "./verify-development-environment.mjs";
 
 const live = {
   projectId: "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
@@ -12,6 +16,10 @@ const live = {
   ],
   storeIds: ["store_SgaF1fm7nkPQPCKq"],
 };
+
+const hostedAcceptance = Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+);
 
 function development(overrides = {}) {
   return {
@@ -29,11 +37,34 @@ function development(overrides = {}) {
     host: null,
     store: { id: null },
     callbackOrigin: null,
+    hostedAcceptance,
     ...overrides,
   };
 }
 
 describe("verifyDevelopmentEnvironment", () => {
+  it("fails closed when a hosted acceptance runtime descriptor is unhandled", () => {
+    expect(() => classifyHostedAcceptanceContract({
+      futureRuntimeControl: {
+        expected: 1,
+        runtime: { kind: "future-runtime" },
+      },
+    })).toThrow(/unhandled hosted acceptance runtime kind/i);
+  });
+
+  it("rejects a prototype-named Vercel runtime environment key", () => {
+    expect(() => classifyHostedAcceptanceContract({
+      futureRuntimeControl: {
+        expected: 1,
+        runtime: { kind: "vercel-environment", key: "__proto__" },
+      },
+      gatewayBudget: {
+        expected: 1,
+        runtime: { kind: "gateway-project-budget" },
+      },
+    })).toThrow(/invalid hosted acceptance runtime descriptor/i);
+  });
+
   it("records the provisioned Development data plane without secrets", async () => {
     const manifest = JSON.parse(
       await readFile(new URL("../../config/development-environment.json", import.meta.url), "utf8"),
@@ -50,6 +81,47 @@ describe("verifyDevelopmentEnvironment", () => {
       callbackOrigin: "https://harness-arena-development.vercel.app",
     });
     expect(manifest.live).toEqual(live);
+  });
+
+  it("pins the bounded hosted-acceptance controls for one Development-only lifecycle probe", async () => {
+    const manifest = JSON.parse(
+      await readFile(new URL("../../config/development-environment.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest.hostedAcceptance).toEqual(hostedAcceptance);
+    expect(verifyDevelopmentEnvironment({ development: manifest, live: manifest.live })).toEqual({
+      ok: true,
+      missing: [],
+      violations: [],
+    });
+  });
+
+  it.each(Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected + 1]))(
+    "rejects a widened hosted acceptance control: %s",
+    (key, value) => {
+    const result = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, [key]: value } }),
+      live,
+    });
+
+    expect(result.violations).toContain(`hostedAcceptance.${key}`);
+    },
+  );
+
+  it("fails closed when hosted acceptance controls are missing or have unknown fields", () => {
+    const missing = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, gatewayProjectBudgetUsd: undefined } }),
+      live,
+    });
+    const unknown = verifyDevelopmentEnvironment({
+      development: development({ hostedAcceptance: { ...hostedAcceptance, providerKey: "never" } }),
+      live,
+    });
+
+    expect(missing.missing).toContain("hostedAcceptance.gatewayProjectBudgetUsd");
+    expect(unknown.violations).toEqual(expect.arrayContaining([
+      "hostedAcceptance.providerKey",
+    ]));
   });
 
   it("reports missing host, store, and callback infrastructure without exposing secrets", () => {
