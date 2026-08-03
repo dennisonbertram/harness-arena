@@ -3,7 +3,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { ensureBaseline } from "@/lib/competition-baseline";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { isAllowedModel } from "@/lib/models";
 import { normalizedPricingVersion } from "@/lib/normalized-pricing";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
@@ -97,9 +97,9 @@ export async function POST(request: NextRequest) {
   if (!input.skip_baseline) {
     after(async () => {
       const result = await ensureBaseline(storage, competition).catch((error: unknown) => {
-        log("warn", "competition.create.baseline_failed", {
+        log("error", "competition.create.baseline_failed", {
           competition_id: competition.id,
-          error: (error as Error).message,
+          ...normalizeError(error, "baseline_ensure"),
         });
         return null;
       });

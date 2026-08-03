@@ -1,7 +1,7 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
 import { PINNED_PROVIDERS } from "./arena-params";
-import { log } from "./log";
+import { log, normalizeError } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
 import type { RunnerTask } from "./tasks-for-runner";
@@ -111,7 +111,7 @@ function requireEnv(name: string): string {
 async function markFailed(run: Run, err: unknown): Promise<void> {
   const storage = getStorage();
   const message = err instanceof Error ? err.message : String(err);
-  log("error", "sandbox.create_failed", { run_id: run.id, error: message });
+  log("error", "sandbox.create_failed", { run_id: run.id, ...normalizeError(err, "sandbox_create") });
   const failed: Run = { ...run, status: "failed", finished_at: new Date().toISOString() };
   await storage.putRun(failed);
   await storage.appendRunEvents(run.id, [

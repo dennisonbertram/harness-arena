@@ -1,5 +1,6 @@
 import { get, list, put } from "@vercel/blob";
 import { FileStorage } from "./file-storage";
+import { log, normalizeError } from "./log";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 
@@ -143,6 +144,7 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
       await new Promise((r) => setTimeout(r, 150 * (i + 1)));
     }
   }
+  log("error", "storage.retry_exhausted", { attempts, ...normalizeError(lastErr, "storage_retry") });
   throw lastErr;
 }
 

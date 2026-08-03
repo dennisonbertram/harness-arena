@@ -57,7 +57,8 @@ describe("dispatchQueuedRuns", () => {
     };
     await storageRef.current.putSubmission(sub);
     for (let i = 0; i < nRuns; i++) {
-      await storageRef.current.putRun(run(String(i + 1).padStart(2, "0")));
+      const ordinal = String(i + 1).padStart(2, "0");
+      await storageRef.current.putRun(run(`run-${String.fromCharCode(97 + i)}`, { created_at: `2026-07-24T00:00:${ordinal}.000Z` }));
     }
   }
 
@@ -89,5 +90,23 @@ describe("dispatchQueuedRuns", () => {
 
     expect(started).toEqual([]);
     expect(startFn).not.toHaveBeenCalled();
+  });
+
+  it("reports rejected startups as failures and excludes them from the successful started set", async () => {
+    await seed(2);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const startFn = vi.fn()
+      .mockRejectedValueOnce(new Error("sandbox startup rejected"))
+      .mockResolvedValueOnce(undefined);
+
+    const started = await dispatchQueuedRuns(storageRef.current, startFn);
+    const records = logSpy.mock.calls.map(([line]) => JSON.parse(line as string));
+
+    expect(started).toEqual(["run-b"]);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "dispatch.start_failed", run_id: "run-a", error_stage: "sandbox_start" }),
+      expect.objectContaining({ event: "dispatch.started", count: 1, run_ids: ["run-b"] }),
+    ]));
+    logSpy.mockRestore();
   });
 });
