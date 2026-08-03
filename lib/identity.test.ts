@@ -79,7 +79,7 @@ describe("hosted seeded Development identity", () => {
     environment: "development",
     branch: "dev",
     git: { provider: "github", repository: "dennisonbertram/harness-arena", productionBranch: "dev" },
-    vercelProject: { id: "prj_development", name: "harness-arena-development" },
+    vercelProject: { id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", name: "harness-arena-development" },
     host: "harness-arena-development.example.test",
     store: { id: "store_development" },
     callbackOrigin: "https://harness-arena-development.example.test",
@@ -107,6 +107,18 @@ describe("hosted seeded Development identity", () => {
       valid,
       manifest as never,
     )).toEqual({ githubId: -144, githubLogin: "harness-local-development" });
+  });
+
+  it("rejects a manifest that attempts to redefine the pinned Development project trust root", () => {
+    const redefined = {
+      ...manifest,
+      vercelProject: { ...manifest.vercelProject, id: "prj_attacker_controlled" },
+    };
+    expect(resolveSeededDevelopmentIdentity(
+      new NextRequest(`${manifest.callbackOrigin}/api/submissions`),
+      { ...valid, VERCEL_PROJECT_ID: redefined.vercelProject.id },
+      redefined as never,
+    )).toBeNull();
   });
 
   it.each([

@@ -5,6 +5,72 @@ import { describe, expect, it, vi } from "vitest";
 import { runLocalSandboxSmoke } from "./local-sandbox-smoke.mjs";
 
 describe("local deterministic HTTP smoke", () => {
+  it("submits a non-empty prompt and derives exact zero-cost proof from the independent task manifest", async () => {
+    const state = await mkdtemp(join(tmpdir(), "arena-local-smoke-success-"));
+    const taskId = "manifest-task";
+    const traceUrl = "http://127.0.0.1:3000/api/runs/run-1/trace-view?task_id=manifest-task&name=session.jsonl";
+    const run = {
+      id: "run-1", submission_id: "sub-1", status: "completed", tasks_passed: 1, total_cost_usd: 0,
+      over_budget: false, task_results: [{ task_id: taskId, attempted: true, passed: true, cost_usd: 0, trace_blob_url: traceUrl }],
+      created_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+    };
+    const types = ["run.created", "run.sandbox_creating", "run.sandbox_ready", "task.started", "task.agent_finished", "task.verify_started", "task.verified", "task.trace_uploaded", "run.completed"];
+    const events = types.map((type, index) => ({
+      run_id: run.id, seq: index + 1, ts: run.created_at, type,
+      payload: type.startsWith("task.") ? { task_id: taskId } : {},
+    }));
+    await mkdir(join(state, "runs"), { recursive: true });
+    await mkdir(join(state, "events"), { recursive: true });
+    await mkdir(join(state, "traces", run.id, taskId), { recursive: true });
+    await writeFile(join(state, "runs", `${run.id}.json`), JSON.stringify(run));
+    await writeFile(join(state, "events", `${run.id}.json`), JSON.stringify(events));
+    await writeFile(join(state, "traces", run.id, taskId, "session.jsonl"), "{}\n");
+    let submittedPrompt;
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === "/api/ready") return Response.json({ ok: true, seeded: true, writable: true, execution_mode: "deterministic-success", development_identity: "seeded" });
+      if (pathname === "/api/health") return Response.json({ ok: true, storage: "up", gateway_key_present: false });
+      if (pathname === "/api/tasks") return Response.json([{ id: taskId, description: "fixture" }]);
+      if (pathname === "/api/submissions") {
+        submittedPrompt = JSON.parse(options.body).prompt;
+        return Response.json({ submission_id: "sub-1", run_id: run.id, run_ids: [run.id], status: "queued", judge_reason: "Approved by deterministic local fairness fixture; no provider request was made." });
+      }
+      if (pathname === `/api/runs/${run.id}`) return Response.json(run);
+      if (pathname === `/api/runs/${run.id}/events`) return Response.json(events);
+      if (pathname === `/api/runs/${run.id}/trace-view`) return new Response("{}\n");
+      return new Response(null, { status: 404 });
+    });
+
+    const result = await runLocalSandboxSmoke({ baseUrl: "http://127.0.0.1:3000", storageRoot: state, fetchImpl });
+
+    expect(submittedPrompt).toBe("Plan carefully, execute the task, and verify the result.");
+    expect(result).toMatchObject({ task_count: 1, tasks_passed: 1, total_cost_usd: 0, over_budget: false, trace_count: 1 });
+    expect(fetchImpl.mock.calls.some(([url]) => new URL(url).pathname === "/api/health")).toBe(true);
+    expect(fetchImpl.mock.calls.some(([url]) => new URL(url).pathname === "/api/tasks")).toBe(true);
+    expect(fetchImpl.mock.calls.some(([url]) => new URL(url).pathname === "/api/runs/run-1/trace-view")).toBe(true);
+  });
+
+  it("rejects observed zero-task success when the independent task manifest is non-empty", async () => {
+    const state = await mkdtemp(join(tmpdir(), "arena-local-smoke-mismatch-"));
+    const run = { id: "run-1", submission_id: "sub-1", status: "completed", tasks_passed: 0, total_cost_usd: 0, over_budget: false, task_results: [], created_at: new Date().toISOString(), finished_at: new Date().toISOString() };
+    const events = ["run.created", "run.sandbox_creating", "run.sandbox_ready", "run.completed"].map((type, index) => ({ run_id: run.id, seq: index + 1, ts: run.created_at, type, payload: {} }));
+    await mkdir(join(state, "runs"), { recursive: true });
+    await mkdir(join(state, "events"), { recursive: true });
+    await writeFile(join(state, "runs", `${run.id}.json`), JSON.stringify(run));
+    await writeFile(join(state, "events", `${run.id}.json`), JSON.stringify(events));
+    const fetchImpl = vi.fn(async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === "/api/ready") return Response.json({ ok: true, seeded: true, writable: true, execution_mode: "deterministic-success", development_identity: "seeded" });
+      if (pathname === "/api/health") return Response.json({ ok: true, storage: "up", gateway_key_present: false });
+      if (pathname === "/api/tasks") return Response.json([{ id: "required-task", description: "fixture" }]);
+      if (pathname === "/api/submissions") return Response.json({ submission_id: "sub-1", run_id: run.id, run_ids: [run.id], status: "queued", judge_reason: "Approved by deterministic local fairness fixture; no provider request was made." });
+      if (pathname === `/api/runs/${run.id}`) return Response.json(run);
+      if (pathname === `/api/runs/${run.id}/events`) return Response.json(events);
+      return new Response(null, { status: 404 });
+    });
+    await expect(runLocalSandboxSmoke({ baseUrl: "http://127.0.0.1:3000", storageRoot: state, fetchImpl })).rejects.toThrow(/task manifest|task count/i);
+  });
+
   it("fails when the persisted lifecycle is missing a required transition", async () => {
     const state = await mkdtemp(join(tmpdir(), "arena-local-smoke-test-"));
     await mkdir(join(state, "runs"), { recursive: true });

@@ -15,7 +15,7 @@ import { executeDeterministicRun } from "./deterministic-execution";
 const originalFetch = globalThis.fetch;
 
 function records(id: string): { run: Run; submission: Submission } {
-  const created_at = "2026-08-03T00:00:00.000Z";
+  const created_at = new Date().toISOString();
   return {
     run: { id, submission_id: `sub-${id}`, status: "queued", task_results: [], created_at },
     submission: { id: `sub-${id}`, agent_name: "local-smoke", prompt: "", status: "queued", created_at },
@@ -32,6 +32,7 @@ beforeEach(() => {
   vi.stubEnv("HARNESS_LOCAL_INIT", "1");
   vi.stubEnv("HARNESS_GIT_BRANCH", "codex/deterministic-local-sandbox");
   vi.stubEnv("STORAGE", "file");
+  vi.stubEnv("LOCAL_INSTANCE_PORT", "4123");
   for (const key of ["VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_PROJECT_ID"]) vi.stubEnv(key, "");
 });
 
@@ -66,11 +67,41 @@ describe("deterministic local execution", () => {
       over_budget: false,
     });
     expect(stored?.task_results.map((result) => result.task_id)).toEqual(taskIds);
+    expect(stored?.task_results.every((result) => result.trace_blob_url?.startsWith("http://127.0.0.1:4123/"))).toBe(true);
+    expect(events.every((event) => Date.parse(event.ts) <= Date.parse(stored?.finished_at ?? ""))).toBe(true);
     for (const taskId of taskIds) {
       await expect(storageRef.current.getTraceBytes(run.id, taskId, "session.jsonl")).resolves.not.toBeNull();
     }
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(mockSandboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("matches runner parity for agent failure: no verifier events are emitted for the failed task", async () => {
+    const { run, submission } = records("run-task-failure-parity");
+    await storageRef.current.putSubmission(submission);
+    await storageRef.current.putRun(run);
+    await executeDeterministicRun(run, { prompt: "non-empty", scenario: "task-failure" });
+
+    const firstTaskId = buildRunnerTasks()[0].id;
+    const events = (await storageRef.current.listRunEvents(run.id)).filter((event) => event.payload.task_id === firstTaskId);
+    expect(events.map((event) => event.type)).toEqual([
+      "task.started", "task.agent_finished", "task.failed", "task.trace_uploaded",
+    ]);
+  });
+
+  it("matches runner parity for budget exhaustion: every remaining manifest task is unattempted", async () => {
+    const { run, submission } = records("run-budget-parity");
+    await storageRef.current.putSubmission(submission);
+    await storageRef.current.putRun(run);
+    await executeDeterministicRun(run, { prompt: "non-empty", scenario: "budget-exceeded" });
+
+    const stored = await storageRef.current.getRun(run.id);
+    const taskIds = buildRunnerTasks().map((task) => task.id);
+    expect(stored?.task_results.map((result) => result.task_id)).toEqual(taskIds);
+    expect(stored?.task_results.map((result) => result.attempted)).toEqual([
+      true, ...taskIds.slice(1).map(() => false),
+    ]);
+    expect(stored).toMatchObject({ tasks_passed: 1, total_cost_usd: 0.02, over_budget: true });
   });
 
   it.each([
