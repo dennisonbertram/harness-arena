@@ -39,6 +39,7 @@ const board = {
     },
   ],
   belowBaseline: [],
+  unpriced: 1,
   pending: 0,
   pendingRunIds: [],
   pendingRows: [],
@@ -72,6 +73,7 @@ describe("competition entries contract", () => {
       competition: expect.objectContaining({ id: "comp-live", status: "live" }),
       ranked: [expect.objectContaining({ submissionId: "submission-1", runId: "run-1", rank: 1 })],
       baselineState: "none",
+      unpriced: 1,
     });
     expect(result.ranked[0]).not.toHaveProperty("prompt");
     expect(result.ranked[0]).not.toHaveProperty("trace_blob_url");
