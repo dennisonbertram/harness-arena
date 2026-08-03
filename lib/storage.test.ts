@@ -292,10 +292,12 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
   });
 
   it("uses private SDK reads and writes for the isolated Development project", async () => {
+    const oidcToken = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, project_id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" })).toString("base64url")}.signature`;
     vi.stubEnv("VERCEL_PROJECT_ID", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA");
     vi.stubEnv("HARNESS_BLOB_STORE_ID", "store_dev");
     vi.stubEnv("BLOB_STORE_ID", "store_dev");
     vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_dev_secret");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", oidcToken);
     const storage = new BlobStorage();
     const submission = { id: "sub-private", created_at: "2026-08-03T00:00:00.000Z" } as Submission;
     vi.mocked(put).mockResolvedValue({ url: "https://private.blob.example/submissions/sub-private.json" } as never);
@@ -305,8 +307,11 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
     await storage.putSubmission(submission);
     await expect(storage.getSubmission(submission.id)).resolves.toEqual(submission);
 
-    expect(put).toHaveBeenCalledWith("submissions/sub-private.json", expect.any(String), expect.objectContaining({ access: "private" }));
-    expect(get).toHaveBeenCalledWith(expect.any(String), { access: "private" });
+    expect(put).toHaveBeenCalledWith("submissions/sub-private.json", expect.any(String), expect.objectContaining({
+      access: "private", oidcToken, storeId: "store_dev",
+    }));
+    expect(put).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.not.objectContaining({ token: expect.anything() }));
+    expect(get).toHaveBeenCalledWith(expect.any(String), { access: "private", oidcToken, storeId: "store_dev" });
   });
 
   it("appendRunEvents writes ONE immutable blob per event, not a single rewritten events file", async () => {

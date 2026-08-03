@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { resolveBlobAccess } from "./blob-access";
 
+function oidc(payload: Record<string, unknown>): string {
+  return [Buffer.from("{}").toString("base64url"), Buffer.from(JSON.stringify(payload)).toString("base64url"), "signature"].join(".");
+}
+
 describe("resolveBlobAccess", () => {
   it("defaults the isolated Development project to private storage", () => {
     expect(resolveBlobAccess({
@@ -55,5 +59,29 @@ describe("resolveBlobAccess", () => {
       BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret",
       VERCEL_OIDC_TOKEN: "oidc",
     })).toThrow("Development BLOB_STORE_ID is required");
+  });
+
+  it.each([
+    ["malformed", "not-a-jwt"],
+    ["expired", oidc({ exp: 1, project_id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" })],
+    ["unrefreshable", oidc({ exp: Math.floor(Date.now() / 1000) + 10, project_id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" })],
+  ])("rejects %s explicit OIDC instead of allowing SDK fallback", (_case, token) => {
+    expect(() => resolveBlobAccess({
+      VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+      HARNESS_BLOB_STORE_ID: "store_dev",
+      BLOB_STORE_ID: "store_dev",
+      BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret",
+      VERCEL_OIDC_TOKEN: token,
+    })).toThrow(/OIDC/i);
+  });
+
+  it("rejects coexisting OIDC and a read-write token bound to another store", () => {
+    expect(() => resolveBlobAccess({
+      VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+      HARNESS_BLOB_STORE_ID: "store_dev",
+      BLOB_STORE_ID: "store_dev",
+      BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_other_secret",
+      VERCEL_OIDC_TOKEN: oidc({ exp: Math.floor(Date.now() / 1000) + 3600, project_id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" }),
+    })).toThrow("Blob credential store identity mismatch");
   });
 });
