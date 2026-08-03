@@ -281,13 +281,13 @@ function assertWithin(parent, candidate) {
   throw new Error(`path is not confined to ${parent}: ${candidate}`);
 }
 
-export async function assertSafeStateDirectory(worktree) {
+export async function inspectSafeStateDirectory(worktree) {
   const root = await realpath(resolve(worktree));
   const state = join(root, ".harness-arena");
   const info = await safeLstat(state);
   if (info?.isSymbolicLink()) throw new Error("state directory must not be a symlink");
   if (info && !info.isDirectory()) throw new Error("state path must be a directory");
-  if (!info) await mkdir(state, { recursive: false, mode: 0o700 });
+  if (!info) return { state, exists: false };
   assertWithin(root, await realpath(state));
   await assertNoSymlinksInTree(state);
   const data = join(state, "local-data");
@@ -295,5 +295,15 @@ export async function assertSafeStateDirectory(worktree) {
   if (dataInfo?.isSymbolicLink()) throw new Error("local data directory must not be a symlink");
   if (dataInfo && !dataInfo.isDirectory()) throw new Error("local data path must be a directory");
   if (dataInfo) assertWithin(state, await realpath(data));
-  return state;
+  return { state, exists: true };
+}
+
+export async function assertSafeStateDirectory(worktree) {
+  let inspected = await inspectSafeStateDirectory(worktree);
+  if (!inspected.exists) {
+    try { await mkdir(inspected.state, { recursive: false, mode: 0o700 }); }
+    catch (error) { if (error?.code !== "EEXIST") throw error; }
+    inspected = await inspectSafeStateDirectory(worktree);
+  }
+  return inspected.state;
 }

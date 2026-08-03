@@ -27,8 +27,12 @@ The child environment is a strict allowlist. Every key discovered in Next's
 development `.env*` inputs is preempted before startup and removed after Next
 loads configuration. `STORAGE=file` fails closed in production and Vercel.
 
-Use `--check` for prerequisite/port/PID validation without side effects and
-`--no-install` for an already-installed worktree. To stop, terminate the
+Use `--check` for read-only prerequisite/port/PID validation and `--no-install`
+for an already-installed worktree. Check may run bounded prerequisite and port
+probes, but it starts no persistent process and creates, deletes, or modifies
+no state, lock, PID, or env file. Stale metadata is reported as
+`stale_pid_detected` and is left untouched for a normal start or explicit
+reset to recover. To stop, terminate the
 reported PID/process group and wait for its ownership metadata to clear. Then
 run `./scripts/init.sh --reset`; reset is explicit and only deletes that
 worktree's `.harness-arena/local-data` directory after realpath/lstat

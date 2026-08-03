@@ -23,8 +23,11 @@ preempted and removed before application code runs, so a forgotten local Blob,
 gateway, runner, or unrelated value cannot leak into the server. File storage
 also refuses to start under `NODE_ENV=production` or Vercel.
 
-- `./scripts/init.sh --check` validates Node, pnpm, port ownership, and stale
-  PID metadata without installing or starting anything.
+- `./scripts/init.sh --check` validates Node, pnpm, port ownership, and PID
+  metadata without installing or starting a persistent process. It is
+  read-only: it does not create state or lock files, create `.env.local`, or
+  repair/delete stale PID metadata. A read-only result reports
+  `stale_pid_detected`; use a normal start or explicit reset for recovery.
 - `./scripts/init.sh --no-install` is for a warm worktree.
 - A repeat start or `--check` reports the same healthy PID/nonce/port. Starts
   serialize through a per-worktree immutable claim queue: owner metadata is

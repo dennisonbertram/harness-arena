@@ -9,6 +9,7 @@ import {
   chooseAvailablePort,
   failTimedOutStart,
   isProcessAlive,
+  inspectSafeStateDirectory,
   probeInstance,
   readInstanceMetadata,
   readManagedLocalConfig,
@@ -38,13 +39,50 @@ if (args.has("--reset")) {
   process.exit(0);
 }
 
-const state = await assertSafeStateDirectory(worktree);
-const pidPath = join(state, "init.pid");
-const lockPath = join(state, "init.lock");
-const logPath = join(state, "init.log");
-await initialize();
+if (args.has("--check")) await checkOnly();
+else await initialize(await assertSafeStateDirectory(worktree));
 
-async function initialize() {
+async function checkOnly() {
+  const inspected = await inspectSafeStateDirectory(worktree);
+  const pnpm = await commandExists("pnpm");
+  if (!pnpm) throw new Error("pnpm is required and was not found on PATH");
+  const observed = inspected.exists ? await inspectPidForCheck(inspected.state) : { state: "absent" };
+  if (observed.state === "live") {
+    if (observed.legacy) throw new Error(`legacy PID metadata points to live process ${observed.pid}; stop it before restarting`);
+    const ready = await probeInstance(observed.metadata);
+    if (!ready) throw new Error(`local PID ${observed.pid} is alive but readiness ownership did not match; refusing a second server`);
+    json(instanceOutput("existing", observed.metadata, { stale_pid_recovered: false, stale_pid_detected: false }, inspected.state));
+    return;
+  }
+  const port = await chooseAvailablePort(worktree);
+  json({
+    ok: true,
+    mode: "check",
+    port,
+    storage: join(inspected.state, "local-data"),
+    stale_pid_detected: observed.state === "stale",
+  });
+}
+
+async function inspectPidForCheck(state) {
+  const pidPath = join(state, "init.pid");
+  let raw;
+  try { raw = await readFile(pidPath, "utf8"); }
+  catch (error) { if (error?.code === "ENOENT") return { state: "absent" }; throw error; }
+  let value;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error(`unrecognized PID metadata at ${pidPath}; --check will not modify it`); }
+  if (Number.isSafeInteger(value) && value > 0) return { state: isProcessAlive(value) ? "live" : "stale", pid: value, legacy: true };
+  if (!value || !Number.isSafeInteger(value.pid) || value.pid <= 0 || !Number.isSafeInteger(value.port) || value.port <= 0 || typeof value.nonce !== "string" || !value.nonce) {
+    throw new Error(`unrecognized PID metadata at ${pidPath}; --check will not modify it`);
+  }
+  return { state: isProcessAlive(value.pid) ? "live" : "stale", pid: value.pid, legacy: false, metadata: value };
+}
+
+async function initialize(state) {
+ const pidPath = join(state, "init.pid");
+ const lockPath = join(state, "init.lock");
+ const logPath = join(state, "init.log");
  const releaseLock = await acquireInitLock(lockPath);
  try {
   const pnpm = await commandExists("pnpm");
@@ -56,7 +94,7 @@ async function initialize() {
     if (isProcessAlive(metadata.pid)) {
       const ready = await probeInstance(metadata);
       if (!ready) throw new Error(`local PID ${metadata.pid} is alive but readiness ownership did not match; refusing a second server`);
-      json(instanceOutput("existing", metadata, { stale_pid_recovered: false }));
+      json(instanceOutput("existing", metadata, { stale_pid_recovered: false }, state));
       return;
     }
     await rm(pidPath, { force: true });
@@ -69,10 +107,6 @@ async function initialize() {
   }
 
   const port = await chooseAvailablePort(worktree);
-  if (args.has("--check")) {
-    json({ ok: true, mode: "check", port, storage: join(state, "local-data"), stale_pid_recovered: stalePidRecovered });
-    return;
-  }
 
   const localConfig = await readManagedLocalConfig(worktree);
   const installEnv = await safeChildEnv(worktree, process.env, localConfig);
@@ -109,7 +143,7 @@ async function initialize() {
   while (Date.now() < deadline) {
     if (await probeInstance(instance, 500)) {
       await rm(join(state, "init-failure.json"), { force: true });
-      json(instanceOutput("start", instance, { stale_pid_recovered: stalePidRecovered }));
+      json(instanceOutput("start", instance, { stale_pid_recovered: stalePidRecovered }, state));
       return;
     }
     if (!isProcessAlive(child.pid)) break;
@@ -138,7 +172,7 @@ function run(command, commandArgs, options, label) {
   });
 }
 
-function instanceOutput(mode, instance, extra) {
+function instanceOutput(mode, instance, extra, state) {
   return {
     ok: true,
     mode,
@@ -147,7 +181,7 @@ function instanceOutput(mode, instance, extra) {
     port: instance.port,
     url: `http://127.0.0.1:${instance.port}/api/ready`,
     storage: join(state, "local-data"),
-    log: logPath,
+    log: join(state, "init.log"),
     ...extra,
   };
 }
