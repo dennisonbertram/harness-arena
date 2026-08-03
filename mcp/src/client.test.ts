@@ -78,6 +78,20 @@ describe("HarnessArenaClient", () => {
     await expect(readFile(target, "utf8")).resolves.toBe(targetContents);
   });
 
+  it("rejects a symlinked credential directory before the first write", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-directory-link-"));
+    const attackerDirectory = join(directory, "attacker");
+    const linkedDirectory = join(directory, "linked");
+    await mkdir(attackerDirectory, { mode: 0o700 });
+    await symlink(attackerDirectory, linkedDirectory);
+    const path = join(linkedDirectory, "credentials.json");
+
+    await expect(new FileCredentialStore(path).set("https://arena.example.test", {
+      token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z",
+    })).rejects.toThrow("Unable to read Harness Arena credentials");
+    await expect(stat(join(attackerDirectory, "credentials.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects malformed stored credential values instead of returning them as authenticated", async () => {
     const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-schema-"));
     const path = join(directory, "credentials.json");

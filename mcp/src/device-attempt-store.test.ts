@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -127,5 +127,18 @@ describe("FileDeviceAttemptStore", () => {
 
     await expect(new FileDeviceAttemptStore(path).get("https://arena.example.test", "permissive-mode"))
       .rejects.toThrow("Unable to read Harness Arena device attempts");
+  });
+
+  it("rejects a symlinked device-attempt directory before the first write", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-device-attempts-directory-link-"));
+    const attackerDirectory = join(directory, "attacker");
+    const linkedDirectory = join(directory, "linked");
+    await mkdir(attackerDirectory, { mode: 0o700 });
+    await symlink(attackerDirectory, linkedDirectory);
+    const path = join(linkedDirectory, "device-attempts.json");
+
+    await expect(new FileDeviceAttemptStore(path).save(attempt("first-write")))
+      .rejects.toThrow("Unable to read Harness Arena device attempts");
+    await expect(stat(join(attackerDirectory, "device-attempts.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
