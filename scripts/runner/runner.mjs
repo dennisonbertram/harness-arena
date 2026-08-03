@@ -47,6 +47,7 @@ import {
   sh,
   shAsync,
   summarizeGatewayRequests,
+  trustedGatewayPricing,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -589,8 +590,26 @@ async function runOneTask(task, index, systemPrompt) {
       ...gatewayCorrelation,
     });
     const sessionUnreadable = isSessionTextUnreadable(sessionText);
-    const parsed = parseSessionCost(sessionText);
+    const parsed = parseSessionCost(sessionText, RUNNER_MODEL);
     const turns = parsed.turns;
+    const trustedPricing = trustedGatewayPricing({
+      requests: proxyRequests,
+      requestCount: diagnosticSnapshot.requestCount,
+      droppedEvents: diagnosticSnapshot.droppedEvents,
+      model: RUNNER_MODEL,
+    });
+    const normalizedCostFields =
+      trustedPricing === undefined
+        ? {}
+        : {
+            normalized_cost_usd: trustedPricing.normalizedCost,
+            pricing_version: trustedPricing.pricingVersion,
+            pricing_source: trustedPricing.pricingSource,
+            input_tokens: trustedPricing.usage.input,
+            cache_read_tokens: trustedPricing.usage.cacheRead,
+            cache_write_tokens: trustedPricing.usage.cacheWrite,
+            output_tokens: trustedPricing.usage.output,
+          };
 
     // Cost tamper resistance (issue #19 finding 2): a root agent can rewrite
     // its own session JSONL. A missing/empty/unparseable session file is
@@ -601,9 +620,10 @@ async function runOneTask(task, index, systemPrompt) {
     // data to stdout). Only when stdout has no usable cost either does this
     // fall back to the configurable floor. Negative cost.total values from
     // the session are clamped and counted as a tamper signal by
-    // parseSessionCost. The platform's gateway-credits ledger remains the
-    // authoritative spend ceiling -- this is a secondary, spoofable signal
-    // surfaced for visibility.
+    // parseSessionCost. Normalized leaderboard pricing is deliberately absent
+    // from this participant-writable path; it comes only from the host-side
+    // gateway proxy above. The gateway-credits ledger remains authoritative
+    // for the actual spend ceiling.
     const stdoutCost = sessionUnreadable ? parseStdoutCost(piStdout.toString("utf8")) : 0;
     const { totalCost, costSource } = resolveTaskCost({
       sessionUnreadable,
@@ -641,6 +661,7 @@ async function runOneTask(task, index, systemPrompt) {
       task_id: task.id,
       turns,
       ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+      ...normalizedCostFields,
       ...(totalCost === null ? {} : { cost_usd: totalCost }),
       cost_source: costSource,
       duration_s: agentDurationS,
@@ -678,6 +699,7 @@ async function runOneTask(task, index, systemPrompt) {
         turns,
         agent_duration_s: agentDurationS,
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        ...normalizedCostFields,
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_timeout",
         error,
@@ -708,6 +730,7 @@ async function runOneTask(task, index, systemPrompt) {
         turns,
         agent_duration_s: agentDurationS,
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        ...normalizedCostFields,
         trace_blob_url: traceBlobUrl,
         failure_stage: "agent_process_error",
         error,
@@ -741,6 +764,7 @@ async function runOneTask(task, index, systemPrompt) {
         turns,
         agent_duration_s: agentDurationS,
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        ...normalizedCostFields,
         trace_blob_url: traceBlobUrl,
         failure_stage: agentError.stage,
         error,
@@ -768,7 +792,12 @@ async function runOneTask(task, index, systemPrompt) {
     const rewardNumber = rewardText != null ? Number(String(rewardText).trim()) : NaN;
     const reward = Number.isFinite(rewardNumber) ? rewardNumber : 0;
 
-    queueEvent("task.verified", { task_id: task.id, passed, reward, duration_s: verifyDurationS });
+    queueEvent("task.verified", {
+      task_id: task.id,
+      passed,
+      reward,
+      duration_s: verifyDurationS,
+    });
     await flushEvents();
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
@@ -806,6 +835,7 @@ async function runOneTask(task, index, systemPrompt) {
       turns,
       agent_duration_s: agentDurationS,
       ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+      ...normalizedCostFields,
       trace_blob_url: traceBlobUrl,
     };
   } finally {
@@ -922,6 +952,9 @@ async function main() {
     queueEvent("run.completed", {
       tasks_passed: totals.tasks_passed,
       total_cost_usd: totals.total_cost_usd,
+      ...(totals.normalized_total_cost_usd === null ? {} : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
+      ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
+      ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
       duration_s: durationS,
     });
 
@@ -930,7 +963,16 @@ async function main() {
     gatewayProxy?.close();
     const delivered = await finalizeTerminalStatus({
       status: "completed",
-      totals: { ...totals, over_budget: overBudget },
+      totals: {
+        tasks_passed: totals.tasks_passed,
+        total_cost_usd: totals.total_cost_usd,
+        ...(totals.normalized_total_cost_usd === null
+          ? {}
+          : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
+        ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
+        ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
+        over_budget: overBudget,
+      },
       task_results: taskResults,
       provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
       resolved_system_prompt: resolvedSystemPrompt,
@@ -952,7 +994,16 @@ async function main() {
     const totals = computeTotals(taskResults);
     const delivered = await finalizeTerminalStatus({
       status: "failed",
-      totals: { ...totals, over_budget: overBudget },
+      totals: {
+        tasks_passed: totals.tasks_passed,
+        total_cost_usd: totals.total_cost_usd,
+        ...(totals.normalized_total_cost_usd === null
+          ? {}
+          : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
+        ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
+        ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
+        over_budget: overBudget,
+      },
       task_results: taskResults,
       provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
       resolved_system_prompt: resolvedSystemPrompt,

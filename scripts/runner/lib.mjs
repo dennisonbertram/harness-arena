@@ -14,9 +14,42 @@ import { execFileSync, spawn } from "node:child_process";
 // negativeCostCount as a tamper signal for the caller to log/alert on. The
 // platform's gateway-credits ledger remains the authoritative spend
 // ceiling; this parser is a secondary, spoofable signal.
-export function parseSessionCost(jsonlText) {
+export const PRICING_VERSION = "inkling-small-2026-08-03-v1";
+
+// Fixed, versioned board rates. These are intentionally separate from Pi's
+// provider-reported ledger: totalCost remains the actual billed spend used for
+// budget enforcement, while scoreCost makes comparable submissions insensitive
+// to a provider changing its retail price.
+const NORMALIZED_PRICING = {
+  "thinkingmachines/inkling-small": {
+    input: 0.5 / 1_000_000,
+    output: 1.2 / 1_000_000,
+    cacheRead: 0.1 / 1_000_000,
+    // Inkling publishes no separate cache-write rate; creation tokens are
+    // charged as ordinary prompt input rather than free cache reads.
+    cacheWrite: 0.5 / 1_000_000,
+  },
+};
+
+export function normalizedCostForUsage(model, usage) {
+  const pricing = NORMALIZED_PRICING[model];
+  if (!pricing) return undefined;
+  const fields = [usage?.input, usage?.cacheRead, usage?.cacheWrite, usage?.output];
+  if (!fields.every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    return undefined;
+  }
+  return usage.input * pricing.input +
+    usage.cacheRead * pricing.cacheRead +
+    usage.cacheWrite * pricing.cacheWrite +
+    usage.output * pricing.output;
+}
+
+export function parseSessionCost(jsonlText, model) {
   let totalCost = 0;
   let turns = 0;
+  let totalInputTokens = 0;
+  let totalCacheReadTokens = 0;
+  let totalCacheWriteTokens = 0;
   let totalOutputTokens = 0;
   let negativeCostCount = 0;
   // Count of assistant messages carrying a finite, nonnegative cost.total
@@ -29,6 +62,10 @@ export function parseSessionCost(jsonlText) {
   // token counts even when their cost ledger is unavailable. It powers the
   // task-level output-token throughput measurement.
   let validOutputTokenCount = 0;
+  // A normalized score is valid only when every assistant turn provides the
+  // complete required usage record. cacheWrite is optional in Pi usage and is
+  // deterministically zero when omitted.
+  let validNormalizedUsageCount = 0;
   for (const line of jsonlText.split("\n")) {
     if (!line.trim()) continue;
     let obj;
@@ -39,10 +76,30 @@ export function parseSessionCost(jsonlText) {
     }
     if (obj?.type === "message" && obj?.message?.role === "assistant") {
       turns += 1;
+      const usage = obj.message.usage;
+      const inputTokens = usage?.input;
+      const cacheReadTokens = usage?.cacheRead;
+      const cacheWriteTokens = usage?.cacheWrite;
       const outputTokens = obj.message.usage?.output;
       if (typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens >= 0) {
         totalOutputTokens += outputTokens;
         validOutputTokenCount += 1;
+      }
+      const requiredUsage = [inputTokens, outputTokens];
+      const hasRequiredUsage = requiredUsage.every(
+        (value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
+      );
+      const hasValidCacheRead =
+        cacheReadTokens === undefined ||
+        (typeof cacheReadTokens === "number" && Number.isFinite(cacheReadTokens) && cacheReadTokens >= 0);
+      const hasValidCacheWrite =
+        cacheWriteTokens === undefined ||
+        (typeof cacheWriteTokens === "number" && Number.isFinite(cacheWriteTokens) && cacheWriteTokens >= 0);
+      if (hasRequiredUsage && hasValidCacheRead && hasValidCacheWrite) {
+        totalInputTokens += inputTokens;
+        totalCacheReadTokens += cacheReadTokens ?? 0;
+        totalCacheWriteTokens += cacheWriteTokens ?? 0;
+        validNormalizedUsageCount += 1;
       }
       const cost = obj.message.usage?.cost?.total;
       if (typeof cost === "number" && Number.isFinite(cost)) {
@@ -55,7 +112,28 @@ export function parseSessionCost(jsonlText) {
       }
     }
   }
-  return { totalCost, turns, totalOutputTokens, negativeCostCount, validCostCount, validOutputTokenCount };
+  const usageComplete = turns > 0 && validNormalizedUsageCount === turns;
+  const scoreCost = usageComplete
+    ? normalizedCostForUsage(model, {
+        input: totalInputTokens,
+        cacheRead: totalCacheReadTokens,
+        cacheWrite: totalCacheWriteTokens,
+        output: totalOutputTokens,
+      })
+    : undefined;
+  return {
+    totalCost,
+    turns,
+    totalInputTokens,
+    totalCacheReadTokens,
+    totalCacheWriteTokens,
+    totalOutputTokens,
+    negativeCostCount,
+    validCostCount,
+    validOutputTokenCount,
+    validNormalizedUsageCount,
+    ...(scoreCost === undefined ? {} : { scoreCost, pricingVersion: PRICING_VERSION }),
+  };
 }
 
 /**
@@ -172,9 +250,43 @@ export function summarizeGatewayRequests(events) {
         chunk_count: terminal?.chunk_count,
         max_idle_ms: terminal?.max_idle_ms,
         duration_ms: terminal?.duration_ms,
+        ...(complete?.usage === undefined ? {} : { usage: complete.usage }),
         stream_error: boundedGatewayError(streamError?.error),
       };
     });
+}
+
+/**
+ * Produces a scoring record only from host-side gateway observations. Any
+ * missing request, dropped diagnostic, failed response, or incomplete usage
+ * makes the entire task unpriced rather than trusting participant-writable
+ * session files or inventing zeroes.
+ */
+export function trustedGatewayPricing({ requests, requestCount, droppedEvents, model }) {
+  if (!Array.isArray(requests) || requestCount < 1 || requests.length !== requestCount || droppedEvents !== 0) {
+    return undefined;
+  }
+  const usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+  for (const request of requests) {
+    if (
+      request?.model !== model ||
+      !Number.isInteger(request.status) || request.status < 200 || request.status >= 300 ||
+      request.stream_error || !request.usage
+    ) return undefined;
+    const fields = {
+      input: request.usage.input_tokens,
+      cacheRead: request.usage.cache_read_tokens ?? 0,
+      cacheWrite: request.usage.cache_write_tokens ?? 0,
+      output: request.usage.output_tokens,
+    };
+    if (!Object.values(fields).every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+      return undefined;
+    }
+    for (const key of Object.keys(usage)) usage[key] += fields[key];
+  }
+  const normalizedCost = normalizedCostForUsage(model, usage);
+  if (normalizedCost === undefined) return undefined;
+  return { normalizedCost, pricingVersion: PRICING_VERSION, usage, pricingSource: "gateway-proxy" };
 }
 
 function boundedGatewayError(error) {
@@ -595,7 +707,17 @@ export async function deliverTerminalStatus({ postFn, payload, writeFallback, fa
 export function computeTotals(taskResults) {
   const total_cost_usd = taskResults.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
   const tasks_passed = taskResults.filter((r) => r.passed === true).length;
-  return { tasks_passed, total_cost_usd };
+  const attemptedTasks = taskResults.filter((r) => r.attempted === true);
+  const pricingVersions = new Set(attemptedTasks.map((r) => r.pricing_version).filter(Boolean));
+  const pricingSources = new Set(attemptedTasks.map((r) => r.pricing_source).filter(Boolean));
+  const normalized_total_cost_usd = attemptedTasks.length > 0 && attemptedTasks.every(
+    (r) => typeof r.normalized_cost_usd === "number" && Number.isFinite(r.normalized_cost_usd),
+  ) && pricingVersions.size === 1
+    ? attemptedTasks.reduce((sum, r) => sum + r.normalized_cost_usd, 0)
+    : null;
+  const pricing_version = normalized_total_cost_usd === null ? undefined : [...pricingVersions][0];
+  const pricing_source = normalized_total_cost_usd === null || pricingSources.size !== 1 ? undefined : [...pricingSources][0];
+  return { tasks_passed, total_cost_usd, normalized_total_cost_usd, pricing_version, pricing_source };
 }
 
 // Cumulative cost check performed after each task completes (spec: budget

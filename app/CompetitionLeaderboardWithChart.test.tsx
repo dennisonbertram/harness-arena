@@ -17,6 +17,8 @@ const rankedRow: CompetitionRow = {
   tasksPassed: 12,
   totalTasks: 16,
   totalCostUsd: 1.0912,
+  billedCostUsd: 1.0912,
+  pricingVersion: "inkling-small-2026-08-03-v1",
   submittedAt: "2026-07-31T00:00:00.000Z",
   githubLogin: "octocat",
 };
@@ -63,6 +65,7 @@ function renderLinkedLeaderboard() {
       chartModel="thinkingmachines/inkling-small"
       ranked={[rankedRow]}
       belowBaseline={[]}
+      unpriced={0}
       baselineRow={baselineRow}
       baselineModel="thinkingmachines/inkling-small"
       baselineState="ready"

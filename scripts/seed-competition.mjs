@@ -33,6 +33,9 @@ const HARNESS = "pi";
 // import lib/*.ts here.
 const DEFAULT_MODEL = process.env.COMPETITION_MODEL ?? "zai/glm-5.2-fast";
 const DEFAULT_GATEWAY_PROVIDER = process.env.COMPETITION_GATEWAY_PROVIDER ?? "fireworks";
+const DEFAULT_PRICING_VERSION = DEFAULT_MODEL === "thinkingmachines/inkling-small"
+  ? "inkling-small-2026-08-03-v1"
+  : undefined;
 
 /** Deterministic id from (arena, harness, model) -- the whole idempotency mechanism. */
 export function competitionId(arena, harness, model) {
@@ -69,6 +72,7 @@ export async function backfillCompetition(
       harness,
       model,
       gateway_provider: gatewayProvider,
+      pricing_version: DEFAULT_PRICING_VERSION,
       // TBD -- do not invent a figure (epic #74).
       prize_amount_usd: null,
       prize_cadence: null,

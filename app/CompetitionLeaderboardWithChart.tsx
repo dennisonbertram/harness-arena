@@ -20,6 +20,7 @@ interface Props {
   chartModel: string;
   ranked: CompetitionRow[];
   belowBaseline: CompetitionRow[];
+  unpriced: number;
   baselineRow: CompetitionRow | null;
   baselineModel: string;
   baselineState: BaselineState;
@@ -34,6 +35,7 @@ export function CompetitionLeaderboardWithChart({
   chartModel,
   ranked,
   belowBaseline,
+  unpriced,
   baselineRow,
   baselineModel,
   baselineState,
@@ -48,7 +50,7 @@ export function CompetitionLeaderboardWithChart({
       {scatterItems.length > 0 ? (
         <section style={{ marginTop: 32, overflowX: "auto" }}>
           <h2 className="label" style={{ marginBottom: 8 }}>
-            Cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per scored run</span>
+            Normalized cost vs. tasks passed <span style={{ color: "var(--gray-700)" }}>· one dot per scored run</span>
           </h2>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12, fontSize: 12 }}>
             <span>
@@ -64,6 +66,7 @@ export function CompetitionLeaderboardWithChart({
             padding={scatterScale.padding}
             xMax={scatterScale.xMax}
             yMax={scatterScale.yMax}
+            costLabel="Normalized scoring cost"
             hoveredRunId={hoveredRunId}
             onHoveredRunIdChange={setHoveredRunId}
           />
@@ -72,7 +75,7 @@ export function CompetitionLeaderboardWithChart({
 
       <section style={{ marginTop: 40, overflowX: "auto" }}>
         <h2 className="label" style={{ marginBottom: 16 }}>
-          Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by tasks solved, then cost</span>
+          Leaderboard <span style={{ color: "var(--gray-700)" }}>· ranked by tasks solved, then normalized cost</span>
         </h2>
         {isEmpty ? (
           <div
@@ -90,6 +93,7 @@ export function CompetitionLeaderboardWithChart({
           <CompetitionLeaderboardTable
             ranked={ranked}
             belowBaseline={belowBaseline}
+            unpriced={unpriced}
             currentGithubLogin={currentGithubLogin}
             baselineRow={baselineRow}
             baselineModel={baselineModel}
