@@ -61,7 +61,8 @@ export const SubmissionSchema = z.object({
   judge_reason: z.string().optional(),
   judge_model: z.string().optional(),
   judged_at: z.iso.datetime().optional(),
-  // First of the submission's runs, kept for backward-compatible readers.
+  // Current run selected by single-run readers and the competition board.
+  // A replay advances this pointer while run_ids retains the immutable history.
   run_id: z.string().optional(),
   // All runs spawned for this submission (RUNS_PER_SUBMISSION of them). Absent
   // for legacy single-run submissions.
@@ -207,6 +208,13 @@ export const RunSchema = z.object({
   // the capture, and on any run whose model never reached the sidecar.
   resolved_system_prompt: z.string().optional(),
   model: z.string().optional(),
+  // Admin-authorized replay provenance. The source run remains immutable;
+  // operation identity makes a lost-response retry reuse the same replay run.
+  replay_of_run_id: z.string().optional(),
+  replay_operation_id: z.uuid().optional(),
+  // Replay reservations are invisible to the dispatcher until every source
+  // submission has been repointed. Absent means ready for legacy runs.
+  replay_ready: z.boolean().optional(),
   task_results: z.array(TaskResultSchema),
   created_at: z.iso.datetime(),
 });

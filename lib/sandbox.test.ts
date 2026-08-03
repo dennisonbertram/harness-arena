@@ -386,6 +386,24 @@ describe("createRunSandbox", () => {
     expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
+  it("does not let a historical sandbox failure overwrite the current replay submission status", async () => {
+    mockCreate.mockRejectedValue(new Error("late sandbox failure"));
+    const oldRun = makeRun({ id: "old-run" });
+    await storageRef.current.putRun(oldRun);
+    await storageRef.current.putSubmission({
+      id: oldRun.submission_id,
+      agent_name: "agent",
+      prompt: "hi",
+      status: "running",
+      run_id: "new-run",
+      run_ids: [oldRun.id, "new-run"],
+      created_at: oldRun.created_at,
+    });
+
+    await expect(createRunSandbox(oldRun, { prompt: "hi" })).rejects.toThrow("late sandbox failure");
+    expect((await storageRef.current.getSubmission(oldRun.submission_id))?.status).toBe("running");
+  });
+
   it("marks the run failed when the bundle bootstrap command exits non-zero", async () => {
     const sandbox = makeSandbox(async () => ({ exitCode: 1 }));
     mockCreate.mockResolvedValue(sandbox);

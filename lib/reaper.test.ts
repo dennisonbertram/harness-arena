@@ -153,6 +153,24 @@ describe("reapIfStale (integration against MemoryStorage)", () => {
     expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
   });
 
+  it("does not let a historical failed run overwrite the current replay submission status", async () => {
+    const storage = new MemoryStorage();
+    const oldRun = makeRun({ id: "old-run", status: "failed" });
+    await storage.putRun(oldRun);
+    await storage.putSubmission({
+      id: oldRun.submission_id,
+      agent_name: "replaying agent",
+      prompt: "p",
+      status: "running",
+      run_id: "new-run",
+      run_ids: [oldRun.id, "new-run"],
+      created_at: oldRun.created_at,
+    });
+
+    await reapIfStale(storage, oldRun);
+    expect((await storage.getSubmission(oldRun.submission_id))?.status).toBe("running");
+  });
+
   it("uses the timestamp of the most recent event, not created_at, once events exist", async () => {
     const storage = new MemoryStorage();
     const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });

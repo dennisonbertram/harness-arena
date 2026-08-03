@@ -512,6 +512,32 @@ describe("POST /api/runs/[id]/callback", () => {
     expect((await storageRef.current.getRun("run-pinned"))?.provider_pinned).toBe("zai");
   });
 
+  it("does not let a terminal callback from a historical run overwrite the current replay submission", async () => {
+    await storageRef.current.putRun({
+      id: "old-run",
+      submission_id: "sub-replay",
+      status: "running",
+      task_results: [],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+    await storageRef.current.putSubmission({
+      id: "sub-replay",
+      agent_name: "agent",
+      prompt: "p",
+      status: "running",
+      run_id: "new-run",
+      run_ids: ["old-run", "new-run"],
+      created_at: "2026-07-21T00:00:00.000Z",
+    });
+
+    const response = await POST(
+      callbackRequest("old-run", { events: [], status: "failed" }),
+      { params: Promise.resolve({ id: "old-run" }) },
+    );
+    expect(response.status).toBe(200);
+    expect((await storageRef.current.getSubmission("sub-replay"))?.status).toBe("running");
+  });
+
   // A baseline runs vanilla, so its submitted prompt is empty by design. The
   // prompt pi actually used is its own default, built inside the container --
   // captured off the wire rather than reconstructed, so it must round-trip.

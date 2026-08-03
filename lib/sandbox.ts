@@ -118,7 +118,10 @@ async function markFailed(run: Run, err: unknown): Promise<void> {
     { ts: new Date().toISOString(), type: "run.failed", payload: { error: message, stage: "sandbox_create" } },
   ]);
   const submission = await storage.getSubmission(run.submission_id);
-  if (submission && (submission.status === "queued" || submission.status === "running")) {
+  if (
+    submission?.run_id === run.id &&
+    (submission.status === "queued" || submission.status === "running")
+  ) {
     submission.status = "failed";
     await storage.putSubmission(submission);
   }

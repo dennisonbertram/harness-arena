@@ -2,6 +2,11 @@ import { get, list, put } from "@vercel/blob";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
 
 export interface Storage {
+  reserveCompetitionReplay(
+    competitionId: string,
+    operationId: string,
+    manifestDigest?: string,
+  ): Promise<"created" | "reused" | "conflict">;
   getSubmission(id: string): Promise<Submission | undefined>;
   putSubmission(submission: Submission): Promise<void>;
   listSubmissions(): Promise<Submission[]>;
@@ -10,6 +15,8 @@ export interface Storage {
   /** Same partial-read contract as listSubmissions/listRuns -- see PartialReadError. */
   listCompetitions(): Promise<Competition[]>;
   getRun(id: string): Promise<Run | undefined>;
+  /** Reserves a new immutable run id. Returns false when the id already exists. */
+  createRun(run: Run): Promise<boolean>;
   putRun(run: Run): Promise<void>;
   listRuns(): Promise<Run[]>;
   /** Assigns each event a monotonic seq (1..n, continuing across batches) and returns them with seq/run_id filled in. */
@@ -38,11 +45,27 @@ export interface Storage {
 // event log emulation is NOT shared — this is a standalone impl for
 // local/test use. Nothing here survives a process restart.
 export class MemoryStorage implements Storage {
+  private replayOperations = new Map<string, { operation_id: string; manifest_digest?: string }>();
   private submissions = new Map<string, Submission>();
   private competitions = new Map<string, Competition>();
   private runs = new Map<string, Run>();
   private events = new Map<string, RunEvent[]>();
   private traces = new Map<string, Buffer>();
+
+  async reserveCompetitionReplay(
+    competitionId: string,
+    operationId: string,
+    manifestDigest?: string,
+  ): Promise<"created" | "reused" | "conflict"> {
+    const existing = this.replayOperations.get(competitionId);
+    if (!existing) {
+      this.replayOperations.set(competitionId, { operation_id: operationId, manifest_digest: manifestDigest });
+      return "created";
+    }
+    return existing.operation_id === operationId && existing.manifest_digest === manifestDigest
+      ? "reused"
+      : "conflict";
+  }
 
   async getSubmission(id: string): Promise<Submission | undefined> {
     return this.submissions.get(id);
@@ -70,6 +93,12 @@ export class MemoryStorage implements Storage {
 
   async getRun(id: string): Promise<Run | undefined> {
     return this.runs.get(id);
+  }
+
+  async createRun(run: Run): Promise<boolean> {
+    if (this.runs.has(run.id)) return false;
+    this.runs.set(run.id, run);
+    return true;
   }
 
   async putRun(run: Run): Promise<void> {
@@ -221,6 +250,31 @@ export class BlobStorage implements Storage {
   private activeReads = 0;
   private readonly readWaiters: Array<() => void> = [];
 
+  async reserveCompetitionReplay(
+    competitionId: string,
+    operationId: string,
+    manifestDigest?: string,
+  ): Promise<"created" | "reused" | "conflict"> {
+    const pathname = `operations/competition-replay/${competitionId}.json`;
+    const reservation = { operation_id: operationId, manifest_digest: manifestDigest };
+    try {
+      await put(pathname, JSON.stringify(reservation), {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: false,
+        cacheControlMaxAge: 60,
+        contentType: "application/json",
+      });
+      return "created";
+    } catch (error) {
+      const existing = await this.readJson<typeof reservation>(pathname).catch(() => undefined);
+      if (!existing) throw error;
+      return existing.operation_id === operationId && existing.manifest_digest === manifestDigest
+        ? "reused"
+        : "conflict";
+    }
+  }
+
   private async withReadSlot<T>(read: () => Promise<T>): Promise<T> {
     if (this.activeReads >= this.readConcurrency) {
       await new Promise<void>((resolve) => this.readWaiters.push(resolve));
@@ -351,6 +405,26 @@ export class BlobStorage implements Storage {
 
   async getRun(id: string): Promise<Run | undefined> {
     return this.readJson<Run>(`runs/${id}.json`);
+  }
+
+  async createRun(run: Run): Promise<boolean> {
+    try {
+      await put(`runs/${run.id}.json`, JSON.stringify(run), {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: false,
+        cacheControlMaxAge: 60,
+        contentType: "application/json",
+      });
+      return true;
+    } catch (error) {
+      // allowOverwrite:false is the durable reservation. Only classify the
+      // failure as an idempotent collision after the reserved record is
+      // actually readable; rate limits/service failures remain operational
+      // errors and can be retried with the same deterministic id.
+      if (await this.getRun(run.id).catch(() => undefined)) return false;
+      throw error;
+    }
   }
 
   async putRun(run: Run): Promise<void> {

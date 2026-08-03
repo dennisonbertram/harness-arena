@@ -40,7 +40,10 @@ function isReapCandidate(run: Run): boolean {
 
 async function markSubmissionFailed(storage: Storage, run: Run): Promise<void> {
   const submission = await storage.getSubmission(run.submission_id);
-  if (submission && (submission.status === "queued" || submission.status === "running")) {
+  if (
+    submission?.run_id === run.id &&
+    (submission.status === "queued" || submission.status === "running")
+  ) {
     submission.status = "failed";
     await storage.putSubmission(submission);
   }
