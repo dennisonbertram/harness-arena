@@ -404,16 +404,19 @@ describe("ops evidence and verdict honesty", () => {
           ownKeys() { traps.push("ownKeys"); throw new Error("keys trap"); },
         });
         let signal;
-        const fetchImpl = vi.fn((_url, init) => {
+        let calls = 0;
+        const fetchImpl = (_url, init) => {
+          calls += 1;
           signal = init.signal;
           if (mode === "throw") throw hostile;
           if (mode === "reject") return Promise.reject(hostile);
           return { then(_resolve, reject) { reject(hostile); } };
-        });
+        };
         const result = await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0 });
         expect(result).toEqual(expect.objectContaining({ ok: false, status: 0, error: "request_failed", kind: "transport", attempts: 1 }));
         expect(result).not.toHaveProperty("detail");
         expect(signal.aborted).toBe(true);
+        expect(calls).toBe(1);
         expect(traps).toEqual([]);
       }
       await delay(0);

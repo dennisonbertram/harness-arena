@@ -265,6 +265,15 @@ function withAbort(promise, signal) {
   });
 }
 
+function invokeFetch(fetchImpl, url, init) {
+  return new Promise((resolve, reject) => {
+    let result;
+    try { result = fetchImpl(url, init); }
+    catch { reject(responseError("request_failed")); return; }
+    Promise.resolve(result).then(resolve, () => reject(responseError("request_failed")));
+  });
+}
+
 function invokeCleanup(callback) {
   if (typeof callback !== "function") return;
   try { Promise.resolve(callback()).catch(() => {}); } catch {}
@@ -415,13 +424,14 @@ export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, 
     try {
       let rawResponse, fetched = false;
       try {
-        const fetchPromise = Promise.resolve().then(() => fetchImpl(url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, redirect: "manual", signal: controller.signal }));
+        const fetchPromise = invokeFetch(fetchImpl, url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, redirect: "manual", signal: controller.signal });
         fetchPromise.then((late) => { if (controller.signal.aborted) disposeRawResponse(late, controller); }, () => {});
         rawResponse = await withAbort(fetchPromise, controller.signal);
         fetched = true;
       } catch (error) {
-        const code = failureCode(error, controller.signal.aborted ? "request_timeout" : "request_failed");
-        last = { ok: false, status: 0, error: code, detail: redactSensitive(error instanceof Error ? error.message : "unknown", token ? [token] : []), attempts: attempt };
+        const normalized = responseError(failureCode(error, "request_failed"));
+        controller.abort();
+        last = { ok: false, status: 0, error: failureCode(normalized, "request_failed"), attempts: attempt };
       }
       if (fetched) {
         let response;
