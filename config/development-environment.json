@@ -10,9 +10,9 @@
     "id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
     "name": "harness-arena-development"
   },
-  "host": null,
-  "store": { "id": null },
-  "callbackOrigin": null,
+  "host": "harness-arena-development.vercel.app",
+  "store": { "id": "store_9AIBHzkDp5mZ1SnM" },
+  "callbackOrigin": "https://harness-arena-development.vercel.app",
   "live": {
     "projectId": "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
     "aliases": [

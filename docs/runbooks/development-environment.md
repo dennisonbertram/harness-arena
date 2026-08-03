@@ -40,10 +40,12 @@ review are complete.
    Production Branch for this project is `dev`. “Production” here is Vercel's
    routing label inside the Development project; it is not the live project,
    live environment, or production approval.
-4. Keep the missing development `host`, `store.id`, and `callbackOrigin`
-   entries missing until the infrastructure owner provisions and independently
-   confirms each value. The known live Blob store identifier is recorded only
-   as an identifier; the manifest contains no token or other secret.
+4. The provisioned Development data plane is
+   `harness-arena-development.vercel.app`, Blob store
+   `store_9AIBHzkDp5mZ1SnM`, and callback origin
+   `https://harness-arena-development.vercel.app`. The known live Blob store
+   identifier is recorded only as an identifier; the manifest contains no token
+   or other secret.
    `CALLBACK_BASE` is required for Sandbox runs and must equal the manifest's
    `callbackOrigin`: a canonical, publicly reachable HTTPS origin for the
    isolated Development deployment that Vercel Sandbox can reach. It must have
@@ -54,8 +56,8 @@ review are complete.
    protected `dev` ref, canonical request host/callback, and
    `HARNESS_BLOB_STORE_ID` matching the isolated manifest store. Missing or
    unknown identities fail closed. Every live project, alias, callback, and
-   store identifier is denied. The current null manifest fields deliberately
-   keep this hosted identity disabled until independently provisioned.
+   store identifier is denied. The complete manifest enables a hosted seeded
+   identity only when every runtime identity check succeeds.
 5. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
    with read-only Vercel inventory access. Compare it with the manifest and stop
    on any omitted or changed identifier. Never retrieve or print Blob

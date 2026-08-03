@@ -159,13 +159,128 @@ function normalizeProject(value) {
       repo: value?.link?.repo,
       productionBranch: value?.link?.productionBranch,
     },
-    aliases: Array.isArray(value?.alias) ? value.alias.map((entry) => ({
-      domain: entry?.domain,
-      environment: entry?.environment,
-      target: entry?.target,
-      redirect: entry?.redirect,
-    })) : undefined,
   };
+}
+
+function normalizeProductionDomains(value, projectId) {
+  if (
+    !exactKeys(value, ["domains", "pagination"])
+    || !Array.isArray(value.domains)
+    || !exactKeys(value.pagination, ["count", "next", "prev"])
+    || !Number.isSafeInteger(value.pagination.count)
+    || value.pagination.count !== value.domains.length
+    || value.pagination.next !== null
+    || (value.pagination.prev !== null && (!Number.isSafeInteger(value.pagination.prev) || value.pagination.prev < 0))
+  ) throw denied();
+  const domains = value.domains.map((domain) => {
+    const allowed = [
+      "name",
+      "apexName",
+      "projectId",
+      "verified",
+      "redirect",
+      "redirectStatusCode",
+      "gitBranch",
+      "customEnvironmentId",
+      "updatedAt",
+      "createdAt",
+      "verification",
+    ];
+    if (
+      !domain
+      || typeof domain !== "object"
+      || Array.isArray(domain)
+      || Object.keys(domain).some((key) => !allowed.includes(key))
+      || typeof domain.name !== "string"
+      || !domain.name
+      || typeof domain.apexName !== "string"
+      || !domain.apexName
+      || domain.projectId !== projectId
+      || domain.verified !== true
+      || (domain.redirect !== undefined && domain.redirect !== null)
+      || (domain.redirectStatusCode !== undefined && domain.redirectStatusCode !== null)
+      || (domain.gitBranch !== undefined && domain.gitBranch !== null)
+      || (domain.customEnvironmentId !== undefined && domain.customEnvironmentId !== null)
+    ) {
+      throw denied();
+    }
+    return {
+      domain: domain.name,
+      environment: "production",
+      target: "PRODUCTION",
+      redirect: undefined,
+    };
+  });
+  domains.sort((left, right) => left.domain.localeCompare(right.domain));
+  if (domains.some((domain, index) => index > 0 && domain.domain === domains[index - 1].domain)) throw denied();
+  return {
+    aliases: domains,
+    pagination: {
+      count: value.pagination.count,
+      next: value.pagination.next,
+      prev: value.pagination.prev,
+    },
+  };
+}
+
+function sortedUniqueStrings(value) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) throw denied();
+  const normalized = [...value].sort();
+  if (normalized.some((item, index) => index > 0 && item === normalized[index - 1])) throw denied();
+  return normalized;
+}
+
+function normalizeLiveInventory(value) {
+  if (!exactKeys(value, ["projectId", "aliases", "storeIds"]) || typeof value.projectId !== "string" || !value.projectId) {
+    throw denied();
+  }
+  const aliases = sortedUniqueStrings(value.aliases);
+  return {
+    projectId: value.projectId,
+    aliases,
+    pinnedAlias: value.aliases[0],
+    storeIds: sortedUniqueStrings(value.storeIds),
+  };
+}
+
+function normalizeLiveDeployment(value, live) {
+  if (
+    !value
+    || typeof value !== "object"
+    || value.projectId !== live.projectId
+    || value.target !== "production"
+    || value.readyState !== "READY"
+  ) throw denied();
+  return sortedUniqueStrings(value.alias);
+}
+
+function normalizeLiveStoreIds(value) {
+  const allowedTargets = new Set(["production", "preview", "development"]);
+  if (
+    !exactKeys(value, ["envs", "hiddenProductionEnvCount"])
+    || !Array.isArray(value.envs)
+    || !Number.isSafeInteger(value.hiddenProductionEnvCount)
+    || value.hiddenProductionEnvCount !== 0
+  ) throw denied();
+  const storeIds = [];
+  for (const entry of value.envs) {
+    const storeId = entry?.contentHint?.storeId;
+    if (storeId === undefined) continue;
+    if (
+      typeof storeId !== "string"
+      || !storeId
+      || !Array.isArray(entry.target)
+      || entry.target.length === 0
+      || entry.target.some((target) => typeof target !== "string" || !allowedTargets.has(target))
+      || new Set(entry.target).size !== entry.target.length
+    ) throw denied();
+    if (entry.target.includes("production")) storeIds.push(storeId);
+  }
+  return sortedUniqueStrings(storeIds);
+}
+
+function identical(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
@@ -186,7 +301,7 @@ export function createReadOnlyVercelApi({
   const get = (token, url) => requestJson(fetchImpl, token, url, { timeoutMs, maxBodyBytes });
 
   return {
-    async inspect({ projectId, teamId, storeId, token }) {
+    async inspect({ projectId, teamId, storeId, token, live }) {
       if (
         projectId !== DEVELOPMENT_PROJECT_ID
         || teamId !== DEVELOPMENT_TEAM_ID
@@ -198,8 +313,26 @@ export function createReadOnlyVercelApi({
         throw denied();
       }
       try {
+        const liveInventory = live === undefined ? null : normalizeLiveInventory(live);
         const projectUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}`, { teamId });
         const projectBefore = normalizeProject(await get(token, projectUrl));
+        const domainsUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}/domains`, { teamId, limit: "100" });
+        const domainInventoryBefore = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const liveDeploymentUrl = liveInventory === null ? null : requestUrl(
+          `/v13/deployments/${encodeURIComponent(liveInventory.pinnedAlias)}`,
+          { teamId, withGitRepoInfo: "true" },
+        );
+        const liveEnvironmentUrl = liveInventory === null ? null : requestUrl(
+          `/v10/projects/${encodeURIComponent(liveInventory.projectId)}/env`,
+          { teamId },
+        );
+        const liveBefore = liveInventory === null ? null : {
+          aliases: normalizeLiveDeployment(await get(token, liveDeploymentUrl), liveInventory),
+          storeIds: normalizeLiveStoreIds(await get(token, liveEnvironmentUrl)),
+        };
+        if (liveBefore !== null && !identical(liveBefore, { aliases: liveInventory.aliases, storeIds: liveInventory.storeIds })) {
+          throw denied();
+        }
         const environments = await get(
           token,
           requestUrl(`/v10/projects/${encodeURIComponent(projectId)}/env`, { teamId }),
@@ -235,7 +368,16 @@ export function createReadOnlyVercelApi({
           requestUrl(`/v1/storage/stores/${encodeURIComponent(storeId)}`, { teamId }),
         );
         const projectAfter = normalizeProject(await get(token, projectUrl));
-        if (JSON.stringify(projectBefore) !== JSON.stringify(projectAfter)) throw denied();
+        const domainInventoryAfter = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const liveAfter = liveInventory === null ? null : {
+          aliases: normalizeLiveDeployment(await get(token, liveDeploymentUrl), liveInventory),
+          storeIds: normalizeLiveStoreIds(await get(token, liveEnvironmentUrl)),
+        };
+        if (
+          !identical(projectBefore, projectAfter)
+          || !identical(domainInventoryBefore, domainInventoryAfter)
+          || !identical(liveBefore, liveAfter)
+        ) throw denied();
         const projectConnections = Array.isArray(store?.projects) ? store.projects : [];
         const connection = projectConnections.find((item) => item?.projectId === projectId);
         const environmentStoreIds = [...new Set(entries.flatMap((entry) => {
@@ -243,7 +385,7 @@ export function createReadOnlyVercelApi({
           return typeof id === "string" && id ? [id] : [];
         }))];
         return {
-          project: projectAfter,
+          project: { ...projectAfter, aliases: domainInventoryAfter.aliases },
           environment: {
             callbackBase: callback?.value,
             networkModeConfigured: entries.some((entry) => entry?.key === "RUNNER_NETWORK_MODE"),
@@ -357,6 +499,7 @@ export async function verifyDevelopmentPreflight({
       teamId: DEVELOPMENT_TEAM_ID,
       storeId: manifest.store.id,
       token,
+      live: manifest.live,
     });
     validateInspection(actual, manifest);
     const remoteAfter = await readRemoteSha({ cwd });

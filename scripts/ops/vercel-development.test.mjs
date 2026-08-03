@@ -106,21 +106,70 @@ function jsonResponse(value) {
   });
 }
 
-function verifierApiFetch({ aliases, envs }) {
+function productionDomain(overrides = {}) {
+  return {
+    name: "harness-arena-development.vercel.app",
+    apexName: "vercel.app",
+    projectId: DEVELOPMENT_PROJECT_ID,
+    verified: true,
+    ...overrides,
+  };
+}
+
+function verifierApiFetch({
+  aliases,
+  domains,
+  domainsAfter,
+  pagination,
+  envs,
+  liveAliases = manifest().live.aliases,
+  liveAliasesAfter = liveAliases,
+  liveStoreIds = manifest().live.storeIds,
+  liveStoreIdsAfter = liveStoreIds,
+  liveStoreTargets = ["production"],
+  liveDeployment = {},
+  liveEnvironment = {},
+}) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
     accountId: TEAM_ID,
     name: DEVELOPMENT_PROJECT_NAME,
     link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-    alias: aliases ?? [{
-      domain: "harness-arena-development.vercel.app",
-      environment: "production",
-      target: "PRODUCTION",
-    }],
+    alias: aliases ?? [],
   };
+  let domainReads = 0;
+  let liveReads = 0;
+  let liveEnvironmentReads = 0;
   return vi.fn(async (input) => {
     const url = new URL(input);
     if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+    if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+      domainReads += 1;
+      const inventory = {
+        domains: domainReads === 1 ? (domains ?? [productionDomain()]) : (domainsAfter ?? domains ?? [productionDomain()]),
+      };
+      inventory.pagination = pagination ?? { count: inventory.domains.length, next: null, prev: null };
+      return jsonResponse(inventory);
+    }
+    if (url.pathname === `/v13/deployments/${encodeURIComponent(manifest().live.aliases[0])}`) {
+      liveReads += 1;
+      return jsonResponse({
+        projectId: LIVE_PROJECT_ID,
+        target: "production",
+        readyState: "READY",
+        alias: liveReads === 1 ? liveAliases : liveAliasesAfter,
+        ...liveDeployment,
+      });
+    }
+    if (url.pathname === `/v10/projects/${LIVE_PROJECT_ID}/env`) {
+      liveEnvironmentReads += 1;
+      const storeIds = liveEnvironmentReads === 1 ? liveStoreIds : liveStoreIdsAfter;
+      return jsonResponse({
+        envs: storeIds.map((storeId) => ({ target: liveStoreTargets, contentHint: { storeId } })),
+        hiddenProductionEnvCount: 0,
+        ...liveEnvironment,
+      });
+    }
     if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
       return jsonResponse({ envs: envs ?? [
         { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
@@ -273,6 +322,142 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the real live environment shape and multi-target Blob binding", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        liveStoreTargets: ["production", "preview", "development"],
+        liveEnvironment: { hiddenProductionEnvCount: 0 },
+      }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).resolves.toEqual(inspection());
+  });
+
+  it("rejects live aliases that are absent from the manifest inventory", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ liveAliases: [...manifest().live.aliases, "unrecorded-live.vercel.app"] }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("uses stable GET-only live inventory metadata without decrypting it", async () => {
+    const fetchImpl = verifierApiFetch({});
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).resolves.toEqual(inspection());
+
+    const liveRequests = fetchImpl.mock.calls.map(([input]) => new URL(input)).filter((url) =>
+      url.pathname === `/v13/deployments/${manifest().live.aliases[0]}`
+      || url.pathname === `/v10/projects/${LIVE_PROJECT_ID}/env`,
+    );
+    expect(liveRequests).toHaveLength(4);
+    expect(liveRequests.filter((url) => url.pathname.startsWith("/v13/deployments/")).every((url) =>
+      url.searchParams.get("withGitRepoInfo") === "true",
+    )).toBe(true);
+    expect(liveRequests.every((url) => url.searchParams.get("decrypt") === null)).toBe(true);
+  });
+
+  it.each([
+    ["replaced production Blob store", { liveStoreIds: ["store_replaced"] }],
+    ["cross-project deployment", { liveDeployment: { projectId: DEVELOPMENT_PROJECT_ID } }],
+    ["non-ready deployment", { liveDeployment: { readyState: "BUILDING" } }],
+    ["non-production deployment", { liveDeployment: { target: "staging" } }],
+    ["paginated environment response", { liveEnvironment: { pagination: { count: 1, next: null, prev: null } } }],
+    [
+      "non-production Blob binding",
+      { liveEnvironment: { envs: [{ target: ["preview"], contentHint: { storeId: LIVE_STORE_ID } }] } },
+    ],
+    ["unstable alias inventory", { liveAliasesAfter: [manifest().live.aliases[0]] }],
+  ])("rejects unsafe live inventory evidence: %s", async (_name, options) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch(options) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it.each([
+    ["hidden production metadata", { liveEnvironment: { hiddenProductionEnvCount: 1 } }],
+    ["malformed target", { liveStoreTargets: ["production", "unknown"] }],
+    ["duplicate target", { liveStoreTargets: ["production", "production"] }],
+    ["production absent", { liveStoreTargets: ["preview"] }],
+  ])("rejects incomplete live store targeting evidence: %s", async (_name, options) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch(options) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("accepts the complete final-page domain inventory metadata", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ pagination: { count: 1, next: null, prev: 1785709088100 } }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
+  it("uses the verified stable domain inventory when project aliases are empty", async () => {
+    const fetchImpl = verifierApiFetch({ aliases: [] });
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+
+    expect(fetchImpl.mock.calls.filter(([input]) => new URL(input).pathname.endsWith("/domains"))).toHaveLength(2);
+  });
+
+  it.each([
+    ["non-matching count", { count: 2, next: null, prev: null }],
+    ["unsafe cursor", { count: 1, next: 1785709088100, prev: null }],
+    ["malformed cursor", { count: 1, next: null, prev: -1 }],
+  ])("rejects incomplete or malformed domain pagination: %s", async (_name, pagination) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ pagination }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
   it.each([
     [
       "copied duplicate metadata",
@@ -313,15 +498,26 @@ describe("bounded read-only Vercel adapter", () => {
   });
 
   it.each([
-    ["redirect", { redirect: manifest().live.aliases[0], target: "PRODUCTION" }],
-    ["live-alias target", { target: manifest().live.aliases[0] }],
-    ["live-project target", { target: LIVE_PROJECT_ID }],
-  ])("preserves alias %s metadata and rejects routing the Development host to a live identity", async (_name, routing) => {
-    const domain = "harness-arena-development.vercel.app";
+    ["redirect", productionDomain({ redirect: manifest().live.aliases[0] })],
+    ["git branch", productionDomain({ gitBranch: "dev" })],
+    ["custom environment", productionDomain({ customEnvironmentId: "env_development" })],
+    ["unverified", productionDomain({ verified: false })],
+    ["malformed", { ...productionDomain(), name: 7 }],
+  ])("rejects unsafe project domain inventory entries: %s", async (_name, domain) => {
     const api = subject.createReadOnlyVercelApi({
-      fetchImpl: verifierApiFetch({
-        aliases: [{ domain, environment: "production", ...routing }],
-      }),
+      fetchImpl: verifierApiFetch({ domains: [domain] }),
+    });
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("returns a live alias only for the preflight to reject", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ domains: [productionDomain({ name: manifest().live.aliases[0] })] }),
     });
     const actual = await api.inspect({
       projectId: DEVELOPMENT_PROJECT_ID,
@@ -330,8 +526,23 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
     });
 
-    expect(actual.project.aliases[0]).toMatchObject({ domain, ...routing });
+    expect(actual.project.aliases[0].domain).toBe(manifest().live.aliases[0]);
     await expectDenied(dependencies({ readOnlyApi: { inspect: vi.fn(async () => actual) } }));
+  });
+
+  it("fails closed when the domain inventory changes during inspection", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({
+        domainsAfter: [productionDomain({ name: "replacement-development.vercel.app" })],
+      }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
   });
 
   it("uses only fixed GET requests, rechecks project settings, and decrypts only CALLBACK_BASE", async () => {
@@ -341,12 +552,15 @@ describe("bounded read-only Vercel adapter", () => {
       accountId: TEAM_ID,
       name: DEVELOPMENT_PROJECT_NAME,
       link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
-      alias: [{ domain: "harness-arena-development.vercel.app", environment: "production", target: "PRODUCTION" }],
+      alias: [],
     };
     const fetchImpl = vi.fn(async (input, options) => {
       const url = new URL(input);
       requests.push({ url, options });
       if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
+      }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [
           { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
@@ -375,11 +589,15 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
     })).resolves.toEqual(inspection());
 
-    expect(requests).toHaveLength(5);
+    expect(requests).toHaveLength(7);
     expect(requests.every(({ options }) => options.method === "GET")).toBe(true);
     expect(requests.every(({ options }) => options.redirect === "error")).toBe(true);
     expect(requests.filter(({ url }) => url.searchParams.get("decrypt") === "true"))
       .toHaveLength(1);
+    expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")))
+      .toHaveLength(2);
+    expect(requests.filter(({ url }) => url.pathname.endsWith("/domains")).every(({ url }) => url.searchParams.get("limit") === "100"))
+      .toBe(true);
     expect(requests.find(({ url }) => url.searchParams.get("decrypt") === "true").url.pathname)
       .toMatch(/env_callback$/);
   });
@@ -415,6 +633,9 @@ describe("bounded read-only Vercel adapter", () => {
           },
           alias: [{ domain: "harness-arena-development.vercel.app" }],
         });
+      }
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}/domains`) {
+        return jsonResponse({ domains: [productionDomain()], pagination: { count: 1, next: null, prev: null } });
       }
       if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
         return jsonResponse({ envs: [
