@@ -9,6 +9,7 @@ import * as subject from "./vercel-development.mjs";
 
 const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 const DEVELOPMENT_PROJECT_NAME = "harness-arena-development";
+const DEVELOPMENT_STORE_NAME = "harness-arena-development-data";
 const LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 const TEAM_ID = "team_cwyLpng8LCwWgINdiQ27hHYa";
 const REVIEWED_SHA = "a".repeat(40);
@@ -75,6 +76,8 @@ function inspection(overrides = {}) {
       ownerId: TEAM_ID,
       projectId: DEVELOPMENT_PROJECT_ID,
       type: "blob",
+      access: "private",
+      status: "available",
     },
     ...overrides,
   };
@@ -116,6 +119,47 @@ function productionDomain(overrides = {}) {
   };
 }
 
+function developmentStoreResponse(overrides = {}) {
+  return {
+    store: {
+      ...currentDevelopmentStoreResponse().store,
+      ...overrides,
+    },
+  };
+}
+
+function currentDevelopmentStoreResponse() {
+  return {
+    store: {
+      access: "private",
+      billingState: "active",
+      count: 0,
+      createdAt: 1785709088100,
+      id: DEVELOPMENT_STORE_ID,
+      isTokenExpired: false,
+      name: DEVELOPMENT_STORE_NAME,
+      ownerId: TEAM_ID,
+      projectsMetadata: [{
+        envVarPrefix: "BLOB",
+        environmentVariables: ["BLOB_READ_WRITE_TOKEN"],
+        environments: ["production", "preview", "development"],
+        framework: "nextjs",
+        id: "spc_development",
+        latestDeployment: null,
+        name: DEVELOPMENT_PROJECT_NAME,
+        projectId: DEVELOPMENT_PROJECT_ID,
+      }],
+      region: "iad1",
+      size: 0,
+      status: "available",
+      totalConnectedProjects: 1,
+      type: "blob",
+      updatedAt: 1785709088100,
+      usageQuotaExceeded: false,
+    },
+  };
+}
+
 function verifierApiFetch({
   aliases,
   domains,
@@ -129,6 +173,7 @@ function verifierApiFetch({
   liveStoreTargets = ["production"],
   liveDeployment = {},
   liveEnvironment = {},
+  developmentStore,
 }) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
@@ -185,12 +230,7 @@ function verifierApiFetch({
       return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
     }
     if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-      return jsonResponse({
-        id: DEVELOPMENT_STORE_ID,
-        ownerId: TEAM_ID,
-        type: "blob",
-        projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-      });
+      return jsonResponse(developmentStore ?? developmentStoreResponse());
     }
     throw new Error(`unexpected request ${url.pathname}`);
   });
@@ -322,6 +362,62 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the current complete nested Blob store shape", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ developmentStore: currentDevelopmentStoreResponse() }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
+  it("accepts the real nested private Blob store metadata", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ developmentStore: developmentStoreResponse() }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
+  it.each([
+    ["malformed envelope", { id: DEVELOPMENT_STORE_ID }],
+    ["public access", developmentStoreResponse({ access: "public" })],
+    [
+      "multiple connected projects",
+      developmentStoreResponse({
+        totalConnectedProjects: 2,
+        projectsMetadata: [
+          developmentStoreResponse().store.projectsMetadata[0],
+          { ...developmentStoreResponse().store.projectsMetadata[0], projectId: "prj_other", name: "other" },
+        ],
+      }),
+    ],
+    [
+      "wrong connected project",
+      developmentStoreResponse({
+        projectsMetadata: [{ ...developmentStoreResponse().store.projectsMetadata[0], projectId: "prj_other" }],
+      }),
+    ],
+  ])("rejects unsafe nested Blob store metadata: %s", async (_name, developmentStore) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ developmentStore }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
   it("accepts the real live environment shape and multi-target Blob binding", async () => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({
@@ -571,12 +667,7 @@ describe("bounded read-only Vercel adapter", () => {
         return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
       }
       if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse({
-          id: DEVELOPMENT_STORE_ID,
-          ownerId: TEAM_ID,
-          type: "blob",
-          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-        });
+        return jsonResponse(developmentStoreResponse());
       }
       throw new Error(`unexpected request ${url.pathname}`);
     });
@@ -647,12 +738,7 @@ describe("bounded read-only Vercel adapter", () => {
         return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
       }
       if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse({
-          id: DEVELOPMENT_STORE_ID,
-          ownerId: TEAM_ID,
-          type: "blob",
-          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-        });
+        return jsonResponse(developmentStoreResponse());
       }
       throw new Error(`unexpected request ${url.pathname}`);
     });
