@@ -206,6 +206,39 @@ describe("hosted request span lifecycle", () => {
     await provider.shutdown();
   });
 
+  it("coalesces both sinks into one lifecycle task for a late generation", async () => {
+    const waitUntilTasks: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[REQUEST_CONTEXT] = {
+      get: () => ({ waitUntil: (task: Promise<unknown>) => { waitUntilTasks.push(task); } }),
+    };
+    const structuredSpans: ReadableSpan[] = [];
+    const otlpSpans: ReadableSpan[] = [];
+    const exporter = (captured: ReadableSpan[]) => ({
+      export: (spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { captured.push(...spans); callback({ code: 0 }); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    }) satisfies SpanExporter;
+    const provider = new BasicTracerProvider({ spanProcessors: [
+      new BoundedSpanProcessor(exporter(structuredSpans), "structured"),
+      new BoundedSpanProcessor(exporter(otlpSpans), "otlp"),
+    ] });
+    const tracer = provider.getTracer("late-generation-two-sink-drain");
+    const root = tracer.startSpan("request-root");
+    const rootContext = trace.setSpan(context.active(), root);
+    const lateChild = tracer.startSpan("late-server-child", { kind: SpanKind.SERVER }, rootContext);
+
+    root.end();
+    expect(waitUntilTasks).toHaveLength(1);
+    await Promise.resolve();
+    lateChild.end();
+    expect(waitUntilTasks).toHaveLength(2);
+
+    await Promise.all(waitUntilTasks);
+    expect(structuredSpans).toHaveLength(2);
+    expect(otlpSpans).toHaveLength(2);
+    await provider.shutdown();
+  });
+
   it("binds one aggregate two-sink lifecycle task to each concurrent root request context in the same incoming trace", async () => {
     const tasksByRequest = new Map<string, Promise<unknown>[]>([["request-a", []], ["request-b", []]]);
     let activeRequest = "request-a";

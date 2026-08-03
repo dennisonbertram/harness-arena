@@ -1,7 +1,7 @@
 import { JsonTraceSerializer, ProtobufTraceSerializer, type ISerializer } from "@opentelemetry/otlp-transformer";
 import { waitUntil } from "@vercel/functions";
 import { registerOTel } from "@vercel/otel";
-import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
+import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Context, type Span, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Instrumentation } from "next";
@@ -14,13 +14,12 @@ const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
 const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
-const MAX_RETAINED_EXPORT_BATCHES = Math.ceil(MAX_BUFFERED_SPANS / MAX_EXPORT_BATCH);
-// A full retained queue can begin draining while the request is still ending.
-// Once its first batch is acknowledged, one more full batch can arrive before
-// the next acknowledgement frees the in-flight slots. Keep that late batch in
-// the request lifetime too, but retain a fixed derived upper bound.
-const MAX_POST_ROOT_DRAIN_BATCHES = MAX_RETAINED_EXPORT_BATCHES + 1;
-const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_POST_ROOT_DRAIN_BATCHES * EXPORT_ACK_DEADLINE_MILLIS + 250;
+// Snapshot generations can interleave at any queue position. In the worst
+// case every retained span belongs to a separate earlier cutoff, so use one
+// bounded acknowledgement window per queue slot instead of assuming batches
+// from distinct generations can be combined.
+const MAX_SNAPSHOT_ACK_WINDOWS = MAX_BUFFERED_SPANS;
+const POST_ROOT_DRAIN_DEADLINE_MILLIS = MAX_SNAPSHOT_ACK_WINDOWS * EXPORT_ACK_DEADLINE_MILLIS + 250;
 const OTLP_REQUEST_DEADLINE_MILLIS = 4_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
@@ -295,12 +294,19 @@ function spanPriority(span: ReadableSpan): number {
   return 0;
 }
 
-type RootDrainParticipant = { forceFlush(): Promise<void> };
+function spanIdentity(spanContext: SpanContext): string {
+  return `${spanContext.traceId}:${spanContext.spanId}`;
+}
+
+type RootDrainParticipant = {
+  captureDrainSnapshot(): number | undefined;
+  forceFlushThrough(cutoff: number): Promise<void>;
+};
 type RootDrainRegistration = { participants: Set<RootDrainParticipant> };
-const rootDrainRegistrations = new Map<string, RootDrainRegistration>();
+const openRootDrainRegistrations = new Map<string, RootDrainRegistration>();
 
 function registerPostRootDrain(rootKey: string, participant: RootDrainParticipant): void {
-  const existing = rootDrainRegistrations.get(rootKey);
+  const existing = openRootDrainRegistrations.get(rootKey);
   if (existing) {
     existing.participants.add(participant);
     return;
@@ -310,8 +316,16 @@ function registerPostRootDrain(rootKey: string, participant: RootDrainParticipan
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const aggregate = Promise.resolve().then(async () => {
     // Composite processors call onEnd synchronously. Deferring one microtask
-    // lets every configured sink join this root's single lifecycle task.
-    await Promise.allSettled([...registration.participants].map((processor) => processor.forceFlush()));
+    // lets every configured sink join this lifecycle generation. Seal it
+    // before taking fixed queue cutoffs so later arrivals synchronously bind
+    // a new bounded waitUntil task.
+    if (openRootDrainRegistrations.get(rootKey) === registration) openRootDrainRegistrations.delete(rootKey);
+    const snapshots = [...registration.participants].map((processor) => ({
+      processor,
+      cutoff: processor.captureDrainSnapshot(),
+    }));
+    await Promise.allSettled(snapshots.map(({ processor, cutoff }) =>
+      cutoff === undefined ? Promise.resolve() : processor.forceFlushThrough(cutoff)));
   });
   const bounded = Promise.race([
     aggregate,
@@ -323,9 +337,8 @@ function registerPostRootDrain(rootKey: string, participant: RootDrainParticipan
     () => undefined,
   ).finally(() => {
     if (deadline) clearTimeout(deadline);
-    if (rootDrainRegistrations.get(rootKey) === registration) rootDrainRegistrations.delete(rootKey);
   });
-  rootDrainRegistrations.set(rootKey, registration);
+  openRootDrainRegistrations.set(rootKey, registration);
   try {
     // This synchronous call binds the aggregate promise to the current root's
     // Vercel request context. With no hosted context, the bounded task still
@@ -338,34 +351,63 @@ function registerPostRootDrain(rootKey: string, participant: RootDrainParticipan
 
 /** Bounded, flushable processor: automatic child spans never synchronously write logs. */
 export class BoundedSpanProcessor implements SpanProcessor {
-  private queue: ReadableSpan[] = [];
+  private queue: Array<{ sequence: number; span: ReadableSpan }> = [];
   private dropped = 0;
   private closed = false;
   private flushInFlight?: Promise<void>;
   private inFlightBatchLength = 0;
+  private nextQueueSequence = 0;
+  private readonly rootKeyBySpan = new Map<string, string>();
+  private readonly activeSpanCountByRoot = new Map<string, number>();
+  private readonly endedRoots = new Set<string>();
   constructor(private readonly exporter: SpanExporter, private readonly sink: "structured" | "otlp" = "structured") {
     if (sink === "otlp") updateSinkReadiness("otlp", { configured: true });
   }
-  onStart(): void {}
+  onStart(span: Span, parentContext: Context): void {
+    if (this.closed) return;
+    const currentKey = spanIdentity(span.spanContext());
+    const parentSpanContext = trace.getSpanContext(parentContext);
+    const rootKey = !parentSpanContext || parentSpanContext.isRemote
+      ? currentKey
+      : this.rootKeyBySpan.get(spanIdentity(parentSpanContext));
+    if (!rootKey) return;
+    this.rootKeyBySpan.set(currentKey, rootKey);
+    this.activeSpanCountByRoot.set(rootKey, (this.activeSpanCountByRoot.get(rootKey) ?? 0) + 1);
+  }
   onEnd(span: ReadableSpan): void {
-    if (this.closed || !shouldRetainSpan(span)) return;
-    if (this.queue.length >= MAX_BUFFERED_SPANS) {
-      const priority = spanPriority(span);
-      const evictionIndex = this.queue.findIndex((queued, index) => index >= this.inFlightBatchLength && spanPriority(queued) < priority);
-      if (evictionIndex >= 0) {
-        this.queue.splice(evictionIndex, 1);
-        this.recordDrop("priority_evicted");
-      } else {
-        this.recordDrop("queue_full");
-        return;
+    const currentKey = spanIdentity(span.spanContext());
+    const isRoot = spanPriority(span) === 2;
+    const rootKey = this.rootKeyBySpan.get(currentKey) ?? (isRoot ? currentKey : undefined);
+    if (isRoot && rootKey) this.endedRoots.add(rootKey);
+    try {
+      if (this.closed || !shouldRetainSpan(span)) return;
+      if (this.queue.length >= MAX_BUFFERED_SPANS) {
+        const priority = spanPriority(span);
+        const evictionIndex = this.queue.findIndex((queued, index) => index >= this.inFlightBatchLength && spanPriority(queued.span) < priority);
+        if (evictionIndex >= 0) {
+          this.queue.splice(evictionIndex, 1);
+          this.recordDrop("priority_evicted");
+        } else {
+          this.recordDrop("queue_full");
+          return;
+        }
       }
+      this.queue.push({ sequence: ++this.nextQueueSequence, span });
+      updateSinkReadiness(this.sink, { queued: this.queue.length });
+      if (rootKey && (isRoot || this.endedRoots.has(rootKey))) registerPostRootDrain(rootKey, this);
+    } finally {
+      this.releaseSpan(currentKey, rootKey);
     }
-    this.queue.push(span);
-    updateSinkReadiness(this.sink, { queued: this.queue.length });
-    if (spanPriority(span) === 2) {
-      const spanContext = span.spanContext();
-      registerPostRootDrain(`${spanContext.traceId}:${spanContext.spanId}`, this);
+  }
+  private releaseSpan(currentKey: string, rootKey: string | undefined): void {
+    if (!rootKey || !this.rootKeyBySpan.delete(currentKey)) return;
+    const remaining = (this.activeSpanCountByRoot.get(rootKey) ?? 1) - 1;
+    if (remaining > 0) {
+      this.activeSpanCountByRoot.set(rootKey, remaining);
+      return;
     }
+    this.activeSpanCountByRoot.delete(rootKey);
+    this.endedRoots.delete(rootKey);
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;
@@ -373,14 +415,20 @@ export class BoundedSpanProcessor implements SpanProcessor {
     updateSinkReadiness(this.sink, { queued: this.queue.length, dropped: sinkReadiness.dropped + 1 });
     if (this.dropped % DROP_SIGNAL_EVERY === 1) log("warn", "trace.span_dropped", { sink: this.sink, reason, dropped: this.dropped });
   }
-  private async drain(): Promise<void> {
-    while (this.queue.length) {
+  captureDrainSnapshot(): number | undefined {
+    return this.queue.at(-1)?.sequence;
+  }
+  private async drainThrough(cutoff: number): Promise<void> {
+    while (this.queue[0]?.sequence !== undefined && this.queue[0].sequence <= cutoff) {
       // Keep a batch in the bounded queue until the exporter acknowledges it.
       // A rejected flush returns to Vercel's waitUntil lifecycle rather than
       // spinning, and the next request/shutdown may retry the same spans.
-      const batchLength = Math.min(this.queue.length, MAX_EXPORT_BATCH);
+      let batchLength = 0;
+      while (batchLength < MAX_EXPORT_BATCH && this.queue[batchLength]?.sequence !== undefined && this.queue[batchLength]!.sequence <= cutoff) {
+        batchLength += 1;
+      }
       this.inFlightBatchLength = batchLength;
-      const batch = this.queue.slice(0, batchLength).map(safeExportSpan);
+      const batch = this.queue.slice(0, batchLength).map(({ span: queuedSpan }) => safeExportSpan(queuedSpan));
       try {
         await new Promise<void>((resolve, reject) => {
           let settled = false;
@@ -416,19 +464,23 @@ export class BoundedSpanProcessor implements SpanProcessor {
       updateSinkReadiness(this.sink, { ready: true, queued: this.queue.length, reason: undefined });
     }
   }
+  async forceFlushThrough(cutoff: number): Promise<void> {
+    while (this.queue[0]?.sequence !== undefined && this.queue[0].sequence <= cutoff) {
+      if (this.flushInFlight) {
+        await this.flushInFlight;
+        continue;
+      }
+      const flush = this.drainThrough(cutoff);
+      this.flushInFlight = flush;
+      try { await flush; }
+      finally {
+        if (this.flushInFlight === flush) this.flushInFlight = undefined;
+      }
+    }
+  }
   async forceFlush(): Promise<void> {
-    if (this.flushInFlight) {
-      await this.flushInFlight;
-      if (this.queue.length) await this.forceFlush();
-      return;
-    }
-    const flush = this.drain();
-    this.flushInFlight = flush;
-    try { await flush; }
-    finally {
-      if (this.flushInFlight === flush) this.flushInFlight = undefined;
-    }
-    if (this.queue.length) await this.forceFlush();
+    const cutoff = this.captureDrainSnapshot();
+    if (cutoff !== undefined) await this.forceFlushThrough(cutoff);
   }
   async shutdown(): Promise<void> { this.closed = true; await this.forceFlush(); await this.exporter.shutdown(); }
 }

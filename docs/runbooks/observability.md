@@ -52,12 +52,16 @@ also registers one root-identity-scoped, post-enqueue aggregate drain through th
 public `@vercel/functions` `waitUntil` API in that root's request context. All
 configured sinks join the same task on the next microtask; roots with distinct
 span IDs receive independent lifecycle tasks even when they continue one
-incoming trace. Retained children do not schedule drains.
-The whole-drain deadline is derived from queue capacity, batch size, and the
-per-batch acknowledgement bound: two retained batches plus one bounded late
-batch times five seconds, plus a 250 ms settlement margin. The late batch covers
-spans appended after the first acknowledgement frees an in-flight slot; the
-bound remains fixed. Failures are consumed by the lifecycle task while
+incoming trace. Each lifecycle generation seals a fixed queue-sequence cutoff
+before it starts draining. A retained descendant that ends after that cutoff
+synchronously registers the next task in its current request context; all
+configured sinks coalesce into that generation before its cutoff is sealed.
+The per-generation deadline is derived from queue capacity and the per-export
+acknowledgement bound. Because older generation cutoffs can split
+otherwise combinable batches, the sound worst case is one five-second export
+window for each of the 32 bounded queue slots, plus a 250 ms settlement margin.
+New arrivals never extend an existing generation or create an unbounded
+recursive drain. Failures are consumed by the lifecycle task while
 the unacknowledged batch remains queued for a later request or shutdown retry.
 Without a hosted request context, the same bounded, catch-wrapped task runs
 locally as a best-effort fallback.
