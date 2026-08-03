@@ -1,21 +1,46 @@
 # Passive agent monitoring
 
-`.github/workflows/passive-agent-monitor.yml` runs at minute 17 and 47 of each hour. It has only `contents: read` and `issues: write`. It collects the existing bounded, GET-only status evidence, retains only sanitized JSON artifacts for 14 days, and opens or reuses an `agent-monitor` issue for each stable failure fingerprint.
+The only scheduled monitor runs in the isolated Development Vercel project
+`harness-arena-development` (`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`). At minute
+17 and 47, Vercel Cron sends an authenticated GET to
+`/api/cron/agent-monitor`. The route fails closed unless the immutable runtime
+project ID is exact, `VERCEL_ENV=production` for that project, the request uses
+the canonical `https://harness-arena-development.vercel.app` origin, and the
+bearer value exactly matches a 32-byte-or-longer `CRON_SECRET`.
 
-Development receives `HARNESS_ARENA_DEVELOPMENT_OPS_READ_TOKEN` only as an Actions secret after the separate Development project exists. Do not put a Vercel, Blob, callback, gateway, admin, or live credential in this workflow. The production invocation deliberately runs without an ops token and must report `access_blocked` when authenticated production evidence is unavailable; it must never escalate privileges.
+The collector has two fixed application targets:
 
-Incident transitions are deterministic: a new fingerprint creates one issue; repeats are silent; an unchanged failure on a changed deployment adds evidence to the same issue; the first healthy observation comments `recovery_pending`; a second consecutive healthy observation closes it; a recurrence reopens that exact issue. Monitor execution failures create a separate `monitor` alert class, never masquerading as product failures.
+- Development: `https://harness-arena-development.vercel.app`, authenticated
+  with `DEVELOPMENT_OPS_READ_TOKEN`.
+- Production: `https://harness-arena-psi.vercel.app`, authenticated with the
+  separately scoped `PRODUCTION_OPS_READ_TOKEN`.
 
-The retained evidence contains timestamp, environment, deployment ID/SHA, finding codes, and safe request/trace identifiers if the status source provides them. It excludes credential values, authorization headers, prompts, request bodies, and raw error payloads.
+Only GET requests to the health and `/api/ops/v1` read surfaces are permitted.
+Redirects are rejected. The reused status collector bounds each request to five
+seconds, bounds response bodies, inventory pages, advertised kinds, and run
+correlations, and redacts read tokens. There is no configurable URL, GitHub
+credential, Blob/admin/deployment credential, write API, or mutation path.
 
-## Local controlled smoke
+Each successful invocation emits one sanitized `monitor.observation` record for
+each fixed environment. Records contain the timestamp, environment, verdict,
+deployment SHA when available, allowlisted failing-check codes, and safe
+correlation IDs. The shared logger adds active OpenTelemetry `trace_id` and
+`span_id` fields. Product health failures use `product_failure`; collector,
+guard, or telemetry failures use `monitor_self_failure`. Missing application or
+production platform read access is explicit `access_blocked`, never inferred as
+healthy.
 
-Run the status collector against a fixture or controlled Development outage, save its JSON, then generate a plan without invoking GitHub:
+Before enabling the isolated schedule, provision only `CRON_SECRET`,
+`DEVELOPMENT_OPS_READ_TOKEN`, and `PRODUCTION_OPS_READ_TOKEN` in the Development
+project. The two ops tokens must be independently scoped GET-only credentials.
+Do not copy, print, rotate, or inspect a live write credential.
 
-```sh
-node scripts/ops/agent-status.mjs --env local --json > /tmp/monitor-status.json
-printf '[]' > /tmp/monitor-incidents.json
-node scripts/ops/passive-monitor.mjs --environment development --status /tmp/monitor-status.json --incidents /tmp/monitor-incidents.json --output /tmp/monitor-plan.json
-```
+After the separate Development deployment exists, invoke the route with its
+cron bearer and inspect that deployment's Vercel logs for both target-scoped
+`monitor.observation` records and their trace/deployment correlation. Also prove
+that missing auth, a wrong project, a redirect, and a missing read token fail
+closed. Production validation is passive only.
 
-For a live proof after review, manually dispatch the workflow against Development, inspect the sanitized artifact and single incident, restore the controlled fault, then verify recovery and a later repeat check. Inspect production only through the passive evidence and confirm no live mutation occurred. Rollback is disabling this workflow; it changes no application or infrastructure state.
+Rollback is removing the single cron entry from the Development project or
+removing its isolated `CRON_SECRET`. This monitor does not modify application
+data, deployments, provider state, repository state, or production settings.
