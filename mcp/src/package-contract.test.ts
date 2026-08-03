@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,14 @@ describe("published MCP package contract", () => {
     expect(packageJson.scripts?.prebuild).toBe("node scripts/clean-dist.mjs");
     expect(packageJson.scripts?.test).toBe("vitest run src");
     expect(tsconfig.exclude).toEqual(expect.arrayContaining(["src/**/*.test.ts"]));
+  });
+
+  it("owns a package-local Vitest config so an isolated npm install never loads the app config", () => {
+    const configPath = join(packageDirectory, "vitest.config.ts");
+    expect(existsSync(configPath)).toBe(true);
+    const config = readFileSync(configPath, "utf8");
+    expect(config).toMatch(/vitest\/config/);
+    expect(config).not.toMatch(/@vitejs\/plugin-react/);
   });
 
   it("packs only production runtime declarations and JavaScript, never tests or fixtures", () => {
