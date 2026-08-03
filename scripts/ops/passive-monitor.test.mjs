@@ -61,7 +61,7 @@ describe("passive monitor incident state machine", () => {
     const good = buildObservation(fixture("passive-monitor-healthy.json"), { environment: "development", knownSecrets: ["fixture-token"] });
     const degraded = buildObservation(fixture("passive-monitor-degraded.json"), { environment: "development", knownSecrets: ["fixture-token"] });
     expect(good).toMatchObject({ kind: "healthy", failures: [] });
-    expect(degraded).toMatchObject({ kind: "product_failure", failures: expect.arrayContaining([expect.objectContaining({ code: "storage_down", alert_class: "storage" }), expect.objectContaining({ code: "stale_runs", alert_class: "queue" })]) });
+    expect(degraded).toMatchObject({ kind: "product_failure", request_ids: ["req_fixture_01", "trace_fixture_02"], failures: expect.arrayContaining([expect.objectContaining({ code: "storage_down", alert_class: "storage" }), expect.objectContaining({ code: "stale_runs", alert_class: "queue" })]) });
     expect(JSON.stringify(degraded)).not.toMatch(/fixture-token|private task body/);
   });
 });
