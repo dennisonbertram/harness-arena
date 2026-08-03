@@ -2,7 +2,7 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { describe, expect, it, vi } from "vitest";
-import { createSafeSpanProcessor, onRequestError } from "./instrumentation";
+import { createSafeSpanProcessors, createSafeSpanProcessor, onRequestError } from "./instrumentation";
 
 describe("onRequestError", () => {
   it("awaits structured safe Error telemetry without raw error text or stack", async () => {
@@ -83,5 +83,41 @@ describe("onRequestError", () => {
     const exported = JSON.stringify(captured[0]);
     for (const forbidden of ["secret", "token=", "signature=", "exception.message", "exception.stacktrace"]) expect(exported).not.toContain(forbidden);
     await provider.shutdown();
+  });
+
+  it("always exports a queryable safe trace event when no OTLP collector is configured", async () => {
+    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    delete process.env.VERCEL_OTEL_ENDPOINTS;
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const provider = new BasicTracerProvider({
+      resource: resourceFromAttributes({ "host.url": "https://host.test?token=secret" }),
+      spanProcessors: createSafeSpanProcessors(),
+    });
+    provider.getTracer("hostile?scope=secret").startSpan("GET /api/runs?token=secret", {
+      attributes: { "http.request.method": "GET", "url.full": "https://host.test?token=secret" },
+    }).end();
+    await provider.forceFlush();
+
+    const records = spy.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    expect(records).toContainEqual(expect.objectContaining({
+      event: "trace.span",
+      trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+      span_id: expect.stringMatching(/^[0-9a-f]{16}$/),
+      span_name: "harness.span",
+    }));
+    expect(JSON.stringify(records)).not.toContain("secret");
+    spy.mockRestore();
+    await provider.shutdown();
+  });
+
+  it("adds OTLP delivery only when a collector is explicitly available", () => {
+    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    delete process.env.VERCEL_OTEL_ENDPOINTS;
+    expect(createSafeSpanProcessors()).toHaveLength(1);
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "https://collector.example.test/v1/traces";
+    expect(createSafeSpanProcessors()).toHaveLength(2);
+    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
   });
 });
