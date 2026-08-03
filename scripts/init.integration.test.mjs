@@ -11,6 +11,16 @@ const launcherGroups = new Set();
 const serverGroups = new Set();
 const operatorEnvBytes = Buffer.from("AI_GATEWAY_API_KEY=gateway-env-sentinel\r\nRUNNER_CALLBACK_SECRET=runner-env-sentinel\nHARMLESS_SENTINEL=harmless-env-sentinel\n", "utf8");
 const operatorEnvMode = 0o640;
+const operatorEnvLocalBytes = Buffer.from([
+  "# harness-arena-init:v2",
+  "# Local-only; never copy production secrets here.",
+  "STORAGE=file",
+  "LOCAL_STORAGE_DIR=__STATE__/local-data",
+  "AUTH_SECRET=hermetic-local-auth",
+  "",
+].join("\n"), "utf8");
+const operatorEnvLocalMode = 0o600;
+const metaMode = process.env.HARNESS_INIT_META_MODE;
 let root;
 let state;
 
@@ -22,16 +32,13 @@ beforeAll(async () => {
   await mkdir(state, { mode: 0o700 });
   await writeFile(join(root, ".env"), operatorEnvBytes, { mode: operatorEnvMode });
   await chmod(join(root, ".env"), operatorEnvMode);
-  await writeFile(join(root, ".env.local"), [
-    "# harness-arena-init:v2",
-    "# Local-only; never copy production secrets here.",
-    "STORAGE=file",
-    `LOCAL_STORAGE_DIR=${join(state, "local-data")}`,
-    "AUTH_SECRET=hermetic-local-auth",
-    "",
-  ].join("\n"), { mode: 0o600 });
-  await chmod(join(root, ".env.local"), 0o600);
+  await writeFile(join(root, ".env.local"), managedEnvLocalBytes(), { mode: operatorEnvLocalMode });
+  await chmod(join(root, ".env.local"), operatorEnvLocalMode);
 }, 30_000);
+
+function managedEnvLocalBytes() {
+  return Buffer.from(operatorEnvLocalBytes.toString("utf8").replace("__STATE__", state), "utf8");
+}
 
 function runInit(...args) {
   return runInitWithEnv({}, ...args);
@@ -93,7 +100,7 @@ async function installFakeNext(checkout) {
   const nextBin = join(checkout, "node_modules", "next", "dist", "bin", "next");
   await mkdir(join(nextBin, ".."), { recursive: true });
   await writeFile(nextBin, [
-    "const { existsSync } = require('node:fs');",
+    "const { appendFile, existsSync } = require('node:fs');",
     "const { createServer } = require('node:http');",
     "const { join } = require('node:path');",
     "const args = process.argv.slice(2);",
@@ -103,7 +110,15 @@ async function installFakeNext(checkout) {
     "const seeded = existsSync(join(process.env.LOCAL_STORAGE_DIR, 'competitions', 'local-development.json'));",
     "const ready = { ok: true, pid: Number(process.env.LOCAL_INSTANCE_PID), nonce: process.env.LOCAL_INSTANCE_NONCE, seeded, writable: true, environment_sanitized: sanitized };",
     "const health = { ok: true, gateway_key_present: Boolean(process.env.AI_GATEWAY_API_KEY), runner_secret_present: Boolean(process.env.RUNNER_CALLBACK_SECRET) };",
+    "const requestLog = join(process.env.HARNESS_INIT_STATE, '..', '..', 'fake-next-requests.log');",
     "const server = createServer((request, response) => {",
+    "  appendFile(requestLog, `${request.url}\\n`, () => {});",
+    "  if (request.url === '/api/local-instance') {",
+    "    const accepted = process.env.HARNESS_LOCAL_INIT === '1' && process.env.STORAGE === 'file' && request.headers['x-harness-local-instance-nonce'] === process.env.LOCAL_INSTANCE_NONCE;",
+    "    response.writeHead(accepted ? 204 : 404, { 'cache-control': 'no-store' });",
+    "    response.end();",
+    "    return;",
+    "  }",
     "  const body = request.url === '/api/ready' ? ready : request.url === '/api/health' ? health : { error: 'not_found' };",
     "  response.writeHead(request.url === '/api/ready' || request.url === '/api/health' ? 200 : 404, { 'content-type': 'application/json' });",
     "  response.end(JSON.stringify(body));",
@@ -174,21 +189,29 @@ async function expectOperatorEnvPreserved(expected = { bytes: operatorEnvBytes, 
   expect(actual.mode).toBe(expected.mode);
 }
 
+async function expectOperatorEnvsPreserved() {
+  await expectOperatorEnvPreserved();
+  const actual = await fileSnapshot(join(root, ".env.local"));
+  expect(actual.bytes.equals(managedEnvLocalBytes())).toBe(true);
+  expect(actual.mode).toBe(operatorEnvLocalMode);
+}
+
 async function snapshotTree(path) {
   const output = {};
   await visit(path, "");
   return output;
 
   async function visit(current, name) {
-    const info = await lstat(current);
+    const info = await lstat(current, { bigint: true });
     const key = name || ".";
-    if (info.isSymbolicLink()) { output[key] = { type: "symlink", mode: info.mode & 0o777, target: await readlink(current) }; return; }
+    const identity = { ino: String(info.ino), mode: Number(info.mode & 0o777n), mtime_ns: String(info.mtimeNs), ctime_ns: String(info.ctimeNs) };
+    if (info.isSymbolicLink()) { output[key] = { type: "symlink", ...identity, target: await readlink(current) }; return; }
     if (info.isDirectory()) {
-      output[key] = { type: "directory", mode: info.mode & 0o777 };
+      output[key] = { type: "directory", ...identity };
       for (const entry of (await readdir(current)).sort()) await visit(join(current, entry), name ? `${name}/${entry}` : entry);
       return;
     }
-    output[key] = { type: "file", mode: info.mode & 0o777, bytes: (await readFile(current)).toString("base64") };
+    output[key] = { type: "file", ...identity, bytes: (await readFile(current)).toString("base64") };
   }
 }
 
@@ -211,7 +234,35 @@ function processIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
+async function fakeHungPnpm(checkout, label) {
+  const bin = join(checkout, "..", `bin-${label}`);
+  const marker = join(checkout, "..", `pnpm-${label}.json`);
+  await mkdir(bin);
+  const path = join(bin, "pnpm");
+  await writeFile(path, [
+    "#!/usr/bin/env node",
+    "import { spawn } from 'node:child_process';",
+    "import { writeFile } from 'node:fs/promises';",
+    "const child = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+    `await writeFile(${JSON.stringify(marker)}, JSON.stringify({ leader: process.pid, child: child.pid }));`,
+    "process.on('SIGTERM', () => {});",
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+  await chmod(path, 0o700);
+  return { marker, path: `${bin}:${process.env.PATH}` };
+}
+
 afterAll(async () => {
+  if (process.env.HARNESS_INIT_META_PRESERVATION_MARKER && root) {
+    let preserved = false;
+    try {
+      const env = await fileSnapshot(join(root, ".env"));
+      const local = await fileSnapshot(join(root, ".env.local"));
+      preserved = env.bytes.equals(operatorEnvBytes) && env.mode === operatorEnvMode
+        && local.bytes.equals(managedEnvLocalBytes()) && local.mode === operatorEnvLocalMode;
+    } catch {}
+    await writeFile(process.env.HARNESS_INIT_META_PRESERVATION_MARKER, JSON.stringify({ preserved }));
+  }
   for (const checkout of checkoutRoots) {
     try {
       const metadata = JSON.parse(await readFile(join(checkout, ".harness-arena", "init.pid"), "utf8"));
@@ -246,7 +297,7 @@ describe.sequential("init process ownership integration", () => {
     const check = await runInit("--check");
     expect(parseLastJson(rerun.stdout).mode).toBe("existing");
     expect(parseLastJson(check.stdout).mode).toBe("existing");
-    await expectOperatorEnvPreserved();
+    await expectOperatorEnvsPreserved();
   }, 30_000);
 
   it("does not expose inherited or env-file sentinel values through health", async () => {
@@ -254,7 +305,7 @@ describe.sequential("init process ownership integration", () => {
     const health = await fetch(`http://127.0.0.1:${metadata.port}/api/health`).then((response) => response.text());
     expect(health).not.toMatch(/sentinel/);
     expect(JSON.parse(health)).toMatchObject({ gateway_key_present: false, runner_secret_present: false });
-    await expectOperatorEnvPreserved();
+    await expectOperatorEnvsPreserved();
   });
 
   it("lets a simultaneous caller outwait a cold install and report the same owned instance", async () => {
@@ -286,7 +337,7 @@ describe.sequential("init process ownership integration", () => {
     const secondInstance = parseLastJson(second.stdout);
     expect(firstInstance).toMatchObject({ mode: "start" });
     expect(secondInstance).toMatchObject({ mode: "existing", pid: firstInstance.pid, nonce: firstInstance.nonce });
-    await expectOperatorEnvPreserved();
+    await expectOperatorEnvsPreserved();
   }, 60_000);
 
   it("preserves operator .env and managed .env.local bytes and modes on failed setup", async () => {
@@ -296,7 +347,7 @@ describe.sequential("init process ownership integration", () => {
     const result = await runInitWithEnv({ PATH: brokenPnpm.path }, "--no-install");
     expect(result.code).not.toBe(0);
     expect(processIsAlive(Number.parseInt(await readFile(brokenPnpm.marker, "utf8"), 10))).toBe(false);
-    await expectOperatorEnvPreserved();
+    await expectOperatorEnvsPreserved();
     const envLocalAfter = await fileSnapshot(join(root, ".env.local"));
     expect(envLocalAfter.bytes.equals(envLocal.bytes)).toBe(true);
     expect(envLocalAfter.mode).toBe(envLocal.mode);
@@ -312,7 +363,7 @@ describe.sequential("init process ownership integration", () => {
     expect(result.code).not.toBe(0);
     const failure = JSON.parse(await readFile(join(state, "init-failure.json"), "utf8"));
     await expect(waitForProcessGroupExit(failure.pid)).resolves.toBeUndefined();
-    await expectOperatorEnvPreserved();
+    await expectOperatorEnvsPreserved();
     const envLocalAfter = await fileSnapshot(join(root, ".env.local"));
     expect(envLocalAfter.bytes.equals(envLocal.bytes)).toBe(true);
     expect(envLocalAfter.mode).toBe(envLocal.mode);
@@ -320,6 +371,41 @@ describe.sequential("init process ownership integration", () => {
 });
 
 describe.sequential("read-only init check integration", () => {
+  it("uses only the local nonce-authenticated identity probe and preserves file identity and write metadata", async () => {
+    await installFakeNext(root);
+    const started = await runInit("--no-install");
+    expect(started.code, started.stderr).toBe(0);
+    expect(parseLastJson(started.stdout)).toMatchObject({ mode: "start" });
+    const requestLog = join(root, "..", "fake-next-requests.log");
+    await writeFile(requestLog, "");
+    const before = await snapshotTree(root);
+    const result = await runInit("--check");
+    expect(result.code, result.stderr).toBe(0);
+    expect(parseLastJson(result.stdout)).toMatchObject({ mode: "existing" });
+    await delay(25);
+    expect((await readFile(requestLog, "utf8")).trim().split("\n")).toEqual(["/api/local-instance"]);
+    expect(await snapshotTree(root)).toEqual(before);
+    await expectOperatorEnvsPreserved();
+  });
+
+  it("bounds and reaps a hung pnpm prerequisite process group", async () => {
+    const checkout = await createHermeticCheckout("harness-arena-check-hung-pnpm-");
+    const pnpm = await fakeHungPnpm(checkout, "hung");
+    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "75" }, "--check");
+    const pids = JSON.parse(await waitForFile(pnpm.marker));
+    const started = Date.now();
+    const result = await Promise.race([invocation, delay(750).then(() => ({ timedOut: true }))]);
+    if (result.timedOut) {
+      for (const pid of launcherGroups) await terminateProcessGroup(pid).catch(() => {});
+    }
+    expect(result.timedOut).not.toBe(true);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toMatch(/timed out/i);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    await expect(waitForProcessGroupExit(pids.leader, 2_000)).resolves.toBeUndefined();
+    expect(processIsAlive(pids.child)).toBe(false);
+  }, 5_000);
+
   it("creates no state or surviving prerequisite process in a valid checkout", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-valid-");
     const pnpm = await fakePnpm(checkout, "valid");
@@ -372,4 +458,27 @@ describe.sequential("read-only init check integration", () => {
     expect(await snapshotTree(symlinked)).toEqual(symlinkBefore);
     expect(await snapshotTree(outside)).toEqual(outsideBefore);
   });
+});
+
+describe.skipIf(metaMode !== "signal" && metaMode !== "assertion")("test-worker cleanup fixture", () => {
+  it("publishes a fake server before the worker is interrupted or fails", async () => {
+    const result = await runInit("--no-install");
+    expect(result.code, result.stderr).toBe(0);
+    const instance = parseLastJson(result.stdout);
+    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
+    if (metaMode === "assertion") expect("deliberate assertion failure").toBe("success");
+    await new Promise(() => {});
+  });
+});
+
+describe.skipIf(metaMode !== "setup")("test-worker setup-failure cleanup fixture", () => {
+  beforeAll(async () => {
+    const result = await runInit("--no-install");
+    expect(result.code, result.stderr).toBe(0);
+    const instance = parseLastJson(result.stdout);
+    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
+    throw new Error("deliberate setup failure");
+  });
+
+  it("never reaches the test body", () => {});
 });
