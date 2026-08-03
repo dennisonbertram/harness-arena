@@ -26,4 +26,10 @@ describe("resolveBlobAccess", () => {
   it("preserves the production-compatible public default outside Development", () => {
     expect(resolveBlobAccess({ BLOB_READ_WRITE_TOKEN: "rw" })).toEqual({ access: "public" });
   });
+
+  it("rejects a Development store identity missing or mixed with the configured store", () => {
+    const base = { BLOB_READ_WRITE_TOKEN: "rw", VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" };
+    expect(() => resolveBlobAccess(base)).toThrow("Development Blob store identity is required");
+    expect(() => resolveBlobAccess({ ...base, HARNESS_BLOB_STORE_ID: "store_dev", BLOB_STORE_ID: "store_other" })).toThrow("Blob store identity mismatch");
+  });
 });

@@ -16,4 +16,12 @@ describe("GET voice audio", () => {
     expect(response.status).toBe(401);
     expect(getAudioBytes).not.toHaveBeenCalled();
   });
+
+  it("rejects a forged UUID cookie and an object outside the active manifest", async () => {
+    const getAudioBytes = vi.fn();
+    voice.getVoiceStorage.mockReturnValue({ getAudioBytes, getManifest: vi.fn().mockResolvedValue({ prompts: [], responses: [] }) });
+    const forged = await GET(req("voice_evaluator=4f51bb74-25e4-4a96-a9ca-5f46ca3dbe61"), { params: params("prompts", "prompt-1") });
+    expect(forged.status).toBe(401);
+    expect(getAudioBytes).not.toHaveBeenCalled();
+  });
 });
