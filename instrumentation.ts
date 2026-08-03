@@ -294,8 +294,8 @@ type RootDrainParticipant = { forceFlush(): Promise<void> };
 type RootDrainRegistration = { participants: Set<RootDrainParticipant> };
 const rootDrainRegistrations = new Map<string, RootDrainRegistration>();
 
-function registerPostRootDrain(traceId: string, participant: RootDrainParticipant): void {
-  const existing = rootDrainRegistrations.get(traceId);
+function registerPostRootDrain(rootKey: string, participant: RootDrainParticipant): void {
+  const existing = rootDrainRegistrations.get(rootKey);
   if (existing) {
     existing.participants.add(participant);
     return;
@@ -318,9 +318,9 @@ function registerPostRootDrain(traceId: string, participant: RootDrainParticipan
     () => undefined,
   ).finally(() => {
     if (deadline) clearTimeout(deadline);
-    if (rootDrainRegistrations.get(traceId) === registration) rootDrainRegistrations.delete(traceId);
+    if (rootDrainRegistrations.get(rootKey) === registration) rootDrainRegistrations.delete(rootKey);
   });
-  rootDrainRegistrations.set(traceId, registration);
+  rootDrainRegistrations.set(rootKey, registration);
   try {
     // This synchronous call binds the aggregate promise to the current root's
     // Vercel request context. With no hosted context, the bounded task still
@@ -357,7 +357,10 @@ export class BoundedSpanProcessor implements SpanProcessor {
     }
     this.queue.push(span);
     updateSinkReadiness(this.sink, { queued: this.queue.length });
-    if (spanPriority(span) === 2) registerPostRootDrain(span.spanContext().traceId, this);
+    if (spanPriority(span) === 2) {
+      const spanContext = span.spanContext();
+      registerPostRootDrain(`${spanContext.traceId}:${spanContext.spanId}`, this);
+    }
   }
   private recordDrop(reason: "queue_full" | "priority_evicted"): void {
     this.dropped += 1;
