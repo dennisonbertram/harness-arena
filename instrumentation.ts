@@ -119,6 +119,46 @@ export class SafeSpanExporter implements SpanExporter {
   shutdown(): Promise<void> { return this.delegate.shutdown(); }
 }
 
+/**
+ * @vercel/otel 2.1.3 reports every resolved fetch as successful, including
+ * collector 4xx/5xx responses. Its exporters call fetch synchronously from
+ * export(), so this short-lived wrapper is captured by that one request before
+ * the global is restored; it never crosses an event-loop boundary.
+ */
+export class StatusAwareHostedOtlpExporter implements SpanExporter {
+  constructor(private readonly delegate: SpanExporter) {}
+  export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
+    const originalFetch = globalThis.fetch;
+    if (typeof originalFetch !== "function") {
+      callback({ code: 1, error: new Error("OTLP collector did not acknowledge export") });
+      return;
+    }
+    const statusAwareFetch: typeof globalThis.fetch = async (input, init) => {
+      try {
+        const response = await originalFetch(input, init);
+        if (response.ok) return response;
+        // The bundled exporter only drains successful responses. Drain this
+        // rejected response too, without retaining its provider-controlled body.
+        void response.arrayBuffer().catch(() => undefined);
+      } catch {
+        // Never hand endpoint, headers, response data, or provider errors to
+        // @vercel/otel's diagnostic logger.
+      }
+      throw new Error("OTLP collector did not acknowledge export");
+    };
+    globalThis.fetch = statusAwareFetch;
+    try {
+      this.delegate.export(spans, callback);
+    } catch {
+      callback({ code: 1, error: new Error("OTLP collector did not acknowledge export") });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+  forceFlush(): Promise<void> { return this.delegate.forceFlush?.() ?? Promise.resolve(); }
+  shutdown(): Promise<void> { return this.delegate.shutdown(); }
+}
+
 /** Durable, provider-neutral fallback: Vercel captures these JSON lines in runtime logs. */
 export class StructuredSpanExporter implements SpanExporter {
   export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
@@ -253,7 +293,11 @@ export class BoundedSpanProcessor implements SpanProcessor {
         }));
       } catch (error) {
         this.inFlightBatchLength = 0;
-        updateSinkReadiness(this.sink, { ready: false, queued: this.queue.length, reason: "export_unacknowledged" });
+        // The structured exporter already records its more specific failure
+        // reason before it reports the failed export result. Keep that single
+        // transition instead of overwriting it with the generic processor one.
+        const reason = structuredReadiness[this.sink].reason ?? "export_unacknowledged";
+        updateSinkReadiness(this.sink, { ready: false, queued: this.queue.length, reason });
         throw error;
       }
       this.queue.splice(0, batchLength);
@@ -294,7 +338,7 @@ export function createSafeSpanProcessors(): SpanProcessor[] {
     const exporter = collector.protocol === "http/json"
       ? new OTLPHttpJsonTraceExporter({ url: collector.url, headers: collector.headers })
       : new OTLPHttpProtoTraceExporter({ url: collector.url, headers: collector.headers });
-    processors.push(createSafeSpanProcessor(exporter, "otlp"));
+    processors.push(createSafeSpanProcessor(new StatusAwareHostedOtlpExporter(exporter), "otlp"));
   } else {
     updateSinkReadiness("otlp", { configured: false, ready: true, queued: 0, dropped: 0, reason: undefined });
   }
