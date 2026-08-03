@@ -2,11 +2,14 @@
 
 The isolated Development Vercel project
 `harness-arena-development` (`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`) has two
-once-daily scheduled backstops, in deterministic order: at 03:00 UTC,
-`/api/cron/reap` reaps stale runs and ensures the baseline; at 03:17 UTC,
-Vercel Cron sends an authenticated GET to `/api/cron/agent-monitor`. The
-monitor route fails closed unless the immutable runtime project ID is exact,
-`VERCEL_ENV=production` for that project, the request uses the canonical
+once-daily scheduled backstops: `/api/cron/reap` uses `0 3 * * *` to reap
+stale runs and ensure the baseline, and `/api/cron/agent-monitor` uses
+`17 3 * * *`. Hobby-plan schedules have per-hour precision, so either route
+may execute anywhere during hour 03 rather than at the configured minute. The
+two routes have no sequencing dependency; each must remain safe and useful when
+it runs before, after, or independently of the other. The monitor route fails
+closed unless the immutable runtime project ID is exact, `VERCEL_ENV=production`
+for that project, the request uses the canonical
 `https://harness-arena-development.vercel.app` origin, and the bearer value
 exactly matches a 32-byte-or-longer `CRON_SECRET`.
 
