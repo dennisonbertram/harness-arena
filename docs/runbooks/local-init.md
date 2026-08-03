@@ -38,6 +38,38 @@ testing requires the separately provisioned canonical, publicly reachable
 HTTPS origin of the isolated Development deployment; never substitute a live
 or production origin.
 
+Init selects `HARNESS_EXECUTION_MODE=deterministic-success`, a seeded local
+development identity, one run per submission, and an ephemeral local callback
+secret in its sanitized child environment. It refuses `main`, detached HEAD,
+unknown deterministic scenarios, any Vercel runtime, and non-file storage.
+The adapter enters through the normal dispatcher and invokes the existing
+authenticated callback and trace route contracts in-process. It emits the
+task manifest's complete lifecycle, trace files, zero-cost terminal totals,
+and no external network or model requests.
+
+Run the complete real-HTTP and persisted-file proof with one command:
+
+```sh
+./scripts/init.sh --smoke
+```
+
+The JSON result includes the submission/run IDs, terminal state, event/task
+counts, zero model cost, and storage path. The smoke fails if readiness,
+lifecycle ordering, terminal totals, traces, or the persisted run/event files
+are missing. For direct failure-path testing, set
+`HARNESS_DETERMINISTIC_SCENARIO` to `task-failure`, `callback-failure`,
+`stale-reap`, or `budget-exceeded` before a fresh init start. These are local
+fixtures; their virtual failure/cost records are not billed execution.
+
+`./scripts/init.sh --real-sandbox-smoke` is a separate, explicit credential and
+creation probe. It accepts only the isolated Development project ID, refuses
+`main`, creates a short-lived Node sandbox with deny-all egress, runs one
+harmless local command, and always permanently deletes the Sandbox (including its snapshots and sessions). It performs no callback, model
+request, benchmark run, or Blob/application data access. It requires locally
+scoped `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and the isolated Development
+`VERCEL_PROJECT_ID`; do not use live credentials or data. This probe does not
+claim that localhost is reachable from Vercel Sandbox.
+
 Use `--check` for read-only prerequisite/port/PID validation and `--no-install`
 for an already-installed worktree. Check may run bounded prerequisite and port
 probes, but it starts no persistent process and creates, deletes, or modifies

@@ -17,6 +17,24 @@ function mockFetchOnce(body: string, ok = true, status = 200) {
 describe("judgeSubmission", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("approves a non-empty deterministic local prompt without calling AI Gateway", async () => {
+    const fetchMock = vi.fn(() => { throw new Error("AI Gateway must not be called in deterministic local mode"); });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("HARNESS_LOCAL_INIT", "1");
+    vi.stubEnv("HARNESS_EXECUTION_MODE", "deterministic-success");
+    vi.stubEnv("HARNESS_GIT_BRANCH", "codex/deterministic-local-sandbox");
+    vi.stubEnv("STORAGE", "file");
+    for (const key of ["VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_PROJECT_ID"]) vi.stubEnv(key, "");
+
+    await expect(judgeSubmission("Plan carefully, then verify the result.", FIXTURE_TASKS)).resolves.toEqual({
+      verdict: "approved",
+      reason: "Approved by deterministic local fairness fixture; no provider request was made.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("returns an approved verdict when the gateway responds with an approve JSON verdict", async () => {

@@ -49,6 +49,13 @@ review are complete.
    isolated Development deployment that Vercel Sandbox can reach. It must have
    no credentials, port, path, query, or fragment. A localhost, loopback,
    production, or live origin is invalid.
+   A hosted seeded Development identity additionally requires the explicit
+   `HARNESS_DEVELOPMENT_IDENTITY=seeded` marker, exact manifest project,
+   protected `dev` ref, canonical request host/callback, and
+   `HARNESS_BLOB_STORE_ID` matching the isolated manifest store. Missing or
+   unknown identities fail closed. Every live project, alias, callback, and
+   store identifier is denied. The current null manifest fields deliberately
+   keep this hosted identity disabled until independently provisioned.
 5. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
    with read-only Vercel inventory access. Compare it with the manifest and stop
    on any omitted or changed identifier. Never retrieve or print Blob
@@ -95,6 +102,13 @@ Do not run write-capable Vercel commands from this repository. Do not manually
 upload, promote, roll back, or change aliases, domains, environments, stores,
 or Git linkage. A successful Development deployment is not production
 approval and never authorizes mutation of the live project.
+
+The optional `./scripts/init.sh --real-sandbox-smoke` is not a deployment or
+application smoke. It uses local scoped credentials only to create a bounded,
+deny-all, non-persistent, non-production Sandbox, run one harmless command, and permanently delete it in a
+`finally` path. It never uses `CALLBACK_BASE`, reaches the Development or live
+data plane, invokes a model, or asserts that a remote Sandbox can callback to
+localhost. Do not run it with the live project ID.
 
 ## Rollback and stop rules
 

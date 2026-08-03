@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertDeterministicLocalEnvironment } from "./development-identity";
 import { log, normalizeError } from "./log";
 import type { Task } from "./tasks";
 
@@ -156,6 +157,13 @@ async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> 
 }
 
 export async function judgeSubmission(prompt: string, tasks: JudgeTask[]): Promise<JudgeVerdict> {
+  if (process.env.HARNESS_EXECUTION_MODE?.startsWith("deterministic-")) {
+    assertDeterministicLocalEnvironment();
+    return {
+      verdict: "approved",
+      reason: "Approved by deterministic local fairness fixture; no provider request was made.",
+    };
+  }
   const raw = await callGateway(prompt, tasks);
   const parsed = tryParseVerdict(raw);
   if (parsed) return parsed;
