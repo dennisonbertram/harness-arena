@@ -20,7 +20,7 @@ import { POST } from "./route";
 import { mintAgentToken } from "@/lib/agent-token";
 
 const ADMIN_TOKEN = "test-admin-token";
-const BODY = { arena: "harness-arena", harness: "pi", model: "zai/glm-5.2", gateway_provider: "morph" };
+const BODY = { arena: "harness-arena", harness: "pi", model: "thinkingmachines/inkling-small", gateway_provider: "baseten" };
 
 function adminRequest(
   body: unknown = BODY,
@@ -89,6 +89,14 @@ describe("POST /api/competition/admin", () => {
     expect(await storageRef.current.listCompetitions()).toEqual([]);
   });
 
+  it("rejects an allowed model that has no normalized pricing table", async () => {
+    const response = await POST(adminRequest({ ...BODY, model: "zai/glm-5.2-fast", gateway_provider: "fireworks" }, {}, "2.2.2.9"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("does not have normalized pricing");
+    expect(await storageRef.current.listCompetitions()).toEqual([]);
+  });
+
   it("stores absent prize fields as null", async () => {
     const response = await POST(adminRequest(BODY, {}, "2.2.2.5"));
     const competition = await response.json();
@@ -96,7 +104,7 @@ describe("POST /api/competition/admin", () => {
     expect(response.status).toBe(201);
     expect(competition).toMatchObject({ ...BODY, prize_amount_usd: null, prize_cadence: null, status: "live" });
     expect(await storageRef.current.getCompetition(competition.id)).toMatchObject({
-      gateway_provider: "morph",
+      gateway_provider: "baseten",
       prize_amount_usd: null,
       prize_cadence: null,
     });

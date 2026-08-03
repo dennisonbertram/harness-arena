@@ -17,6 +17,7 @@ function competition(id: string, overrides: Partial<Competition> = {}): Competit
     arena: "harness-arena",
     harness: "pi",
     model: "zai/glm-5.2",
+    pricing_version: "inkling-small-2026-08-03-v1",
     status: "live",
     created_at: "2026-07-25T00:00:00.000Z",
     ...overrides,
@@ -32,6 +33,8 @@ function row(tasksPassed: number, totalCostUsd: number, overrides: Partial<Compe
     tasksPassed,
     totalTasks: 16,
     totalCostUsd,
+    billedCostUsd: overrides.billedCostUsd ?? totalCostUsd,
+    pricingVersion: overrides.pricingVersion ?? "inkling-small-2026-08-03-v1",
     submittedAt: "2026-07-25T00:00:00.000Z",
     githubLogin: "unknown",
     ...overrides,
@@ -91,6 +94,12 @@ function run(id: string, overrides: Partial<Run> = {}): Run {
     status: "completed",
     task_results: [],
     created_at: "2026-07-25T00:00:00.000Z",
+    ...(typeof overrides.total_cost_usd === "number" && overrides.normalized_total_cost_usd === undefined
+      ? {
+          normalized_total_cost_usd: overrides.total_cost_usd,
+          pricing_version: "inkling-small-2026-08-03-v1",
+        }
+      : {}),
     ...overrides,
   };
 }
@@ -135,6 +144,7 @@ describe("baseline as the ranking cutoff", () => {
     const board = await boardWith([{ id: "tie", tasks: 7, cost: 1 }], { tasks: 7, cost: 1 });
 
     expect(board.ranked).toHaveLength(0);
+    expect(board.unpriced).toBe(0);
     expect(board.belowBaseline.map((r) => r.submissionId)).toEqual(["tie"]);
   });
 
@@ -183,8 +193,69 @@ describe("baseline as the ranking cutoff", () => {
 });
 
 describe("getCompetitionBoard", () => {
+  it("ranks and compares using normalized cost while retaining actual billed spend", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putSubmission(sub("expensive-billed", { run_id: "r-expensive" }));
+    await storage.putRun(run("r-expensive", {
+      submission_id: "expensive-billed",
+      tasks_passed: 10,
+      total_cost_usd: 9,
+      normalized_total_cost_usd: 0.5,
+      pricing_version: "inkling-small-2026-08-03-v1",
+    }));
+    await storage.putSubmission(sub("cheap-billed", { run_id: "r-cheap" }));
+    await storage.putRun(run("r-cheap", {
+      submission_id: "cheap-billed",
+      tasks_passed: 10,
+      total_cost_usd: 1,
+      normalized_total_cost_usd: 0.75,
+      pricing_version: "inkling-small-2026-08-03-v1",
+    }));
+
+    const board = await getCompetitionBoard(storage, DEFAULT_ID);
+
+    expect(board.ranked.map((entry) => entry.submissionId)).toEqual(["expensive-billed", "cheap-billed"]);
+    expect(board.ranked[0]).toMatchObject({ totalCostUsd: 0.5, billedCostUsd: 9 });
+  });
+
+  it("does not rank a completed legacy run whose normalized cost is unavailable", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putSubmission(sub("legacy", { run_id: "r-legacy" }));
+    await storage.putRun(run("r-legacy", {
+      submission_id: "legacy",
+      tasks_passed: 16,
+      total_cost_usd: 0.01,
+      normalized_total_cost_usd: undefined,
+      pricing_version: undefined,
+    }));
+
+    const board = await getCompetitionBoard(storage, DEFAULT_ID);
+
+    expect(board.ranked).toHaveLength(0);
+  });
+
+  it("does not compare a run priced under a different table version", async () => {
+    const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putSubmission(sub("wrong-version", { run_id: "r-wrong" }));
+    await storage.putRun(run("r-wrong", {
+      submission_id: "wrong-version",
+      tasks_passed: 16,
+      total_cost_usd: 1,
+      normalized_total_cost_usd: 0.01,
+      pricing_version: "future-v2",
+    }));
+
+    const board = await getCompetitionBoard(storage, DEFAULT_ID);
+
+    expect(board.ranked).toHaveLength(0);
+  });
+
   it("ranks completed competition runs and reports a pending count for queued/running ones", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
     await storage.putSubmission(sub("s1", { run_id: "r1" }));
     await storage.putRun(run("r1", { submission_id: "s1", tasks_passed: 14, total_cost_usd: 1.0, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }) }));
     await storage.putSubmission(sub("s2", { run_id: "r2" }));
@@ -199,6 +270,7 @@ describe("getCompetitionBoard", () => {
 
   it("carries the entrant's github_login onto the ranked row, falling back to 'unknown' when unset", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
     await storage.putSubmission(sub("s1", { run_id: "r1", github_login: "octocat" }));
     await storage.putRun(run("r1", { submission_id: "s1", tasks_passed: 10, total_cost_usd: 1.0, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }) }));
 
@@ -243,6 +315,7 @@ describe("getCompetitionBoard", () => {
 
   it("reports baselineState 'ready' and populates baseline once its run completes", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
     await storage.putSubmission(sub("base", { run_id: "rb", competition_baseline: true }));
     await storage.putRun(run("rb", { submission_id: "base", tasks_passed: 6, total_cost_usd: 0.9, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: false }) }));
 
@@ -275,6 +348,8 @@ describe("getCompetitionBoard — competition scoping (issue #76)", () => {
 
   it("two competitions with entries do not bleed into each other's boards", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putCompetition(competition(OTHER_ID));
     await storage.putSubmission(sub("s1", { run_id: "r1", competition_id: DEFAULT_ID }));
     await storage.putRun(
       run("r1", { submission_id: "s1", tasks_passed: 10, total_cost_usd: 1.0, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }) }),
@@ -293,6 +368,8 @@ describe("getCompetitionBoard — competition scoping (issue #76)", () => {
 
   it("a legacy submission (competition: true, no competition_id) lands in the default competition's board only", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putCompetition(competition(OTHER_ID));
     await storage.putSubmission(sub("legacy", { run_id: "r1" })); // no competition_id -- unbackfilled row
     await storage.putRun(
       run("r1", { submission_id: "legacy", tasks_passed: 9, total_cost_usd: 1.5, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: true }) }),
@@ -307,6 +384,8 @@ describe("getCompetitionBoard — competition scoping (issue #76)", () => {
 
   it("resolves per-competition baselines independently", async () => {
     const storage = new MemoryStorage();
+    await storage.putCompetition(competition(DEFAULT_ID));
+    await storage.putCompetition(competition(OTHER_ID));
     await storage.putSubmission(sub("base1", { run_id: "rb1", competition_id: DEFAULT_ID, competition_baseline: true }));
     await storage.putRun(
       run("rb1", { submission_id: "base1", tasks_passed: 4, total_cost_usd: 0.5, task_results: Array(16).fill({ task_id: "t", attempted: true, passed: false }) }),

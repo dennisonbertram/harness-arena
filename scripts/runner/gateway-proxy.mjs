@@ -133,6 +133,9 @@ const MAX_DIAGNOSTIC_STRING_BYTES = 512;
 const MAX_DIAGNOSTIC_EVENT_BYTES = 8 * 1024;
 const MAX_DIAGNOSTIC_OBJECT_KEYS = 32;
 const MAX_DIAGNOSTIC_ARRAY_ENTRIES = 16;
+// SSE content deltas can be arbitrarily large. We only need the small JSON
+// envelopes that carry ids and token counts, never generated text itself.
+const MAX_SSE_OBSERVATION_LINE_BYTES = 8 * 1024;
 const TRUNCATION_MARKER = "[TRUNCATED]";
 
 function truncateUtf8(value, maxBytes = MAX_DIAGNOSTIC_STRING_BYTES) {
@@ -253,13 +256,64 @@ function responseIdFromJson(value) {
 
 function inspectStreamJson(state, value) {
   if (!state.response_id) state.response_id = responseIdFromJson(value);
+  inspectUsage(state, value);
+}
+
+function tokenCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function inspectUsage(state, value) {
+  if (!value || typeof value !== "object") return;
+  const anthropicUsage = value.type === "message_start" ? value.message?.usage : value.type === "message_delta" ? value.usage : undefined;
+  const openAiUsage = value.type === undefined ? value.usage : undefined;
+  const usage = anthropicUsage ?? openAiUsage;
+  if (!usage || typeof usage !== "object") return;
+
+  if (anthropicUsage) {
+    const input = tokenCount(usage.input_tokens);
+    const cacheRead = tokenCount(usage.cache_read_input_tokens);
+    const cacheWrite = tokenCount(usage.cache_creation_input_tokens);
+    const output = tokenCount(usage.output_tokens);
+    if (input !== undefined) state.usage.input_tokens = input;
+    if (cacheRead !== undefined) state.usage.cache_read_tokens = cacheRead;
+    if (cacheWrite !== undefined) state.usage.cache_write_tokens = cacheWrite;
+    if (output !== undefined) state.usage.output_tokens = output;
+    return;
+  }
+
+  const input = tokenCount(usage.prompt_tokens);
+  const cacheRead = tokenCount(usage.prompt_tokens_details?.cached_tokens);
+  const output = tokenCount(usage.completion_tokens);
+  // OpenAI-compatible usage reports cached prompt tokens as a subset of
+  // prompt_tokens. Keep the normalized buckets disjoint so cache hits are not
+  // charged once as ordinary input and again at the cache-read rate.
+  if (input !== undefined && (cacheRead === undefined || cacheRead <= input)) {
+    state.usage.input_tokens = input - (cacheRead ?? 0);
+  }
+  if (cacheRead !== undefined) state.usage.cache_read_tokens = cacheRead;
+  if (output !== undefined) state.usage.output_tokens = output;
+}
+
+function completeUsage(usage) {
+  // A billable completion needs both sides. Cache fields are optional, and
+  // absent data must stay absent rather than being invented as zero.
+  return usage.input_tokens === undefined || usage.output_tokens === undefined ? undefined : usage;
 }
 
 function inspectStreamChunk(state, chunk) {
-  if (state.response_id || state.inspect_bytes >= 64 * 1024) return;
   const text = Buffer.from(chunk).toString("utf8");
-  state.inspect_bytes += Buffer.byteLength(text);
-  state.sse_buffer += text;
+  // Retain at most one small SSE line. A giant content delta is deliberately
+  // discarded until its newline, after which terminal usage events continue
+  // to be inspected for the rest of the stream.
+  if (state.discard_sse_line) {
+    const newline = text.indexOf("\n");
+    if (newline === -1) return;
+    state.discard_sse_line = false;
+    state.sse_buffer = text.slice(newline + 1);
+  } else {
+    state.sse_buffer += text;
+  }
   let newline;
   while ((newline = state.sse_buffer.indexOf("\n")) !== -1) {
     const line = state.sse_buffer.slice(0, newline).replace(/\r$/, "");
@@ -273,7 +327,10 @@ function inspectStreamChunk(state, chunk) {
       // The proxy only observes JSON for correlation; it never changes or
       // rejects a stream because a provider uses a non-JSON SSE event.
     }
-    if (state.response_id) break;
+  }
+  if (Buffer.byteLength(state.sse_buffer) > MAX_SSE_OBSERVATION_LINE_BYTES) {
+    state.sse_buffer = "";
+    state.discard_sse_line = true;
   }
 }
 
@@ -497,8 +554,9 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
 
     const streamState = {
       response_id: undefined,
-      inspect_bytes: 0,
       sse_buffer: "",
+      discard_sse_line: false,
+      usage: {},
       first_byte_at: undefined,
       last_byte_at: undefined,
       previous_byte_at: undefined,
@@ -556,6 +614,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         type: "gateway_proxy.response_complete",
         request_id: requestId,
         response_id: streamState.response_id,
+        ...(completeUsage(streamState.usage) === undefined ? {} : { usage: completeUsage(streamState.usage) }),
         first_byte_at: streamState.first_byte_at,
         last_byte_at: streamState.last_byte_at,
         total_bytes: streamState.total_bytes,
