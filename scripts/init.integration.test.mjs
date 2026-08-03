@@ -248,19 +248,24 @@ function processIsAlive(pid) {
 async function fakeHungPnpm(checkout, label) {
   const bin = join(checkout, "..", `bin-${label}`);
   const marker = join(checkout, "..", `pnpm-${label}.json`);
+  const events = join(checkout, "..", `pnpm-${label}.events`);
   await mkdir(bin);
   const path = join(bin, "pnpm");
   await writeFile(path, [
     "#!/usr/bin/env node",
     "import { spawn } from 'node:child_process';",
-    "import { writeFile } from 'node:fs/promises';",
-    "const child = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
-    `await writeFile(${JSON.stringify(marker)}, JSON.stringify({ leader: process.pid, child: child.pid }));`,
-    "process.on('SIGTERM', () => {});",
+    "import { appendFileSync } from 'node:fs';",
+    "import { readFile, writeFile } from 'node:fs/promises';",
+    `const events = ${JSON.stringify(events)};`,
+    "process.on('SIGTERM', () => appendFileSync(events, 'leader:SIGTERM\\n'));",
+    "const descendant = `const { appendFileSync } = require('node:fs'); const events = process.argv[1]; process.on('SIGTERM', () => appendFileSync(events, 'descendant:SIGTERM\\\\n')); appendFileSync(events, 'descendant:ready\\\\n'); setInterval(() => {}, 1000);`;",
+    "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
+    "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
+    `await writeFile(${JSON.stringify(marker)}, JSON.stringify({ init: process.ppid, leader: process.pid, child: child.pid }));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(path, 0o700);
-  return { marker, path: `${bin}:${process.env.PATH}` };
+  return { events, marker, path: `${bin}:${process.env.PATH}` };
 }
 
 function cleanupHarness() {
@@ -484,13 +489,35 @@ describe.sequential("read-only init check integration", () => {
   });
 });
 
-describe.skipIf(metaMode !== "signal" && metaMode !== "assertion")("test-worker cleanup fixture", () => {
+describe.skipIf(!["signal", "normal", "assertion"].includes(metaMode))("test-worker cleanup fixture", () => {
   it("publishes a fake server before the worker is interrupted or fails", async () => {
     const result = await runInit("--no-install");
     expect(result.code, result.stderr).toBe(0);
     const instance = parseLastJson(result.stdout);
     await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
     if (metaMode === "assertion") expect("deliberate assertion failure").toBe("success");
+    if (metaMode === "normal") return;
+    await new Promise(() => {});
+  });
+});
+
+describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisite interruption fixture", () => {
+  it("publishes a hung prerequisite leader and descendant before interruption", async () => {
+    const pnpm = await fakeHungPnpm(root, `meta-${process.pid}`);
+    const invocation = runInitWithEnv({ PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "60000" }, "--check");
+    const pids = JSON.parse(await waitForFile(pnpm.marker));
+    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
+      worker_pid: process.pid,
+      init_pid: pids.init,
+      prerequisite_leader_pid: pids.leader,
+      prerequisite_descendant_pid: pids.child,
+      prerequisite_events: pnpm.events,
+    }));
+    if (metaMode === "prerequisite-init") {
+      const result = await invocation;
+      expect(result.code === 0 && result.signal === null, result.stderr).toBe(false);
+      return;
+    }
     await new Promise(() => {});
   });
 });
