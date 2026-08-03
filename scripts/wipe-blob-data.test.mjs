@@ -18,7 +18,7 @@ describe("wipeBlobData", () => {
     vi.resetModules();
     vi.mocked(list).mockReset();
     vi.mocked(del).mockReset();
-    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "test-token");
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
   });
 
   afterEach(() => {
@@ -168,12 +168,12 @@ describe("wipeBlobData", () => {
 
     const results = await wipeBlobData({ confirm: true });
 
-    expect(list).toHaveBeenNthCalledWith(1, { prefix: "events/", cursor: undefined });
-    expect(list).toHaveBeenNthCalledWith(2, { prefix: "events/", cursor: "next" });
+    expect(list).toHaveBeenNthCalledWith(1, { prefix: "events/", cursor: undefined, access: "public" });
+    expect(list).toHaveBeenNthCalledWith(2, { prefix: "events/", cursor: "next", access: "public" });
     expect(del).toHaveBeenCalledWith([
       "https://store.example/events/first.json",
       "https://store.example/events/second.json",
-    ]);
+    ], { access: "public" });
     expect(results[0]).toMatchObject({ prefix: "events/", count: 2, deleted: true });
   });
 

@@ -1,10 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NFT = resolve(ROOT, ".next/server/app/api/voice/audio/[kind]/[id]/route.js.nft.json");
-const FORBIDDEN_ROOTS = new Set(["app", "config", "docs", "mcp", "public", "scripts", "tasks", "tests"]);
+export const ALLOWED_PROJECT_FILES = new Set([
+  "lib/blob-access.mjs",
+  "lib/blob-read.mjs",
+  "lib/file-storage-lock.mjs",
+]);
 
 export function inspectVoiceAudioNft(files, { root = ROOT, nftPath = NFT } = {}) {
   const projectFiles = [];
@@ -14,18 +18,21 @@ export function inspectVoiceAudioNft(files, { root = ROOT, nftPath = NFT } = {})
     const rel = relative(root, absolute);
     if (!rel || rel.startsWith(`..${sep}`) || rel === ".." || rel.startsWith(".next/") || rel.startsWith("node_modules/")) continue;
     projectFiles.push(rel);
-    const top = rel.split(/[\\/]/)[0];
-    if (FORBIDDEN_ROOTS.has(top) || /(?:^|\/)\w[^/]*\.test\.[^/]+$/.test(rel) || /^(?:next\.config\.[^/]+|package\.json|pnpm-lock\.yaml)$/.test(rel)) {
+    if (/^\.env(?:\.|$)/.test(rel) || /(?:secret|credential|token)/i.test(rel) || !ALLOWED_PROJECT_FILES.has(rel)) {
       forbidden.push(rel);
     }
   }
   return { projectFiles: projectFiles.sort(), forbidden: forbidden.sort() };
 }
 
-export async function checkVoiceAudioNft() {
-  const parsed = JSON.parse(await readFile(NFT, "utf8"));
-  const result = inspectVoiceAudioNft(parsed.files ?? []);
-  if (result.forbidden.length > 0 || result.projectFiles.length > 12) {
+export async function checkVoiceAudioNft({ nftPath = NFT, buildStartedAtMs } = {}) {
+  const metadata = await stat(nftPath);
+  if (buildStartedAtMs !== undefined && metadata.mtimeMs < buildStartedAtMs) {
+    throw new Error("voice audio NFT is stale and was not produced by the current build");
+  }
+  const parsed = JSON.parse(await readFile(nftPath, "utf8"));
+  const result = inspectVoiceAudioNft(parsed.files ?? [], { nftPath });
+  if (result.forbidden.length > 0) {
     throw new Error(`voice audio NFT escaped its route closure: ${JSON.stringify(result)}`);
   }
   return result;

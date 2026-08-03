@@ -13,7 +13,7 @@
 //     --yes
 
 import { copy, del, list, put } from "@vercel/blob";
-import { blobAccess } from "../lib/blob-access.mjs";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
 import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
@@ -31,7 +31,7 @@ async function listAll(prefix, token) {
   const blobs = [];
   let cursor;
   do {
-    const page = await list({ prefix, cursor, token });
+    const page = await list(blobCommandOptions({ prefix, cursor, token }));
     blobs.push(...page.blobs);
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
@@ -137,12 +137,11 @@ export async function resetCompetitionData({
   // Nothing is removed until every live object and the retained competition
   // definition have been copied successfully.
   for (const pathname of archiveSources) {
-    await copy(pathname, `${resolvedArchivePrefix}/${pathname}`, {
-      access: blobAccess(),
+    await copy(pathname, `${resolvedArchivePrefix}/${pathname}`, blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       token,
-    });
+    }));
   }
 
   // Children first, then their run and submission parents. Each group is
@@ -150,25 +149,24 @@ export async function resetCompetitionData({
   // unbounded delete request.
   for (const group of groups) {
     for (const batch of chunks(group, DELETE_BATCH_SIZE)) {
-      await del(batch, { token });
+      await del(batch, blobCommandOptions({ token }));
     }
   }
 
   if (deleteCompetition) {
     // The retained definition was archived with the children above, so the
     // obsolete board can now be removed without losing recoverability.
-    await del(competitionPath, { token });
+    await del(competitionPath, blobCommandOptions({ token }));
   } else {
     await put(
       competitionPath,
       JSON.stringify({ ...competition, gateway_provider: gatewayProvider }),
-      {
-        access: blobAccess(),
+      blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",
         token,
-      },
+      }),
     );
   }
 

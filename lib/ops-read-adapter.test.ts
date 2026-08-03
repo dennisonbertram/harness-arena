@@ -5,7 +5,10 @@ import { BlobOpsReadAdapter } from "./ops-read-adapter";
 
 const metadata = (size: number) => ({ pathname: "traces/r/t/log.txt", size, uploadedAt: new Date("2026-08-02T00:00:00.000Z"), etag: "etag", url: "https://blob.test/a?token=secret", downloadUrl: "https://blob.test/a?token=secret" });
 describe("Blob ops read adapter", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
+  });
   it("preserves storage pagination and exposes metadata without signed URLs", async () => {
     blob.list.mockResolvedValue({ blobs: [metadata(12)], hasMore: true, cursor: "blob-next" });
     await expect(new BlobOpsReadAdapter().listPage({ prefix: "traces/", limit: 1 })).resolves.toEqual({ records: [{ pathname: "traces/r/t/log.txt", size: 12, uploaded_at: "2026-08-02T00:00:00.000Z", etag: "etag" }], has_more: true, cursor: "blob-next" });

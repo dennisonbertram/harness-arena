@@ -106,7 +106,7 @@ describe("seed-competition CLI Blob adapter", () => {
     vi.mocked(get).mockReset();
     vi.mocked(list).mockReset();
     vi.mocked(put).mockReset();
-    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "test-token");
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
     exitSignal = new Error("process.exit called");
     exit = vi.spyOn(process, "exit").mockImplementation((() => {
       throw exitSignal;
@@ -154,8 +154,8 @@ describe("seed-competition CLI Blob adapter", () => {
 
     const id = competitionId("harness-arena", "pi", "zai/glm-5.2-fast");
     expect(get).toHaveBeenCalledWith(`competitions/${id}.json`, { access: "public" });
-    expect(list).toHaveBeenNthCalledWith(1, { prefix: "submissions/", cursor: undefined });
-    expect(list).toHaveBeenNthCalledWith(2, { prefix: "submissions/", cursor: "page-2" });
+    expect(list).toHaveBeenNthCalledWith(1, { prefix: "submissions/", cursor: undefined, access: "public" });
+    expect(list).toHaveBeenNthCalledWith(2, { prefix: "submissions/", cursor: "page-2", access: "public" });
     expect(get).toHaveBeenCalledWith("submissions/legacy.json", { access: "public" });
     expect(get).toHaveBeenCalledWith("submissions/current.json", { access: "public" });
     expect(put).toHaveBeenCalledTimes(2);

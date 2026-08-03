@@ -23,6 +23,8 @@ vi.mock("@vercel/blob", () => ({
   list: vi.fn(),
 }));
 
+beforeEach(() => vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret"));
+
 function makeRun(id: string, createdAt: string): Run {
   return {
     id,
@@ -311,7 +313,8 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
       access: "private", oidcToken, storeId: "store_dev",
     }));
     expect(put).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.not.objectContaining({ token: expect.anything() }));
-    expect(get).toHaveBeenCalledWith(expect.any(String), { access: "private", oidcToken, storeId: "store_dev" });
+    expect(get).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ access: "private", oidcToken, storeId: "store_dev" }));
+    expect(get).toHaveBeenCalledWith(expect.any(String), expect.not.objectContaining({ token: expect.anything() }));
   });
 
   it("appendRunEvents writes ONE immutable blob per event, not a single rewritten events file", async () => {

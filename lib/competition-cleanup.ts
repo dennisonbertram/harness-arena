@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { copy, del, list, put } from "@vercel/blob";
-import { blobAccess } from "./blob-access";
+import { blobCommandOptions } from "./blob-access";
 import { readBlobJson } from "./blob-read.mjs";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 
@@ -104,7 +104,7 @@ async function listAllPathnames(prefix: string): Promise<string[]> {
   const pathnames: string[] = [];
   let cursor: string | undefined;
   do {
-    const page = await list({ prefix, cursor });
+    const page = await list(blobCommandOptions({ prefix, cursor }));
     pathnames.push(...page.blobs.map((blob) => blob.pathname));
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
@@ -133,7 +133,7 @@ function batches<T>(values: T[]): T[][] {
 async function deletePathnames(pathnames: string[], confirmedDeleted: string[]): Promise<void> {
   for (const batch of batches(pathnames)) {
     if (batch.length > 0) {
-      await del(batch);
+      await del(batch, blobCommandOptions());
       confirmedDeleted.push(...batch);
     }
   }
@@ -222,11 +222,10 @@ async function claimOperationIdentity(expected: CleanupOperationIdentity): Promi
   }
 
   try {
-    await put(pathname, JSON.stringify(expected, null, 2), {
-      access: blobAccess(),
+    await put(pathname, JSON.stringify(expected, null, 2), blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: false,
-    });
+    }));
   } catch (error) {
     // A concurrent claimant may have won the write-once race. Only the exact
     // same global intent may continue; a different competition/intent stops
@@ -397,7 +396,7 @@ async function deleteOperation(
         recorded_at: new Date().toISOString(),
         operationId: operation.operationId,
         ...recovery,
-      }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true });
+      }, null, 2), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true }));
     } catch {
       delete recovery.receiptPath;
     }
@@ -418,7 +417,7 @@ async function deleteOperation(
     deletedPathnames: operation.sourcePathnames,
     remainingPathnames: [],
     receiptPath,
-  }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true });
+  }, null, 2), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true }));
 }
 
 /**
@@ -524,11 +523,10 @@ export async function archiveAndDeleteCompetitionSubmissions(
   // Nothing is removed until the entire live set and the manifest are durably
   // copied. A copy failure leaves the leaderboard exactly as it was.
   for (const pathname of sourcePathnames) {
-    await copy(pathname, `${archivePrefix}/${pathname}`, {
-      access: blobAccess(),
+    await copy(pathname, `${archivePrefix}/${pathname}`, blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: false,
-    });
+    }));
   }
 
   const result: CompetitionCleanupResult = {
@@ -553,7 +551,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
     ...result,
     source_pathnames: sourcePathnames,
     deletion_groups: deletionGroups,
-  }, null, 2), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: false });
+  }, null, 2), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: false }));
 
   await deleteOperation({ operationId: archiveId, result, reason, sourcePathnames, deletionGroups });
 

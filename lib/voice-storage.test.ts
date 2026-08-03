@@ -12,6 +12,8 @@ vi.mock("@vercel/blob", () => ({
   list: vi.fn(),
 }));
 
+beforeEach(() => vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret"));
+
 function makeJudgment(overrides: Partial<VoiceJudgment> = {}): VoiceJudgment {
   return {
     comparison_id: "resp-a_resp-b",

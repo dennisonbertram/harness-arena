@@ -1,5 +1,5 @@
 import { get, list } from "@vercel/blob";
-import { blobAccess } from "./blob-access";
+import { blobCommandOptions } from "./blob-access";
 
 export interface OpsRecordMetadata { pathname: string; size: number; uploaded_at: string; etag: string }
 export interface OpsListPage { records: OpsRecordMetadata[]; cursor?: string; has_more: boolean }
@@ -29,7 +29,7 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
   async listPage({ prefix, cursor, limit }: { prefix: string; cursor?: string; limit: number }): Promise<OpsListPage> {
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),3_000);
     let page: Awaited<ReturnType<typeof list>> | undefined;
-    try {for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list({prefix,cursor,limit,abortSignal:controller.signal}),3_000);break;}catch(error){if(attempt===1)throw error;}}if(!page)throw new Error("list_failed");return {records:page.blobs.map((blob)=>({pathname:blob.pathname,size:blob.size,uploaded_at:blob.uploadedAt.toISOString(),etag:blob.etag})),cursor:page.hasMore?page.cursor:undefined,has_more:page.hasMore};}
+    try {for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list(blobCommandOptions({prefix,cursor,limit,abortSignal:controller.signal})),3_000);break;}catch(error){if(attempt===1)throw error;}}if(!page)throw new Error("list_failed");return {records:page.blobs.map((blob)=>({pathname:blob.pathname,size:blob.size,uploaded_at:blob.uploadedAt.toISOString(),etag:blob.etag})),cursor:page.hasMore?page.cursor:undefined,has_more:page.hasMore};}
     finally{clearTimeout(timer);}
   }
 
@@ -38,7 +38,7 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
     let metadata: OpsRecordMetadata | undefined;
     try {
       let page:Awaited<ReturnType<typeof list>>|undefined;
-      for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list({prefix:pathname,limit:2,abortSignal:controller.signal}),Math.max(1,deadlineAt-Date.now()));break;}catch(error){if(attempt===1)throw error;}}
+      for(let attempt=0;attempt<2;attempt++){try{page=await timeout(list(blobCommandOptions({prefix:pathname,limit:2,abortSignal:controller.signal})),Math.max(1,deadlineAt-Date.now()));break;}catch(error){if(attempt===1)throw error;}}
       metadata = page?.blobs.filter((record)=>record.pathname===pathname).map((record)=>({pathname:record.pathname,size:record.size,uploaded_at:record.uploadedAt.toISOString(),etag:record.etag}))[0];
       if (!metadata) {clearTimeout(timer);return { status: "not_found" };}
       if (metadata.size > maxBytes) {clearTimeout(timer);return { status: "too_large", size: metadata.size, limit: maxBytes };}
@@ -46,7 +46,7 @@ export class BlobOpsReadAdapter implements OpsReadAdapter {
       clearTimeout(timer);return { status: "transient", error: controller.signal.aborted||error instanceof Error&&error.message === "read_timeout" ? "read_timeout" : "read_failed" };
     }
     try { for (let attempt = 0; attempt < 2; attempt++) {
-      try { const result = await timeout(get(pathname,{access:blobAccess(),abortSignal:controller.signal}),Math.max(1,deadlineAt-Date.now()));
+      try { const result = await timeout(get(pathname,blobCommandOptions({abortSignal:controller.signal})),Math.max(1,deadlineAt-Date.now()));
         if (!result) { if(attempt===1)return {status:"transient",error:"read_failed"}; continue; }
         if (result.statusCode !== 200 || !result.stream) throw new Error("read_failed");
         const bytes = await boundedBytes(result.stream, maxBytes, deadlineAt, controller);

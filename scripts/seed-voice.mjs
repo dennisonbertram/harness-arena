@@ -46,7 +46,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { get, put } from "@vercel/blob";
-import { blobAccess } from "../lib/blob-access.mjs";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
 import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
@@ -366,7 +366,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function pollUntilReady(pathname, { attempts = 10, delayMs = 300 } = {}) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await get(pathname, { access: blobAccess(), abortSignal: AbortSignal.timeout(5000), useCache: false });
+      const res = await get(pathname, blobCommandOptions({ abortSignal: AbortSignal.timeout(5000), useCache: false }));
       if (res?.statusCode === 200) { await res.stream.cancel(); return; }
     } catch {
       // transient -- including a timed-out/aborted request -- retry
@@ -405,11 +405,10 @@ async function main() {
     const idToPathname = new Map();
     for (const upload of uploads) {
       const data = readFileSync(upload.file);
-      await put(upload.blobPath, data, {
-        access: blobAccess(),
+      await put(upload.blobPath, data, blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
-      });
+      }));
       idToPathname.set(upload.id, upload.blobPath);
     }
 
@@ -422,12 +421,11 @@ async function main() {
 
     // Write last: this is the commit marker. Everything it references is
     // already uploaded and confirmed readable.
-    await put(MANIFEST_PATH, JSON.stringify(manifest), {
-      access: blobAccess(),
+    await put(MANIFEST_PATH, JSON.stringify(manifest), blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
-    });
+    }));
 
     console.log(
       `Seeded voice/manifest.json: ${manifest.models.length} models, ${manifest.prompts.length} prompts, ${manifest.responses.length} responses`,

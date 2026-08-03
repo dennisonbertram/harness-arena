@@ -97,7 +97,7 @@ function arrangeStore() {
 describe("resetCompetitionData", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "test-token");
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test_secret");
     arrangeStore();
   });
 

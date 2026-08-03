@@ -1,5 +1,5 @@
 import { get, list, put } from "@vercel/blob";
-import { blobAccess } from "./blob-access";
+import { blobCommandOptions } from "./blob-access";
 import { readBlobJson } from "./blob-read.mjs";
 import { readBoundedStream } from "./bounded-stream";
 import { mkdir as nodeMkdir, readFile as nodeReadFile, readdir as nodeReaddir } from "node:fs/promises";
@@ -154,7 +154,7 @@ export class BlobVoiceStorage implements VoiceStorage {
     const blobs: { pathname: string }[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
@@ -162,7 +162,7 @@ export class BlobVoiceStorage implements VoiceStorage {
   }
 
   async getManifest(): Promise<VoiceManifest | undefined> {
-    const blobs = await withRetry(() => list({ prefix: MANIFEST_PATH, limit: 1 }));
+    const blobs = await withRetry(() => list(blobCommandOptions({ prefix: MANIFEST_PATH, limit: 1 })));
     const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
     if (!blob) return undefined;
     const raw = await withRetry(() => readBlobJson(blob.pathname));
@@ -173,24 +173,22 @@ export class BlobVoiceStorage implements VoiceStorage {
 
   async putManifest(manifest: VoiceManifest): Promise<void> {
     await withRetry(() =>
-      put(MANIFEST_PATH, JSON.stringify(manifest), {
-        access: blobAccess(),
+      put(MANIFEST_PATH, JSON.stringify(manifest), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",
-      }),
+      })),
     );
   }
 
   async putJudgment(judgment: VoiceJudgment): Promise<{ created: boolean }> {
     const pathname = judgmentPath(judgment.evaluator_id, judgment.comparison_id);
     const write = () =>
-      put(pathname, JSON.stringify(judgment), {
-        access: blobAccess(),
+      put(pathname, JSON.stringify(judgment), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: false,
         contentType: "application/json",
-      });
+      }));
     try {
       await write();
       return { created: true };
@@ -239,7 +237,7 @@ export class BlobVoiceStorage implements VoiceStorage {
     return { judgments, unreadable };
   }
   async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
-    const response = await get(audioPath(kind, id), { access: blobAccess() });
+    const response = await get(audioPath(kind, id), blobCommandOptions());
     if (!response || response.statusCode !== 200 || !response.stream) return null;
     return readBoundedStream(response.stream, 12 * 1024 * 1024);
   }
@@ -248,6 +246,6 @@ export class BlobVoiceStorage implements VoiceStorage {
 export function getVoiceStorage(): VoiceStorage {
   if (process.env.STORAGE === "file") return new FileVoiceStorage(process.env.LOCAL_STORAGE_DIR ?? "");
   if (process.env.STORAGE === "memory") return new MemoryVoiceStorage();
-  if (process.env.BLOB_READ_WRITE_TOKEN) { blobAccess(); return new BlobVoiceStorage(); }
+  if (process.env.BLOB_READ_WRITE_TOKEN || process.env.VERCEL_OIDC_TOKEN) { blobCommandOptions(); return new BlobVoiceStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

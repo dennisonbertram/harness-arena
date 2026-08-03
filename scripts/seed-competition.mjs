@@ -25,7 +25,7 @@
 // parse, so a plain `node scripts/seed-competition.mjs` can't import it.
 
 import { list, put } from "@vercel/blob";
-import { blobAccess } from "../lib/blob-access.mjs";
+import { blobCommandOptions } from "../lib/blob-access.mjs";
 import { readBlobJson } from "../lib/blob-read.mjs";
 
 const ARENA = "harness-arena";
@@ -104,18 +104,17 @@ function blobStorage() {
     return readBlobJson(pathname);
   }
   async function writeJson(pathname, value) {
-    await put(pathname, JSON.stringify(value), {
-      access: blobAccess(),
+    await put(pathname, JSON.stringify(value), blobCommandOptions({
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
-    });
+    }));
   }
   async function listAll(prefix) {
     const blobs = [];
     let cursor;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);

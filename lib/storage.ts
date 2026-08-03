@@ -1,5 +1,5 @@
 import { get, list, put } from "@vercel/blob";
-import { blobAccess } from "./blob-access";
+import { blobCommandOptions } from "./blob-access";
 import { readBlobJson } from "./blob-read.mjs";
 import { readBoundedStream } from "./bounded-stream";
 import { FileStorage } from "./file-storage";
@@ -236,13 +236,12 @@ export class BlobStorage implements Storage {
     // emits ~90 event blobs + ~32 trace blobs), and an un-retried put failure
     // there 500'd the callback route and lost the run's totals.
     await withRetry(() =>
-      put(pathname, JSON.stringify(value), {
-        access: blobAccess(),
+      put(pathname, JSON.stringify(value), blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
         cacheControlMaxAge: 60,
         contentType: "application/json",
-      }),
+      })),
     );
   }
 
@@ -258,7 +257,7 @@ export class BlobStorage implements Storage {
     const blobs: { url: string; pathname: string; uploadedAt: string | Date }[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list({ prefix, cursor });
+      const page = await list(blobCommandOptions({ prefix, cursor }));
       blobs.push(...page.blobs);
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
@@ -346,12 +345,11 @@ export class BlobStorage implements Storage {
       for (let tries = 0; tries < 50; tries++) {
         try {
           const full: RunEvent = { ...event, run_id: runId, seq };
-          await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
-            access: blobAccess(),
+          await put(`${BLOB_PATHS.events}${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), blobCommandOptions({
             addRandomSuffix: false,
             allowOverwrite: false,
             contentType: "application/json",
-          });
+          }));
           appended.push(full);
           break;
         } catch {
@@ -426,11 +424,10 @@ export class BlobStorage implements Storage {
 
   async putTraceBlob(runId: string, taskId: string, name: string, data: Buffer | string): Promise<string> {
     const { url } = await withRetry(() =>
-      put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, {
-        access: blobAccess(),
+      put(`${BLOB_PATHS.traces}${runId}/${taskId}/${name}`, data, blobCommandOptions({
         addRandomSuffix: false,
         allowOverwrite: true,
-      }),
+      })),
     );
     return url;
   }
@@ -442,7 +439,7 @@ export class BlobStorage implements Storage {
         const blobs = await this.listAllBlobs(pathname);
         const blob = blobs.find((candidate) => candidate.pathname === pathname);
         if (!blob) return null;
-        const response = await get(blob.pathname, { access: blobAccess() });
+        const response = await get(blob.pathname, blobCommandOptions());
         if (!response || response.statusCode !== 200 || !response.stream) throw new Error("blob get failed");
         return readBoundedStream(response.stream, BlobStorage.TRACE_LIMIT);
       });
@@ -467,6 +464,6 @@ export function getStorage(): Storage {
     g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();
     return g[MEMORY_STORAGE_KEY];
   }
-  if (process.env.BLOB_READ_WRITE_TOKEN) { blobAccess(); return new BlobStorage(); }
+  if (process.env.BLOB_READ_WRITE_TOKEN || process.env.VERCEL_OIDC_TOKEN) { blobCommandOptions(); return new BlobStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

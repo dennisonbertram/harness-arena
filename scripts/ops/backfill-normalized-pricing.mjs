@@ -4,7 +4,7 @@
 // default; pass --yes only after reviewing the per-run summary.
 
 import { list, put } from "@vercel/blob";
-import { blobAccess } from "../../lib/blob-access.mjs";
+import { blobCommandOptions } from "../../lib/blob-access.mjs";
 import { readBlobJson } from "../../lib/blob-read.mjs";
 import { computeTotals, normalizedCostForUsage, PRICING_VERSION } from "../runner/lib.mjs";
 
@@ -126,7 +126,7 @@ export async function backfillNormalizedPricing(storage, {
 
 async function listAll(prefix, token) {
   const blobs = []; let cursor;
-  do { const page = await list({ prefix, cursor, token }); blobs.push(...page.blobs); cursor = page.hasMore ? page.cursor : undefined; } while (cursor);
+  do { const page = await list(blobCommandOptions({ prefix, cursor, token })); blobs.push(...page.blobs); cursor = page.hasMore ? page.cursor : undefined; } while (cursor);
   return blobs;
 }
 
@@ -137,11 +137,11 @@ async function readJson(pathname, token) {
 function blobStorage(token) {
   return {
     getCompetition: (id) => readJson(`competitions/${id}.json`, token),
-    async putCompetition(value) { await put(`competitions/${value.id}.json`, JSON.stringify(value), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token }); },
+    async putCompetition(value) { await put(`competitions/${value.id}.json`, JSON.stringify(value), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token })); },
     async listSubmissions() { return Promise.all((await listAll("submissions/", token)).map((blob) => readJson(blob.pathname, token))); },
     async listRuns() { return Promise.all((await listAll("runs/", token)).map((blob) => readJson(blob.pathname, token))); },
     async listRunEvents(runId) { return Promise.all((await listAll(`events/${runId}/`, token)).map((blob) => readJson(blob.pathname, token))); },
-    async putRun(value) { await put(`runs/${value.id}.json`, JSON.stringify(value), { access: blobAccess(), addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token }); },
+    async putRun(value) { await put(`runs/${value.id}.json`, JSON.stringify(value), blobCommandOptions({ addRandomSuffix: false, allowOverwrite: true, contentType: "application/json", token })); },
   };
 }
 
