@@ -147,7 +147,7 @@ function spawnFixture(mode, marker, preservationMarker, { env: configuredEnv = {
     childEnv.HARNESS_META_OUTPUT_BYTES = String(outputBytes);
     childArgs = ["-e", [
       "const outputBytes = Number(process.env.HARNESS_META_OUTPUT_BYTES || 0);",
-      "process.stderr.write(`${process.env.HARNESS_META_PARENT_SECRET || ''}\\n${process.env.HARNESS_META_CONFIG_TOKEN || ''}\\n${'x'.repeat(outputBytes)}`);",
+      "process.stderr.write(`${process.env.LOCAL_INSTANCE_NONCE || ''}\\n${process.env.HARNESS_META_CONFIG_TOKEN || ''}\\n${'x'.repeat(outputBytes)}`);",
       "process.exit(17);",
     ].join("\n")];
   } else if (mode === "never-publish") {
@@ -194,7 +194,7 @@ describe.sequential("integration harness process cleanup", () => {
     const marker = join(directory, "published.json");
     const inheritedSecret = "meta-inherited-secret-sentinel";
     const configuredSecret = "meta-configured-token-sentinel";
-    process.env.HARNESS_META_PARENT_SECRET = inheritedSecret;
+    process.env.LOCAL_INSTANCE_NONCE = inheritedSecret;
     const fixture = spawnFixture("immediate-exit", marker, join(directory, "preserved.json"), {
       env: { HARNESS_META_CONFIG_TOKEN: configuredSecret },
       outputBytes: FIXTURE_OUTPUT_MAX_BYTES * 2,
@@ -210,7 +210,7 @@ describe.sequential("integration harness process cleanup", () => {
       expect(Buffer.byteLength(fixture.output(), "utf8")).toBeLessThanOrEqual(FIXTURE_OUTPUT_MAX_BYTES);
       expect(fixture.output()).toContain("[output truncated]");
     } finally {
-      delete process.env.HARNESS_META_PARENT_SECRET;
+      delete process.env.LOCAL_INSTANCE_NONCE;
       await terminateGroup(fixture.child.pid);
       await rm(directory, { recursive: true, force: true });
     }
