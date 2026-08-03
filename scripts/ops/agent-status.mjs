@@ -64,10 +64,10 @@ export function parseCliArgs(argv, env = process.env) {
 
 function commandError(code, message = code) { const error = new Error(message); error.code = code; return error; }
 
-export async function spawnCommand(binary, args, { timeoutMs = DEFAULT_TIMEOUT_MS, killGraceMs = 250, maxBufferBytes = MAX_COMMAND_OUTPUT_BYTES, spawnImpl = spawn } = {}) {
+export async function spawnCommand(binary, args, { timeoutMs = DEFAULT_TIMEOUT_MS, killGraceMs = 250, maxBufferBytes = MAX_COMMAND_OUTPUT_BYTES, spawnImpl = spawn, env } = {}) {
   return new Promise((resolve, reject) => {
     let child;
-    try { child = spawnImpl(binary, args, { stdio: ["ignore", "pipe", "pipe"], shell: false }); }
+    try { child = spawnImpl(binary, args, { stdio: ["ignore", "pipe", "pipe"], shell: false, ...(env ? { env } : {}) }); }
     catch (error) { reject(error); return; }
     let stdout = "", stderr = "", bytes = 0, pendingError = null, settled = false, killTimer, forceTimer;
     const finish = (callback, value) => { if (settled) return; settled = true; clearTimeout(timeoutTimer); clearTimeout(killTimer); clearTimeout(forceTimer); callback(value); };

@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { NextResponse } from "next/server";
 import { getStorage, PartialReadError } from "@/lib/storage";
+import { credentialSeparationAttestation } from "@/lib/credential-separation.mjs";
 
 function resolveSha(): string {
   if (process.env.VERCEL_GIT_COMMIT_SHA) {
@@ -56,5 +57,6 @@ export async function GET() {
     storage,
     gateway_key_present: Boolean(process.env.AI_GATEWAY_API_KEY),
     runner_secret_present: Boolean(process.env.RUNNER_CALLBACK_SECRET),
+    credential_separation: credentialSeparationAttestation(process.env),
   });
 }

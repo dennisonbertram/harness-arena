@@ -4,6 +4,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { SimpleSpanProcessor, type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Instrumentation } from "next";
 import { log, normalizeError } from "./lib/log";
+import { assertOpsReadCredentialSeparation } from "./lib/credential-separation.mjs";
 
 const SAFE_RESOURCE = resourceFromAttributes({ "service.name": "harness-arena" });
 const SAFE_SCOPE = { name: "harness-arena-sanitized" };
@@ -70,6 +71,7 @@ export function createSafeSpanProcessor(exporter: SpanExporter = new OTLPHttpPro
 }
 
 export function register() {
+  assertOpsReadCredentialSeparation(process.env);
   registerOTel({
     serviceName: "harness-arena",
     // An explicit processor disables @vercel/otel's parallel automatic

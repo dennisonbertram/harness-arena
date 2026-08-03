@@ -5,6 +5,7 @@ import { getOpsReadAdapter, type OpsReadAdapter } from "./ops-read-adapter";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 import { isRunOperationallyStale } from "./stale-policy";
 import { configuredSecrets, redactOpsValue as redactSharedOpsValue, sanitizeHttpUrls } from "./ops-redaction.mjs";
+import { assertOpsReadCredentialSeparation, credentialSeparationAttestation, separatedCredential } from "./credential-separation.mjs";
 
 export const OPS_SCHEMA_VERSION = "ops.v1";
 export const OPS_RECORD_KINDS = [
@@ -26,6 +27,7 @@ export type OpsKind = typeof OPS_RECORD_KINDS[number]["kind"];
 const MAX_LIMIT = 100, DEFAULT_LIMIT = 50, MAX_BYTES = 750_000, SUMMARY_READ_BYTES = 262_144, READ_TIMEOUT_MS = 3_000, MAX_SUMMARY_RECORDS = 1_000;
 
 export function opsAuthorized(value: string | null) {
+  if (credentialSeparationAttestation(process.env).state !== "ok") return false;
   const expected = process.env.OPS_READ_TOKEN ?? "", match = /^Bearer ([^\s]+)$/.exec(value ?? ""), actual = match?.[1] ?? "";
   const digest = (input: string) => createHash("sha256").update(input).digest();
   const equal = timingSafeEqual(digest(expected), digest(actual));
@@ -34,7 +36,7 @@ export function opsAuthorized(value: string | null) {
 export function redactUrl(value: string) { return sanitizeHttpUrls(value); }
 export function redactOpsValue(value: unknown, key = ""): unknown { return redactSharedOpsValue(value, configuredSecrets(process.env), key); }
 type CursorPayload = { kind: OpsKind; prefix: string; blob_cursor?: string; snapshot_at: string; filter?: string; run_id?: string; root?: string; last_event?: { run_id: string; seq: number }; v?: 1 };
-const cursorKey = () => {const value=process.env.OPS_READ_CURSOR_SECRET;if(!value||value===process.env.OPS_READ_TOKEN)throw new Error("cursor_secret_missing");return value;};
+const cursorKey = () => {assertOpsReadCredentialSeparation(process.env);const value=separatedCredential("OPS_READ_CURSOR_SECRET");if(!value)throw new Error("cursor_secret_missing");return value;};
 export function encodeOpsCursor(payload: CursorPayload) { const body=Buffer.from(JSON.stringify({...payload,v:1})).toString("base64url");return `${body}.${createHmac("sha256",cursorKey()).update(body).digest("base64url")}`; }
 export function decodeOpsCursor(cursor:string, context:Pick<CursorPayload,"kind"|"prefix">):CursorPayload { try {const [body,sig,...extra]=cursor.split(".");if(!body||!sig||extra.length)throw 0;const expected=createHmac("sha256",cursorKey()).update(body).digest(),actual=Buffer.from(sig,"base64url");if(actual.length!==expected.length||!timingSafeEqual(expected,actual))throw 0;const value=JSON.parse(Buffer.from(body,"base64url").toString()) as CursorPayload;if(value.v!==1||value.kind!==context.kind||value.prefix!==context.prefix)throw 0;return value;}catch{throw new Error("invalid_cursor");} }
 const definition = (kind: OpsKind) => OPS_RECORD_KINDS.find((entry) => entry.kind === kind)!;
