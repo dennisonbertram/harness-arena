@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/passive-monitor-cron.mjs", () => ({
   executePassiveMonitorCron: vi.fn().mockResolvedValue({
@@ -17,12 +17,31 @@ import { log } from "@/lib/log";
 import { GET } from "./route";
 
 describe("GET /api/cron/agent-monitor", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   it("emits one sanitized trace-correlated monitor.observation per fixed environment", async () => {
+    vi.stubEnv("CRON_SECRET", "route-cron-secret");
+    vi.stubEnv("DEVELOPMENT_OPS_READ_TOKEN", "route-development-read-token");
+    vi.stubEnv("PRODUCTION_OPS_READ_TOKEN", "route-production-read-token");
+    vi.stubEnv("VERCEL_READ_TOKEN", "route-vercel-read-token");
+    vi.stubEnv("VERCEL_PROJECT_ID", "route-development-project");
+    vi.stubEnv("VERCEL_ENV", "production");
     const request = new Request("https://harness-arena-development.vercel.app/api/cron/agent-monitor", { headers: { authorization: "Bearer route-secret" } });
     const response = await GET(request);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true });
-    expect(executePassiveMonitorCron).toHaveBeenCalledWith(expect.objectContaining({ request, env: process.env, fetchImpl: globalThis.fetch }));
+    expect(executePassiveMonitorCron).toHaveBeenCalledWith({
+      request,
+      env: {
+        CRON_SECRET: "route-cron-secret",
+        DEVELOPMENT_OPS_READ_TOKEN: "route-development-read-token",
+        PRODUCTION_OPS_READ_TOKEN: "route-production-read-token",
+        VERCEL_READ_TOKEN: "route-vercel-read-token",
+        VERCEL_PROJECT_ID: "route-development-project",
+        VERCEL_ENV: "production",
+      },
+      fetchImpl: globalThis.fetch,
+    });
     expect(log).toHaveBeenCalledTimes(2);
     expect(log).toHaveBeenNthCalledWith(1, "info", "monitor.observation", expect.objectContaining({
       target_environment: "development",
