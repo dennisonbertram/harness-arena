@@ -1,5 +1,7 @@
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { describe, expect, it, vi } from "vitest";
-import { createSpanAttributeSanitizer, onRequestError } from "./instrumentation";
+import { createSafeSpanProcessor, onRequestError } from "./instrumentation";
 
 describe("onRequestError", () => {
   it("awaits structured safe Error telemetry without raw error text or stack", async () => {
@@ -40,24 +42,42 @@ describe("onRequestError", () => {
     spy.mockRestore();
   });
 
-  it("drops every URL, query, and request attribute except the safe HTTP method", () => {
-    const sanitizer = createSpanAttributeSanitizer();
-    const span = { attributes: {
-      "url.full": "https://arena.example/api/runs?token=secret",
-      "http.target": "/api/runs?signature=secret",
-      "http.request.header.authorization": "Bearer secret",
-      "http.request.method": "POST",
-      "http.response.status_code": 503,
-      "server.address": "arena.example",
-      "custom.attribute": "safe",
-    } };
-    sanitizer.onStart(span as never);
-    sanitizer.onEnding?.(span as never);
-    expect(span.attributes).toEqual({
-      "http.request.method": "POST",
-      "http.response.status_code": 503,
-      "server.address": "arena.example",
-      "custom.attribute": "safe",
+  it("exports only a safe clone through the real SpanProcessor onEnd lifecycle", async () => {
+    const captured: ReadableSpan[] = [];
+    const exporter: SpanExporter = {
+      export(spans, callback) { captured.push(...spans); callback({ code: 0 }); },
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    };
+    const provider = new BasicTracerProvider({ spanProcessors: [createSafeSpanProcessor(exporter)] });
+    const span = provider.getTracer("hostile?scope=secret").startSpan("GET https://arena.example/api/runs?token=secret", {
+      kind: SpanKind.SERVER,
+      attributes: {
+        "url.full": "https://arena.example/api/runs?token=secret",
+        "http.target": "/api/runs?signature=secret",
+        "http.request.header.authorization": "Bearer secret",
+        "http.request.method": "POST",
+        "http.response.status_code": 503,
+        "custom.attribute": "secret provider payload",
+      },
+      links: [{ context: { traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1 }, attributes: { payload: "secret-link" } }],
     });
+    span.recordException(new Error("secret exception message"));
+    span.setStatus({ code: SpanStatusCode.ERROR, message: "secret status message" });
+    span.end();
+    await provider.forceFlush();
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({
+      name: "harness.span",
+      attributes: { "http.request.method": "POST", "http.response.status_code": 503 },
+      status: { code: SpanStatusCode.ERROR },
+      events: [], links: [],
+      instrumentationScope: { name: "harness-arena-sanitized" },
+      resource: { attributes: { "service.name": "harness-arena" } },
+    });
+    const exported = JSON.stringify(captured[0]);
+    for (const forbidden of ["secret", "token=", "signature=", "exception.message", "exception.stacktrace"]) expect(exported).not.toContain(forbidden);
+    await provider.shutdown();
   });
 });

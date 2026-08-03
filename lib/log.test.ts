@@ -123,4 +123,19 @@ describe("observability logger contract", () => {
     expect((output as string).length).toBeLessThanOrEqual(2_048);
     expect(output).not.toContain("secret-after-the-boundary");
   });
+
+  it("does not leak the prefix of a configured secret longer than the input bound", () => {
+    const longSecret = `prefix-${"s".repeat(3_000)}`;
+    const output = String(redactLogValue(`provider returned ${longSecret}`, new Set([longSecret])));
+    expect(output).toContain("[REDACTED]");
+    expect(output).not.toContain(longSecret.slice(0, 128));
+    expect(output.length).toBeLessThanOrEqual(2_048);
+  });
+
+  it("normalizes an Error with a hostile name getter without throwing", () => {
+    const hostile = new Error("payload must stay unread");
+    Object.defineProperty(hostile, "name", { get: () => { throw new Error("hostile name getter"); } });
+    expect(() => normalizeError(hostile, "request")).not.toThrow();
+    expect(normalizeError(hostile, "request")).toMatchObject({ error_class: "error", error_stage: "request" });
+  });
 });
