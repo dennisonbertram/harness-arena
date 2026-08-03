@@ -360,6 +360,86 @@ describe("ops evidence and verdict honesty", () => {
     } finally { process.off("unhandledRejection", onUnhandled); }
   });
 
+  it("does not trust Proxy Symbol traps as internal failure brands", async () => {
+    let symbolReads = 0;
+    const forged = new Proxy(new Error("hostile transport"), {
+      get(target, key, receiver) {
+        if (typeof key === "symbol") { symbolReads += 1; return "request_timeout"; }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const fetchFailure = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockRejectedValue(forged),
+      timeoutMs: 25,
+      retries: 0,
+    });
+    const readFailure = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockResolvedValue({
+        status: 200,
+        headers: new Headers(),
+        body: { locked: false, getReader: () => ({ read: () => Promise.reject(forged), cancel: vi.fn(), releaseLock: vi.fn() }) },
+      }),
+      timeoutMs: 25,
+      retries: 0,
+    });
+    expect(fetchFailure).toMatchObject({ error: "request_failed", kind: "transport" });
+    expect(readFailure).toMatchObject({ error: "invalid_response", kind: "transport" });
+    expect(symbolReads).toBe(0);
+  });
+
+  it("checks intrinsic chunk byte lengths before any copy or attacker-controlled index read", async () => {
+    const typed = new Uint8Array(32);
+    const arrayBuffer = new ArrayBuffer(32);
+    const dataView = new DataView(new ArrayBuffer(32));
+    const proxied = new Proxy(new Uint8Array(32), {});
+    let indexReads = 0;
+    const forgedTypedArray = Object.setPrototypeOf({
+      length: 32,
+      get 0() { indexReads += 1; return 65; },
+    }, Uint8Array.prototype);
+    const values = [typed, arrayBuffer, dataView, proxied, forgedTypedArray];
+    const copiedInputs = [];
+    const originalFrom = Buffer.from;
+    const from = vi.spyOn(Buffer, "from").mockImplementation(function (...args) {
+      copiedInputs.push(args[0]);
+      return originalFrom.apply(Buffer, args);
+    });
+    try {
+      const results = [];
+      for (const value of values) {
+        const cancel = vi.fn();
+        results.push(await requestOpsJson({
+          baseUrl: new URL("https://arena.example"),
+          path: "/api/health",
+          fetchImpl: vi.fn().mockResolvedValue({
+            status: 200,
+            headers: new Headers(),
+            body: { locked: false, getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value }), cancel, releaseLock: vi.fn() }) },
+          }),
+          maxResponseBytes: 8,
+          timeoutMs: 25,
+          retries: 0,
+        }));
+        expect(cancel).toHaveBeenCalledOnce();
+      }
+      expect(results.slice(0, 2)).toEqual([
+        expect.objectContaining({ error: "response_too_large" }),
+        expect.objectContaining({ error: "response_too_large" }),
+      ]);
+      expect(results.slice(2)).toEqual([
+        expect.objectContaining({ error: "invalid_response" }),
+        expect.objectContaining({ error: "invalid_response" }),
+        expect.objectContaining({ error: "invalid_response" }),
+      ]);
+      expect(copiedInputs.some((input) => values.includes(input))).toBe(false);
+      expect(indexReads).toBe(0);
+    } finally { from.mockRestore(); }
+  });
+
   it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
     const fetchImpl = healthyApiFetch();
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
@@ -469,6 +549,70 @@ describe("ops evidence and verdict honesty", () => {
 });
 
 describe("redaction, platform wiring, and process bounds", () => {
+  it("sanitizes untrusted object and Error keys collision-safely while preserving truthful fields", () => {
+    const knownSecret = "client-known-key-secret";
+    const sentinels = {
+      knownKey: knownSecret,
+      credentialKey: "client-credential-key-sentinel",
+      errorKey: "client-error-key-sentinel",
+      urlUserA: "client-url-user-a",
+      urlPassA: "client-url-pass-a",
+      urlQueryA: "client-url-query-a",
+      urlUserB: "client-url-user-b",
+      urlPassB: "client-url-pass-b",
+      urlQueryB: "client-url-query-b",
+      sensitiveValue: "client-sensitive-value",
+      callbackValue: "client-callback-value",
+    };
+    const error = new Error("truthful error message");
+    error[`apiToken=${sentinels.errorKey}`] = sentinels.sensitiveValue;
+    error[`https://${sentinels.urlUserA}:${sentinels.urlPassA}@x.test/error?sig=${sentinels.urlQueryA}`] = "error-url-value";
+    const output = redactSensitive({
+      truth: {
+        author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+        authentication_method: "passkey", oauth_provider: "github", authors: "compiler team",
+      },
+      collisions: {
+        [`https://${sentinels.urlUserA}:${sentinels.urlPassA}@x.test/a?sig=${sentinels.urlQueryA}`]: "collision-value-a",
+        [`https://${sentinels.urlUserB}:${sentinels.urlPassB}@x.test/a?sig=${sentinels.urlQueryB}`]: "collision-value-b",
+      },
+      [`prefix-${knownSecret}-suffix`]: "known-key-value",
+      [`accessToken=${sentinels.credentialKey}`]: sentinels.sensitiveValue,
+      callback: { toJSON: () => ({ leak: sentinels.callbackValue }) },
+      error,
+    }, [knownSecret]);
+    const text = JSON.stringify(output);
+    for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+    expect(output.truth).toEqual({
+      author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+      authentication_method: "passkey", oauth_provider: "github", authors: "compiler team",
+    });
+    expect(Object.keys(output.collisions)).toHaveLength(2);
+    expect(Object.values(output.collisions).sort()).toEqual(["collision-value-a", "collision-value-b"]);
+    expect(Object.values(output)).toContain("known-key-value");
+  });
+
+  it("scans long, escaped, near-cap, and malformed assignments or fails closed before processing", () => {
+    const cap = 64 * 1024;
+    const quotedKey = `${"q".repeat(129)}AccessToken`;
+    const bareKey = `${"b".repeat(82)}_client_secret`;
+    const sentinels = ["quoted-long-leak", "bare-long-leak", "escaped-leak", "malformed-leak", "near-cap-leak"];
+    const escapedKey = `${"e".repeat(129)}\\\"refresh_token`;
+    const input = [
+      JSON.stringify({ [quotedKey]: sentinels[0] }),
+      `${bareKey}=${sentinels[1]}`,
+      `{"${escapedKey}":"${sentinels[2]}"}`,
+      `{"${quotedKey}":"${sentinels[3]}`,
+    ].join("\n");
+    const nearAssignment = ` access_token="${sentinels[4]}"`;
+    const nearCap = `${"x".repeat(cap - nearAssignment.length)}${nearAssignment}`;
+    const redacted = `${redactSensitive(input)}\n${redactSensitive(nearCap)}`;
+    for (const sentinel of sentinels) expect(redacted).not.toContain(sentinel);
+    expect(redactSensitive(`${"x".repeat(cap)} access_token=oversized-leak`)).toBe("[REDACTED]");
+    const assignmentOverflow = `${Array.from({ length: 257 }, (_, index) => `safe_${index}=value`).join(" ")} access_token=count-overflow-leak`;
+    expect(redactSensitive(assignmentOverflow)).toBe("[REDACTED]");
+  });
+
   it("uses one normalized sentinel matrix for URLs, credential keys, Errors, and every nonempty secret", () => {
     const sentinels = {
       tokenHeader: "sentinel-token-header",

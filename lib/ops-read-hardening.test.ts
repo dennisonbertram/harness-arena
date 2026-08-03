@@ -8,6 +8,68 @@ import {
 } from "./ops-read";
 
 describe("ops read hardening contract", () => {
+  it("uses collision-safe untrusted keys and a strict env-secret grammar without hiding truthful telemetry", () => {
+    const env = {
+      AUTH_URL: "public-auth-route", SESSION_COUNT: "7", PUBLIC_TOKEN_COUNT: "8",
+      AUTHENTICATION_METHOD: "public-auth-method", OAUTH_PROVIDER: "public-oauth-provider", AUTHORS: "public-authors-value",
+      SERVICE_TOKEN: "server-env-token", SERVICE_SECRET: "server-env-secret", SERVICE_PASSWORD: "server-env-password",
+      SIGNING_KEY: "server-env-signing-key",
+    };
+    const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+    for (const [key, value] of Object.entries(env)) process.env[key] = value;
+    const sentinels = {
+      knownKey: env.SERVICE_SECRET,
+      credentialKey: "server-credential-key-sentinel",
+      errorKey: "server-error-key-sentinel",
+      urlUserA: "server-url-user-a", urlPassA: "server-url-pass-a", urlQueryA: "server-url-query-a",
+      urlUserB: "server-url-user-b", urlPassB: "server-url-pass-b", urlQueryB: "server-url-query-b",
+      sensitiveValue: "server-sensitive-value", callbackValue: "server-callback-value",
+    };
+    try {
+      const error = new Error("truthful server error");
+      (error as Error & Record<string, unknown>)[`apiToken=${sentinels.errorKey}`] = sentinels.sensitiveValue;
+      const output = redactOpsValue({
+        truth: {
+          author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+          authentication_method: "passkey", oauth_provider: "github", authors: env.AUTHORS,
+          public_values: `${env.AUTH_URL}/${env.SESSION_COUNT}/${env.PUBLIC_TOKEN_COUNT}/${env.AUTHENTICATION_METHOD}/${env.OAUTH_PROVIDER}/${env.AUTHORS}`,
+        },
+        collisions: {
+          [`https://${sentinels.urlUserA}:${sentinels.urlPassA}@x.test/a?sig=${sentinels.urlQueryA}`]: "collision-value-a",
+          [`https://${sentinels.urlUserB}:${sentinels.urlPassB}@x.test/a?sig=${sentinels.urlQueryB}`]: "collision-value-b",
+        },
+        [`prefix-${env.SERVICE_SECRET}-suffix`]: "known-key-value",
+        [`accessToken=${sentinels.credentialKey}`]: sentinels.sensitiveValue,
+        callback: { toJSON: () => ({ leak: sentinels.callbackValue }) },
+        secrets: `${env.SERVICE_TOKEN}/${env.SERVICE_SECRET}/${env.SERVICE_PASSWORD}/${env.SIGNING_KEY}`,
+        error,
+      }) as Record<string, unknown> & { truth: Record<string, unknown>; collisions: Record<string, unknown> };
+      const text = JSON.stringify(output);
+      for (const sentinel of Object.values(sentinels)) expect(text).not.toContain(sentinel);
+      for (const secret of [env.SERVICE_TOKEN, env.SERVICE_SECRET, env.SERVICE_PASSWORD, env.SIGNING_KEY]) expect(text).not.toContain(secret);
+      expect(output.truth).toEqual({
+        author: "Ada", authority: "maintainer", session_count: 7, token_count: 8,
+        authentication_method: "passkey", oauth_provider: "github", authors: env.AUTHORS,
+        public_values: `${env.AUTH_URL}/${env.SESSION_COUNT}/${env.PUBLIC_TOKEN_COUNT}/${env.AUTHENTICATION_METHOD}/${env.OAUTH_PROVIDER}/${env.AUTHORS}`,
+      });
+      expect(Object.keys(output.collisions)).toHaveLength(2);
+      expect(Object.values(output.collisions).sort()).toEqual(["collision-value-a", "collision-value-b"]);
+      expect(Object.values(output)).toContain("known-key-value");
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
+  it("redacts assignment keys beyond the former 128/81 limits", () => {
+    const quoted = `${"q".repeat(129)}AccessToken`;
+    const bare = `${"b".repeat(82)}_client_secret`;
+    const output = JSON.stringify(redactOpsValue({ serialized: `{"${quoted}":"server-long-quoted"}\n${bare}=server-long-bare` }));
+    expect(output).not.toContain("server-long-quoted");
+    expect(output).not.toContain("server-long-bare");
+  });
+
   it("normalizes the full credential-key grammar, URL schemes, Error fields, and short configured secrets", () => {
     const previous = { token: process.env.OPS_READ_TOKEN, session: process.env.SESSION_SECRET };
     process.env.OPS_READ_TOKEN = "q";
