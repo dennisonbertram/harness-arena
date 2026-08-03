@@ -1,4 +1,4 @@
-import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -146,6 +146,37 @@ describe("onRequestError", () => {
     logSpy.mockRestore();
   });
 
+  it("evicts a lower-priority retained child so a root that ends last survives the bounded queue", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const captured: ReadableSpan[] = [];
+    const exporter = {
+      export: vi.fn((spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => { captured.push(...spans); callback({ code: 0 }); }),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "structured");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    const tracer = provider.getTracer("priority-test");
+    const root = tracer.startSpan("request-root", { kind: SpanKind.INTERNAL });
+    const rootSpanId = root.spanContext().spanId;
+    const droppedBefore = structuredSpanReadiness().structured.dropped;
+
+    context.with(trace.setSpan(context.active(), root), () => {
+      for (let index = 0; index < 32; index += 1) tracer.startSpan(`server-child-${index}`, { kind: SpanKind.SERVER }).end();
+    });
+    root.end();
+    await provider.forceFlush();
+
+    expect(captured).toHaveLength(32);
+    expect(captured.some((span) => span.spanContext().spanId === rootSpanId)).toBe(true);
+    expect(structuredSpanReadiness().structured).toMatchObject({ queued: 0, dropped: droppedBefore + 1 });
+    expect(logSpy.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)).toContainEqual(expect.objectContaining({
+      event: "trace.span_dropped", reason: "priority_evicted", sink: "structured",
+    }));
+    await provider.shutdown();
+    logSpy.mockRestore();
+  });
+
   it("keeps a failed OTLP batch bounded and retryable without letting structured delivery hide its failure", async () => {
     let acknowledge = false;
     const exporter = {
@@ -204,6 +235,37 @@ describe("onRequestError", () => {
     await provider.shutdown();
   });
 
+  it("emits one sanitized hosted sink-state transition on OTLP export failure and one on recovery", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let acknowledge = false;
+    const exporter = {
+      export: vi.fn((_spans: ReadableSpan[], callback: (result: { code: number; error?: Error }) => void) => callback(
+        acknowledge ? { code: 0 } : { code: 1, error: new Error("collector unavailable authorization=secret-value") },
+      )),
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    } satisfies SpanExporter;
+    const processor = new BoundedSpanProcessor(exporter, "otlp");
+    const provider = new BasicTracerProvider({ spanProcessors: [processor] });
+    provider.getTracer("sink-state-test").startSpan("request-root").end();
+
+    await expect(provider.forceFlush()).rejects.toBeDefined();
+    provider.getTracer("sink-state-test").startSpan("queued-after-failure").end();
+    acknowledge = true;
+    await provider.forceFlush();
+
+    const transitions = logSpy.mock.calls
+      .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .filter((entry) => entry.event === "trace.sink_state");
+    expect(transitions).toEqual([
+      expect.objectContaining({ event: "trace.sink_state", sink: "otlp", state: "degraded", reason: "export_unacknowledged", queued: 1, dropped: expect.any(Number) }),
+      expect.objectContaining({ event: "trace.sink_state", sink: "otlp", state: "ready", queued: 0, dropped: expect.any(Number) }),
+    ]);
+    expect(JSON.stringify(transitions)).not.toContain("secret-value");
+    await provider.shutdown();
+    logSpy.mockRestore();
+  });
+
   it("fails closed for unsupported configured OTLP protocol without exposing header values", () => {
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc");
@@ -240,6 +302,23 @@ describe("onRequestError", () => {
     expect(createSafeSpanProcessors()).toHaveLength(1);
     expect(structuredSpanReadiness()).toMatchObject({ ready: false, otlp: { configured: true, ready: false, reason: "invalid_headers" } });
     expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-value");
+    spy.mockRestore();
+  });
+
+  it("emits an invalid OTLP configuration transition once without endpoint or header values", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces?secret=endpoint-value");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=Bearer%ZZheader-value");
+    expect(createSafeSpanProcessors()).toHaveLength(1);
+    expect(createSafeSpanProcessors()).toHaveLength(1);
+
+    const transitions = spy.mock.calls
+      .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .filter((entry) => entry.event === "trace.sink_state");
+    expect(transitions).toEqual([
+      expect.objectContaining({ event: "trace.sink_state", sink: "otlp", state: "degraded", reason: "invalid_headers", queued: 0, dropped: 0 }),
+    ]);
+    expect(JSON.stringify(transitions)).not.toMatch(/endpoint-value|header-value|collector\.example/);
     spy.mockRestore();
   });
 });
