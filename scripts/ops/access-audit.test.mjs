@@ -89,6 +89,7 @@ describe("least-privilege access policy", () => {
     });
     const env = {
       OPS_READ_TOKEN: "read-token",
+      GH_TOKEN: "github-read-token",
       VERCEL_TOKEN: "viewer-token",
       VERCEL_TEAM_ID: "team-one",
       VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0],
@@ -100,6 +101,42 @@ describe("least-privilege access policy", () => {
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
     expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
+  });
+
+  it("attests all local audit credentials before making any external request", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const commandRunner = vi.fn();
+    const fetchImpl = vi.fn();
+    const secret = "must-never-leave-process";
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: {
+        OPS_READ_TOKEN: secret,
+        GH_TOKEN: "github-read-token",
+        VERCEL_TOKEN: secret,
+        VERCEL_TEAM_ID: "team-one",
+        VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0],
+        HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app",
+      },
+      commandRunner, fetchImpl,
+    });
+    expect(commandRunner).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(collected.ops).toMatchObject({ state: "missing", reason: "credential_separation_invalid" });
+    expect(JSON.stringify(collected)).not.toContain(secret);
+  });
+
+  it("does not use inherited GitHub CLI authentication when explicit GH_TOKEN is unavailable", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const commandRunner = vi.fn(async () => ({ exitCode: 1, stdout: "" }));
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: {}, commandRunner, fetchImpl: vi.fn(),
+    });
+    expect(collected.github).toMatchObject({ state: "missing", reason: "github_explicit_identity_missing" });
+    expect(commandRunner.mock.calls.some(([binary]) => binary === "gh")).toBe(false);
   });
 
   it("rejects arbitrary 200 responses instead of treating them as ops.v1 proof", async () => {
@@ -167,11 +204,28 @@ describe("least-privilege access policy", () => {
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "PROJECT_DEVELOPER" }] } }).project_role).toBe("DEVELOPER");
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "ADMIN" }] } }).project_role).toBe("ADMIN");
     expect(audit.normalizeVercelAccess({ projectId: "project-one", userId: "user-one", team: { membership: { role: "VIEWER" } }, project: { members: [{ uid: "user-one", role: "project-admin" }] } }).project_role).toBe("ADMIN");
+    expect(audit.normalizeVercelAccess({
+      projectId: "project-one",
+      userId: "user-one",
+      team: { membership: { role: "VIEWER", teamRoles: ["VIEWER"], teamPermissions: [] } },
+      project: { members: [{ uid: "user-one", role: "PROJECT_VIEWER" }, { uid: "user-one", role: "PROJECT_ADMIN" }] },
+    })).toMatchObject({ project_role: "ADMIN", extended_permissions_complete: true });
     for (const role of ["PROJECT_DEVELOPER", "ADMIN", "project-admin"]) {
       const raw = await evidence("viewer");
       raw.vercel.project_role = role;
       expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "vercel")?.state, role).toBe("overprivileged");
     }
+    for (const permission of ["CreateProject", "FullProductionDeployment", "OrgAdmin", "EnvironmentManager"]) {
+      const raw = await evidence("viewer");
+      raw.vercel.team_permissions = [permission];
+      raw.vercel.extended_permissions_complete = true;
+      expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "vercel"), permission)
+        .toMatchObject({ state: "overprivileged" });
+    }
+    const unverifiable = await evidence("viewer");
+    unverifiable.vercel.extended_permissions_complete = false;
+    expect(audit.auditAccessEvidence(policy, unverifiable, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "vercel"))
+      .toMatchObject({ state: "missing", reasons: ["vercel_extended_permissions_unverifiable"] });
   });
 
   it("derives every runtime credential-separation class from one central policy", async () => {
