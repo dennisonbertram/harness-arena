@@ -237,7 +237,10 @@ export function parseOtlpHeaders(value: string | undefined): Record<string, stri
     let headerValue: string;
     try { headerValue = decodeURIComponent(encodedValue); } catch { return null; }
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) || !headerValue || /[\u0000-\u001F\u007F]/.test(headerValue)) return null;
-    headers[key] = headerValue;
+    // HTTP field names are case-insensitive. Canonicalizing before the
+    // general/trace-specific merge makes the latter replace the former and
+    // lets protocol-owned content headers replace any configured casing.
+    headers[key.toLowerCase()] = headerValue;
   }
   return headers;
 }
