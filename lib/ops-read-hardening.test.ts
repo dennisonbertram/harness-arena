@@ -33,4 +33,14 @@ describe("ops read hardening contract", () => {
     process.env.BLOB_READ_WRITE_TOKEN = "rw-secret";
     expect(redactOpsValue({ nested: ["https://x.test/a?token=signed", "rw-secret"], api_key: "leak" })).toEqual({ nested: ["https://x.test/a", "[REDACTED]"], api_key: "[REDACTED]" });
   });
+
+  it("redacts quoted and camel-case credentials in stringified JSON and nested errors", () => {
+    const error = new Error('failed={"access_token":"error-access","refresh_token":"error-refresh","clientSecret":"error-client"}');
+    const output = JSON.stringify(redactOpsValue({
+      error,
+      nested: ['{"access_token":"nested-access","refresh_token":"nested-refresh","clientSecret":"nested-client"}'],
+    }));
+    for (const leaked of ["error-access", "error-refresh", "error-client", "nested-access", "nested-refresh", "nested-client"]) expect(output).not.toContain(leaked);
+    expect(output).toContain("[REDACTED]");
+  });
 });

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -65,6 +66,7 @@ describe("CLI contract and command safety", () => {
     expect(parseCliArgs(["--env", "development"], {})).toMatchObject({ environment: "development", json: false, expected_ref: "dev", collect_platform: true });
     expect(parseCliArgs(["--env", "local"], {})).toMatchObject({ environment: "local", collect_platform: false, base_url: "http://127.0.0.1:3000" });
     expect(() => parseCliArgs(["--env", "staging"], {})).toThrow("invalid_environment");
+    expect(() => parseCliArgs(["--env", "production"], { HARNESS_ARENA_PRODUCTION_URL: "https://user:pass@arena.example" })).toThrow("invalid_base_url");
   });
 
   it("uses exact Vercel argv grammars and rejects mutation and option injection", async () => {
@@ -115,6 +117,116 @@ describe("fixture-driven evidence parsers", () => {
 });
 
 describe("ops evidence and verdict honesty", () => {
+  it("rejects a real 302 without issuing a second request or forwarding the bearer token", async () => {
+    const requests = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        url: request.url,
+        authorization: request.headers.authorization,
+        contentLength: request.headers["content-length"],
+        transferEncoding: request.headers["transfer-encoding"],
+      });
+      if (request.url === "/api/health") {
+        response.writeHead(302, { location: "/credential-capture" });
+        response.end("redirecting");
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+    const port = await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+    });
+    try {
+      const result = await requestOpsJson({ baseUrl: new URL(`http://127.0.0.1:${port}`), path: "/api/health", token: "redirect-secret", timeoutMs: 1_000, retries: 0 });
+      expect(result).toMatchObject({ ok: false, status: 302, error: "redirect_rejected", kind: "redirect", attempts: 1 });
+      expect(requests).toEqual([{ url: "/api/health", authorization: "Bearer redirect-secret", contentLength: undefined, transferEncoding: undefined }]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("rejects every redirect status without reading its body or retrying", async () => {
+    for (const status of [300, 301, 302, 303, 307, 308, 399]) {
+      let cancelled = false;
+      const body = new ReadableStream({ cancel() { cancelled = true; } });
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, headers: new Headers({ location: "/elsewhere" }), body, json: vi.fn(async () => ({ unexpected: true })) });
+      await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", token: "redirect-secret", fetchImpl, timeoutMs: 100, retries: 2 })).resolves.toMatchObject({
+        ok: false,
+        status,
+        error: "redirect_rejected",
+        kind: "redirect",
+        attempts: 1,
+      });
+      expect(cancelled).toBe(true);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(fetchImpl).toHaveBeenCalledWith("https://arena.example/api/health", expect.objectContaining({ redirect: "manual" }));
+    }
+  });
+
+  it("bounds declared and chunked JSON responses and cancels overflow streams", async () => {
+    for (const declared of [true, false]) {
+      let cancelled = false;
+      const payload = JSON.stringify({ data: "x".repeat(64) });
+      const body = new ReadableStream({
+        start(controller) { controller.enqueue(Buffer.from(payload)); controller.close(); },
+        cancel() { cancelled = true; },
+      });
+      let signal;
+      const fetchImpl = vi.fn(async (_url, init) => {
+        signal = init.signal;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(declared ? { "content-length": String(Buffer.byteLength(payload)) } : {}),
+          body,
+          json: async () => JSON.parse(payload),
+        };
+      });
+      await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0, maxResponseBytes: 16 })).resolves.toMatchObject({
+        ok: false,
+        status: 200,
+        error: "response_too_large",
+        kind: "response_too_large",
+      });
+      expect(cancelled).toBe(true);
+      expect(signal.aborted).toBe(true);
+      expect(fetchImpl).toHaveBeenCalledWith("https://arena.example/api/health", expect.objectContaining({ method: "GET", redirect: "manual" }));
+    }
+  });
+
+  it("applies the request deadline while streaming and cleans up the reader", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      pull() { return new Promise(() => {}); },
+      cancel() { cancelled = true; },
+    });
+    let signal;
+    const fetchImpl = vi.fn(async (_url, init) => {
+      signal = init.signal;
+      return { ok: true, status: 200, headers: new Headers(), body, json: async () => { throw new Error("legacy unbounded json path called"); } };
+    });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 10, retries: 0, maxResponseBytes: 16 })).resolves.toMatchObject({ error: "request_timeout", kind: "timeout" });
+    expect(cancelled).toBe(true);
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("fails closed on a malformed content-length before consuming JSON", async () => {
+    let cancelled = false;
+    const json = vi.fn(async () => ({ ok: true }));
+    const body = new ReadableStream({ cancel() { cancelled = true; } });
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "12, 13" }), body, json });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 100, retries: 0 })).resolves.toMatchObject({
+      ok: false,
+      status: 200,
+      error: "invalid_content_length",
+      kind: "invalid_content_length",
+    });
+    expect(cancelled).toBe(true);
+    expect(json).not.toHaveBeenCalled();
+  });
+
   it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
     const fetchImpl = healthyApiFetch();
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
@@ -179,6 +291,9 @@ describe("ops evidence and verdict honesty", () => {
     const runs = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 21 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
     expect(runs).toMatchObject({ verdict: "degraded", ops: { run_correlation_scope: { available: 21, selected: 20, truncated: true } } });
     expect(runs.findings.map(({ code }) => code)).toContain("run_correlation_limit");
+
+    const pageOverflow = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 101 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(pageOverflow).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { records: 0, pages: 0, complete: false, error: "page_item_limit" } } } });
   });
 
   it("classifies unreadable, corrupt, and event-hole integrity evidence as failed", async () => {
@@ -234,6 +349,23 @@ describe("redaction, platform wiring, and process bounds", () => {
     const output = JSON.stringify(redactSensitive(value, ["alpha", "beta", "csrf"]));
     for (const leaked of ["alpha", "beta", "csrf", "one", "two", "three", "access_token=beta", "client_secret=alpha"]) expect(output).not.toContain(leaked);
     expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("redacts quoted and camel-case credentials inside nested JSON strings and Error causes", () => {
+    const cause = new Error('cause={"access_token":"cause-access","clientSecret":"cause-client"}');
+    cause.context = { serialized: '{"refresh_token":"cause-refresh"}' };
+    const error = new Error('upstream={"access_token":"error-access","refresh_token":"error-refresh","clientSecret":"error-client"}', { cause });
+    const value = {
+      error,
+      nested: [
+        '{"access_token":"nested-access","refresh_token":"nested-refresh","clientSecret":"nested-client"}',
+        "clientSecret='single-client' access_token=bare-access",
+      ],
+    };
+    const output = JSON.stringify(redactSensitive(value));
+    for (const leaked of ["cause-access", "cause-client", "cause-refresh", "error-access", "error-refresh", "error-client", "nested-access", "nested-refresh", "nested-client", "single-client", "bare-access"]) expect(output).not.toContain(leaked);
+    expect(output).toContain('"name":"Error"');
+    expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(8);
   });
 
   it("wires the production CLI through injected Vercel/GitHub commands and emits JSON or human output", async () => {
