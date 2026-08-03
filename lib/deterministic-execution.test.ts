@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildRunnerTasks } from "./tasks-for-runner";
+import { redactRunEventPayload } from "./run-error";
 import { resetStorage, storageRef } from "./test-support/storage-ref";
 import type { Run, Submission } from "./types";
 
@@ -71,7 +72,29 @@ describe("deterministic local execution", () => {
     expect(events.every((event) => Date.parse(event.ts) <= Date.parse(stored?.finished_at ?? ""))).toBe(true);
     for (const taskId of taskIds) {
       await expect(storageRef.current.getTraceBytes(run.id, taskId, "session.jsonl")).resolves.not.toBeNull();
+      const result = stored?.task_results.find((candidate) => candidate.task_id === taskId);
+      const agentFinished = events.find((event) => event.type === "task.agent_finished" && event.payload.task_id === taskId);
+      const verified = events.find((event) => event.type === "task.verified" && event.payload.task_id === taskId);
+      expect(redactRunEventPayload("task.agent_finished", agentFinished?.payload)).toEqual({
+        task_id: taskId,
+        turns: result?.turns,
+        output_tokens: result?.output_tokens,
+        cost_usd: result?.cost_usd,
+        duration_s: result?.agent_duration_s,
+      });
+      expect(redactRunEventPayload("task.verified", verified?.payload)).toEqual({
+        task_id: taskId,
+        passed: result?.passed,
+        reward: result?.reward,
+        duration_s: (result?.duration_s ?? 0) - (result?.agent_duration_s ?? 0),
+      });
     }
+    const completed = events.find((event) => event.type === "run.completed");
+    expect(redactRunEventPayload("run.completed", completed?.payload)).toEqual({
+      tasks_passed: stored?.tasks_passed,
+      total_cost_usd: stored?.total_cost_usd,
+      duration_s: stored?.task_results.reduce((sum, result) => sum + (result.duration_s ?? 0), 0),
+    });
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(mockSandboxCreate).not.toHaveBeenCalled();
   });
@@ -84,9 +107,13 @@ describe("deterministic local execution", () => {
 
     const firstTaskId = buildRunnerTasks()[0].id;
     const events = (await storageRef.current.listRunEvents(run.id)).filter((event) => event.payload.task_id === firstTaskId);
-    expect(events.map((event) => event.type)).toEqual([
-      "task.started", "task.agent_finished", "task.failed", "task.trace_uploaded",
-    ]);
+    const types = events.map((event) => event.type);
+    const failureIndex = types.indexOf("task.failed");
+    const traceIndexes = types.flatMap((type, index) => type === "task.trace_uploaded" ? [index] : []);
+    expect(types).not.toContain("task.verify_started");
+    expect(types).not.toContain("task.verified");
+    expect(traceIndexes.length).toBeGreaterThan(0);
+    expect(traceIndexes.every((index) => index < failureIndex)).toBe(true);
   });
 
   it("matches runner parity for budget exhaustion: every remaining manifest task is unattempted", async () => {
