@@ -10,6 +10,8 @@ if (!nonce || !config || typeof config.command !== "string" || !Array.isArray(co
 let child;
 let childSettled = false;
 let durable = false;
+let detachId;
+let detachState = "idle";
 let selfTerminating = false;
 let started = false;
 
@@ -21,12 +23,8 @@ process.on("message", (message) => {
   if (!message || message.nonce !== nonce) return;
   if (message.type === "start" && !started && !selfTerminating) startCommand();
   else if (message.type === "verify" && !selfTerminating) send({ type: "verified", nonce, anchorPid: process.pid });
-  else if (message.type === "prepare-detach" && started && !selfTerminating) {
-    send({ type: "detach-ready", nonce, anchorPid: process.pid });
-  } else if (message.type === "commit-detach" && started && !selfTerminating) {
-    durable = true;
-    send({ type: "detached", nonce, anchorPid: process.pid });
-  }
+  else if (message.type === "prepare-detach" && started && !selfTerminating) prepareDetach(message.detachId);
+  else if (message.type === "commit-detach" && started && !selfTerminating) commitDetach(message.detachId);
 });
 
 send({ type: "anchor-ready", nonce, anchorPid: process.pid });
@@ -57,6 +55,32 @@ function finishCommand(outcome) {
   if (childSettled) return;
   childSettled = true;
   send({ type: "outcome", nonce, anchorPid: process.pid, ...outcome });
+}
+
+function validDetachId(value) {
+  return typeof value === "string" && /^[0-9a-f-]{36}$/.test(value);
+}
+
+function prepareDetach(requestedId) {
+  if (!validDetachId(requestedId)) return;
+  if (detachState === "idle") {
+    detachId = requestedId;
+    detachState = "prepared";
+  }
+  if (detachState === "prepared" && detachId === requestedId) {
+    send({ type: "detach-prepared", nonce, anchorPid: process.pid, detachId });
+  }
+}
+
+function commitDetach(requestedId) {
+  if (!validDetachId(requestedId) || detachId !== requestedId) return;
+  if (detachState === "prepared") {
+    detachState = "committed";
+    durable = true;
+  }
+  if (detachState === "committed") {
+    send({ type: "detach-committed", nonce, anchorPid: process.pid, detachId });
+  }
 }
 
 function beginSelfTermination(signal) {

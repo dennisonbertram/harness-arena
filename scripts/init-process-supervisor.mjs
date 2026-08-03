@@ -13,7 +13,8 @@ if (!nonce || !config || typeof config.command !== "string" || !Array.isArray(co
 let anchor;
 let anchorNonce;
 let commandPid;
-let detachPrepared = false;
+let detachId;
+let detachState = "idle";
 let detached = false;
 let detachPromise;
 let cleanupPromise;
@@ -23,14 +24,14 @@ let started = false;
 
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { void beginCleanup(signal); });
 process.on("disconnect", () => {
-  if (detachPrepared && !cleanupRequest) void commitDetach();
-  else void beginCleanup("SIGTERM");
+  if (!detached) void beginCleanup("SIGTERM");
 });
 process.on("message", (message) => {
   if (!message || message.nonce !== nonce) return;
   if (message.type === "start" && !started && !detachPromise && !cleanupPromise) startAnchor();
   else if (message.type === "terminate") void beginCleanup("SIGTERM", true, message);
-  else if (message.type === "detach" && started && !detachPromise && !cleanupPromise) void beginDetach();
+  else if (message.type === "detach" && started && !cleanupPromise) void beginDetach(message.detachId);
+  else if (message.type === "commit-detach" && started && !cleanupPromise) void commitDetach(message.detachId);
 });
 
 send({ type: "supervisor-ready", nonce, supervisorPid: process.pid });
@@ -51,8 +52,11 @@ function startAnchor() {
   anchor.once("error", (error) => emitOutcome({ error: serializeError(error) }));
   anchor.once("exit", (code, signal) => {
     if (!outcomeSent) emitOutcome({ error: { message: `command group anchor exited before command outcome (${signal ?? code})` } });
-    if (!cleanupPromise && !detached) process.exitCode = 1;
-    if (detached) process.exit(code ?? 1);
+    if (!cleanupPromise && detachState !== "idle") {
+      void beginCleanup("SIGTERM", false, { allowOrphanGroup: true, graceMs: 50, killWaitMs: 1_000 });
+    } else if (!cleanupPromise && !detached) {
+      process.exitCode = 1;
+    }
   });
 }
 
@@ -75,11 +79,13 @@ function emitOutcome(outcome) {
 }
 
 function beginCleanup(signal = "SIGTERM", authenticated = false, settings = {}) {
-  cleanupRequest ??= { signal, authenticated, settings };
+  const allowOrphanGroup = settings.allowOrphanGroup === true || (detachId && detachState !== "idle");
+  if (!cleanupRequest) cleanupRequest = { signal, authenticated, settings: { ...settings, allowOrphanGroup } };
+  else if (allowOrphanGroup) cleanupRequest.settings.allowOrphanGroup = true;
   if (cleanupPromise) return cleanupPromise;
   cleanupPromise = (async () => {
     if (detachPromise) await detachPromise.catch(() => false);
-    detachPrepared = false;
+    detachState = "cleaning";
     detached = false;
     const requested = cleanupRequest;
     return cleanupGroup(requested.signal, requested.authenticated, requested.settings);
@@ -100,10 +106,16 @@ async function cleanupGroup(signal, authenticated, settings) {
   if (!anchor) return true;
   const graceMs = positiveTimeout(settings.graceMs, 500);
   const killWaitMs = positiveTimeout(settings.killWaitMs, 1_000);
-  if (!await verifyAnchor(Math.min(250, killWaitMs)) || !liveChild(anchor)) return false;
-  try { process.kill(-anchor.pid, signal); } catch { return false; }
+  const allowOrphanGroup = settings.allowOrphanGroup === true
+    && Number.isSafeInteger(commandPid) && commandPid > 0;
+  const initiallyVerified = await verifyAnchor(Math.min(250, killWaitMs));
+  if ((!initiallyVerified || !liveChild(anchor)) && !allowOrphanGroup) return false;
+  try { process.kill(-anchor.pid, signal); } catch (error) {
+    if (error?.code !== "ESRCH" || !allowOrphanGroup) return false;
+  }
   await delay(graceMs);
-  if (!await verifyAnchor(Math.min(250, killWaitMs)) || !liveChild(anchor)) return false;
+  const stillVerified = await verifyAnchor(Math.min(250, killWaitMs));
+  if ((!stillVerified || !liveChild(anchor)) && !allowOrphanGroup) return false;
   try { process.kill(-anchor.pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") return false; }
   const [anchorGone, commandGone, groupGone] = await Promise.all([
     waitForChildExit(anchor, killWaitMs),
@@ -118,44 +130,108 @@ function verifyAnchor(timeoutMs) {
   return waitForAnchorMessage("verified", timeoutMs, () => anchor.send({ type: "verify", nonce: anchorNonce }));
 }
 
-async function beginDetach() {
-  if (detachPromise || cleanupPromise || cleanupRequest) return false;
-  detachPromise = (async () => {
+function validDetachId(value) {
+  return typeof value === "string" && /^[0-9a-f-]{36}$/.test(value);
+}
+
+async function beginDetach(requestedId) {
+  if (!validDetachId(requestedId) || cleanupPromise || cleanupRequest) return false;
+  if (detachState === "prepared" && detachId === requestedId) {
+    sendDetachPrepared();
+    return true;
+  }
+  if (detachState !== "idle" || detachPromise) return false;
+  detachId = requestedId;
+  detachState = "preparing";
+  const operation = (async () => {
     if (!anchor || !await verifyAnchor(250)) return false;
-    const acknowledged = await waitForAnchorMessage("detach-ready", 500, () => anchor.send({ type: "prepare-detach", nonce: anchorNonce }));
+    const acknowledged = await waitForAnchorMessage(
+      "detach-prepared",
+      500,
+      () => anchor.send({ type: "prepare-detach", nonce: anchorNonce, detachId }),
+      detachId,
+    );
     if (!acknowledged || !liveChild(anchor) || cleanupRequest) return false;
-    detachPrepared = true;
-    send({ type: "detached", nonce, supervisorPid: process.pid, groupPid: anchor.pid });
+    detachState = "prepared";
+    sendDetachPrepared();
     return true;
   })();
-  const succeeded = await detachPromise;
-  detachPromise = undefined;
+  detachPromise = operation;
+  const succeeded = await operation;
+  if (detachPromise === operation) detachPromise = undefined;
+  if (!succeeded && !cleanupPromise && !cleanupRequest) void beginCleanup("SIGTERM");
   return succeeded;
 }
 
-async function commitDetach() {
-  if (!anchor || !liveChild(anchor)) {
-    detachPrepared = false;
-    void beginCleanup("SIGTERM");
-    return;
+async function commitDetach(requestedId) {
+  if (!validDetachId(requestedId) || requestedId !== detachId || cleanupPromise || cleanupRequest) return false;
+  if (detachState === "committed") {
+    void sendDetachCommitted();
+    return true;
   }
-  const committed = await waitForAnchorMessage("detached", 500, () => anchor.send({ type: "commit-detach", nonce: anchorNonce }));
-  if (committed) {
-    detachPrepared = false;
+  if (detachState === "committing" && detachPromise) {
+    return detachPromise;
+  }
+  if (detachState !== "prepared" || detachPromise) return false;
+  detachState = "committing";
+  const operation = (async () => {
+    if (!anchor || !liveChild(anchor) || !await verifyAnchor(250)) return false;
+    const committed = await waitForAnchorMessage(
+      "detach-committed",
+      500,
+      () => anchor.send({ type: "commit-detach", nonce: anchorNonce, detachId }),
+      detachId,
+    );
+    if (!committed || !liveChild(anchor) || cleanupRequest) return false;
+    detachState = "commit-acknowledging";
+    if (!await sendDetachCommitted()) return false;
+    detachState = "committed";
     detached = true;
-  } else {
-    detachPrepared = false;
-    void beginCleanup("SIGTERM");
-  }
+    return true;
+  })();
+  detachPromise = operation;
+  const committed = await operation;
+  if (detachPromise === operation) detachPromise = undefined;
+  if (!committed && !cleanupPromise && !cleanupRequest) void beginCleanup("SIGTERM");
+  return committed;
 }
 
-function waitForAnchorMessage(type, timeoutMs, request) {
+function sendDetachPrepared() {
+  send({ type: "detach-prepared", nonce, supervisorPid: process.pid, groupPid: anchor.pid, detachId });
+}
+
+function sendDetachCommitted() {
+  return new Promise((resolveSent) => {
+    if (!process.connected) { resolveSent(false); return; }
+    let settled = false;
+    const timer = setTimeout(() => finish(false), 500);
+    timer.unref();
+    const onDisconnect = () => finish(false);
+    process.once("disconnect", onDisconnect);
+    try {
+      process.send(
+        { type: "detach-committed", nonce, supervisorPid: process.pid, groupPid: anchor.pid, detachId },
+        (error) => finish(!error),
+      );
+    } catch { finish(false); }
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.off("disconnect", onDisconnect);
+      resolveSent(value);
+    }
+  });
+}
+
+function waitForAnchorMessage(type, timeoutMs, request, expectedDetachId) {
   return new Promise((resolveMatched) => {
     let settled = false;
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref();
     const onMessage = (message) => {
-      if (message?.type === type && message.nonce === anchorNonce && message.anchorPid === anchor.pid) finish(true);
+      if (message?.type === type && message.nonce === anchorNonce && message.anchorPid === anchor.pid
+        && (expectedDetachId === undefined || message.detachId === expectedDetachId)) finish(true);
     };
     const onExit = () => finish(false);
     anchor.on("message", onMessage);

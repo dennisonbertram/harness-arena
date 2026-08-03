@@ -266,38 +266,70 @@ function waitForChildExit(child, timeoutMs) {
   });
 }
 
-export async function detachOwnedSupervisor(owned, { signal, beforeDisconnect } = {}) {
+export async function detachOwnedSupervisor(owned, { signal, beforeCommit, beforeDisconnect } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
-  if (!record || !liveChild(record.child) || !record.child.connected) return false;
-  try {
-    signal?.throwIfAborted();
-    const detached = waitForAuthenticatedMessage(record, "detached", 500, signal);
-    try { record.child.send({ type: "detach", nonce: record.nonce }); } catch { return false; }
-    if (!await detached) {
-      signal?.throwIfAborted();
+  if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
+    || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
+  const detachId = randomUUID();
+  const cleanupProof = waitForAuthenticatedExit(record, "group-reaped", 3_500);
+  const cleanupAfterFailure = async () => {
+    // A generic parent-side IPC disconnect makes an acknowledgement impossible;
+    // supervisor exit is the only remaining observable proof for that failure mode.
+    if (!record.child.connected) {
+      if (!await waitForChildExit(record.child, 3_500)) {
+        throw new Error("durable detach cleanup could not be authenticated");
+      }
       return false;
     }
+    if (record.child.connected && liveChild(record.child)) {
+      try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs: 100, killWaitMs: 2_000 }); } catch {}
+    }
+    if (!await cleanupProof) throw new Error("durable detach cleanup could not be authenticated");
+    return false;
+  };
+  try {
+    signal?.throwIfAborted();
+    const prepared = waitForAuthenticatedMessage(record, "detach-prepared", 500, signal, { detachId });
+    try { record.child.send({ type: "detach", nonce: record.nonce, detachId }); } catch { return cleanupAfterFailure(); }
+    if (!await prepared) {
+      signal?.throwIfAborted();
+      return cleanupAfterFailure();
+    }
+    signal?.throwIfAborted();
+    if (!liveChild(record.child) || !record.child.connected) return cleanupAfterFailure();
+    if (beforeCommit) await beforeCommit();
+    signal?.throwIfAborted();
+    if (!liveChild(record.child) || !record.child.connected) return cleanupAfterFailure();
+    const committed = waitForAuthenticatedMessage(record, "detach-committed", 500, signal, { detachId });
+    try { record.child.send({ type: "commit-detach", nonce: record.nonce, detachId }); } catch { return cleanupAfterFailure(); }
+    if (!await committed) {
+      signal?.throwIfAborted();
+      return cleanupAfterFailure();
+    }
+    signal?.throwIfAborted();
+    if (!liveChild(record.child) || !record.child.connected) return cleanupAfterFailure();
     if (beforeDisconnect) await beforeDisconnect();
     signal?.throwIfAborted();
-    if (!liveChild(record.child) || !record.child.connected) return false;
+    if (!liveChild(record.child) || !record.child.connected) return cleanupAfterFailure();
     signal?.throwIfAborted();
     record.child.disconnect();
     record.child.unref();
     return true;
   } catch (error) {
-    if (!signal?.aborted) throw error;
-    await terminateOwnedSupervisor(owned);
-    throw signal.reason instanceof Error ? signal.reason : error;
+    await cleanupAfterFailure();
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error;
+    throw error;
   }
 }
 
-function waitForAuthenticatedMessage(record, type, timeoutMs, signal) {
+function waitForAuthenticatedMessage(record, type, timeoutMs, signal, expected = {}) {
   return new Promise((resolveMatched) => {
     let settled = false;
     const timer = setTimeout(() => finish(false), timeoutMs);
     timer.unref();
     const onMessage = (message) => {
-      if (authenticatedSupervisorMessage(message, record, type)) finish(true);
+      if (authenticatedSupervisorMessage(message, record, type)
+        && Object.entries(expected).every(([key, value]) => message[key] === value)) finish(true);
     };
     const onExit = () => finish(false);
     const onAbort = () => finish(false);
@@ -323,6 +355,7 @@ function waitForAuthenticatedExit(record, type, timeoutMs) {
     let acknowledged = false;
     let exited = !liveChild(record.child);
     const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
     const onMessage = (message) => {
       if (!authenticatedSupervisorMessage(message, record, type)) return;
       acknowledged = true;
