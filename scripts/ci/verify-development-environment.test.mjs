@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 
-import { verifyDevelopmentEnvironment } from "./verify-development-environment.mjs";
+import {
+  classifyHostedAcceptanceContract,
+  HOSTED_ACCEPTANCE_CONTRACT,
+  verifyDevelopmentEnvironment,
+} from "./verify-development-environment.mjs";
 
 const live = {
   projectId: "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo",
@@ -13,16 +17,9 @@ const live = {
   storeIds: ["store_SgaF1fm7nkPQPCKq"],
 };
 
-const hostedAcceptance = {
-  runsPerSubmission: 1,
-  maxConcurrentRuns: 1,
-  maxStartsPerTick: 1,
-  runBudgetCapUsd: 0.25,
-  runnerAgentTimeoutCapSeconds: 30,
-  runnerVerifyTimeoutCapSeconds: 30,
-  runnerSandboxTimeoutMinutes: 60,
-  gatewayProjectBudgetUsd: 1,
-};
+const hostedAcceptance = Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+);
 
 function development(overrides = {}) {
   return {
@@ -46,6 +43,28 @@ function development(overrides = {}) {
 }
 
 describe("verifyDevelopmentEnvironment", () => {
+  it("fails closed when a hosted acceptance runtime descriptor is unhandled", () => {
+    expect(() => classifyHostedAcceptanceContract({
+      futureRuntimeControl: {
+        expected: 1,
+        runtime: { kind: "future-runtime" },
+      },
+    })).toThrow(/unhandled hosted acceptance runtime kind/i);
+  });
+
+  it("rejects a prototype-named Vercel runtime environment key", () => {
+    expect(() => classifyHostedAcceptanceContract({
+      futureRuntimeControl: {
+        expected: 1,
+        runtime: { kind: "vercel-environment", key: "__proto__" },
+      },
+      gatewayBudget: {
+        expected: 1,
+        runtime: { kind: "gateway-project-budget" },
+      },
+    })).toThrow(/invalid hosted acceptance runtime descriptor/i);
+  });
+
   it("records the provisioned Development data plane without secrets", async () => {
     const manifest = JSON.parse(
       await readFile(new URL("../../config/development-environment.json", import.meta.url), "utf8"),
@@ -77,23 +96,17 @@ describe("verifyDevelopmentEnvironment", () => {
     });
   });
 
-  it.each([
-    ["runsPerSubmission", 5],
-    ["maxConcurrentRuns", 2],
-    ["maxStartsPerTick", 2],
-    ["runBudgetCapUsd", 1],
-    ["runnerAgentTimeoutCapSeconds", 60],
-    ["runnerVerifyTimeoutCapSeconds", 60],
-    ["runnerSandboxTimeoutMinutes", 120],
-    ["gatewayProjectBudgetUsd", 5],
-  ])("rejects a widened hosted acceptance control: %s", (key, value) => {
+  it.each(Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected + 1]))(
+    "rejects a widened hosted acceptance control: %s",
+    (key, value) => {
     const result = verifyDevelopmentEnvironment({
       development: development({ hostedAcceptance: { ...hostedAcceptance, [key]: value } }),
       live,
     });
 
     expect(result.violations).toContain(`hostedAcceptance.${key}`);
-  });
+    },
+  );
 
   it("fails closed when hosted acceptance controls are missing or have unknown fields", () => {
     const missing = verifyDevelopmentEnvironment({

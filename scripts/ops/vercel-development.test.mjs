@@ -6,6 +6,10 @@ import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import * as subject from "./vercel-development.mjs";
+import {
+  HOSTED_ACCEPTANCE_CONTRACT,
+  HOSTED_ACCEPTANCE_RUNTIME,
+} from "../ci/verify-development-environment.mjs";
 
 const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 const DEVELOPMENT_PROJECT_NAME = "harness-arena-development";
@@ -19,25 +23,10 @@ const DEVELOPMENT_STORE_ID = "store_development";
 const TOKEN = "test-vercel-token-never-print";
 const UPSTREAM_URL = "https://github.com/dennisonbertram/harness-arena.git";
 const execFileAsync = promisify(execFile);
-const HOSTED_ACCEPTANCE = {
-  runsPerSubmission: 1,
-  maxConcurrentRuns: 1,
-  maxStartsPerTick: 1,
-  runBudgetCapUsd: 0.25,
-  runnerAgentTimeoutCapSeconds: 30,
-  runnerVerifyTimeoutCapSeconds: 30,
-  runnerSandboxTimeoutMinutes: 60,
-  gatewayProjectBudgetUsd: 1,
-};
-const HOSTED_ACCEPTANCE_ENV = {
-  RUNS_PER_SUBMISSION: "runsPerSubmission",
-  MAX_CONCURRENT_RUNS: "maxConcurrentRuns",
-  MAX_STARTS_PER_TICK: "maxStartsPerTick",
-  RUN_BUDGET_CAP_USD: "runBudgetCapUsd",
-  RUNNER_AGENT_TIMEOUT_CAP: "runnerAgentTimeoutCapSeconds",
-  RUNNER_VERIFY_TIMEOUT_CAP: "runnerVerifyTimeoutCapSeconds",
-  RUNNER_SANDBOX_TIMEOUT_MIN: "runnerSandboxTimeoutMinutes",
-};
+const HOSTED_ACCEPTANCE = Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+);
+const HOSTED_ACCEPTANCE_ENV = HOSTED_ACCEPTANCE_RUNTIME.environment;
 const DEVELOPMENT_GATEWAY_KEY_ID = "gateway-key-development";
 const DEVELOPMENT_GATEWAY_KEY_PARTIAL = "abc";
 
@@ -504,12 +493,16 @@ describe("bounded read-only Vercel adapter", () => {
     })).resolves.toEqual(inspection());
   });
 
-  it("rejects a Development project that lacks any declared hosted acceptance runtime control", async () => {
+  it.each(Object.keys(HOSTED_ACCEPTANCE_ENV))(
+    "rejects a Development project that lacks the declared hosted acceptance runtime control %s",
+    async (missingRuntimeKey) => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({ envs: [
         { id: "env_callback", key: "CALLBACK_BASE", target: ["production"], type: "encrypted" },
         { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
         { id: "env_gateway", key: "AI_GATEWAY_API_KEY", target: ["production"], type: "sensitive" },
+        ...acceptanceEnvironmentEntries().filter(({ key }) => key !== missingRuntimeKey),
+        ...gatewayBindingEnvironmentEntries(),
       ] }),
     });
 
@@ -520,7 +513,8 @@ describe("bounded read-only Vercel adapter", () => {
       token: TOKEN,
       live: manifest().live,
     })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
-  });
+    },
+  );
 
   it("rejects a Development project with no active project-scoped Gateway quota", async () => {
     const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ gatewayKeys: [] }) });

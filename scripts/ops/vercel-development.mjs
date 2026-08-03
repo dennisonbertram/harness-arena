@@ -4,7 +4,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { verifyDevelopmentEnvironment } from "../ci/verify-development-environment.mjs";
+import {
+  HOSTED_ACCEPTANCE_CONTRACT,
+  HOSTED_ACCEPTANCE_RUNTIME,
+  verifyDevelopmentEnvironment,
+} from "../ci/verify-development-environment.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,26 +32,12 @@ const EXPECTED_GIT = Object.freeze({
   repo: "harness-arena",
   productionBranch: "dev",
 });
-const HOSTED_ACCEPTANCE_ENV = Object.freeze({
-  RUNS_PER_SUBMISSION: "runsPerSubmission",
-  MAX_CONCURRENT_RUNS: "maxConcurrentRuns",
-  MAX_STARTS_PER_TICK: "maxStartsPerTick",
-  RUN_BUDGET_CAP_USD: "runBudgetCapUsd",
-  RUNNER_AGENT_TIMEOUT_CAP: "runnerAgentTimeoutCapSeconds",
-  RUNNER_VERIFY_TIMEOUT_CAP: "runnerVerifyTimeoutCapSeconds",
-  RUNNER_SANDBOX_TIMEOUT_MIN: "runnerSandboxTimeoutMinutes",
-});
 const DEFAULT_CALLBACK_ORIGIN = "https://harness-arena-development.vercel.app";
-const DEFAULT_HOSTED_ACCEPTANCE = Object.freeze({
-  runsPerSubmission: 1,
-  maxConcurrentRuns: 1,
-  maxStartsPerTick: 1,
-  runBudgetCapUsd: 0.25,
-  runnerAgentTimeoutCapSeconds: 30,
-  runnerVerifyTimeoutCapSeconds: 30,
-  runnerSandboxTimeoutMinutes: 60,
-  gatewayProjectBudgetUsd: 1,
-});
+const HOSTED_ACCEPTANCE_ENV = HOSTED_ACCEPTANCE_RUNTIME.environment;
+const GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY = HOSTED_ACCEPTANCE_RUNTIME.gatewayProjectBudgetAcceptanceKey;
+const DEFAULT_HOSTED_ACCEPTANCE = Object.freeze(Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+));
 const GATEWAY_KEY_KEYS = [
   "activeAt",
   "createdAt",
@@ -658,7 +648,7 @@ export function createReadOnlyVercelApi({
         );
         const gatewayBudget = normalizeDevelopmentGatewayKey(
           await get(token, requestUrl("/v1/api-keys", { teamId, limit: "100" })),
-          { projectId, teamId, limitAmount: expectedAcceptance.gatewayProjectBudgetUsd },
+          { projectId, teamId, limitAmount: expectedAcceptance[GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY] },
         );
         if (gatewayKeyId !== gatewayBudget.keyId || gatewayKeyPartial !== gatewayBudget.keyPartial) throw denied();
         const store = await get(
@@ -752,7 +742,7 @@ function validateInspection(actual, manifest) {
     || typeof actual.environment.gatewayBudget.keyPartial !== "string"
     || !actual.environment.gatewayBudget.keyPartial
     || actual.environment.gatewayBudget.quotaEntityId !== `api_key_id_${actual.environment.gatewayBudget.keyId}`
-    || actual.environment.gatewayBudget.limitAmount !== manifest.hostedAcceptance.gatewayProjectBudgetUsd
+    || actual.environment.gatewayBudget.limitAmount !== manifest.hostedAcceptance[GATEWAY_PROJECT_BUDGET_ACCEPTANCE_KEY]
     || typeof actual.environment.gatewayBudget.currentSpend !== "number"
     || !Number.isFinite(actual.environment.gatewayBudget.currentSpend)
     || actual.environment.gatewayBudget.currentSpend < 0

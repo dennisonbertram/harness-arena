@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { domainToASCII, pathToFileURL } from "node:url";
 
 const CREDENTIAL_KEY = /(?:token|secret|password|credential|api[_-]?key)/i;
+const VERCEL_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
 const DEVELOPMENT_KEYS = new Set([
   "environment",
   "branch",
@@ -16,27 +17,106 @@ const DEVELOPMENT_KEYS = new Set([
 const VERCEL_PROJECT_KEYS = new Set(["id", "name"]);
 const GIT_KEYS = new Set(["provider", "repository", "productionBranch"]);
 const STORE_KEYS = new Set(["id"]);
-const HOSTED_ACCEPTANCE_KEYS = new Set([
-  "runsPerSubmission",
-  "maxConcurrentRuns",
-  "maxStartsPerTick",
-  "runBudgetCapUsd",
-  "runnerAgentTimeoutCapSeconds",
-  "runnerVerifyTimeoutCapSeconds",
-  "runnerSandboxTimeoutMinutes",
-  "gatewayProjectBudgetUsd",
-]);
 const LIVE_KEYS = new Set(["projectId", "aliases", "storeIds"]);
-const REQUIRED_HOSTED_ACCEPTANCE = Object.freeze({
-  runsPerSubmission: 1,
-  maxConcurrentRuns: 1,
-  maxStartsPerTick: 1,
-  runBudgetCapUsd: 0.25,
-  runnerAgentTimeoutCapSeconds: 30,
-  runnerVerifyTimeoutCapSeconds: 30,
-  runnerSandboxTimeoutMinutes: 60,
-  gatewayProjectBudgetUsd: 1,
+export const HOSTED_ACCEPTANCE_CONTRACT = Object.freeze({
+  runsPerSubmission: Object.freeze({
+    expected: 1,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "RUNS_PER_SUBMISSION" }),
+  }),
+  maxConcurrentRuns: Object.freeze({
+    expected: 1,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "MAX_CONCURRENT_RUNS" }),
+  }),
+  maxStartsPerTick: Object.freeze({
+    expected: 1,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "MAX_STARTS_PER_TICK" }),
+  }),
+  runBudgetCapUsd: Object.freeze({
+    expected: 0.25,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "RUN_BUDGET_CAP_USD" }),
+  }),
+  runnerAgentTimeoutCapSeconds: Object.freeze({
+    expected: 30,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "RUNNER_AGENT_TIMEOUT_CAP" }),
+  }),
+  runnerVerifyTimeoutCapSeconds: Object.freeze({
+    expected: 30,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "RUNNER_VERIFY_TIMEOUT_CAP" }),
+  }),
+  runnerSandboxTimeoutMinutes: Object.freeze({
+    expected: 60,
+    runtime: Object.freeze({ kind: "vercel-environment", key: "RUNNER_SANDBOX_TIMEOUT_MIN" }),
+  }),
+  gatewayProjectBudgetUsd: Object.freeze({
+    expected: 1,
+    runtime: Object.freeze({ kind: "gateway-project-budget" }),
+  }),
 });
+
+export function classifyHostedAcceptanceContract(contract) {
+  if (contract === null || typeof contract !== "object" || Array.isArray(contract)) {
+    throw new Error("invalid hosted acceptance contract");
+  }
+
+  const environment = new Map();
+  let gatewayProjectBudgetAcceptanceKey;
+  for (const [acceptanceKey, descriptor] of Object.entries(contract)) {
+    if (
+      descriptor === null
+      || typeof descriptor !== "object"
+      || Array.isArray(descriptor)
+      || typeof descriptor.expected !== "number"
+      || !Number.isFinite(descriptor.expected)
+      || descriptor.runtime === null
+      || typeof descriptor.runtime !== "object"
+      || Array.isArray(descriptor.runtime)
+      || typeof descriptor.runtime.kind !== "string"
+    ) {
+      throw new Error("invalid hosted acceptance runtime descriptor");
+    }
+
+    if (descriptor.runtime.kind === "vercel-environment") {
+      if (
+        Object.keys(descriptor.runtime).length !== 2
+        || typeof descriptor.runtime.key !== "string"
+        || !descriptor.runtime.key
+        || !VERCEL_ENVIRONMENT_KEY.test(descriptor.runtime.key)
+        || environment.has(descriptor.runtime.key)
+      ) {
+        throw new Error("invalid hosted acceptance runtime descriptor");
+      }
+      environment.set(descriptor.runtime.key, acceptanceKey);
+      continue;
+    }
+
+    if (descriptor.runtime.kind === "gateway-project-budget") {
+      if (
+        Object.keys(descriptor.runtime).length !== 1
+        || gatewayProjectBudgetAcceptanceKey !== undefined
+      ) {
+        throw new Error("invalid hosted acceptance runtime descriptor");
+      }
+      gatewayProjectBudgetAcceptanceKey = acceptanceKey;
+      continue;
+    }
+
+    throw new Error(`unhandled hosted acceptance runtime kind: ${descriptor.runtime.kind}`);
+  }
+
+  if (gatewayProjectBudgetAcceptanceKey === undefined) {
+    throw new Error("missing hosted acceptance gateway-project-budget descriptor");
+  }
+  return Object.freeze({
+    environment: Object.freeze(Object.fromEntries(environment)),
+    gatewayProjectBudgetAcceptanceKey,
+  });
+}
+
+export const HOSTED_ACCEPTANCE_RUNTIME = classifyHostedAcceptanceContract(HOSTED_ACCEPTANCE_CONTRACT);
+const HOSTED_ACCEPTANCE_KEYS = new Set(Object.keys(HOSTED_ACCEPTANCE_CONTRACT));
+const REQUIRED_HOSTED_ACCEPTANCE = Object.freeze(Object.fromEntries(
+  Object.entries(HOSTED_ACCEPTANCE_CONTRACT).map(([key, { expected }]) => [key, expected]),
+));
 
 const KNOWN_LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 const KNOWN_LIVE_ALIASES = [
