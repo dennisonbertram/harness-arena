@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { archiveAndDeleteCompetitionSubmissions } from "@/lib/competition-cleanup";
 import { competitionAdminToken } from "@/lib/competition-config";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 
 const CleanupRequestSchema = z.object({
@@ -123,7 +123,7 @@ export async function POST(request: NextRequest) {
     log("error", "competition.admin.cleanup.failed", {
       competition_id: parsed.data.competition_id,
       submission_ids: parsed.data.submission_ids,
-      error: message,
+      ...normalizeError(error, "cleanup"),
     });
     return NextResponse.json({ error: "cleanup failed; inspect server logs and archive receipt" }, { status: 500 });
   }

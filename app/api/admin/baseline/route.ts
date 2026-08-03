@@ -3,7 +3,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
 import { dispatchQueuedRuns } from "@/lib/dispatch";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
@@ -104,7 +104,7 @@ export async function POST(request: NextRequest) {
 
   const kickDispatch = () =>
     dispatchQueuedRuns(storage).catch((err: unknown) =>
-      log("warn", "dispatch.failed", { submission_id: submission.id, error: (err as Error).message }),
+      log("error", "dispatch.failed", { submission_id: submission.id, ...normalizeError(err, "dispatch") }),
     );
   try {
     after(kickDispatch);

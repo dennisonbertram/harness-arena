@@ -1,0 +1,9 @@
+{
+  "envs": [
+    { "key": "OPS_READ_TOKEN", "target": ["preview"], "type": "encrypted", "createdAt": "2026-08-01T00:00:00.000Z" },
+    { "key": "OPS_READ_CURSOR_SECRET", "target": ["preview"], "type": "encrypted", "createdAt": "2026-08-01T00:00:00.000Z" },
+    { "key": "AI_GATEWAY_API_KEY", "target": ["preview"], "type": "encrypted", "createdAt": "2026-08-01T00:00:00.000Z" },
+    { "key": "RUNNER_CALLBACK_SECRET", "target": ["preview"], "type": "encrypted", "createdAt": "2026-08-01T00:00:00.000Z" },
+    { "key": "BLOB_READ_WRITE_TOKEN", "target": ["preview"], "type": "encrypted", "createdAt": "2026-08-01T00:00:00.000Z" }
+  ]
+}

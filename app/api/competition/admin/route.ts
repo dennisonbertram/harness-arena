@@ -3,8 +3,9 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { ensureBaseline } from "@/lib/competition-baseline";
 import { z } from "zod";
 import { competitionAdminToken } from "@/lib/competition-config";
-import { log } from "@/lib/log";
+import { log, normalizeError } from "@/lib/log";
 import { isAllowedModel } from "@/lib/models";
+import { normalizedPricingVersion } from "@/lib/normalized-pricing";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 import { PRIZE_CADENCES, type Competition } from "@/lib/types";
@@ -65,6 +66,10 @@ export async function POST(request: NextRequest) {
   if (!isAllowedModel(input.model)) {
     return NextResponse.json({ error: `model "${input.model}" is not allowed` }, { status: 400 });
   }
+  const pricingVersion = normalizedPricingVersion(input.model);
+  if (!pricingVersion) {
+    return NextResponse.json({ error: `model "${input.model}" does not have normalized pricing` }, { status: 400 });
+  }
 
   const competition: Competition = {
     id: randomUUID(),
@@ -72,6 +77,7 @@ export async function POST(request: NextRequest) {
     harness: input.harness,
     model: input.model,
     gateway_provider: input.gateway_provider,
+    pricing_version: pricingVersion,
     prize_amount_usd: input.prize_amount_usd ?? null,
     prize_cadence: input.prize_cadence ?? null,
     status: "live",
@@ -91,9 +97,9 @@ export async function POST(request: NextRequest) {
   if (!input.skip_baseline) {
     after(async () => {
       const result = await ensureBaseline(storage, competition).catch((error: unknown) => {
-        log("warn", "competition.create.baseline_failed", {
+        log("error", "competition.create.baseline_failed", {
           competition_id: competition.id,
-          error: (error as Error).message,
+          ...normalizeError(error, "baseline_ensure"),
         });
         return null;
       });

@@ -14,6 +14,8 @@ function row(overrides: Partial<CompetitionRow> = {}): CompetitionRow {
     tasksPassed: 10,
     totalTasks: 16,
     totalCostUsd: 1.2345,
+    billedCostUsd: 1.2345,
+    pricingVersion: "inkling-small-2026-08-03-v1",
     submittedAt: "2026-07-25T00:00:00.000Z",
     githubLogin: "octocat",
     ...overrides,
@@ -30,19 +32,20 @@ describe("CompetitionLeaderboardTable", () => {
     expect(html).toContain('alt="octocat"');
   });
 
-  it("separates total run cost from cost per solved task", () => {
+  it("separates normalized scoring cost from actual billed spend and cost per solved task", () => {
     const html = renderToStaticMarkup(
       <CompetitionLeaderboardTable
-        ranked={[row({ tasksPassed: 12, totalCostUsd: 1.0912 })]}
+        ranked={[row({ tasksPassed: 12, totalCostUsd: 1.0912, billedCostUsd: 3.5 })]}
         belowBaseline={[row({ submissionId: "zero", tasksPassed: 0, totalCostUsd: 0 })]}
         baselineRow={row({ submissionId: "baseline", tasksPassed: 9, totalCostUsd: 2.2982 })}
         currentGithubLogin={undefined}
       />,
     );
 
-    expect(html).toMatch(/<th[^>]*>Total run cost<\/th>/);
+    expect(html).toMatch(/<th[^>]*>Normalized run cost<\/th>/);
     expect(html).toMatch(/<th[^>]*>Cost \/ solved task<\/th>/);
     expect(html).toContain("$1.0912");
+    expect(html).toContain("billed $3.5000");
     expect(html).toContain("$0.0909");
     expect(html).toContain("$2.2982");
     expect(html).toContain("$0.2554");
@@ -102,7 +105,7 @@ describe("CompetitionLeaderboardTable", () => {
 
     expect(html).toContain("12/16");
     expect(html).toContain("$3.5000");
-    expect(html).toContain("Total run cost");
+    expect(html).toContain("Normalized run cost");
     expect(html).toContain("Cost / solved task");
     // The task count appears before the total cost column in source order.
     expect(html.indexOf("12/16")).toBeLessThan(html.indexOf("$3.5000"));

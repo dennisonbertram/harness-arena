@@ -74,8 +74,25 @@ describe("POST /api/runs/[id]/callback", () => {
           { ts: "2026-07-21T00:01:00.000Z", type: "task.started", payload: { task_id: "t1", index: 0 } },
         ],
         status: "completed",
-        task_results: [{ task_id: "t1", attempted: true, passed: true, cost_usd: 0.1 }],
-        totals: { tasks_passed: 1, total_cost_usd: 0.1, over_budget: false },
+        task_results: [{
+          task_id: "t1",
+          attempted: true,
+          passed: true,
+          cost_usd: 0.1,
+          normalized_cost_usd: 0.04,
+          pricing_version: "inkling-small-2026-08-03-v1",
+          input_tokens: 10,
+          cache_read_tokens: 2,
+          cache_write_tokens: 0,
+          output_tokens: 5,
+        }],
+        totals: {
+          tasks_passed: 1,
+          total_cost_usd: 0.1,
+          normalized_total_cost_usd: 0.04,
+          pricing_version: "inkling-small-2026-08-03-v1",
+          over_budget: false,
+        },
       }),
       { params: Promise.resolve({ id: "run-1" }) },
     );
@@ -89,7 +106,16 @@ describe("POST /api/runs/[id]/callback", () => {
     expect(run?.status).toBe("completed");
     expect(run?.tasks_passed).toBe(1);
     expect(run?.total_cost_usd).toBe(0.1);
-    expect(run?.task_results).toEqual([{ task_id: "t1", attempted: true, passed: true, cost_usd: 0.1 }]);
+    expect(run?.normalized_total_cost_usd).toBe(0.04);
+    expect(run?.pricing_version).toBe("inkling-small-2026-08-03-v1");
+    expect(run?.task_results[0]).toMatchObject({
+      normalized_cost_usd: 0.04,
+      pricing_version: "inkling-small-2026-08-03-v1",
+      input_tokens: 10,
+      cache_read_tokens: 2,
+      cache_write_tokens: 0,
+      output_tokens: 5,
+    });
     expect(run?.finished_at).toBeDefined();
 
     const events = await storageRef.current.listRunEvents("run-1");
@@ -329,6 +355,7 @@ describe("POST /api/runs/[id]/callback", () => {
 
   describe("completed-requires-results schema refinement", () => {
     it("returns 400 when status is completed but totals/task_results are omitted", async () => {
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
       await storageRef.current.putRun({
         id: "run-incomplete",
         submission_id: "sub-incomplete",
@@ -343,6 +370,10 @@ describe("POST /api/runs/[id]/callback", () => {
       );
 
       expect(response.status).toBe(400);
+      const output = logSpy.mock.calls.flat().join(" ");
+      expect(output).toContain("callback.invalid_payload");
+      expect(output).not.toContain("events");
+      logSpy.mockRestore();
       const run = await storageRef.current.getRun("run-incomplete");
       expect(run?.status).toBe("running");
     });

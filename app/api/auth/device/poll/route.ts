@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { AGENT_TOKEN_EXPIRY_SECONDS, mintAgentToken } from "@/lib/agent-token";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
+import { log } from "@/lib/log";
 
 // A device code is valid for ~15 minutes and GitHub's advertised poll interval
 // is 5s, so a patient human legitimately generates ~180 polls for ONE login.
@@ -27,7 +28,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "GitHub Device Flow is not configured: set AUTH_GITHUB_ID and AUTH_GITHUB_SECRET on the server" }, { status: 503 });
   }
   const parsed = PollInputSchema.safeParse(await request.json().catch(() => null));
-  if (!parsed.success) return NextResponse.json({ error: "invalid device_code" }, { status: 400 });
+  if (!parsed.success) {
+    log("warn", "auth.device_poll_invalid", { stage: "input" });
+    return NextResponse.json({ error: "invalid device_code" }, { status: 400 });
+  }
 
   const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
@@ -35,15 +39,25 @@ export async function POST(request: NextRequest) {
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, device_code: parsed.data.device_code, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }),
   });
   const tokenBody = (await tokenResponse.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!tokenBody) return NextResponse.json({ error: "GitHub returned an invalid Device Flow response" }, { status: 502 });
-  if (typeof tokenBody.error === "string") return errorResponse(tokenBody.error, tokenBody.interval);
-  if (!tokenResponse.ok || typeof tokenBody.access_token !== "string") return NextResponse.json({ error: "GitHub returned an invalid Device Flow response" }, { status: 502 });
+  if (!tokenBody) {
+    log("warn", "auth.device_poll_invalid_response", { stage: "token" });
+    return NextResponse.json({ error: "GitHub returned an invalid Device Flow response" }, { status: 502 });
+  }
+  if (typeof tokenBody.error === "string") {
+    log("info", "auth.device_poll_pending", { stage: "token", outcome: tokenBody.error });
+    return errorResponse(tokenBody.error, tokenBody.interval);
+  }
+  if (!tokenResponse.ok || typeof tokenBody.access_token !== "string") {
+    log("warn", "auth.device_poll_invalid_response", { stage: "token", status: tokenResponse.status });
+    return NextResponse.json({ error: "GitHub returned an invalid Device Flow response" }, { status: 502 });
+  }
 
   const userResponse = await fetch("https://api.github.com/user", {
     headers: { accept: "application/vnd.github+json", authorization: `Bearer ${tokenBody.access_token}` },
   });
   const user = (await userResponse.json().catch(() => null)) as Record<string, unknown> | null;
   if (!userResponse.ok || !user || typeof user.id !== "number" || typeof user.login !== "string") {
+    log("warn", "auth.device_poll_invalid_response", { stage: "user", status: userResponse.status });
     return NextResponse.json({ error: "GitHub could not verify the authorized user" }, { status: 502 });
   }
   const token = await mintAgentToken({ githubId: user.id, githubLogin: user.login });
