@@ -52,7 +52,7 @@ describe("Blob call-site inventory", () => {
     }
   });
 
-  it("skips excluded directories, exact test-file patterns, and symlinked entries", () => {
+  it("skips excluded directories and exact test-file patterns", () => {
     const workspace = mkdtempSync(join(tmpdir(), "blob-inventory-"));
     try {
       for (const sourceRoot of SOURCE_ROOTS) mkdirSync(join(workspace, sourceRoot), { recursive: true });
@@ -63,13 +63,38 @@ describe("Blob call-site inventory", () => {
         mkdirSync(join(workspace, "lib", excluded), { recursive: true });
         writeFileSync(join(workspace, "lib", excluded, "hidden.ts"), 'import "@vercel/blob";');
       }
-      mkdirSync(join(workspace, "outside"));
-      writeFileSync(join(workspace, "outside", "linked.ts"), 'import "@vercel/blob";');
-      symlinkSync(join(workspace, "outside"), join(workspace, "lib", "linked"));
-
       expect(findBlobSdkCallers(workspace)).toEqual(["lib/caller.ts", "lib/contest.ts"]);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["in-root directory before directory exclusions", "directory", "workspace", "node_modules"],
+    ["escaping directory", "directory", "external", "linked-directory"],
+    ["in-root file before test-file exclusions", "file", "workspace", "caller.test.ts"],
+    ["escaping file", "file", "external", "linked.ts"],
+  ] as const)("fails closed on an %s symlink without exposing its target", (_case, kind, scope, linkName) => {
+    const workspace = mkdtempSync(join(tmpdir(), "blob-inventory-symlink-"));
+    const external = mkdtempSync(join(tmpdir(), "blob-inventory-target-secret-"));
+    try {
+      for (const sourceRoot of SOURCE_ROOTS) mkdirSync(join(workspace, sourceRoot), { recursive: true });
+      const targetRoot = scope === "workspace" ? join(workspace, "target-secret") : join(external, "target-secret");
+      if (kind === "directory") {
+        mkdirSync(targetRoot, { recursive: true });
+        writeFileSync(join(targetRoot, "caller.ts"), 'import "@vercel/blob";');
+      } else {
+        mkdirSync(resolve(targetRoot, ".."), { recursive: true });
+        writeFileSync(targetRoot, 'import "@vercel/blob";');
+      }
+      symlinkSync(targetRoot, join(workspace, "lib", linkName));
+
+      expect(() => findBlobSdkCallers(workspace)).toThrowError(
+        new Error(`Blob inventory refuses symlink: lib/${linkName}`),
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(external, { recursive: true, force: true });
     }
   });
 
