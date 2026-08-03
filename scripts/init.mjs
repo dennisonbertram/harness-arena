@@ -177,7 +177,11 @@ async function initialize(state) {
       await rm(join(state, "init-failure.json"), { force: true });
       await phaseBarrier("server_lifecycle");
       shutdownController.signal.throwIfAborted();
-      if (!await detachOwnedSupervisor(serverOwned)) throw new Error("local supervisor exited before durable detach");
+      if (!await detachOwnedSupervisor(serverOwned, {
+        signal: shutdownController.signal,
+        beforeDisconnect: () => phaseBarrier("durable_detach"),
+      })) throw new Error("local supervisor exited before durable detach");
+      shutdownController.signal.throwIfAborted();
       serverDetached = true;
       activeServer = undefined;
       json(instanceOutput("start", instance, { stale_pid_recovered: stalePidRecovered }, state));

@@ -21,7 +21,9 @@ process.on("message", (message) => {
   if (!message || message.nonce !== nonce) return;
   if (message.type === "start" && !started && !selfTerminating) startCommand();
   else if (message.type === "verify" && !selfTerminating) send({ type: "verified", nonce, anchorPid: process.pid });
-  else if (message.type === "detach" && started && !selfTerminating) {
+  else if (message.type === "prepare-detach" && started && !selfTerminating) {
+    send({ type: "detach-ready", nonce, anchorPid: process.pid });
+  } else if (message.type === "commit-detach" && started && !selfTerminating) {
     durable = true;
     send({ type: "detached", nonce, anchorPid: process.pid });
   }

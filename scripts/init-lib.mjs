@@ -15,7 +15,7 @@ const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
 const SUPERVISOR_PATH = fileURLToPath(new URL("./init-process-supervisor.mjs", import.meta.url));
 const SUPERVISOR_OWNERSHIP = new WeakMap();
 export const INIT_CANCELLATION_PHASES = Object.freeze([
-  "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle",
+  "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle", "durable_detach",
 ]);
 
 export function choosePort(worktree) {
@@ -266,17 +266,32 @@ function waitForChildExit(child, timeoutMs) {
   });
 }
 
-export async function detachOwnedSupervisor(owned) {
+export async function detachOwnedSupervisor(owned, { signal, beforeDisconnect } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
-  if (!record || !liveChild(record.child)) return false;
-  const detached = waitForAuthenticatedMessage(record, "detached", 500);
-  try { record.child.send({ type: "detach", nonce: record.nonce }); } catch { return false; }
-  if (!await detached || !liveChild(record.child)) return false;
-  record.child.unref();
-  return true;
+  if (!record || !liveChild(record.child) || !record.child.connected) return false;
+  try {
+    signal?.throwIfAborted();
+    const detached = waitForAuthenticatedMessage(record, "detached", 500, signal);
+    try { record.child.send({ type: "detach", nonce: record.nonce }); } catch { return false; }
+    if (!await detached) {
+      signal?.throwIfAborted();
+      return false;
+    }
+    if (beforeDisconnect) await beforeDisconnect();
+    signal?.throwIfAborted();
+    if (!liveChild(record.child) || !record.child.connected) return false;
+    signal?.throwIfAborted();
+    record.child.disconnect();
+    record.child.unref();
+    return true;
+  } catch (error) {
+    if (!signal?.aborted) throw error;
+    await terminateOwnedSupervisor(owned);
+    throw signal.reason instanceof Error ? signal.reason : error;
+  }
 }
 
-function waitForAuthenticatedMessage(record, type, timeoutMs) {
+function waitForAuthenticatedMessage(record, type, timeoutMs, signal) {
   return new Promise((resolveMatched) => {
     let settled = false;
     const timer = setTimeout(() => finish(false), timeoutMs);
@@ -285,14 +300,18 @@ function waitForAuthenticatedMessage(record, type, timeoutMs) {
       if (authenticatedSupervisorMessage(message, record, type)) finish(true);
     };
     const onExit = () => finish(false);
+    const onAbort = () => finish(false);
     record.child.on("message", onMessage);
     record.child.once("exit", onExit);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     function finish(value) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       record.child.off("message", onMessage);
       record.child.off("exit", onExit);
+      signal?.removeEventListener("abort", onAbort);
       resolveMatched(value);
     }
   });
