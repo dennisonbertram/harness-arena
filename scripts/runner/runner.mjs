@@ -20,11 +20,15 @@ import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   agentProcessFailure,
+  AGENT_TRACE_NAMES,
   budgetExceeded,
   buildPiSettings,
   buildContainerName,
   buildPiCommand,
   buildPinnedModelsConfig,
+  buildRunCompletedEventPayload,
+  buildTaskAgentFinishedEventPayload,
+  buildTaskVerifiedEventPayload,
   PI_MODELS_CONFIG_PATH,
   PI_SETTINGS_CONFIG_PATH,
   preflightProxy,
@@ -41,6 +45,8 @@ import {
   parseReward,
   parseSessionCost,
   parseStdoutCost,
+  queueAgentFailureEvents,
+  queueAgentTraceEvents,
   redactSecrets,
   resolveTaskCost,
   safeCleanup,
@@ -48,6 +54,7 @@ import {
   shAsync,
   summarizeGatewayRequests,
   trustedGatewayPricing,
+  VERIFIER_TRACE_NAME,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -308,25 +315,26 @@ async function uploadTrace(taskId, name, buffer) {
 async function uploadAgentTraces(taskId, sessionText, piStdout) {
   const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
   let traceBlobUrl;
+  const traceUploads = [];
   const redactedSession = redactSecrets(sessionText, secrets);
   const sessionUpload = await uploadTrace(
     taskId,
-    "session.jsonl",
+    AGENT_TRACE_NAMES[0],
     Buffer.from(redactedSession, "utf8"),
   );
   if (sessionUpload?.url) {
     traceBlobUrl = sessionUpload.url;
-    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: sessionUpload.url });
+    traceUploads.push({ task_id: taskId, name: AGENT_TRACE_NAMES[0], blob_url: sessionUpload.url });
   }
   const redactedStdout = Buffer.from(
     redactSecrets(piStdout.toString("utf8"), secrets),
     "utf8",
   );
-  const stdoutUpload = await uploadTrace(taskId, "pi-stdout.txt", redactedStdout);
+  const stdoutUpload = await uploadTrace(taskId, AGENT_TRACE_NAMES[1], redactedStdout);
   if (stdoutUpload?.url) {
-    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: stdoutUpload.url });
+    traceUploads.push({ task_id: taskId, name: AGENT_TRACE_NAMES[1], blob_url: stdoutUpload.url });
   }
-  return { traceBlobUrl, secrets };
+  return { traceBlobUrl, secrets, traceUploads };
 }
 
 // Terminal status delivery (status completed/failed + totals) is the one
@@ -657,16 +665,16 @@ async function runOneTask(task, index, systemPrompt) {
     if (execResult.outputTruncated) {
       log(`task ${task.id}: Pi stdout/stderr capture reached ${STDOUT_CAP_BYTES} bytes; child continued`);
     }
-    queueEvent("task.agent_finished", {
-      task_id: task.id,
+    queueEvent("task.agent_finished", buildTaskAgentFinishedEventPayload({
+      taskId: task.id,
       turns,
-      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
-      ...normalizedCostFields,
-      ...(totalCost === null ? {} : { cost_usd: totalCost }),
-      cost_source: costSource,
-      duration_s: agentDurationS,
-      ...(execResult.outputTruncated ? { output_capture_truncated: true } : {}),
-    });
+      outputTokens: parsed.validOutputTokenCount > 0 ? parsed.totalOutputTokens : undefined,
+      normalizedCostFields,
+      totalCost,
+      costSource,
+      durationS: agentDurationS,
+      outputTruncated: execResult.outputTruncated,
+    }));
     await flushEvents();
 
     // GNU timeout exits 124 after the configured agent deadline. This is a
@@ -679,8 +687,8 @@ async function runOneTask(task, index, systemPrompt) {
         `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
       );
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: "agent_timeout",
         error,
@@ -711,8 +719,8 @@ async function runOneTask(task, index, systemPrompt) {
       const error =
         `${processFailure} ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: "agent_process_error",
         error,
@@ -745,8 +753,8 @@ async function runOneTask(task, index, systemPrompt) {
       const error =
         `${agentError.error} ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: agentError.stage,
         error,
@@ -792,12 +800,12 @@ async function runOneTask(task, index, systemPrompt) {
     const rewardNumber = rewardText != null ? Number(String(rewardText).trim()) : NaN;
     const reward = Number.isFinite(rewardNumber) ? rewardNumber : 0;
 
-    queueEvent("task.verified", {
-      task_id: task.id,
+    queueEvent("task.verified", buildTaskVerifiedEventPayload({
+      taskId: task.id,
       passed,
       reward,
-      duration_s: verifyDurationS,
-    });
+      durationS: verifyDurationS,
+    }));
     await flushEvents();
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
@@ -805,7 +813,8 @@ async function runOneTask(task, index, systemPrompt) {
     // own session/stdout, and these traces are uploaded publicly. The FULL
     // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
     // ~4.5MB callback body limit) -- no truncation.
-    const { traceBlobUrl, secrets } = await uploadAgentTraces(task.id, sessionText, piStdout);
+    const { traceBlobUrl, secrets, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+    queueAgentTraceEvents(queueEvent, traceUploads);
     // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
     // Verifier tab shows WHY a task passed or failed, not just the reward.
     const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
@@ -814,7 +823,7 @@ async function runOneTask(task, index, systemPrompt) {
     verifierParts.push(`\n[reward.txt] ${rewardText ?? "(missing)"}`);
     const verifierUpload = await uploadTrace(
       task.id,
-      "verifier.txt",
+      VERIFIER_TRACE_NAME,
       Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
     );
     if (verifierUpload?.url) {
@@ -949,14 +958,7 @@ async function main() {
 
     const totals = computeTotals(taskResults);
     const durationS = (Date.now() - startedAt) / 1000;
-    queueEvent("run.completed", {
-      tasks_passed: totals.tasks_passed,
-      total_cost_usd: totals.total_cost_usd,
-      ...(totals.normalized_total_cost_usd === null ? {} : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
-      ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
-      ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
-      duration_s: durationS,
-    });
+    queueEvent("run.completed", buildRunCompletedEventPayload(totals, durationS));
 
     await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
 

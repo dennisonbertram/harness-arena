@@ -9,7 +9,12 @@ import { acquireDirectoryLock, assertNoSymlinksInTree, atomicCreateFile, atomicW
 const MANAGED_ENV_MARKER = "# harness-arena-init:v2";
 const NEXT_DEV_ENV_FILES = new Set([".env", ".env.local", ".env.development", ".env.development.local"]);
 const INHERITED_ALLOWLIST = new Set(["PATH", "TMPDIR", "LANG", "LC_ALL", "TERM", "COLORTERM", "CI", "NO_COLOR", "FORCE_COLOR", "SystemRoot", "ComSpec"]);
-const SAFE_LOCAL_KEYS = new Set(["STORAGE", "LOCAL_STORAGE_DIR", "AUTH_SECRET", "LOCAL_INSTANCE_NONCE", "HARNESS_LOCAL_INIT", "LOCAL_NEUTRALIZED_ENV_KEYS", "NODE_ENV"]);
+const SAFE_LOCAL_KEYS = new Set([
+  "STORAGE", "LOCAL_STORAGE_DIR", "AUTH_SECRET", "LOCAL_INSTANCE_NONCE", "HARNESS_LOCAL_INIT",
+  "LOCAL_NEUTRALIZED_ENV_KEYS", "NODE_ENV", "HARNESS_EXECUTION_MODE", "HARNESS_DEVELOPMENT_IDENTITY",
+  "HARNESS_GIT_BRANCH", "RUNNER_CALLBACK_SECRET", "RUNS_PER_SUBMISSION",
+]);
+const DETERMINISTIC_SCENARIOS = new Set(["success", "task-failure", "callback-failure", "stale-reap", "budget-exceeded"]);
 const REQUIRED_NODE_VERSION = [20, 9, 0];
 const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
 const SUPERVISOR_PATH = fileURLToPath(new URL("./init-process-supervisor.mjs", import.meta.url));
@@ -100,6 +105,10 @@ export async function readManagedLocalConfig(worktree) {
 }
 
 export async function safeChildEnv(worktree, parentEnv, localConfig) {
+  const branch = localConfig.HARNESS_GIT_BRANCH;
+  if (!branch || branch === "main") throw new Error("local deterministic init is forbidden on main or an unknown branch");
+  const scenario = parentEnv.HARNESS_DETERMINISTIC_SCENARIO || "success";
+  if (!DETERMINISTIC_SCENARIOS.has(scenario)) throw new Error(`unknown deterministic scenario: ${scenario}`);
   const child = {};
   for (const key of INHERITED_ALLOWLIST) if (typeof parentEnv[key] === "string" && parentEnv[key] !== "") child[key] = parentEnv[key];
   Object.assign(child, {
@@ -109,6 +118,11 @@ export async function safeChildEnv(worktree, parentEnv, localConfig) {
     LOCAL_STORAGE_DIR: localConfig.LOCAL_STORAGE_DIR,
     AUTH_SECRET: localConfig.AUTH_SECRET,
     LOCAL_INSTANCE_NONCE: localConfig.LOCAL_INSTANCE_NONCE ?? "",
+    HARNESS_GIT_BRANCH: branch,
+    HARNESS_EXECUTION_MODE: `deterministic-${scenario}`,
+    HARNESS_DEVELOPMENT_IDENTITY: "seeded",
+    RUNNER_CALLBACK_SECRET: `local-${localConfig.AUTH_SECRET}`,
+    RUNS_PER_SUBMISSION: "1",
   });
   const discovered = await discoverNextEnvKeys(worktree);
   const neutralized = [];
@@ -119,6 +133,24 @@ export async function safeChildEnv(worktree, parentEnv, localConfig) {
   }
   child.LOCAL_NEUTRALIZED_ENV_KEYS = neutralized.sort().join(",");
   return child;
+}
+
+export async function readCurrentBranch(worktree) {
+  const dotGit = resolve(worktree, ".git");
+  let gitDirectory = dotGit;
+  const info = await lstat(dotGit);
+  if (info.isFile()) {
+    const pointer = (await readFile(dotGit, "utf8")).trim();
+    const match = /^gitdir:\s*(.+)$/.exec(pointer);
+    if (!match) throw new Error("worktree .git file has an invalid gitdir pointer");
+    gitDirectory = resolve(dirname(dotGit), match[1]);
+  } else if (!info.isDirectory()) {
+    throw new Error("worktree .git is neither a file nor a directory");
+  }
+  const head = (await readFile(join(gitDirectory, "HEAD"), "utf8")).trim();
+  const match = /^ref:\s+refs\/heads\/(.+)$/.exec(head);
+  if (!match?.[1]) throw new Error("detached or unrecognized Git HEAD; refusing deterministic identity");
+  return match[1];
 }
 
 export async function discoverNextEnvKeys(worktree) {

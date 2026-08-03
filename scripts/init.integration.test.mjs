@@ -100,6 +100,8 @@ async function createHermeticCheckout(prefix, { withFakeNext = false } = {}) {
   checkoutRoots.add(checkout);
   await mkdir(join(checkout, "scripts"), { recursive: true });
   await mkdir(join(checkout, "lib"), { recursive: true });
+  await mkdir(join(checkout, ".git"), { recursive: true });
+  await writeFile(join(checkout, ".git", "HEAD"), "ref: refs/heads/codex/init-integration\n");
   for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/init-command-group-anchor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
     await cp(join(repositoryRoot, path), join(checkout, path));
   }
@@ -335,7 +337,7 @@ describe.sequential("init process ownership integration", () => {
     const metadata = JSON.parse(await readFile(join(state, "init.pid"), "utf8"));
     const health = await fetch(`http://127.0.0.1:${metadata.port}/api/health`).then((response) => response.text());
     expect(health).not.toMatch(/sentinel/);
-    expect(JSON.parse(health)).toMatchObject({ gateway_key_present: false, runner_secret_present: false });
+    expect(JSON.parse(health)).toMatchObject({ gateway_key_present: false, runner_secret_present: true });
     await expectOperatorEnvsPreserved();
   });
 
