@@ -248,6 +248,32 @@ describe("least-privilege access policy", () => {
     expect(collected.vercel).toMatchObject({ state: "missing" });
   });
 
+  it("directly rejects a repeated Vercel project-member pagination cursor", async () => {
+    const audit = await subject();
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return { ok: true, text: async () => JSON.stringify({ members: [], pagination: { hasNext: true, count: 0, next: 123, prev: null } }) };
+    });
+
+    await expect(audit.getProjectMemberPages({ fetchImpl, headers: {}, url: "https://api.vercel.com/v1/projects/project/members" }))
+      .rejects.toThrow("vercel_project_members_pagination_repeated");
+    expect(calls).toBe(2);
+  });
+
+  it("directly rejects Vercel access-group pagination that exhausts the page cap", async () => {
+    const audit = await subject();
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return { ok: true, text: async () => JSON.stringify({ accessGroups: [], pagination: { count: 0, next: `cursor-${calls}` } }) };
+    });
+
+    await expect(audit.getAccessGroupPages({ fetchImpl, headers: {}, url: "https://api.vercel.com/v1/access-groups", collection: "accessGroups" }))
+      .rejects.toThrow("vercel_access_group_pagination_limit_exceeded");
+    expect(calls).toBe(100);
+  });
+
   it("never infers a GitHub App installation token's fine-grained permissions from successful GET probes", async () => {
     const audit = await subject();
     const policy = await audit.loadPolicy(policyPath);

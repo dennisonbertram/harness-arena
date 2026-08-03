@@ -474,7 +474,7 @@ function accessGroupNext(page, collection) {
   return next;
 }
 
-async function getProjectMemberPages({ fetchImpl, headers, url }) {
+export async function getProjectMemberPages({ fetchImpl, headers, url }) {
   const entries = [];
   const sinceValues = new Set();
   let since = null;
@@ -492,7 +492,7 @@ async function getProjectMemberPages({ fetchImpl, headers, url }) {
   throw new Error("vercel_project_members_pagination_limit_exceeded");
 }
 
-async function getAccessGroupPages({ fetchImpl, headers, url, collection }) {
+export async function getAccessGroupPages({ fetchImpl, headers, url, collection }) {
   const entries = [];
   const nextValues = new Set();
   let next = null;
