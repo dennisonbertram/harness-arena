@@ -29,5 +29,5 @@
   "blob": { "credential_present": false, "read_via": "get_only_ops" },
   "sandbox": { "credential_present": false, "read_via": "get_only_ops" },
   "ai_gateway": { "spend_credential_present": false, "read_via": "vercel_logs" },
-  "secrets": { "static_values_present": false, "metadata_readable": true, "ephemeral_file_mode": "0600", "cleanup_verified": true }
+  "secrets": { "forbidden_static_values_present": false, "metadata_readable": true, "ephemeral_file_mode": "0600", "cleanup_verified": true }
 }

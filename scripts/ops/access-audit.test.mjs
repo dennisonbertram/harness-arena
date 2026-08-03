@@ -25,6 +25,8 @@ describe("least-privilege access policy", () => {
     expect(inventory.referenced).toContain("VERCEL_TEAM_ID");
     expect(audit.compareEnvironmentInventory(new Set(["OPS_READ_TOKEN", "NEW_UNMAPPED_ENV"]), policy)).toEqual(["NEW_UNMAPPED_ENV"]);
     expect(audit.deriveEnvironmentReferencesFromText("process.env.DIRECT; process.env['BRACKET']; const { DESTRUCTURED: alias } = process.env").names).toEqual(new Set(["BRACKET", "DESTRUCTURED", "DIRECT"]));
+    expect(() => audit.validatePolicy({ ...policy, environment_inventory: { ...policy.environment_inventory, variables: { BAD: { secret: false } } } })).toThrow(/inventory/i);
+    expect(JSON.parse(await readFile(join(repo, "config", "agent-access-policy.schema.json"), "utf8")).$id).toContain("agent-access-policy.v1");
   });
 
   it.each([
@@ -38,7 +40,11 @@ describe("least-privilege access policy", () => {
     const report = audit.auditAccessEvidence(await audit.loadPolicy(policyPath), await evidence(name), { now: "2026-08-03T10:00:00.000Z" });
     expect(report.overall).toBe(state);
     expect(report.exit_code).toBe(exitCode);
-    if (name === "owner") expect(report.systems.every((item) => item.state !== "observable") || report.systems.some((item) => item.state === "overprivileged")).toBe(true);
+    if (name === "owner") {
+      for (const system of ["github", "vercel", "blob", "sandbox", "ai_gateway", "secrets"]) {
+        expect(report.systems.find((item) => item.name === system)?.state).toBe("overprivileged");
+      }
+    }
   });
 
   it("uses a 0600 ephemeral secret file, redacts output, and cleans up on success", async () => {
@@ -104,7 +110,7 @@ describe("least-privilege access policy", () => {
     const writeOut = vi.fn();
     const raw = await evidence("viewer");
     raw.untrusted_secret = "cli-secret-sentinel";
-    const exitCode = await audit.executeCli(["--evidence", fixture("viewer"), "--json"], { cwd: repo, writeOut, evidenceOverride: raw, now: "2026-08-03T10:00:00.000Z" });
+    const exitCode = await audit.executeCli(["--", "--evidence", fixture("viewer"), "--json"], { cwd: repo, writeOut, evidenceOverride: raw, now: "2026-08-03T10:00:00.000Z" });
     expect(exitCode).toBe(0);
     expect(writeOut).toHaveBeenCalledOnce();
     expect(writeOut.mock.calls[0][0]).not.toContain("cli-secret-sentinel");

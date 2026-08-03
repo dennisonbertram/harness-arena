@@ -13,6 +13,7 @@ public/runner-bundle.tgz
 .vercel
 .env*
 .harness-arena/
+.agent-access-secrets/
 
 # MCP package build output and deps
 mcp/dist/
