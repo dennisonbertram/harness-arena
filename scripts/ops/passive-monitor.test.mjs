@@ -78,6 +78,8 @@ describe("monitor workflow contract", () => {
     expect(workflow).toMatch(/retention-days:\s*[1-9]/);
     expect(workflow).not.toMatch(/\b(?:deploy|promote|rollback|alias|env\s+(?:add|rm|pull)|blob|admin)\b/i);
     expect(workflow).not.toMatch(/(?:VERCEL_TOKEN|BLOB_READ_WRITE_TOKEN|RUNNER_CALLBACK_SECRET|AI_GATEWAY_API_KEY)/);
+    expect(workflow).not.toMatch(/--label\s+agent-monitor/);
+    expect(workflow).toMatch(/--search\s+"\[agent-monitor\] in:title"/);
     expect(runbook).toMatch(/GET-only/i);
     expect(runbook).toMatch(/access_blocked/i);
   });
