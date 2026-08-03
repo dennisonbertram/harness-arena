@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -48,18 +48,21 @@ export class FileCredentialStore implements CredentialStore {
   }
 
   private async read(): Promise<CredentialFile> {
+    const directory = dirname(this.path);
+    await assertPrivateDirectory(directory, true);
     try {
       const metadata = await lstat(this.path);
-      const directoryMetadata = await lstat(dirname(this.path));
-      if (!metadata.isFile() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata) ||
-          !directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() || !isPrivatePosixMetadata(directoryMetadata)) {
+      if (!metadata.isFile() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata)) {
         throw new Error(READ_ERROR);
       }
       const parsed: unknown = JSON.parse(await readFile(this.path, "utf8"));
       if (!isCredentialFile(parsed)) throw new Error(READ_ERROR);
       return parsed;
     } catch (error: unknown) {
-      if (isMissingFile(error)) return { version: 1, credentials: {} };
+      if (isMissingFile(error)) {
+        await assertPrivateDirectory(directory, true);
+        return { version: 1, credentials: {} };
+      }
       if (error instanceof Error && error.message === READ_ERROR) throw error;
       throw new Error(READ_ERROR);
     }
@@ -67,13 +70,14 @@ export class FileCredentialStore implements CredentialStore {
 
   private async write(file: CredentialFile): Promise<void> {
     const directory = dirname(this.path);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
+    const directoryExists = await assertPrivateDirectory(directory, true);
+    if (!directoryExists) await mkdir(directory, { recursive: true, mode: 0o700 });
+    await assertPrivateDirectory(directory, false);
     const temporary = join(directory, `.${basename(this.path)}.${process.pid}.${randomUUID()}.tmp`);
     try {
       await writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await assertPrivateDirectory(directory, false);
       await rename(temporary, this.path);
-      await chmod(this.path, 0o600);
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;
@@ -103,6 +107,20 @@ const isPrivatePosixMetadata = (metadata: { mode: number; uid: number }): boolea
   if (process.platform === "win32") return true;
   const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
   return (metadata.mode & 0o077) === 0 && (currentUid === undefined || metadata.uid === currentUid);
+};
+
+const assertPrivateDirectory = async (directory: string, allowMissing: boolean): Promise<boolean> => {
+  try {
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata)) {
+      throw new Error(READ_ERROR);
+    }
+    return true;
+  } catch (error: unknown) {
+    if (allowMissing && isMissingFile(error)) return false;
+    if (error instanceof Error && error.message === READ_ERROR) throw error;
+    throw new Error(READ_ERROR);
+  }
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
