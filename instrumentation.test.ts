@@ -1,10 +1,11 @@
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSafeSpanProcessors, createSafeSpanProcessor, onRequestError } from "./instrumentation";
 
 describe("onRequestError", () => {
+  afterEach(() => vi.unstubAllEnvs());
   it("awaits structured safe Error telemetry without raw error text or stack", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     const error = Object.assign(new Error("gateway timeout"), { digest: "digest-42" });
@@ -86,9 +87,9 @@ describe("onRequestError", () => {
   });
 
   it("always exports a queryable safe trace event when no OTLP collector is configured", async () => {
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
-    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-    delete process.env.VERCEL_OTEL_ENDPOINTS;
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "");
+    vi.stubEnv("VERCEL_OTEL_ENDPOINTS", "");
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     const provider = new BasicTracerProvider({
       resource: resourceFromAttributes({ "host.url": "https://host.test?token=secret" }),
@@ -112,12 +113,11 @@ describe("onRequestError", () => {
   });
 
   it("adds OTLP delivery only when a collector is explicitly available", () => {
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
-    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-    delete process.env.VERCEL_OTEL_ENDPOINTS;
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "");
+    vi.stubEnv("VERCEL_OTEL_ENDPOINTS", "");
     expect(createSafeSpanProcessors()).toHaveLength(1);
-    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "https://collector.example.test/v1/traces";
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
     expect(createSafeSpanProcessors()).toHaveLength(2);
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
   });
 });

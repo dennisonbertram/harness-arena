@@ -1,5 +1,5 @@
 import { OTLPHttpProtoTraceExporter, registerOTel } from "@vercel/otel";
-import { SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
+import { context, ROOT_CONTEXT, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { SimpleSpanProcessor, type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { Instrumentation } from "next";
@@ -64,9 +64,61 @@ export class SafeSpanExporter implements SpanExporter {
   shutdown(): Promise<void> { return this.delegate.shutdown(); }
 }
 
+/** Durable, provider-neutral fallback: Vercel captures these JSON lines in runtime logs. */
+export class StructuredSpanExporter implements SpanExporter {
+  export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
+    try {
+      for (const span of spans) {
+        const spanContext = span.spanContext();
+        // Do not let an unrelated active span overwrite the ended span IDs in
+        // log()'s reserved envelope.
+        context.with(ROOT_CONTEXT, () => log("info", "trace.span", {
+          trace_id: spanContext.traceId,
+          span_id: spanContext.spanId,
+          ...(span.parentSpanContext?.spanId ? { parent_span_id: span.parentSpanContext.spanId } : {}),
+          span_name: span.name,
+          span_kind: span.kind,
+          span_status: span.status.code,
+          ...span.attributes,
+        }));
+      }
+      callback({ code: 0 });
+    } catch (error) {
+      callback({ code: 1, error: error instanceof Error ? error : new Error("structured span export failed") });
+    }
+  }
+  forceFlush(): Promise<void> { return Promise.resolve(); }
+  shutdown(): Promise<void> { return Promise.resolve(); }
+}
+
+function configuredCollectorUrl(): string | null {
+  const tracesEndpoint = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT?.trim();
+  if (tracesEndpoint) return tracesEndpoint;
+  const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim().replace(/\/$/, "");
+  if (endpoint) return `${endpoint}/v1/traces`;
+  if (!process.env.VERCEL_OTEL_ENDPOINTS) return null;
+  const protocol = process.env.VERCEL_OTEL_ENDPOINTS_PROTOCOL?.trim() || "http/protobuf";
+  if (protocol !== "http/protobuf") return null;
+  const rawPort = process.env.VERCEL_OTEL_ENDPOINTS_PORT?.trim() || "4318";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  return `http://localhost:${port}/v1/traces`;
+}
+
 /** Uses the supported onEnd/export lifecycle; readonly SDK spans are never mutated. */
-export function createSafeSpanProcessor(exporter: SpanExporter = new OTLPHttpProtoTraceExporter()): SpanProcessor {
+export function createSafeSpanProcessor(exporter: SpanExporter = new StructuredSpanExporter()): SpanProcessor {
   return new SimpleSpanProcessor(new SafeSpanExporter(exporter));
+}
+
+/**
+ * Runtime logs are the always-on trace sink. OTLP is additive only when the
+ * environment proves a collector exists, avoiding silent localhost export.
+ */
+export function createSafeSpanProcessors(): SpanProcessor[] {
+  const processors: SpanProcessor[] = [createSafeSpanProcessor()];
+  const collectorUrl = configuredCollectorUrl();
+  if (collectorUrl) processors.push(createSafeSpanProcessor(new OTLPHttpProtoTraceExporter({ url: collectorUrl })));
+  return processors;
 }
 
 export function register() {
@@ -74,7 +126,7 @@ export function register() {
     serviceName: "harness-arena",
     // An explicit processor disables @vercel/otel's parallel automatic
     // exporters, ensuring every exported field crosses the safe clone boundary.
-    spanProcessors: [createSafeSpanProcessor()],
+    spanProcessors: createSafeSpanProcessors(),
   });
 }
 

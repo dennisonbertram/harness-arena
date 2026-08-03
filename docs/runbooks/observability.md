@@ -19,10 +19,10 @@ Local and isolated-development evidence must never be described as production pr
 For the isolated development project only, start from the deployment serving its
 development hostname, then query its logs with the Vercel CLI. Filter JSON
 messages by `event`, `run_id`, or `trace_id`; compare the deployment SHA in each
-event with the deployment under investigation. Trace availability and retention
-are collector/provider dependent: the isolated project's configured OTLP
-collector is the trace source of truth, and a missing trace is not proof that an
-application event did not occur.
+event with the deployment under investigation. Every ended OpenTelemetry span is
+also exported as a redacted `trace.span` JSON event, so agents retain a queryable
+trace path even when no OTLP collector is configured. An explicitly configured
+OTLP collector is an additive sink, not the only copy.
 
 For an error, begin with `request.error`, then follow the trace/span fields to
 storage, sandbox, dispatch, provider, callback, or cron events. Route-level
@@ -32,13 +32,13 @@ and search only with an approved Vercel access path.
 
 ## Local behavior
 
-`instrumentation.ts` disables `@vercel/otel`'s automatic exporters and sends
-only safe-cloned spans through the official OTLP HTTP/protobuf exporter. A local
-collector or an `OTEL_EXPORTER_OTLP_*` endpoint configured only in the isolated
-development project is required to receive traces. Never re-enable an automatic
+`instrumentation.ts` disables `@vercel/otel`'s automatic exporters so every span
+crosses the safe-clone boundary. The always-on exporter writes bounded
+`trace.span` JSON events to runtime logs. If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, or Vercel's HTTP/protobuf collector discovery
+variables prove a collector exists, the same safe clone is additionally sent
+through the official OTLP HTTP/protobuf exporter. Never re-enable an automatic
 exporter as a debugging workaround because that bypasses the safe clone boundary.
-Without a collector, JSON logs still work and simply omit trace/span IDs when no
-active span is exposed.
 
 ## Rollback
 
