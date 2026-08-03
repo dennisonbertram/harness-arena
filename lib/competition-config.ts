@@ -1,4 +1,5 @@
 import { isAllowedModel } from "./models";
+import { separatedCredential } from "./credential-separation.mjs";
 
 // The one model the /competition contest runs on. Fixed for the whole
 // competition (no per-submission choice) — the admin picks this via env var,
@@ -15,5 +16,5 @@ if (!isAllowedModel(COMPETITION_MODEL)) {
 
 /** Reads the configured admin token, or undefined if unset. */
 export function competitionAdminToken(): string | undefined {
-  return process.env.COMPETITION_ADMIN_TOKEN;
+  return separatedCredential("COMPETITION_ADMIN_TOKEN");
 }

@@ -1,4 +1,5 @@
 import { SignJWT, jwtVerify, errors } from "jose";
+import { separatedCredential } from "./credential-separation.mjs";
 
 const AGENT_TOKEN_EXPIRY_SECONDS = 90 * 24 * 60 * 60;
 
@@ -20,7 +21,7 @@ export class AgentTokenError extends Error {
 }
 
 function authSecret(): Uint8Array {
-  const secret = process.env.AUTH_SECRET;
+  const secret = separatedCredential("AUTH_SECRET");
   if (!secret) throw new Error("AUTH_SECRET is not configured on the server");
   return new TextEncoder().encode(secret);
 }
