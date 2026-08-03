@@ -16,7 +16,9 @@ const { FUTURE_MANIFEST_LIVE_ALIAS } = vi.hoisted(() => ({
   FUTURE_MANIFEST_LIVE_ALIAS: "new-live-alias.example.test",
 }));
 vi.mock("@/config/development-environment.json", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/config/development-environment.json")>();
+  const actual = await importOriginal() as unknown as {
+    default: typeof import("@/config/development-environment.json");
+  };
   return {
     default: {
       ...actual.default,

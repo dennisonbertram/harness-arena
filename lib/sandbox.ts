@@ -1,5 +1,6 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
+import developmentEnvironment from "@/config/development-environment.json";
 import { PINNED_PROVIDERS } from "./arena-params";
 import { log, normalizeError } from "./log";
 import { getStorage } from "./storage";
@@ -13,11 +14,12 @@ import type { Run } from "./types";
 // redeploy.
 const DEFAULT_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
 const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
-const PRODUCTION_CALLBACK_HOSTS = new Set([
-  "harness-arena-psi.vercel.app",
-  "harness-arena-dennisons-projects.vercel.app",
-  "harness-arena-git-main-dennisons-projects.vercel.app",
-]);
+// Static JSON import is intentional: Next traces the versioned manifest into
+// the Vercel server bundle, so runtime validation neither depends on the
+// deployment filesystem nor duplicates the live inventory in application
+// code. The public runner bundle does not need this file because the callback
+// is rejected before a Sandbox is created or the runner bundle is downloaded.
+const PRODUCTION_CALLBACK_HOSTS = new Set(developmentEnvironment.live.aliases);
 
 // Requested lifetime before applying the task-derived safety floor below.
 // Vercel Pro currently permits much longer runs, but keeping the requested

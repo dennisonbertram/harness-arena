@@ -44,6 +44,11 @@ review are complete.
    entries missing until the infrastructure owner provisions and independently
    confirms each value. The known live Blob store identifier is recorded only
    as an identifier; the manifest contains no token or other secret.
+   `CALLBACK_BASE` is required for Sandbox runs and must equal the manifest's
+   `callbackOrigin`: a canonical, publicly reachable HTTPS origin for the
+   isolated Development deployment that Vercel Sandbox can reach. It must have
+   no credentials, port, path, query, or fragment. A localhost, loopback,
+   production, or live origin is invalid.
 5. Before any Development configuration or deploy, refresh the complete live alias and Blob store identifier inventory
    with read-only Vercel inventory access. Compare it with the manifest and stop
    on any omitted or changed identifier. Never retrieve or print Blob
