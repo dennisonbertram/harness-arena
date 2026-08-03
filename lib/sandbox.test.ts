@@ -225,15 +225,26 @@ describe("createRunSandbox", () => {
     );
   });
 
-  it("falls back to the production callback base URL when CALLBACK_BASE is unset", async () => {
+  it("fails closed instead of falling back to the production callback when CALLBACK_BASE is unset", async () => {
     delete process.env.CALLBACK_BASE;
-    const sandbox = makeSandbox();
-    mockCreate.mockResolvedValue(sandbox);
+    mockCreate.mockResolvedValue(makeSandbox());
 
-    await createRunSandbox(makeRun(), { prompt: "be careful" });
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: missing required env var CALLBACK_BASE",
+    );
 
-    const bootstrap = sandbox.runCommand.mock.calls[0][0] as { args: string[] };
-    expect(bootstrap.args[1]).toContain("https://harness-arena-psi.vercel.app/runner-bundle.tgz");
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it("refuses the known production callback origin even when it is explicitly configured", async () => {
+    process.env.CALLBACK_BASE = "https://harness-arena-psi.vercel.app";
+    mockCreate.mockResolvedValue(makeSandbox());
+
+    await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+      "sandbox: production callback origin denied",
+    );
+
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 
   describe("secrets-in-env-map launch (issue #23 finding C)", () => {
