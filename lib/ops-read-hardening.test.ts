@@ -82,6 +82,18 @@ describe("ops read hardening contract", () => {
     expect(output).toMatchObject({ author: "Ada", token_count: 8 });
   });
 
+  it("fails closed for every lexically JSON-shaped malformed string but preserves non-JSON telemetry", () => {
+    const candidates = [
+      "{", "[", "{public}", "[1 2]", "[\"unterminated]", "[1,]",
+      '{"first":1 "second":2}', '{"outer":[1,2}', '{"outer":{"value" "nested-leak"}}',
+      String.raw`["\uZZZZ"]`, "\uFEFF \t\r\n[true false]", " \t\r\n{public}",
+    ];
+    for (const candidate of candidates) expect(redactOpsValue({ candidate })).toEqual({ candidate: "[REDACTED]" });
+    const truthful = redactOpsValue({ text: "status=ready author=Ada token_count=8 access_token=server-free-leak" }) as { text: string };
+    expect(truthful.text).toContain("status=ready author=Ada token_count=8");
+    expect(truthful.text).not.toContain("server-free-leak");
+  });
+
   it("normalizes the full credential-key grammar, URL schemes, Error fields, and short configured secrets", () => {
     const previous = { token: process.env.OPS_READ_TOKEN, session: process.env.SESSION_SECRET };
     process.env.OPS_READ_TOKEN = "q";

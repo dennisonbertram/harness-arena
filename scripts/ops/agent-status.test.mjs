@@ -671,6 +671,32 @@ describe("redaction, platform wiring, and process bounds", () => {
     expect(redactSensitive(excessive)).toBe("[REDACTED]");
   });
 
+  it.each([
+    ["truncated object", "{"],
+    ["truncated array", "["],
+    ["missing object quotes and separator", "{public}"],
+    ["missing array comma", "[1 2]"],
+    ["unterminated array quote", "[\"unterminated]"],
+    ["trailing array comma", "[1,]"],
+    ["missing object comma", '{"first":1 "second":2}'],
+    ["mismatched nested closer", '{"outer":[1,2}'],
+    ["missing nested separator", '{"outer":{"value" "nested-leak"}}'],
+    ["invalid Unicode escape", String.raw`["\uZZZZ"]`],
+    ["BOM and JSON whitespace", "\uFEFF \t\r\n[true false]"],
+    ["whitespace-prefixed malformed object", " \t\r\n{public}"],
+  ])("fails closed for a %s JSON candidate without relying on assignment punctuation", (_label, candidate) => {
+    expect(redactSensitive(candidate)).toBe("[REDACTED]");
+  });
+
+  it("keeps non-JSON free text truthful while continuing to scan assignments", () => {
+    const output = redactSensitive("\uFEFF \tstatus=ready author=Ada token_count=8 access_token=free-text-leak");
+    expect(output).not.toBe("[REDACTED]");
+    expect(output).toContain("status=ready");
+    expect(output).toContain("author=Ada");
+    expect(output).toContain("token_count=8");
+    expect(output).not.toContain("free-text-leak");
+  });
+
   it("uses own descriptors only and never executes accessors, coercion hooks, iterators, or Proxy traps", () => {
     const calls = [];
     const hostile = {};
