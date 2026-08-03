@@ -51,4 +51,19 @@ describe("POST /api/agent/payout-wallet/ensure", () => {
     await expect(response.json()).resolves.toEqual({ error: { code: "invalid_body" } });
     expect(runtime.ensurePayoutWallet).not.toHaveBeenCalled();
   });
+
+  it("rejects an authenticated oversized body before buffering or provisioning", async () => {
+    const response = await POST(new NextRequest("http://localhost/api/agent/payout-wallet/ensure", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer scoped-session",
+        "content-type": "application/json",
+        "content-length": String(1_048_577),
+      },
+      body: "{}",
+    }));
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: { code: "body_too_large" } });
+    expect(runtime.ensurePayoutWallet).not.toHaveBeenCalled();
+  });
 });

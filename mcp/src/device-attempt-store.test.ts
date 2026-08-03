@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -118,5 +118,14 @@ describe("FileDeviceAttemptStore", () => {
     );
     expect(JSON.parse(await readFile(path, "utf8")).attempts["https://arena.example.test\u0000legacy-attempt"])
       .toMatchObject({ nextPollAt: "2029-01-01T00:00:10.000Z" });
+  });
+
+  it("rejects an existing device-attempt file readable by group or other users", async () => {
+    const { path, store } = await storeAt();
+    await store.save(attempt("permissive-mode"));
+    await chmod(path, 0o644);
+
+    await expect(new FileDeviceAttemptStore(path).get("https://arena.example.test", "permissive-mode"))
+      .rejects.toThrow("Unable to read Harness Arena device attempts");
   });
 });

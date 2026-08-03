@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -85,6 +85,21 @@ describe("HarnessArenaClient", () => {
       version: 1,
       credentials: { "https://arena.example.test": { token: "", github_login: 42, expires_at: "never" } },
     }));
+
+    await expect(new FileCredentialStore(path).get("https://arena.example.test"))
+      .rejects.toThrow("Unable to read Harness Arena credentials");
+  });
+
+  it("rejects an existing credential file readable by group or other users", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "harness-arena-mcp-credential-mode-"));
+    const path = join(directory, "credentials.json");
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      credentials: {
+        "https://arena.example.test": { token: "scoped-secret", github_login: "octo", expires_at: "2099-01-01T00:00:00Z" },
+      },
+    }), { mode: 0o600 });
+    await chmod(path, 0o644);
 
     await expect(new FileCredentialStore(path).get("https://arena.example.test"))
       .rejects.toThrow("Unable to read Harness Arena credentials");

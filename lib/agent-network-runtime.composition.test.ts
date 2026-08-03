@@ -64,7 +64,7 @@ describe("agent network runtime production composition", () => {
     expect(fakes.createNeonRuntime).not.toHaveBeenCalled();
   });
 
-  it("composes one cached runtime with bounded defaults and no private blob when its credentials are absent", () => {
+  it("composes one cached runtime with bounded defaults, a credential-pattern scanner, and no private blob when its credentials are absent", () => {
     vi.stubEnv("AGENT_TOKEN_ISSUER", "issuer");
     vi.stubEnv("AGENT_TOKEN_AUDIENCE", "audience");
     vi.stubEnv("AGENT_TOKEN_KEY_ID", "key");
@@ -77,7 +77,14 @@ describe("agent network runtime production composition", () => {
     expect(fakes.createNeonRuntime).toHaveBeenCalledWith({ databaseUrl: "postgres://test-only", maxPoolSize: 5 });
     expect(fakes.createServices).toHaveBeenCalledWith(expect.any(Object), { cursorSecret: "x".repeat(32) });
     expect(fakes.createSaga).toHaveBeenCalledWith(expect.objectContaining({ ledger: { ledger: "test-only" } }));
-    expect(fakes.createPolicy).toHaveBeenCalledWith({ maxUncompressedBytes: 8_388_608, scanTimeoutMs: 5_000 });
+    expect(fakes.createPolicy).toHaveBeenCalledWith({
+      maxUncompressedBytes: 8_388_608,
+      scanTimeoutMs: 5_000,
+      scan: expect.any(Function),
+    });
+    const scan = fakes.createPolicy.mock.calls[0][0].scan;
+    expect(scan({ schema_version: "rationale.v1", authored_by: "entrant", summary: "Verifier passed." })).toEqual({ ok: true });
+    expect(scan({ schema_version: "rationale.v1", authored_by: "entrant", summary: `credential ${"ghp_"}${"a".repeat(36)}` })).toEqual({ ok: false });
     expect(fakes.createPrivateBlob).not.toHaveBeenCalled();
   });
 
