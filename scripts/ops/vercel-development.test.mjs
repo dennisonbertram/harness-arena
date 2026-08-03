@@ -116,7 +116,19 @@ function productionDomain(overrides = {}) {
   };
 }
 
-function verifierApiFetch({ aliases, domains, domainsAfter, pagination, envs }) {
+function verifierApiFetch({
+  aliases,
+  domains,
+  domainsAfter,
+  pagination,
+  envs,
+  liveAliases = manifest().live.aliases,
+  liveAliasesAfter = liveAliases,
+  liveStoreIds = manifest().live.storeIds,
+  liveStoreIdsAfter = liveStoreIds,
+  liveDeployment = {},
+  liveEnvironment = {},
+}) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
     accountId: TEAM_ID,
@@ -125,6 +137,8 @@ function verifierApiFetch({ aliases, domains, domainsAfter, pagination, envs }) 
     alias: aliases ?? [],
   };
   let domainReads = 0;
+  let liveReads = 0;
+  let liveEnvironmentReads = 0;
   return vi.fn(async (input) => {
     const url = new URL(input);
     if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
@@ -135,6 +149,24 @@ function verifierApiFetch({ aliases, domains, domainsAfter, pagination, envs }) 
       };
       inventory.pagination = pagination ?? { count: inventory.domains.length, next: null, prev: null };
       return jsonResponse(inventory);
+    }
+    if (url.pathname === `/v13/deployments/${encodeURIComponent(manifest().live.aliases[0])}`) {
+      liveReads += 1;
+      return jsonResponse({
+        projectId: LIVE_PROJECT_ID,
+        target: "production",
+        readyState: "READY",
+        alias: liveReads === 1 ? liveAliases : liveAliasesAfter,
+        ...liveDeployment,
+      });
+    }
+    if (url.pathname === `/v10/projects/${LIVE_PROJECT_ID}/env`) {
+      liveEnvironmentReads += 1;
+      const storeIds = liveEnvironmentReads === 1 ? liveStoreIds : liveStoreIdsAfter;
+      return jsonResponse({
+        envs: storeIds.map((storeId) => ({ target: ["production"], contentHint: { storeId } })),
+        ...liveEnvironment,
+      });
     }
     if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
       return jsonResponse({ envs: envs ?? [
@@ -288,6 +320,66 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("rejects live aliases that are absent from the manifest inventory", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ liveAliases: [...manifest().live.aliases, "unrecorded-live.vercel.app"] }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
+  it("uses stable GET-only live inventory metadata without decrypting it", async () => {
+    const fetchImpl = verifierApiFetch({});
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).resolves.toEqual(inspection());
+
+    const liveRequests = fetchImpl.mock.calls.map(([input]) => new URL(input)).filter((url) =>
+      url.pathname === `/v13/deployments/${manifest().live.aliases[0]}`
+      || url.pathname === `/v10/projects/${LIVE_PROJECT_ID}/env`,
+    );
+    expect(liveRequests).toHaveLength(4);
+    expect(liveRequests.filter((url) => url.pathname.startsWith("/v13/deployments/")).every((url) =>
+      url.searchParams.get("withGitRepoInfo") === "true",
+    )).toBe(true);
+    expect(liveRequests.every((url) => url.searchParams.get("decrypt") === null)).toBe(true);
+  });
+
+  it.each([
+    ["replaced production Blob store", { liveStoreIds: ["store_replaced"] }],
+    ["cross-project deployment", { liveDeployment: { projectId: DEVELOPMENT_PROJECT_ID } }],
+    ["non-ready deployment", { liveDeployment: { readyState: "BUILDING" } }],
+    ["non-production deployment", { liveDeployment: { target: "staging" } }],
+    ["paginated environment response", { liveEnvironment: { pagination: { count: 1, next: null, prev: null } } }],
+    [
+      "non-production Blob binding",
+      { liveEnvironment: { envs: [{ target: ["preview"], contentHint: { storeId: LIVE_STORE_ID } }] } },
+    ],
+    ["unstable alias inventory", { liveAliasesAfter: [manifest().live.aliases[0]] }],
+  ])("rejects unsafe live inventory evidence: %s", async (_name, options) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch(options) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+      live: manifest().live,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
   it("accepts the complete final-page domain inventory metadata", async () => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({ pagination: { count: 1, next: null, prev: 1785709088100 } }),

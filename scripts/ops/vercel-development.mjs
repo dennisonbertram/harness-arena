@@ -223,6 +223,59 @@ function normalizeProductionDomains(value, projectId) {
   };
 }
 
+function sortedUniqueStrings(value) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) throw denied();
+  const normalized = [...value].sort();
+  if (normalized.some((item, index) => index > 0 && item === normalized[index - 1])) throw denied();
+  return normalized;
+}
+
+function normalizeLiveInventory(value) {
+  if (!exactKeys(value, ["projectId", "aliases", "storeIds"]) || typeof value.projectId !== "string" || !value.projectId) {
+    throw denied();
+  }
+  const aliases = sortedUniqueStrings(value.aliases);
+  return {
+    projectId: value.projectId,
+    aliases,
+    pinnedAlias: value.aliases[0],
+    storeIds: sortedUniqueStrings(value.storeIds),
+  };
+}
+
+function normalizeLiveDeployment(value, live) {
+  if (
+    !value
+    || typeof value !== "object"
+    || value.projectId !== live.projectId
+    || value.target !== "production"
+    || value.readyState !== "READY"
+  ) throw denied();
+  return sortedUniqueStrings(value.alias);
+}
+
+function normalizeLiveStoreIds(value) {
+  if (!exactKeys(value, ["envs"]) || !Array.isArray(value.envs)) throw denied();
+  const storeIds = [];
+  for (const entry of value.envs) {
+    const storeId = entry?.contentHint?.storeId;
+    if (storeId === undefined) continue;
+    if (
+      typeof storeId !== "string"
+      || !storeId
+      || !Array.isArray(entry.target)
+      || entry.target.length !== 1
+      || entry.target[0] !== "production"
+    ) throw denied();
+    storeIds.push(storeId);
+  }
+  return sortedUniqueStrings(storeIds);
+}
+
+function identical(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
 export function createReadOnlyVercelApi({
   fetchImpl = globalThis.fetch,
@@ -241,7 +294,7 @@ export function createReadOnlyVercelApi({
   const get = (token, url) => requestJson(fetchImpl, token, url, { timeoutMs, maxBodyBytes });
 
   return {
-    async inspect({ projectId, teamId, storeId, token }) {
+    async inspect({ projectId, teamId, storeId, token, live }) {
       if (
         projectId !== DEVELOPMENT_PROJECT_ID
         || teamId !== DEVELOPMENT_TEAM_ID
@@ -253,10 +306,26 @@ export function createReadOnlyVercelApi({
         throw denied();
       }
       try {
+        const liveInventory = live === undefined ? null : normalizeLiveInventory(live);
         const projectUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}`, { teamId });
         const projectBefore = normalizeProject(await get(token, projectUrl));
         const domainsUrl = requestUrl(`/v9/projects/${encodeURIComponent(projectId)}/domains`, { teamId, limit: "100" });
         const domainInventoryBefore = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const liveDeploymentUrl = liveInventory === null ? null : requestUrl(
+          `/v13/deployments/${encodeURIComponent(liveInventory.pinnedAlias)}`,
+          { teamId, withGitRepoInfo: "true" },
+        );
+        const liveEnvironmentUrl = liveInventory === null ? null : requestUrl(
+          `/v10/projects/${encodeURIComponent(liveInventory.projectId)}/env`,
+          { teamId },
+        );
+        const liveBefore = liveInventory === null ? null : {
+          aliases: normalizeLiveDeployment(await get(token, liveDeploymentUrl), liveInventory),
+          storeIds: normalizeLiveStoreIds(await get(token, liveEnvironmentUrl)),
+        };
+        if (liveBefore !== null && !identical(liveBefore, { aliases: liveInventory.aliases, storeIds: liveInventory.storeIds })) {
+          throw denied();
+        }
         const environments = await get(
           token,
           requestUrl(`/v10/projects/${encodeURIComponent(projectId)}/env`, { teamId }),
@@ -293,9 +362,14 @@ export function createReadOnlyVercelApi({
         );
         const projectAfter = normalizeProject(await get(token, projectUrl));
         const domainInventoryAfter = normalizeProductionDomains(await get(token, domainsUrl), projectId);
+        const liveAfter = liveInventory === null ? null : {
+          aliases: normalizeLiveDeployment(await get(token, liveDeploymentUrl), liveInventory),
+          storeIds: normalizeLiveStoreIds(await get(token, liveEnvironmentUrl)),
+        };
         if (
-          JSON.stringify(projectBefore) !== JSON.stringify(projectAfter)
-          || JSON.stringify(domainInventoryBefore) !== JSON.stringify(domainInventoryAfter)
+          !identical(projectBefore, projectAfter)
+          || !identical(domainInventoryBefore, domainInventoryAfter)
+          || !identical(liveBefore, liveAfter)
         ) throw denied();
         const projectConnections = Array.isArray(store?.projects) ? store.projects : [];
         const connection = projectConnections.find((item) => item?.projectId === projectId);
@@ -418,6 +492,7 @@ export async function verifyDevelopmentPreflight({
       teamId: DEVELOPMENT_TEAM_ID,
       storeId: manifest.store.id,
       token,
+      live: manifest.live,
     });
     validateInspection(actual, manifest);
     const remoteAfter = await readRemoteSha({ cwd });
