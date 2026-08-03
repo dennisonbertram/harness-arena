@@ -87,10 +87,11 @@ function beginSelfTermination(signal) {
   if (selfTerminating) return;
   selfTerminating = true;
   try { process.kill(-process.pid, signal); } catch {}
-  const timer = setTimeout(() => {
+  // Keep this escalation referenced: after the direct command has exited and
+  // supervisor IPC disappears, it may be the anchor's only live handle.
+  setTimeout(() => {
     try { process.kill(-process.pid, "SIGKILL"); } catch { process.kill(process.pid, "SIGKILL"); }
   }, 500);
-  timer.unref();
 }
 
 function send(message, callback) {
