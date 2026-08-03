@@ -269,7 +269,7 @@ describe("authenticated prerequisite supervisor", () => {
     let held;
     const emit = owned.child.emit;
     owned.child.emit = function holdDetachAck(event, ...args) {
-      if (event === "message" && args[0]?.type === "detached") {
+      if (event === "message" && ["detach-prepared", "detached"].includes(args[0]?.type)) {
         held = args;
         observed.resolve();
         return false;
@@ -290,7 +290,47 @@ describe("authenticated prerequisite supervisor", () => {
     }
   });
 
-  it("chains repeated cleanup immediately after an acknowledged detach when cancellation wins before disconnect", async () => {
+  it("reaps the exact reviewer repro when the anchor dies after prepare and before explicit commit", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-anchor-dies-after-prepare.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const anchorPid = processGroupId(tree.command);
+    try {
+      await expect(init.detachOwnedSupervisor(owned, {
+        beforeCommit: async () => {
+          process.kill(anchorPid, "SIGKILL");
+          await waitForGone([anchorPid]);
+        },
+      })).resolves.toBe(false);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
+
+  it("reaps when cancellation wins after prepare and before the explicit commit request", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-after-prepare.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const controller = new AbortController();
+    const entered = deferred();
+    const release = deferred();
+    try {
+      const detaching = init.detachOwnedSupervisor(owned, {
+        signal: controller.signal,
+        beforeCommit: async () => { entered.resolve(); await release.promise; },
+      });
+      await Promise.race([entered.promise, delay(1_000).then(() => { throw new Error("prepare barrier was not entered"); })]);
+      controller.abort(new Error("cancel after prepare"));
+      release.resolve();
+      await expect(detaching).rejects.toThrow(/cancel after prepare/);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
+
+  it("chains repeated cleanup after final commit ACK when cancellation wins before disconnect", async () => {
     const root = await temp();
     const marker = join(root, "detach-after-ack.json");
     const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
@@ -304,34 +344,132 @@ describe("authenticated prerequisite supervisor", () => {
         beforeDisconnect: async () => { entered.resolve(); await release.promise; },
       });
       await Promise.race([entered.promise, delay(1_000).then(() => { throw new Error("detach barrier was not entered"); })]);
-      controller.abort(new Error("cancel after detach ack"));
+      controller.abort(new Error("cancel after final commit ack"));
       const repeated = [init.terminateOwnedSupervisor(owned), init.terminateOwnedSupervisor(owned)];
       release.resolve();
-      await expect(detaching).rejects.toThrow(/cancel after detach ack/);
+      await expect(detaching).rejects.toThrow(/cancel after final commit ack/);
       await expect(Promise.all(repeated)).resolves.toEqual([true, true]);
       await waitForExit(owned.child);
       await waitForGone([tree.command, tree.descendant]);
     } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
-  it.each(["missing", "spoofed"])("keeps cleanup authority when the detach acknowledgement is %s", async (mode) => {
+  it.each([
+    ["prepared", "missing"],
+    ["prepared", "spoofed"],
+    ["committed", "missing"],
+    ["committed", "spoofed"],
+  ])("reaps before returning false when the %s acknowledgement is %s", async (phase, mode) => {
     const root = await temp();
-    const marker = join(root, `detach-${mode}.json`);
+    const marker = join(root, `detach-${phase}-${mode}.json`);
     const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
     const tree = await waitForJson(marker);
     const emit = owned.child.emit;
     owned.child.emit = function filterDetachAck(event, ...args) {
-      if (event !== "message" || args[0]?.type !== "detached") return emit.call(this, event, ...args);
+      const expectedType = phase === "prepared" ? "detach-prepared" : "detach-committed";
+      const oldSinglePhaseAck = phase === "prepared" && args[0]?.type === "detached";
+      if (event !== "message" || (args[0]?.type !== expectedType && !oldSinglePhaseAck)) return emit.call(this, event, ...args);
       if (mode === "missing") return false;
-      return emit.call(this, event, { ...args[0], nonce: "spoofed-nonce" }, ...args.slice(1));
+      return emit.call(this, event, { ...args[0], detachId: "spoofed-detach-id" }, ...args.slice(1));
     };
     try {
       await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(false);
-      expect(owned.child.connected).toBe(true);
-      await expect(init.terminateOwnedSupervisor(owned)).resolves.toBe(true);
+      await waitForExit(owned.child);
       await waitForGone([tree.command, tree.descendant]);
     } finally {
       owned.child.emit = emit;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("ignores replayed and out-of-order authenticated detach acknowledgements", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-ack-order.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const groupPid = processGroupId(tree.command);
+    const originalSend = owned.child.send;
+    const sent = [];
+    owned.child.send = function injectOutOfOrder(message, ...args) {
+      sent.push(message);
+      const result = originalSend.call(this, message, ...args);
+      if (message?.type === "detach") {
+        queueMicrotask(() => owned.child.emit("message", {
+          type: "detach-committed",
+          nonce: message.nonce,
+          supervisorPid: owned.supervisorPid,
+          groupPid,
+          detachId: message.detachId,
+        }));
+      } else if (message?.type === "commit-detach") {
+        queueMicrotask(() => owned.child.emit("message", {
+          type: "detach-prepared",
+          nonce: message.nonce,
+          supervisorPid: owned.supervisorPid,
+          groupPid,
+          detachId: message.detachId,
+        }));
+      }
+      return result;
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(true);
+      expect(sent.map(({ type }) => type)).toEqual(expect.arrayContaining(["detach", "commit-detach"]));
+      expect(sent.find(({ type }) => type === "detach").detachId)
+        .toBe(sent.find(({ type }) => type === "commit-detach").detachId);
+      try { process.kill(-owned.supervisorPid, "SIGTERM"); } catch {}
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.send = originalSend;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("treats a generic parent disconnect while prepared as cleanup, never as commit", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-prepared-disconnect.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const entered = deferred();
+    const release = deferred();
+    try {
+      const detaching = init.detachOwnedSupervisor(owned, {
+        beforeCommit: async () => { entered.resolve(); await release.promise; },
+      });
+      await Promise.race([entered.promise, delay(1_000).then(() => { throw new Error("prepare barrier was not entered"); })]);
+      owned.child.disconnect();
+      release.resolve();
+      await expect(detaching).resolves.toBe(false);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
+
+  it("accepts a repeated nonce-bound commit request idempotently", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-repeated-commit.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const originalSend = owned.child.send;
+    let repeated = false;
+    owned.child.send = function repeatCommit(message, ...args) {
+      const result = originalSend.call(this, message, ...args);
+      if (message?.type === "commit-detach" && !repeated) {
+        repeated = true;
+        originalSend.call(this, { ...message });
+      }
+      return result;
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(true);
+      expect(repeated).toBe(true);
+      expect(processAlive(tree.command)).toBe(true);
+      try { process.kill(-owned.supervisorPid, "SIGTERM"); } catch {}
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.send = originalSend;
       await forceCleanup(owned, [tree.command, tree.descendant]);
     }
   });
@@ -341,15 +479,28 @@ describe("authenticated prerequisite supervisor", () => {
     const marker = join(root, "detach-success.json");
     const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
     const tree = await waitForJson(marker);
+    const originalSend = owned.child.send;
+    const sent = [];
+    owned.child.send = function recordDetachMessages(message, ...args) {
+      sent.push(message);
+      return originalSend.call(this, message, ...args);
+    };
     try {
       await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(true);
+      const detach = sent.find(({ type }) => type === "detach");
+      const commit = sent.find(({ type }) => type === "commit-detach");
+      expect(detach?.detachId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(commit).toMatchObject({ nonce: detach.nonce, detachId: detach.detachId });
       expect(processAlive(owned.supervisorPid)).toBe(true);
       expect(processAlive(tree.command)).toBe(true);
       expect(processAlive(tree.descendant)).toBe(true);
       try { process.kill(-owned.supervisorPid, "SIGTERM"); } catch {}
       await waitForExit(owned.child);
       await waitForGone([tree.command, tree.descendant]);
-    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+    } finally {
+      owned.child.send = originalSend;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
   });
 
   it("closes synchronous-spawn and pre-handshake cancellation races without publishing ownership", async () => {
