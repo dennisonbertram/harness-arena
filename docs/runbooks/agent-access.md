@@ -109,6 +109,12 @@ must be passed through `withEphemeralSecretFile`. It creates a 0600 file in a
 directory on normal completion, error, SIGINT, and SIGTERM. `.agent-access-secrets/`
 is ignored as defense in depth; the default location remains the OS temp area.
 
+OpenTelemetry endpoint, protocol, port, and availability variables are
+inventory metadata only: the audit may report their presence but never their
+values. OTLP header variables are additionally classified as secrets. These
+inventory entries do not grant environment writes, deployment mutation, or
+provider-configuration changes.
+
 ## Vercel limitation and external setup
 
 As reviewed on 2026-08-03, Vercel documents team/project `VIEWER` roles and bearer API tokens, but does not

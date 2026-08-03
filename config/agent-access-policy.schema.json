@@ -68,7 +68,17 @@
         "secret": { "type": "boolean" },
         "owner": { "type": "string", "minLength": 1 },
         "required": { "type": "string", "minLength": 1 },
-        "safe_diagnostic": { "type": "string", "minLength": 1 }
+        "safe_diagnostic": {
+          "enum": [
+            "boolean_presence",
+            "command_presence_only",
+            "metadata_presence_only",
+            "names_only",
+            "path_basename_only",
+            "sanitized_origin",
+            "value_non_secret"
+          ]
+        }
       },
       "additionalProperties": false
     }
