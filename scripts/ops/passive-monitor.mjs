@@ -56,6 +56,12 @@ function failureFromItem(item, environment, knownSecrets) {
   }, knownSecrets);
 }
 
+function safeCorrelationIds(status) {
+  const candidates = [status?.request_id, status?.trace_id];
+  for (const entry of status?.platform?.logs?.recent_errors ?? []) candidates.push(entry?.request_id, entry?.trace_id);
+  return [...new Set(candidates.filter((value) => typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value)))].slice(0, 20);
+}
+
 export function buildObservation(status, { environment, monitorError, knownSecrets = [], checkedAt = new Date().toISOString() } = {}) {
   const target = environment ?? status?.environment ?? "unknown";
   if (monitorError) {
@@ -73,7 +79,7 @@ export function buildObservation(status, { environment, monitorError, knownSecre
     verdict,
     deployment_sha: status?.platform?.deployment?.sha ?? status?.health?.sha ?? null,
     deployment_id: status?.platform?.deployment?.id ?? null,
-    request_ids: [],
+    request_ids: safeCorrelationIds(status),
     failures: unique,
   }, knownSecrets);
 }
