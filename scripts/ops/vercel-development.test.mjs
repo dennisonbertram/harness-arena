@@ -9,6 +9,7 @@ import * as subject from "./vercel-development.mjs";
 
 const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 const DEVELOPMENT_PROJECT_NAME = "harness-arena-development";
+const DEVELOPMENT_STORE_NAME = "harness-arena-development-data";
 const LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 const TEAM_ID = "team_cwyLpng8LCwWgINdiQ27hHYa";
 const REVIEWED_SHA = "a".repeat(40);
@@ -136,7 +137,7 @@ function currentDevelopmentStoreResponse() {
       createdAt: 1785709088100,
       id: DEVELOPMENT_STORE_ID,
       isTokenExpired: false,
-      name: DEVELOPMENT_PROJECT_NAME,
+      name: DEVELOPMENT_STORE_NAME,
       ownerId: TEAM_ID,
       projectsMetadata: [{
         envVarPrefix: "BLOB",

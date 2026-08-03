@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 
 export const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 export const DEVELOPMENT_PROJECT_NAME = "harness-arena-development";
+export const DEVELOPMENT_STORE_NAME = "harness-arena-development-data";
 export const DEVELOPMENT_TEAM_ID = "team_cwyLpng8LCwWgINdiQ27hHYa";
 export const LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 export const PROTECTED_REMOTE_URL = "https://github.com/dennisonbertram/harness-arena.git";
@@ -321,7 +322,7 @@ function normalizeDevelopmentStore(value, { storeId, projectId }) {
     || store.type !== "blob"
     || store.access !== "private"
     || store.status !== "available"
-    || store.name !== DEVELOPMENT_PROJECT_NAME
+    || store.name !== DEVELOPMENT_STORE_NAME
     || typeof store.billingState !== "string"
     || !store.billingState
     || typeof store.region !== "string"
