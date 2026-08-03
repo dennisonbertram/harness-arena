@@ -170,7 +170,7 @@ describe("ops evidence and verdict honesty", () => {
       let cancelled = false;
       const payload = JSON.stringify({ data: "x".repeat(64) });
       const body = new ReadableStream({
-        start(controller) { controller.enqueue(Buffer.from(payload)); controller.close(); },
+        start(controller) { controller.enqueue(Buffer.from(payload)); },
         cancel() { cancelled = true; },
       });
       let signal;

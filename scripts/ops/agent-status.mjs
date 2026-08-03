@@ -7,6 +7,7 @@ export const EXIT_CODES = Object.freeze({ healthy: 0, degraded: 1, failed: 2, ac
 const OPS_PATHS = new Set(["/api/health", "/api/ops/v1", "/api/ops/v1/summary", "/api/ops/v1/inventory", "/api/ops/v1/read"]);
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1_000_000;
+const MAX_HTTP_RESPONSE_BYTES = 1_000_000;
 const MAX_INVENTORY_PAGES = 10;
 const MAX_INVENTORY_KINDS = 20;
 const MAX_RUN_READS = 20;
@@ -24,8 +25,7 @@ function redactText(value, knownSecrets) {
   let output = String(value)
     .replace(/\b(?:Bearer|Basic)\s+[^\s,"'<>]+/gi, (match) => `${match.split(/\s/, 1)[0]} [REDACTED]`)
     .replace(/\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, (match) => `${match.split(":", 1)[0]}: [REDACTED]`)
-    .replace(/\b(?:Authorization|Proxy-Authorization|x-api-key)\s*[:=]\s*[^\r\n,;]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}: [REDACTED]`)
-    .replace(/\b(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|password|secret|token|api[_-]?key|apiKey|credential)\s*[:=]\s*[^\s,"'<>]+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`)
+    .replace(/((?:["'])?\b(?:authorization|proxy[-_]?authorization|x[-_]?api[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi, "$1[REDACTED]")
     .replace(/https?:\/\/[^\s,"'<>]+/g, (candidate) => {
       try { const url = new URL(candidate); url.search = ""; url.hash = ""; return url.toString(); } catch { return candidate; }
     });
@@ -34,14 +34,32 @@ function redactText(value, knownSecrets) {
 }
 
 export function redactSensitive(value, knownSecrets = []) {
-  if (Array.isArray(value)) return value.map((item) => redactSensitive(item, knownSecrets));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+  return redactSensitiveValue(value, knownSecrets, new WeakSet());
+}
+
+function redactSensitiveValue(value, knownSecrets, seen) {
+  if (typeof value === "string") return redactText(value, knownSecrets);
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return "[REDACTED]";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveValue(item, knownSecrets, seen));
+  if (value instanceof Error) {
+    const output = { name: value.name, message: redactText(value.message, knownSecrets) };
+    if (value.cause !== undefined) output.cause = redactSensitiveValue(value.cause, knownSecrets, seen);
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "cause") continue;
+      output[key] = redactSensitiveEntry(key, item, knownSecrets, seen);
+    }
+    return output;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSensitiveEntry(key, item, knownSecrets, seen)]));
+}
+
+function redactSensitiveEntry(key, item, knownSecrets, seen) {
     const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
     const sensitive = /(?:^|_)(?:authorization|proxy_authorization|cookie|set_cookie|x_api_key|password|secret|token|api_key|credential)(?:$|_)/.test(normalized);
     const presenceFlag = normalized.endsWith("_present") && typeof item === "boolean";
-    return [key, sensitive && !presenceFlag ? "[REDACTED]" : redactSensitive(item, knownSecrets)];
-  }));
-  return typeof value === "string" ? redactText(value, knownSecrets) : value;
+    return sensitive && !presenceFlag ? "[REDACTED]" : redactSensitiveValue(item, knownSecrets, seen);
 }
 
 function safeBaseUrl(value) {
@@ -242,6 +260,9 @@ export async function collectPlatformEvidence({ environment, commandRunner = spa
 
 function requestKind(result) {
   if (result.status === 401 || result.status === 403) return "access";
+  if (result.error === "redirect_rejected") return "redirect";
+  if (result.error === "response_too_large") return "response_too_large";
+  if (result.error === "invalid_content_length") return "invalid_content_length";
   if (result.error === "invalid_json") return "invalid_json";
   if (result.error === "request_timeout") return "timeout";
   if (result.error === "request_failed") return "transport";
@@ -249,8 +270,74 @@ function requestKind(result) {
   return "http";
 }
 
-export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, retries = 1 }) {
+function responseError(code) { const error = new Error(code); error.code = code; return error; }
+
+function withAbort(promise, signal) {
+  if (signal.aborted) return Promise.reject(responseError("request_timeout"));
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(responseError("request_timeout"));
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+async function cancelResponse(response, controller, reader) {
+  controller.abort();
+  try {
+    if (reader) await reader.cancel();
+    else if (response.body && !response.body.locked) await response.body.cancel();
+  } catch {}
+}
+
+async function readBoundedJson(response, controller, maxBytes) {
+  const rawLength = response.headers?.get?.("content-length");
+  if (rawLength !== null && rawLength !== undefined) {
+    const normalized = rawLength.trim();
+    if (!/^(?:0|[1-9]\d*)$/.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
+      await cancelResponse(response, controller);
+      throw responseError("invalid_content_length");
+    }
+    if (Number(normalized) > maxBytes) {
+      await cancelResponse(response, controller);
+      throw responseError("response_too_large");
+    }
+  }
+  if (response.body?.getReader) {
+    const reader = response.body.getReader(), chunks = [];
+    let bytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await withAbort(reader.read(), controller.signal);
+        if (done) break;
+        const chunk = Buffer.from(value);
+        bytes += chunk.byteLength;
+        if (bytes > maxBytes) throw responseError("response_too_large");
+        chunks.push(chunk);
+      }
+      try { return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")); }
+      catch { throw responseError("invalid_json"); }
+    } catch (error) {
+      const normalized = error?.code ?? (controller.signal.aborted ? "request_timeout" : "invalid_json");
+      await cancelResponse(response, controller, reader);
+      throw responseError(normalized);
+    } finally {
+      try { reader.releaseLock(); } catch {}
+    }
+  }
+  try {
+    const value = await withAbort(response.json(), controller.signal);
+    if (Buffer.byteLength(JSON.stringify(value) ?? "") > maxBytes) throw responseError("response_too_large");
+    return value;
+  } catch (error) {
+    const normalized = error?.code ?? (controller.signal.aborted ? "request_timeout" : "invalid_json");
+    await cancelResponse(response, controller);
+    throw responseError(normalized);
+  }
+}
+
+export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, retries = 1, maxResponseBytes = MAX_HTTP_RESPONSE_BYTES }) {
   const parsedPath = safeOpsPath(path), attemptsAllowed = Math.min(3, Math.max(1, retries + 1));
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) throw new Error("invalid_response_limit");
   const url = new URL(parsedPath.pathname, baseUrl);
   for (const [key, value] of parsedPath.searchParams) url.searchParams.append(key, value);
   let last;
@@ -258,13 +345,20 @@ export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, 
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let response;
-      try { response = await fetchImpl(url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, signal: controller.signal }); }
-      catch (error) { last = { ok: false, status: 0, error: controller.signal.aborted ? "request_timeout" : "request_failed", detail: error instanceof Error ? error.message : "unknown", attempts: attempt }; }
+      try { response = await fetchImpl(url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, redirect: "manual", signal: controller.signal }); }
+      catch (error) { last = { ok: false, status: 0, error: controller.signal.aborted ? "request_timeout" : "request_failed", detail: redactSensitive(error instanceof Error ? error.message : "unknown", token ? [token] : []), attempts: attempt }; }
       if (response) {
-        let body;
-        try { body = await response.json(); }
-        catch { last = { ok: false, status: response.status, error: "invalid_json", attempts: attempt }; }
-        if (body !== undefined) last = { ok: response.ok, status: response.status, body: redactSensitive(body, token ? [token] : []), attempts: attempt };
+        if (response.status >= 300 && response.status < 400) {
+          await cancelResponse(response, controller);
+          last = { ok: false, status: response.status, error: "redirect_rejected", attempts: attempt };
+        } else {
+          try {
+            const body = await readBoundedJson(response, controller, maxResponseBytes);
+            last = { ok: response.ok, status: response.status, body: redactSensitive(body, token ? [token] : []), attempts: attempt };
+          } catch (error) {
+            last = { ok: false, status: response.status, error: error?.code ?? "invalid_json", attempts: attempt };
+          }
+        }
       }
     } finally { clearTimeout(timer); }
     const kind = requestKind(last);
@@ -287,6 +381,7 @@ async function inventoryKind({ kind, ...options }) {
     const cursorTypeValid = body.has_more === true ? body.next_cursor === null || typeof body.next_cursor === "string" : body.has_more === false ? body.next_cursor === null : false;
     if (typeof body.has_more !== "boolean" || !hasCursorField || !cursorTypeValid) { complete = false; error = "malformed_pagination"; break; }
     const pageItems = body.items;
+    if (pageItems.length > 100) { complete = false; error = "page_item_limit"; break; }
     items.push(...pageItems); records += pageItems.length; pages += 1;
     if (body.partial === true) { complete = false; error = "partial_read"; break; }
     if (body.has_more === true && !body.next_cursor) { complete = false; error = "missing_cursor"; break; }
