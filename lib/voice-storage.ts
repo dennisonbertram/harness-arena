@@ -1,7 +1,8 @@
 import { get, list, put } from "@vercel/blob";
 import { blobAccess } from "./blob-access";
+import { readBlobJson } from "./blob-read.mjs";
 import { readBoundedStream } from "./bounded-stream";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir as nodeMkdir, readFile as nodeReadFile, readdir as nodeReaddir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertLocalFileStorageAllowed, LocalStorageReadError, safeStoragePart } from "./file-storage";
 import { assertSafeStoragePath, atomicCreateFile, atomicWriteFile } from "./file-storage-lock.mjs";
@@ -13,6 +14,15 @@ import { BLOB_PATHS } from "./blob-paths.mjs";
 const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
 const JUDGMENTS_PREFIX = BLOB_PATHS.voiceJudgments;
 const LIST_CONCURRENCY = 20;
+const mkdir = (path: string, options: Parameters<typeof nodeMkdir>[1]) => nodeMkdir(/* turbopackIgnore: true */ path, options);
+function readFile(path: string): Promise<Buffer>;
+function readFile(path: string, encoding: "utf8"): Promise<string>;
+function readFile(path: string, encoding?: "utf8"): Promise<string | Buffer> {
+  return encoding
+    ? nodeReadFile(/* turbopackIgnore: true */ path, encoding)
+    : nodeReadFile(/* turbopackIgnore: true */ path) as Promise<Buffer>;
+}
+const readdir = (path: string) => nodeReaddir(/* turbopackIgnore: true */ path);
 export type VoiceAudioKind = "prompts" | "responses";
 
 function audioPath(kind: VoiceAudioKind, id: string): string {
@@ -114,11 +124,10 @@ export class FileVoiceStorage implements VoiceStorage {
     const evaluator = safeStoragePart(evaluatorId);
     const directory = this.path("judgments", evaluator);
     await assertSafeStoragePath(this.storageRoot, directory);
-    try { const { readdir } = await import("node:fs/promises"); return (await readdir(directory)).filter((name) => name.endsWith(".json")).map((name) => safeStoragePart(name.slice(0, -5))); }
+    try { return (await readdir(directory)).filter((name) => name.endsWith(".json")).map((name) => safeStoragePart(name.slice(0, -5))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
   }
   async listAllJudgments(): Promise<{ judgments: VoiceJudgment[]; unreadable: number }> {
-    const { readdir } = await import("node:fs/promises");
     const judgmentsRoot = this.path("judgments");
     await assertSafeStoragePath(this.storageRoot, judgmentsRoot);
     let evaluators: string[] = []; try { evaluators = await readdir(judgmentsRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -156,9 +165,8 @@ export class BlobVoiceStorage implements VoiceStorage {
     const blobs = await withRetry(() => list({ prefix: MANIFEST_PATH, limit: 1 }));
     const blob = blobs.blobs.find((b) => b.pathname === MANIFEST_PATH);
     if (!blob) return undefined;
-    const response = await withRetry(() => get(blob.pathname, { access: blobAccess() }));
-    if (!response || response.statusCode !== 200 || !response.stream) return undefined;
-    const raw = JSON.parse(await new Response(response.stream).text()) as unknown;
+    const raw = await withRetry(() => readBlobJson(blob.pathname));
+    if (raw === undefined) return undefined;
     const parsed = VoiceManifestSchema.safeParse(raw);
     return parsed.success ? parsed.data : undefined;
   }
@@ -215,9 +223,7 @@ export class BlobVoiceStorage implements VoiceStorage {
       const results = await Promise.all(
         chunk.map(async (blob) => {
           try {
-            const response = await withRetry(() => get(blob.pathname, { access: blobAccess() }), 3);
-            if (!response || response.statusCode !== 200 || !response.stream) return undefined;
-            const raw = JSON.parse(await new Response(response.stream).text()) as unknown;
+            const raw = await withRetry(() => readBlobJson(blob.pathname, { required: true }), 3);
             const parsed = VoiceJudgmentSchema.safeParse(raw);
             return parsed.success ? parsed.data : undefined;
           } catch {

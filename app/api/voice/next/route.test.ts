@@ -126,12 +126,12 @@ describe("GET /api/voice/next", () => {
 
       const cookie = response.cookies.get("voice_evaluator");
       expect(cookie).toBeDefined();
-      expect(cookie?.value).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]+$/);
+      expect(cookie?.value).toMatch(/^v1\.[0-9a-f-]{36}\.\d+\.\d+\.[A-Za-z0-9_-]+$/);
       expect(cookie?.httpOnly).toBe(true);
       expect(cookie?.sameSite).toBe("lax");
       expect(cookie?.path).toBe("/");
       expect(cookie?.secure).toBe(true);
-      expect(cookie?.maxAge).toBe(31536000);
+      expect(cookie?.maxAge).toBe(86400);
     });
 
     it("does not re-mint when a valid cookie is already present", async () => {
@@ -151,7 +151,7 @@ describe("GET /api/voice/next", () => {
       const cookie = response.cookies.get("voice_evaluator");
       expect(cookie).toBeDefined();
       expect(cookie?.value).not.toBe("not-a-uuid");
-      expect(cookie?.value).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]+$/);
+      expect(cookie?.value).toMatch(/^v1\.[0-9a-f-]{36}\.\d+\.\d+\.[A-Za-z0-9_-]+$/);
     });
   });
 

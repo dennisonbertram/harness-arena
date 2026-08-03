@@ -4,9 +4,10 @@ import { resolveBlobAccess } from "./blob-access";
 describe("resolveBlobAccess", () => {
   it("defaults the isolated Development project to private storage", () => {
     expect(resolveBlobAccess({
-      BLOB_READ_WRITE_TOKEN: "rw",
+      BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_dev_secret",
       VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
       HARNESS_BLOB_STORE_ID: "store_dev",
+      BLOB_STORE_ID: "store_dev",
     })).toEqual({ access: "private" });
   });
 

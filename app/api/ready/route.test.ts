@@ -1,12 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const readiness = vi.fn();
-const listRuns = vi.fn();
-const listSubmissions = vi.fn();
-const getManifest = vi.fn();
+const { readiness, listRuns, listSubmissions, getManifest, getVoiceStorage } = vi.hoisted(() => ({
+  readiness: vi.fn(), listRuns: vi.fn(), listSubmissions: vi.fn(), getManifest: vi.fn(),
+  getVoiceStorage: vi.fn(() => ({ getManifest: vi.fn() })),
+}));
 vi.mock("@/lib/storage", () => ({ getStorage: () => ({ listRuns, listSubmissions, checkReady: readiness }) }));
-const getVoiceStorage = vi.fn(() => ({ getManifest }));
-vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage }));
+vi.mock("@/lib/voice-storage", () => ({ getVoiceStorage: () => { getVoiceStorage(); return { getManifest }; } }));
 import { GET } from "./route";
 
 describe("GET /api/ready", () => {

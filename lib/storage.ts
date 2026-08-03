@@ -1,5 +1,6 @@
 import { get, list, put } from "@vercel/blob";
 import { blobAccess } from "./blob-access";
+import { readBlobJson } from "./blob-read.mjs";
 import { readBoundedStream } from "./bounded-stream";
 import { FileStorage } from "./file-storage";
 import { log, normalizeError } from "./log";
@@ -143,6 +144,7 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<
       return await fn();
     } catch (err) {
       lastErr = err;
+      if (err instanceof Error && err.name === "PayloadTooLargeError") throw err;
       await new Promise((r) => setTimeout(r, 150 * (i + 1)));
     }
   }
@@ -186,14 +188,7 @@ export function seqFromEventPathname(pathname: string | undefined): number | nul
 }
 
 async function getJson<T>(identifier: string): Promise<T> {
-  const result = await get(identifier, { access: blobAccess() });
-  // The caller derived this identifier from list(), so a null/304 here is a
-  // transiently unreadable object rather than a legitimate missing entity.
-  // Throw so withRetry can make another authenticated attempt.
-  if (!result || result.statusCode !== 200 || !result.stream) {
-    throw new Error(`blob get ${result?.statusCode ?? 404}`);
-  }
-  return JSON.parse(await new Response(result.stream).text()) as T;
+  return await readBlobJson<T>(identifier, { required: true }) as T;
 }
 
 export class BlobStorage implements Storage {

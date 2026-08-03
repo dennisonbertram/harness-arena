@@ -136,19 +136,19 @@ describe("seed-competition CLI Blob adapter", () => {
     vi.mocked(get).mockResolvedValue(null);
     vi.mocked(list)
       .mockResolvedValueOnce({
-        blobs: [{ url: "https://blob.example/submissions/legacy.json" }],
+        blobs: [{ url: "https://blob.example/submissions/legacy.json", pathname: "submissions/legacy.json" }],
         hasMore: true,
         cursor: "page-2",
       } as never)
       .mockResolvedValueOnce({
-        blobs: [{ url: "https://blob.example/submissions/current.json" }],
+        blobs: [{ url: "https://blob.example/submissions/current.json", pathname: "submissions/current.json" }],
         hasMore: false,
         cursor: undefined,
       } as never);
-    const fetch = vi.fn()
-      .mockResolvedValueOnce({ json: async () => legacySubmission("legacy") })
-      .mockResolvedValueOnce({ json: async () => legacySubmission("current", { competition: false }) });
-    vi.stubGlobal("fetch", fetch);
+    vi.mocked(get)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ statusCode: 200, stream: new Response(JSON.stringify(legacySubmission("legacy"))).body } as never)
+      .mockResolvedValueOnce({ statusCode: 200, stream: new Response(JSON.stringify(legacySubmission("current", { competition: false }))).body } as never);
 
     await runCli(["--yes"]);
 
@@ -156,7 +156,8 @@ describe("seed-competition CLI Blob adapter", () => {
     expect(get).toHaveBeenCalledWith(`competitions/${id}.json`, { access: "public" });
     expect(list).toHaveBeenNthCalledWith(1, { prefix: "submissions/", cursor: undefined });
     expect(list).toHaveBeenNthCalledWith(2, { prefix: "submissions/", cursor: "page-2" });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenCalledWith("submissions/legacy.json", { access: "public" });
+    expect(get).toHaveBeenCalledWith("submissions/current.json", { access: "public" });
     expect(put).toHaveBeenCalledTimes(2);
     expect(put).toHaveBeenCalledWith(`competitions/${id}.json`, expect.stringContaining(`\"id\":\"${id}\"`), {
       access: "public",

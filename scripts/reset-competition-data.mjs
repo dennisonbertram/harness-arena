@@ -12,8 +12,9 @@
 //     --delete-competition \
 //     --yes
 
-import { copy, del, get, list, put } from "@vercel/blob";
+import { copy, del, list, put } from "@vercel/blob";
 import { blobAccess } from "../lib/blob-access.mjs";
+import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const DELETE_BATCH_SIZE = 100;
@@ -38,9 +39,7 @@ async function listAll(prefix, token) {
 }
 
 async function readJson(pathname, token) {
-  const result = await get(pathname, { access: blobAccess(), token });
-  if (!result) throw new Error(`required blob not found: ${pathname}`);
-  return JSON.parse(await new Response(result.stream).text());
+  return readBlobJson(pathname, { token, required: true });
 }
 
 function uniqueSorted(values) {

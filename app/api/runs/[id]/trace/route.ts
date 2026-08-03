@@ -27,6 +27,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const storage = getStorage();
   const run = await storage.getRun(id);
   if (!run) return NextResponse.json({ error: "run not found" }, { status: 404 });
+  const taskResult = run.task_results.find((result) => result.task_id === taskId);
+  if ((taskId === "_run" && name !== "runner-log.txt") || (taskId !== "_run" && !taskResult)) {
+    return NextResponse.json({ error: "trace task does not belong to run" }, { status: 400 });
+  }
 
   // ponytail: read-modify-write on the run doc assumes the single sequential
   // runner is the only writer during a run.
@@ -44,7 +48,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   )}&name=${encodeURIComponent(name)}`;
 
   if (name === "session.jsonl") {
-    const taskResult = run.task_results.find((tr) => tr.task_id === taskId);
     if (taskResult) {
       taskResult.trace_blob_url = viewUrl;
       await storage.putRun(run);

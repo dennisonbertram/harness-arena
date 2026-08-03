@@ -294,6 +294,8 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
   it("uses private SDK reads and writes for the isolated Development project", async () => {
     vi.stubEnv("VERCEL_PROJECT_ID", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA");
     vi.stubEnv("HARNESS_BLOB_STORE_ID", "store_dev");
+    vi.stubEnv("BLOB_STORE_ID", "store_dev");
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_dev_secret");
     const storage = new BlobStorage();
     const submission = { id: "sub-private", created_at: "2026-08-03T00:00:00.000Z" } as Submission;
     vi.mocked(put).mockResolvedValue({ url: "https://private.blob.example/submissions/sub-private.json" } as never);

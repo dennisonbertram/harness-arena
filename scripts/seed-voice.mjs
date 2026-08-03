@@ -47,6 +47,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { get, put } from "@vercel/blob";
 import { blobAccess } from "../lib/blob-access.mjs";
+import { readBlobJson } from "../lib/blob-read.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
@@ -357,10 +358,7 @@ async function fetchPriorManifestRaw() {
   // through VoiceManifestSchema, which strips the `key` fields ID reuse
   // depends on. Read the raw JSON directly, same style as
   // lib/storage.ts's readJson.
-  const result = await get(MANIFEST_PATH, { access: blobAccess() });
-  if (!result) return undefined;
-  const text = await new Response(result.stream).text();
-  return JSON.parse(text);
+  return readBlobJson(MANIFEST_PATH);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

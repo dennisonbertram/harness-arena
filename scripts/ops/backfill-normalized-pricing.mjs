@@ -3,8 +3,9 @@
 // ids and Vercel AI Gateway's authoritative generation records. Dry-run by
 // default; pass --yes only after reviewing the per-run summary.
 
-import { get, list, put } from "@vercel/blob";
+import { list, put } from "@vercel/blob";
 import { blobAccess } from "../../lib/blob-access.mjs";
+import { readBlobJson } from "../../lib/blob-read.mjs";
 import { computeTotals, normalizedCostForUsage, PRICING_VERSION } from "../runner/lib.mjs";
 
 function finiteToken(value) {
@@ -130,9 +131,7 @@ async function listAll(prefix, token) {
 }
 
 async function readJson(pathname, token) {
-  const result = await get(pathname, { access: blobAccess(), token });
-  if (!result?.stream) return undefined;
-  return JSON.parse(await new Response(result.stream).text());
+  return readBlobJson(pathname, { token });
 }
 
 function blobStorage(token) {

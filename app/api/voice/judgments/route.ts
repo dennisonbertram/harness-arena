@@ -6,6 +6,7 @@ import { getVoiceStorage } from "@/lib/voice-storage";
 import { verifyVoiceCapability } from "@/lib/voice-capability";
 import { VOICE_JUDGMENT_REASONS, VOICE_OUTCOMES, VoicePlayCountsSchema } from "@/lib/voice-types";
 import type { VoiceJudgment } from "@/lib/voice-types";
+import { readBoundedStream } from "@/lib/bounded-stream";
 
 const COOKIE_NAME = "voice_evaluator";
 const MAX_BODY_BYTES = 65536; // 64KB
@@ -72,7 +73,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "rate limit exceeded, max 120 judgments per hour" }, { status: 429 });
   }
 
-  const rawBody = await request.json().catch(() => null);
+  let rawBody: unknown = null;
+  try {
+    if (!request.body) throw new Error("missing body");
+    rawBody = JSON.parse((await readBoundedStream(request.body, MAX_BODY_BYTES)).toString("utf8"));
+  } catch (error) {
+    if (error instanceof Error && /limit|large/i.test(error.message)) {
+      return NextResponse.json({ error: "request body too large" }, { status: 413 });
+    }
+  }
   const parsedInput = JudgmentInputSchema.safeParse(rawBody);
   if (!parsedInput.success) {
     log("warn", "voice.judgment.invalid", { evaluator_id: evaluatorId, issues: parsedInput.error.issues });

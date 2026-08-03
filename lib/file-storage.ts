@@ -1,8 +1,18 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile as nodeReadFile, readdir as nodeReaddir, rm as nodeRm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { appendRunEventsFile, assertSafeStoragePath, atomicWriteFile, latestEventTimestampFile, readRunEventsFile, safeStoragePart } from "./file-storage-lock.mjs";
 import { CompetitionSchema, type Competition, type NewRunEvent, type Run, type RunEvent, type Submission } from "./types";
 import type { Storage } from "./storage";
+
+function readFile(path: string): Promise<Buffer>;
+function readFile(path: string, encoding: "utf8"): Promise<string>;
+function readFile(path: string, encoding?: "utf8"): Promise<string | Buffer> {
+  return encoding
+    ? nodeReadFile(/* turbopackIgnore: true */ path, encoding)
+    : nodeReadFile(/* turbopackIgnore: true */ path) as Promise<Buffer>;
+}
+const readdir = (path: string) => nodeReaddir(/* turbopackIgnore: true */ path);
+const rm = (path: string, options: Parameters<typeof nodeRm>[1]) => nodeRm(/* turbopackIgnore: true */ path, options);
 
 export class LocalStorageReadError extends Error {
   constructor(path: string, cause: unknown) {
@@ -50,7 +60,6 @@ export class FileStorage implements Storage {
   private async listJson<T>(directory: string): Promise<T[]> {
     await assertSafeStoragePath(this.root, directory);
     try {
-      const { readdir } = await import("node:fs/promises");
       const names = await readdir(directory);
       return Promise.all(names.filter((name) => name.endsWith(".json")).map((name) => this.readJson<T>(join(directory, name)).then((value) => {
         if (value === undefined) throw new LocalStorageReadError(join(directory, name), new Error("document disappeared during read"));

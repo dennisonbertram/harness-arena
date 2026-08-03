@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { copy, del, get, list, put } from "@vercel/blob";
+import { copy, del, list, put } from "@vercel/blob";
 import { blobAccess } from "./blob-access";
+import { readBlobJson } from "./blob-read.mjs";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "reaped"]);
@@ -77,14 +78,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function readJson(pathname: string): Promise<BlobDocument> {
-  const response = await get(pathname, { access: blobAccess() });
-  if (!response || response.statusCode !== 200 || !response.stream) {
-    throw new CompetitionCleanupError(`required record is missing: ${pathname}`);
-  }
-
   let value: unknown;
   try {
-    value = JSON.parse(await new Response(response.stream).text());
+    value = await readBlobJson(pathname, { required: true });
   } catch {
     throw new CompetitionCleanupError(`required record is not valid JSON: ${pathname}`);
   }
@@ -93,17 +89,13 @@ async function readJson(pathname: string): Promise<BlobDocument> {
 }
 
 async function readOptionalJson(pathname: string): Promise<BlobDocument | undefined> {
-  const response = await get(pathname, { access: blobAccess() });
-  if (!response) return undefined;
-  if (response.statusCode !== 200 || !response.stream) {
-    throw new CompetitionCleanupError(`required record is missing: ${pathname}`);
-  }
   let value: unknown;
   try {
-    value = JSON.parse(await new Response(response.stream).text());
+    value = await readBlobJson(pathname);
   } catch {
     throw new CompetitionCleanupError(`required record is not valid JSON: ${pathname}`);
   }
+  if (value === undefined) return undefined;
   if (!isRecord(value)) throw new CompetitionCleanupError(`required record is invalid: ${pathname}`);
   return { pathname, value };
 }

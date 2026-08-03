@@ -5,10 +5,10 @@ import type { NextComparison, Progress } from "@/lib/voice-session";
 import { enumerateComparisons, pickNext, progress } from "@/lib/voice-session";
 import type { VoiceManifest } from "@/lib/voice-types";
 import { getVoiceStorage } from "@/lib/voice-storage";
-import { mintVoiceCapability, verifyVoiceCapability } from "@/lib/voice-capability";
+import { mintVoiceCapability, verifyVoiceCapability, VOICE_CAPABILITY_LIFETIME_SECONDS } from "@/lib/voice-capability";
 
 const COOKIE_NAME = "voice_evaluator";
-const COOKIE_MAX_AGE_SECONDS = 31536000; // ~1 year
+const COOKIE_MAX_AGE_SECONDS = VOICE_CAPABILITY_LIFETIME_SECONDS;
 const EXCLUDE_CAP = 25;
 
 const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;

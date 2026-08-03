@@ -113,14 +113,14 @@ describe("POST /api/runs/[id]/trace", () => {
   });
 
   it("allows _run only for runner-log.txt", async () => {
-    await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-07-21T00:00:00.000Z" });
+    await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [{ task_id: "t1", attempted: true, passed: false }], created_at: "2026-07-21T00:00:00.000Z" });
     expect((await POST(traceRequest("run-1", "task_id=_run&name=session.jsonl", "x"), {
       params: Promise.resolve({ id: "run-1" }),
     })).status).toBe(400);
   });
 
   it("rejects a chunked body over the byte ceiling despite a misleading content-length", async () => {
-    await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [], created_at: "2026-07-21T00:00:00.000Z" });
+    await storageRef.current.putRun({ id: "run-1", submission_id: "sub-1", status: "running", task_results: [{ task_id: "t1", attempted: true, passed: false }], created_at: "2026-07-21T00:00:00.000Z" });
     const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(3 * 1024 * 1024)); controller.enqueue(new Uint8Array(2 * 1024 * 1024)); } });
     const request = new NextRequest(new Request("http://localhost/api/runs/run-1/trace?task_id=t1&name=session.jsonl", {
       method: "POST", headers: { "x-runner-secret": SECRET, "content-length": "1" }, body: stream, duplex: "half",
