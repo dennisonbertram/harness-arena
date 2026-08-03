@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +48,21 @@ describe("FileStorage", () => {
     const appended = await Promise.all(Array.from({ length: 20 }, (_, n) => local.appendRunEvents("run-1", [{ ts: `2026-08-02T00:00:${String(n).padStart(2, "0")}.000Z`, type: "run.created", payload: { submission_id: String(n) } }])));
     expect(appended.flat().map((event) => event.seq).sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, n) => n + 1));
     expect((await local.listRunEvents("run-1")).map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, n) => n + 1));
+  });
+
+  it("persists a small latest-event index with each event append", async () => {
+    const local = await storage();
+    await local.appendRunEvents("run-1", [
+      { ts: "2026-08-02T00:00:00.000Z", type: "run.created", payload: {} },
+      { ts: "2026-08-02T00:01:00.000Z", type: "task.started", payload: {} },
+    ]);
+
+    const eventPath = join(local.root, "events", "run-1.json");
+    const indexPath = join(local.root, "events", "run-1.index.json");
+    const index = JSON.parse(await readFile(indexPath, "utf8"));
+    const eventInfo = await stat(eventPath);
+    expect(index).toMatchObject({ version: 1, latest_ts: "2026-08-02T00:01:00.000Z" });
+    expect(index.event_identity).toMatchObject({ size: eventInfo.size, mtime_ms: eventInfo.mtimeMs });
   });
 
   it("fails loudly instead of accepting a corrupt local document", async () => {
