@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,11 +8,13 @@ import { describe, expect, it, vi } from "vitest";
 import * as subject from "./vercel-development.mjs";
 
 const DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+const DEVELOPMENT_PROJECT_NAME = "harness-arena-development";
 const LIVE_PROJECT_ID = "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo";
 const TEAM_ID = "team_cwyLpng8LCwWgINdiQ27hHYa";
-const SCOPE = "dennisons-projects";
 const REVIEWED_SHA = "a".repeat(40);
+const OTHER_SHA = "b".repeat(40);
 const LIVE_STORE_ID = "store_SgaF1fm7nkPQPCKq";
+const DEVELOPMENT_STORE_ID = "store_development";
 const TOKEN = "test-vercel-token-never-print";
 const UPSTREAM_URL = "https://github.com/dennisonbertram/harness-arena.git";
 const execFileAsync = promisify(execFile);
@@ -21,9 +23,14 @@ function manifest(overrides = {}) {
   return {
     environment: "development",
     branch: "dev",
-    vercelProject: { id: DEVELOPMENT_PROJECT_ID, name: "harness-arena-development" },
+    git: {
+      provider: "github",
+      repository: "dennisonbertram/harness-arena",
+      productionBranch: "dev",
+    },
+    vercelProject: { id: DEVELOPMENT_PROJECT_ID, name: DEVELOPMENT_PROJECT_NAME },
     host: "harness-arena-development.vercel.app",
-    store: { id: "store_development" },
+    store: { id: DEVELOPMENT_STORE_ID },
     callbackOrigin: "https://harness-arena-development.vercel.app",
     live: {
       projectId: LIVE_PROJECT_ID,
@@ -38,32 +45,27 @@ function manifest(overrides = {}) {
   };
 }
 
-function provenance(overrides = {}) {
-  return {
-    reviewedSha: REVIEWED_SHA,
-    remote: {
-      name: "origin",
-      url: UPSTREAM_URL,
-      ref: "refs/heads/dev",
-      sha: REVIEWED_SHA,
-    },
-    isAncestor: true,
-    ...overrides,
-  };
-}
-
-function preflight(overrides = {}) {
+function inspection(overrides = {}) {
   return {
     project: {
       id: DEVELOPMENT_PROJECT_ID,
       ownerId: TEAM_ID,
-      name: "harness-arena-development",
+      name: DEVELOPMENT_PROJECT_NAME,
+      git: {
+        type: "github",
+        org: "dennisonbertram",
+        repo: "harness-arena",
+        productionBranch: "dev",
+      },
+      aliases: ["harness-arena-development.vercel.app"],
     },
     environment: {
       callbackBase: "https://harness-arena-development.vercel.app",
+      networkModeConfigured: false,
+      storeIds: [DEVELOPMENT_STORE_ID],
     },
     store: {
-      id: "store_development",
+      id: DEVELOPMENT_STORE_ID,
       ownerId: TEAM_ID,
       projectId: DEVELOPMENT_PROJECT_ID,
       type: "blob",
@@ -72,464 +74,241 @@ function preflight(overrides = {}) {
   };
 }
 
-function deployment(overrides = {}) {
-  return {
-    id: "dpl_development_preview",
-    url: "harness-arena-development-preview.vercel.app",
-    projectId: DEVELOPMENT_PROJECT_ID,
-    ownerId: TEAM_ID,
-    target: null,
-    meta: { reviewedSha: REVIEWED_SHA },
-    ...overrides,
-  };
-}
-
 function dependencies(overrides = {}) {
-  const cleanup = vi.fn(async () => {});
   return {
     cwd: "/repo",
     reviewedSha: REVIEWED_SHA,
     token: TOKEN,
-    inheritedEnv: {
-      PATH: "/attacker/bin",
-      NODE_OPTIONS: "--require=/tmp/attacker.cjs",
-      VERCEL_ORG_ID: "team_attacker",
-      VERCEL_PROJECT_ID: LIVE_PROJECT_ID,
-      VERCEL_TARGET_ENV: "production",
-      VERCEL_FORCE_NO_BUILD_CACHE: "1",
-      FORCE_COLOR: "1",
-    },
-    readManifest: async () => manifest(),
-    readProvenance: async () => provenance(),
-    createSnapshot: vi.fn(async () => ({ path: "/immutable/snapshot", cleanup })),
-    readOnlyApi: {
-      preflight: vi.fn(async () => preflight()),
-      deployment: vi.fn(async () => deployment()),
-    },
-    verifyCliModule: vi.fn(async () => {}),
-    spawn: vi.fn(async () => ({
-      stdout: "https://harness-arena-development-preview.vercel.app\n",
-      stderr: "",
-      code: 0,
-      timedOut: false,
-      reaped: true,
-    })),
-    cleanup,
+    inheritedEnv: {},
+    readManifest: vi.fn(async () => manifest()),
+    readRemoteSha: vi.fn()
+      .mockResolvedValueOnce(REVIEWED_SHA)
+      .mockResolvedValueOnce(REVIEWED_SHA),
+    readOnlyApi: { inspect: vi.fn(async () => inspection()) },
     ...overrides,
   };
 }
 
-async function expectDeniedWithoutSpawn(deps, operation = "deploy") {
-  await expect(subject.runDevelopmentVercelOperation({ operation, ...deps })).rejects.toThrow(
-    /development Vercel operation denied/i,
-  );
-  expect(deps.spawn).not.toHaveBeenCalled();
+async function expectDenied(deps) {
+  await expect(subject.verifyDevelopmentPreflight(deps)).rejects.toThrow(/read-only preflight denied/i);
 }
 
-function tarBuffer(entries) {
-  const blocks = [];
-  for (const { name, type = "0", body = "" } of entries) {
-    const content = Buffer.from(body);
-    const header = Buffer.alloc(512);
-    header.write(name, 0, 100, "utf8");
-    header.write("0000644\0", 100, 8, "ascii");
-    header.write("0000000\0", 108, 8, "ascii");
-    header.write("0000000\0", 116, 8, "ascii");
-    header.write(`${content.length.toString(8).padStart(11, "0")}\0`, 124, 12, "ascii");
-    header.write("00000000000\0", 136, 12, "ascii");
-    header.fill(0x20, 148, 156);
-    header.write(type, 156, 1, "ascii");
-    header.write("ustar\0", 257, 6, "ascii");
-    header.write("00", 263, 2, "ascii");
-    const checksum = header.reduce((sum, byte) => sum + byte, 0);
-    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
-    blocks.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512));
-  }
-  blocks.push(Buffer.alloc(1024));
-  return Buffer.concat(blocks);
+function jsonResponse(value) {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-describe("Development-only Vercel Preview deployment", () => {
-  it("invokes only the pinned local CLI with an immutable snapshot and a scrubbed environment", async () => {
+describe("native-Git Development project verifier", () => {
+  it("is read-only and proves the exact stable remote dev SHA plus isolated project settings", async () => {
     const deps = dependencies();
 
-    await expect(subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps })).resolves.toEqual({
-      deploymentId: "dpl_development_preview",
+    await expect(subject.verifyDevelopmentPreflight(deps)).resolves.toEqual({
+      ok: true,
       reviewedSha: REVIEWED_SHA,
-      url: "https://harness-arena-development-preview.vercel.app",
-    });
-
-    expect(deps.spawn).toHaveBeenCalledTimes(1);
-    const [file, argv, options] = deps.spawn.mock.calls[0];
-    expect(file).toBe(process.execPath);
-    expect(path.isAbsolute(argv[0])).toBe(true);
-    expect(argv[0]).toMatch(/node_modules\/vercel\/dist\/vc\.js$/);
-    expect(argv).toEqual([
-      argv[0],
-      "deploy",
-      "/immutable/snapshot",
-      "--yes",
-      "--no-wait",
-      "--scope",
-      SCOPE,
-      "--meta",
-      `reviewedSha=${REVIEWED_SHA}`,
-    ]);
-    expect(argv).not.toContain("--target");
-    expect(options).toEqual({
-      cwd: "/immutable/snapshot",
-      env: {
-        VERCEL_ORG_ID: TEAM_ID,
-        VERCEL_PROJECT_ID: DEVELOPMENT_PROJECT_ID,
-        VERCEL_TOKEN: TOKEN,
-      },
-      timeoutMs: 30_000,
-      termGraceMs: 2_000,
-      maxOutputBytes: 65_536,
-    });
-    expect(options.env).not.toHaveProperty("PATH");
-    expect(options.env).not.toHaveProperty("NODE_OPTIONS");
-    expect(options.env).not.toHaveProperty("VERCEL_TARGET_ENV");
-    expect(deps.createSnapshot).toHaveBeenCalledWith({ cwd: "/repo", reviewedSha: REVIEWED_SHA });
-    expect(deps.verifyCliModule).toHaveBeenCalledTimes(1);
-    expect(deps.cleanup).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    "promote",
-    "rollback",
-    "alias",
-    "domain",
-    "env",
-    "store",
-    "deploy --prod",
-    "deploy --target production",
-    "deploy; vercel --prod",
-  ])("rejects an unapproved or option-injected operation before spawn: %s", async (operation) => {
-    const deps = dependencies();
-    await expectDeniedWithoutSpawn(deps, operation);
-  });
-
-  it.each([
-    ["the live project", manifest({ vercelProject: { id: LIVE_PROJECT_ID, name: "live" } })],
-    ["a live callback", manifest({ callbackOrigin: "https://harness-arena-psi.vercel.app" })],
-    ["a live Blob store", manifest({ store: { id: LIVE_STORE_ID } })],
-    ["an unknown manifest key", manifest({ unsafeOption: "--prod" })],
-    ["a missing callback", manifest({ callbackOrigin: null })],
-  ])("rejects %s manifest state before any upload", async (_name, invalidManifest) => {
-    const deps = dependencies({ readManifest: async () => invalidManifest });
-    await expectDeniedWithoutSpawn(deps);
-    expect(deps.createSnapshot).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["an unpinned SHA", "HEAD"],
-    ["a spoofed upstream", REVIEWED_SHA, provenance({ remote: { ...provenance().remote, url: "https://evil.test/repo" } })],
-    ["a spoofed ref", REVIEWED_SHA, provenance({ remote: { ...provenance().remote, ref: "refs/heads/main" } })],
-    ["a different protected SHA", REVIEWED_SHA, provenance({ remote: { ...provenance().remote, sha: "b".repeat(40) } })],
-    ["a non-ancestor", REVIEWED_SHA, provenance({ isAncestor: false })],
-    ["unknown provenance fields", REVIEWED_SHA, provenance({ branch: "dev" })],
-  ])("rejects %s rather than trusting branch name or cleanliness", async (_name, reviewedSha, state) => {
-    const deps = dependencies({ reviewedSha, readProvenance: async () => state ?? provenance() });
-    await expectDeniedWithoutSpawn(deps);
-    expect(deps.createSnapshot).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["live project", preflight({ project: { ...preflight().project, id: LIVE_PROJECT_ID } })],
-    ["wrong owner", preflight({ project: { ...preflight().project, ownerId: "team_other" } })],
-    ["unknown project metadata", preflight({ project: { ...preflight().project, production: true } })],
-    ["missing callback", preflight({ environment: {} })],
-    ["live callback", preflight({ environment: { callbackBase: "https://harness-arena-psi.vercel.app" } })],
-    ["unknown environment metadata", preflight({ environment: { callbackBase: manifest().callbackOrigin, OTHER: "x" } })],
-    ["live store", preflight({ store: { ...preflight().store, id: LIVE_STORE_ID } })],
-    ["store on live project", preflight({ store: { ...preflight().store, projectId: LIVE_PROJECT_ID } })],
-    ["wrong store owner", preflight({ store: { ...preflight().store, ownerId: "team_other" } })],
-    ["wrong store type", preflight({ store: { ...preflight().store, type: "postgres" } })],
-    ["unknown top-level metadata", preflight({ production: true })],
-  ])("fails closed on mismatched actual preflight metadata: %s", async (_name, actual) => {
-    const deps = dependencies({
-      readOnlyApi: {
-        preflight: vi.fn(async () => actual),
-        deployment: vi.fn(async () => deployment()),
+      remote: { url: UPSTREAM_URL, ref: "refs/heads/dev", sha: REVIEWED_SHA },
+      project: {
+        id: DEVELOPMENT_PROJECT_ID,
+        name: DEVELOPMENT_PROJECT_NAME,
+        productionBranch: "dev",
       },
     });
-    await expectDeniedWithoutSpawn(deps);
-    expect(deps.createSnapshot).not.toHaveBeenCalled();
+
+    expect(deps.readRemoteSha).toHaveBeenCalledTimes(2);
+    expect(deps.readOnlyApi.inspect).toHaveBeenCalledTimes(1);
   });
 
-  it("uploads neither mutable nor ignored cwd files and always removes the temporary snapshot", async () => {
-    const deps = dependencies({ cwd: "/mutable/repo-with-ignored-secrets" });
-    deps.spawn.mockRejectedValueOnce(new Error(`failure ${TOKEN}`));
-
-    await expect(subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps })).rejects.toThrow(
-      "Development Vercel operation failed",
-    );
-    expect(deps.spawn.mock.calls[0][1]).not.toContain("/mutable/repo-with-ignored-secrets");
-    expect(deps.spawn.mock.calls[0][2].cwd).toBe("/immutable/snapshot");
-    expect(deps.cleanup).toHaveBeenCalledTimes(1);
+  it("exports no archive, process-spawn, deploy, or postflight mutation machinery", () => {
+    expect(subject.runDevelopmentVercelOperation).toBeUndefined();
+    expect(subject.createReviewedSnapshot).toBeUndefined();
+    expect(subject.validateTarArchive).toBeUndefined();
+    expect(subject.spawnBounded).toBeUndefined();
   });
 
   it.each([
-    ["CLI failure", { stdout: TOKEN, stderr: TOKEN, code: 1, timedOut: false, reaped: true }],
-    ["CLI timeout", { stdout: TOKEN, stderr: TOKEN, code: 1, timedOut: true, reaped: true }],
-    ["unreaped process tree", { stdout: "", stderr: "", code: 1, timedOut: true, reaped: false }],
-    ["malformed output", { stdout: "not a deployment", stderr: "", code: 0, timedOut: false, reaped: true }],
-    ["ambiguous output", { stdout: "https://one.vercel.app\nhttps://two.vercel.app\n", stderr: "", code: 0, timedOut: false, reaped: true }],
-  ])("rejects secret-safe %s and cleans the snapshot", async (_name, result) => {
-    const deps = dependencies({ spawn: vi.fn(async () => result) });
-    const error = await subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps }).catch((value) => value);
-    expect(error).toBeInstanceOf(Error);
-    expect(error.message).not.toContain(TOKEN);
-    expect(deps.cleanup).toHaveBeenCalledTimes(1);
+    ["symbolic SHA", "HEAD", REVIEWED_SHA, REVIEWED_SHA],
+    ["different initial remote tip", REVIEWED_SHA, OTHER_SHA, OTHER_SHA],
+    ["remote tip changed during verification", REVIEWED_SHA, REVIEWED_SHA, OTHER_SHA],
+  ])("rejects %s", async (_name, reviewedSha, firstSha, secondSha) => {
+    const deps = dependencies({
+      reviewedSha,
+      readRemoteSha: vi.fn().mockResolvedValueOnce(firstSha).mockResolvedValueOnce(secondSha),
+    });
+    await expectDenied(deps);
   });
 
   it.each([
-    ["live project", deployment({ projectId: LIVE_PROJECT_ID })],
-    ["wrong owner", deployment({ ownerId: "team_other" })],
-    ["production target", deployment({ target: "production" })],
-    ["development target", deployment({ target: "development" })],
-    ["different SHA", deployment({ meta: { reviewedSha: "b".repeat(40) } })],
-    ["different URL", deployment({ url: "different.vercel.app" })],
-    ["unknown key", deployment({ production: true })],
-    ["malformed response", null],
-  ])("rejects postflight deployment mismatch: %s", async (_name, actual) => {
-    const deps = dependencies({
-      readOnlyApi: {
-        preflight: vi.fn(async () => preflight()),
-        deployment: vi.fn(async () => actual),
-      },
-    });
-    await expect(subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps })).rejects.toThrow(
-      /postflight denied/i,
-    );
-    expect(deps.cleanup).toHaveBeenCalledTimes(1);
+    ["live project", inspection({ project: { ...inspection().project, id: LIVE_PROJECT_ID } })],
+    ["wrong project name", inspection({ project: { ...inspection().project, name: "harness-arena" } })],
+    ["wrong owner", inspection({ project: { ...inspection().project, ownerId: "team_other" } })],
+    ["non-GitHub link", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, type: "gitlab" } } })],
+    ["wrong repository", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, repo: "other" } } })],
+    ["wrong production branch", inspection({ project: { ...inspection().project, git: { ...inspection().project.git, productionBranch: "main" } } })],
+    ["live alias", inspection({ project: { ...inspection().project, aliases: manifest().live.aliases } })],
+    ["live callback", inspection({ environment: { ...inspection().environment, callbackBase: `https://${manifest().live.aliases[0]}` } })],
+    ["live store metadata", inspection({ environment: { ...inspection().environment, storeIds: [LIVE_STORE_ID] } })],
+    ["live connected store", inspection({ store: { ...inspection().store, id: LIVE_STORE_ID } })],
+    ["allow-all Vercel setting", inspection({ environment: { ...inspection().environment, networkModeConfigured: true } })],
+    ["unknown response field", { ...inspection(), target: "production" }],
+  ])("fails closed on %s", async (_name, actual) => {
+    await expectDenied(dependencies({ readOnlyApi: { inspect: vi.fn(async () => actual) } }));
   });
 
-  it("does not expose a token when read-only APIs fail with secret-bearing errors", async () => {
-    const deps = dependencies({
-      readOnlyApi: {
-        preflight: vi.fn(async () => { throw new Error(`remote said ${TOKEN}`); }),
-        deployment: vi.fn(),
-      },
-    });
-    const error = await subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps }).catch((value) => value);
-    expect(error.message).toBe("Development Vercel operation denied by local safety policy");
-    expect(error.message).not.toContain(TOKEN);
+  it("rejects RUNNER_NETWORK_MODE=allow-all from its own Vercel invocation context", async () => {
+    await expectDenied(dependencies({ inheritedEnv: { VERCEL: "1", RUNNER_NETWORK_MODE: "allow-all" } }));
   });
 
-  it("fails closed when the immutable snapshot cannot be removed", async () => {
-    const cleanup = vi.fn(async () => { throw new Error(TOKEN); });
-    const deps = dependencies({
-      cleanup,
-      createSnapshot: vi.fn(async () => ({ path: "/immutable/snapshot", cleanup })),
-    });
-
-    const error = await subject.runDevelopmentVercelOperation({ operation: "deploy", ...deps }).catch((value) => value);
-    expect(error.message).toBe("Development snapshot cleanup failed");
-    expect(error.message).not.toContain(TOKEN);
-    expect(cleanup).toHaveBeenCalledTimes(1);
+  it("rejects every operation argument other than the read-only verify command", async () => {
+    await expectDenied(dependencies({ operation: "deploy" }));
   });
 });
 
-describe("reviewed Git archive snapshots", () => {
-  it.each([
-    ["parent traversal", "../escape", "0"],
-    ["nested traversal", "safe/../../escape", "0"],
-    ["absolute path", "/escape", "0"],
-    ["backslash traversal", "..\\escape", "0"],
-    ["symlink", "link", "2"],
-    ["hard link", "link", "1"],
-    ["character device", "device", "3"],
-    ["block device", "device", "4"],
-    ["fifo", "fifo", "6"],
-    ["extended metadata", "meta", "x"],
-  ])("rejects an archive containing %s", (_name, name, type) => {
-    expect(() => subject.validateTarArchive(tarBuffer([{ name, type }]))).toThrow(/archive denied/i);
-  });
-
-  it("accepts only regular files/directories with canonical relative paths", () => {
-    expect(subject.validateTarArchive(tarBuffer([
-      { name: "app/", type: "5" },
-      { name: "app/page.tsx", body: "export default 1" },
-    ]))).toEqual(["app/", "app/page.tsx"]);
-  });
-
-  it("accepts Git's one exact commit-comment global header before safe entries", () => {
-    const comment = `52 comment=${REVIEWED_SHA}\n`;
-    expect(subject.validateTarArchive(tarBuffer([
-      { name: "pax_global_header", type: "g", body: comment },
-      { name: "tracked.txt", body: "reviewed" },
-    ]))).toEqual(["tracked.txt"]);
-  });
-
-  it("archives the exact reviewed object, validates before extraction, and cleans temporary state", async () => {
-    const temp = await mkdtemp(path.join(os.tmpdir(), "issue175-test-"));
-    const events = [];
-    const archive = tarBuffer([
-      { name: "pax_global_header", type: "g", body: `52 comment=${REVIEWED_SHA}\n` },
-      { name: "tracked.txt", body: "reviewed" },
-    ]);
+describe("trusted remote Git provenance", () => {
+  it("ignores replacement refs and repository/global insteadOf config and resolves outside the repository", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "issue175-spoofed-repo-"));
+    const calls = [];
     try {
-      const snapshot = await subject.createReviewedSnapshot({
-        cwd: "/mutable/repo",
-        reviewedSha: REVIEWED_SHA,
-        makeTempDirectory: async () => temp,
-        archiveToFile: async ({ cwd, reviewedSha, archivePath }) => {
-          events.push(["archive", cwd, reviewedSha]);
-          await writeFile(archivePath, archive);
-        },
-        extractArchive: async ({ archivePath, destination }) => {
-          events.push(["extract", archivePath, destination]);
-        },
-        removeTemp: async (target) => {
-          events.push(["remove", target]);
-          await rm(target, { recursive: true, force: true });
+      await execFileAsync("/usr/bin/git", ["init", "--quiet"], { cwd: repo });
+      await execFileAsync("/usr/bin/git", ["config", "url.https://attacker.invalid/.insteadOf", UPSTREAM_URL], { cwd: repo });
+      await execFileAsync("/usr/bin/git", ["config", "core.useReplaceRefs", "true"], { cwd: repo });
+
+      const sha = await subject.readTrustedRemoteDevSha({
+        cwd: repo,
+        execFileImpl: async (file, args, options) => {
+          calls.push({ file, args, options });
+          return { stdout: `${REVIEWED_SHA}\trefs/heads/dev\n` };
         },
       });
-      expect(snapshot.path).toBe(path.join(temp, "snapshot"));
-      expect(events[0]).toEqual(["archive", "/mutable/repo", REVIEWED_SHA]);
-      expect(events[1][0]).toBe("extract");
-      await snapshot.cleanup();
-      expect(events.at(-1)).toEqual(["remove", temp]);
+
+      expect(sha).toBe(REVIEWED_SHA);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].file).toBe("/usr/bin/git");
+      expect(calls[0].args).toEqual([
+        "--no-replace-objects",
+        "ls-remote",
+        "--exit-code",
+        UPSTREAM_URL,
+        "refs/heads/dev",
+      ]);
+      expect(path.resolve(calls[0].options.cwd)).not.toBe(path.resolve(repo));
+      expect(calls[0].options.env).toEqual({
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+        HOME: "/dev/null",
+        LC_ALL: "C",
+        PATH: "/usr/bin:/bin",
+      });
     } finally {
-      await rm(temp, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects an otherwise-safe archive whose Git commit header is not the reviewed SHA", () => {
-    const otherSha = "b".repeat(40);
-    const archive = tarBuffer([
-      { name: "pax_global_header", type: "g", body: `52 comment=${otherSha}\n` },
-      { name: "tracked.txt", body: "reviewed" },
-    ]);
-    expect(() => subject.validateTarArchive(archive, { expectedSha: REVIEWED_SHA })).toThrow(/archive denied/i);
-  });
-
-  it("ignores untracked/ignored files and working-tree races by archiving only the reviewed commit", async () => {
-    const repo = await mkdtemp(path.join(os.tmpdir(), "issue175-repo-"));
-    let snapshot;
-    const runGit = (...args) => execFileAsync("/usr/bin/git", args, {
-      cwd: repo,
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-    });
-    try {
-      await runGit("init", "--quiet");
-      await runGit("config", "user.name", "Test");
-      await runGit("config", "user.email", "test@example.test");
-      await writeFile(path.join(repo, ".gitignore"), "ignored-secret.txt\n");
-      await writeFile(path.join(repo, "tracked.txt"), "reviewed\n");
-      await runGit("add", ".gitignore", "tracked.txt");
-      await runGit("commit", "--quiet", "-m", "reviewed");
-      const { stdout } = await runGit("rev-parse", "HEAD");
-      const reviewedSha = stdout.trim();
-
-      await writeFile(path.join(repo, "tracked.txt"), "mutable-race\n");
-      await writeFile(path.join(repo, "ignored-secret.txt"), TOKEN);
-      snapshot = await subject.createReviewedSnapshot({ cwd: repo, reviewedSha });
-
-      await expect(readFile(path.join(snapshot.path, "tracked.txt"), "utf8")).resolves.toBe("reviewed\n");
-      await expect(access(path.join(snapshot.path, "ignored-secret.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      await snapshot?.cleanup();
       await rm(repo, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    ["wrong ref", `${REVIEWED_SHA}\trefs/heads/main\n`],
+    ["multiple lines", `${REVIEWED_SHA}\trefs/heads/dev\n${OTHER_SHA}\trefs/heads/dev\n`],
+    ["symbolic output", `ref: refs/heads/dev\tHEAD\n`],
+  ])("rejects malformed ls-remote output: %s", async (_name, stdout) => {
+    await expect(subject.readTrustedRemoteDevSha({
+      cwd: "/repo",
+      execFileImpl: async () => ({ stdout }),
+    })).rejects.toThrow(/read-only preflight denied/i);
+  });
 });
 
-describe("read-only Vercel metadata adapter", () => {
-  it("reads only the fixed project, Preview callback value, store, and deployment metadata", async () => {
+describe("bounded read-only Vercel adapter", () => {
+  it("uses only fixed GET requests, rechecks project settings, and decrypts only CALLBACK_BASE", async () => {
     const requests = [];
+    const project = {
+      id: DEVELOPMENT_PROJECT_ID,
+      accountId: TEAM_ID,
+      name: DEVELOPMENT_PROJECT_NAME,
+      link: { type: "github", org: "dennisonbertram", repo: "harness-arena", productionBranch: "dev" },
+      alias: ["harness-arena-development.vercel.app"],
+    };
     const fetchImpl = vi.fn(async (input, options) => {
       const url = new URL(input);
       requests.push({ url, options });
-      let value;
-      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) {
-        value = { id: DEVELOPMENT_PROJECT_ID, accountId: TEAM_ID, name: "harness-arena-development" };
-      } else if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
-        value = {
-          envs: [
-            { id: "env_callback", key: "CALLBACK_BASE", target: ["preview"] },
-            { id: "env_secret", key: "BLOB_READ_WRITE_TOKEN", target: ["preview"] },
-          ],
-        };
-      } else if (url.pathname.endsWith("/env/env_callback")) {
-        value = { value: "https://harness-arena-development.vercel.app" };
-      } else if (url.pathname === "/v1/storage/stores/store_development") {
-        value = {
-          id: "store_development",
+      if (url.pathname === `/v9/projects/${DEVELOPMENT_PROJECT_ID}`) return jsonResponse(project);
+      if (url.pathname === `/v10/projects/${DEVELOPMENT_PROJECT_ID}/env`) {
+        return jsonResponse({ envs: [
+          { id: "env_callback", key: "CALLBACK_BASE", target: ["production"] },
+          { id: "env_blob", key: "BLOB_READ_WRITE_TOKEN", target: ["production"], contentHint: { storeId: DEVELOPMENT_STORE_ID } },
+        ] });
+      }
+      if (url.pathname.endsWith("/env/env_callback")) {
+        return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
+      }
+      if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
+        return jsonResponse({
+          id: DEVELOPMENT_STORE_ID,
           ownerId: TEAM_ID,
           type: "blob",
           projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-        };
-      } else if (url.pathname === "/v13/deployments/harness-arena-development-preview.vercel.app") {
-        value = deployment();
-      } else {
-        throw new Error(`unexpected request ${url.pathname}`);
+        });
       }
-      return { ok: true, json: async () => value };
+      throw new Error(`unexpected request ${url.pathname}`);
     });
-    const api = subject.createReadOnlyVercelApi({ fetchImpl });
 
-    await expect(api.preflight({
+    const api = subject.createReadOnlyVercelApi({ fetchImpl });
+    await expect(api.inspect({
       projectId: DEVELOPMENT_PROJECT_ID,
       teamId: TEAM_ID,
-      storeId: "store_development",
+      storeId: DEVELOPMENT_STORE_ID,
       token: TOKEN,
-    })).resolves.toEqual(preflight());
-    await expect(api.deployment({
-      url: "https://harness-arena-development-preview.vercel.app",
-      teamId: TEAM_ID,
-      token: TOKEN,
-    })).resolves.toEqual(deployment());
+    })).resolves.toEqual(inspection());
 
     expect(requests).toHaveLength(5);
-    expect(requests.every(({ url }) => url.searchParams.get("teamId") === TEAM_ID)).toBe(true);
-    expect(requests.every(({ options }) => options.headers.Authorization === `Bearer ${TOKEN}`)).toBe(true);
-    expect(requests.some(({ url }) => url.pathname.endsWith("/env/env_secret"))).toBe(false);
-    expect(requests.find(({ url }) => url.pathname.endsWith("/env/env_callback")).url.searchParams.get("decrypt"))
-      .toBe("true");
+    expect(requests.every(({ options }) => options.method === "GET")).toBe(true);
+    expect(requests.every(({ options }) => options.redirect === "error")).toBe(true);
+    expect(requests.filter(({ url }) => url.searchParams.get("decrypt") === "true"))
+      .toHaveLength(1);
+    expect(requests.find(({ url }) => url.searchParams.get("decrypt") === "true").url.pathname)
+      .toMatch(/env_callback$/);
   });
 
-  it("fails with a constant secret-safe error on malformed or rejected API responses", async () => {
+  it("bounds response bodies", async () => {
     const api = subject.createReadOnlyVercelApi({
-      fetchImpl: vi.fn(async () => ({
-        ok: false,
-        json: async () => ({ error: TOKEN }),
-      })),
+      fetchImpl: vi.fn(async () => new Response("x".repeat(2_000), { status: 200 })),
+      maxBodyBytes: 1_024,
     });
-
-    const error = await api.preflight({
+    await expect(api.inspect({
       projectId: DEVELOPMENT_PROJECT_ID,
       teamId: TEAM_ID,
-      storeId: "store_development",
+      storeId: DEVELOPMENT_STORE_ID,
       token: TOKEN,
-    }).catch((value) => value);
-    expect(error.message).toBe("Development Vercel operation denied by local safety policy");
-    expect(error.message).not.toContain(TOKEN);
+    })).rejects.toThrow(/read-only preflight denied/i);
+  });
+
+  it("bounds request time", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: vi.fn((_input, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      })),
+      timeoutMs: 10,
+    });
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/read-only preflight denied/i);
   });
 });
 
-describe("bounded process-tree supervision", () => {
-  it("TERM/grace/KILLs the owned process group and waits for its descendants", async () => {
-    const script = [
-      "const {spawn}=require('node:child_process')",
-      "process.on('SIGTERM',()=>{})",
-      "const child=spawn(process.execPath,['-e',`process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`],{stdio:'ignore'})",
-      "console.log(child.pid)",
-      "setInterval(()=>{},1000)",
-    ].join(";");
-    const result = await subject.spawnBounded(process.execPath, ["-e", script], {
-      cwd: process.cwd(),
-      env: {},
-      timeoutMs: 100,
-      termGraceMs: 100,
-      maxOutputBytes: 1_024,
-    });
-    expect(result.timedOut).toBe(true);
-    expect(result.reaped).toBe(true);
-    const descendantPid = Number(result.stdout.trim());
-    expect(Number.isInteger(descendantPid)).toBe(true);
-    expect(() => process.kill(descendantPid, 0)).toThrow();
+describe("Development runbook contract", () => {
+  it("assigns deployment ownership to native Git and documents only read-only verification", async () => {
+    const [runbook, agents] = await Promise.all([
+      readFile(new URL("../../docs/runbooks/development-environment.md", import.meta.url), "utf8"),
+      readFile(new URL("../../AGENTS.md", import.meta.url), "utf8"),
+    ]);
+    expect(runbook).toMatch(/Vercel native Git integration/i);
+    expect(runbook).toMatch(/Production Branch[^\n]*`dev`/i);
+    expect(runbook).toContain("node scripts/ops/vercel-development.mjs verify <exact-reviewed-origin-dev-sha>");
+    expect(runbook).not.toMatch(/vercel-development\.mjs deploy|vercel deploy/i);
+    expect(agents).not.toMatch(/vercel-development\.mjs deploy/i);
+    expect(agents).toMatch(/native Git/i);
   });
 });

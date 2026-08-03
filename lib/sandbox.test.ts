@@ -51,6 +51,7 @@ const ENV_KEYS = [
   "RUNNER_VERIFY_TIMEOUT_CAP",
   "VERCEL_GIT_COMMIT_SHA",
   "VERCEL_ENV",
+  "VERCEL",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -103,6 +104,7 @@ describe("createRunSandbox", () => {
     delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
     delete process.env.VERCEL_GIT_COMMIT_SHA;
     delete process.env.VERCEL_ENV;
+    delete process.env.VERCEL;
   });
 
   afterEach(() => {
@@ -192,6 +194,21 @@ describe("createRunSandbox", () => {
 
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ networkPolicy: "allow-all" }));
     });
+
+    it.each(["production", "preview", "development"])(
+      "rejects RUNNER_NETWORK_MODE=allow-all in a Vercel %s context",
+      async (vercelEnvironment) => {
+        process.env.RUNNER_NETWORK_MODE = "allow-all";
+        process.env.VERCEL = "1";
+        process.env.VERCEL_ENV = vercelEnvironment;
+        mockCreate.mockResolvedValue(makeSandbox());
+
+        await expect(createRunSandbox(makeRun(), { prompt: "be careful" })).rejects.toThrow(
+          "sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel",
+        );
+        expect(mockCreate).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("bootstraps the sandbox by curling the runner bundle from CALLBACK_BASE and extracting it to /opt/runner", async () => {
