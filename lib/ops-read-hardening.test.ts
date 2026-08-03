@@ -43,4 +43,15 @@ describe("ops read hardening contract", () => {
     for (const leaked of ["error-access", "error-refresh", "error-client", "nested-access", "nested-refresh", "nested-client"]) expect(output).not.toContain(leaked);
     expect(output).toContain("[REDACTED]");
   });
+
+  it("strips encoded URL userinfo and redacts stringified cookie and header variants", () => {
+    const error = new Error('failed={"cookie":"error-cookie","setCookie":"error-set","set-cookie":"error-dash","authorizationHeader":"header-auth"} https://error-user:error-pass@x.test/a?token=q#fragment');
+    const output = JSON.stringify(redactOpsValue({
+      error,
+      urls: ["https://user:pass@x.test/a?token=q#fragment", "https://us%65r:p%40ss@x.test/b?sig=signed#secret"],
+      nested: ['{"Cookie":"upper-cookie","cookieHeader":"header-cookie","set_cookie":"snake-cookie","xApiKey":"api-key"}'],
+    }));
+    for (const leaked of ["user", "pass", "us%65r", "p%40ss", "error-user", "error-pass", "error-cookie", "error-set", "error-dash", "header-auth", "upper-cookie", "header-cookie", "snake-cookie", "api-key", "token=q", "sig=signed", "fragment"]) expect(output).not.toContain(leaked);
+    expect(output).toContain("[REDACTED]");
+  });
 });

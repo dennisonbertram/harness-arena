@@ -23,9 +23,14 @@ import {
 } from "./agent-status.mjs";
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
-const jsonResponse = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hardBound = async (promise, timeoutMs = 150) => {
+  const timedOut = Symbol("timed-out");
+  return Promise.race([promise, delay(timeoutMs).then(() => timedOut)]);
+};
 
-function healthyApiFetch({ missingCursor = false, missingHasMore = false, missingTerminalCursor = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, runRecords, integrity } = {}) {
+function healthyApiFetch({ missingCursor = false, missingHasMore = false, missingTerminalCursor = false, unknownFreshness = false, healthOk = true, advertisedKinds, runCount, runRecords, integrity, serverPageLimit = false } = {}) {
   return vi.fn(async (rawUrl, init) => {
     expect(init.method).toBe("GET");
     const url = new URL(rawUrl);
@@ -34,6 +39,7 @@ function healthyApiFetch({ missingCursor = false, missingHasMore = false, missin
     if (url.pathname === "/api/ops/v1/summary") return jsonResponse({ schema_version: "ops.v1", scan: { complete: true }, latest: { runs: unknownFreshness ? null : "2026-08-03T00:05:00.000Z", events: "2026-08-03T00:06:00.000Z" }, run_states: { queued: 0, running: 1, failed: 0, stale: 0 }, integrity: integrity ?? { unreadable: 0, corrupt: 0, event_holes: 0 } });
     if (url.pathname === "/api/ops/v1/inventory") {
       const kind = url.searchParams.get("kind"), cursor = url.searchParams.get("cursor");
+      if (kind === "runs" && serverPageLimit) return jsonResponse({ schema_version: "ops.v1", kind, error: { code: "page_item_limit", limit: 100, received: 101 }, partial: true }, 503);
       if (kind === "runs" && runRecords) return jsonResponse({ schema_version: "ops.v1", kind, items: runRecords, has_more: false, next_cursor: null });
       if (kind === "runs" && runCount) return jsonResponse({ schema_version: "ops.v1", kind, items: Array.from({ length: runCount }, (_, index) => ({ pathname: `runs/r${index + 1}.json`, uploaded_at: "2026-08-03T00:05:00.000Z" })), has_more: false, next_cursor: null });
       if (kind === "runs" && !cursor) return jsonResponse({ schema_version: "ops.v1", kind, items: [{ pathname: "runs/r1.json", uploaded_at: "2026-08-03T00:05:00.000Z" }], ...(missingHasMore ? {} : { has_more: true }), next_cursor: missingCursor ? null : "runs-2" });
@@ -148,21 +154,17 @@ describe("ops evidence and verdict honesty", () => {
   });
 
   it("rejects every redirect status without reading its body or retrying", async () => {
-    for (const status of [300, 301, 302, 303, 307, 308, 399]) {
-      let cancelled = false;
-      const body = new ReadableStream({ cancel() { cancelled = true; } });
-      const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, headers: new Headers({ location: "/elsewhere" }), body, json: vi.fn(async () => ({ unexpected: true })) });
-      await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", token: "redirect-secret", fetchImpl, timeoutMs: 100, retries: 2 })).resolves.toMatchObject({
-        ok: false,
-        status,
-        error: "redirect_rejected",
-        kind: "redirect",
-        attempts: 1,
-      });
-      expect(cancelled).toBe(true);
-      expect(fetchImpl).toHaveBeenCalledTimes(1);
-      expect(fetchImpl).toHaveBeenCalledWith("https://arena.example/api/health", expect.objectContaining({ redirect: "manual" }));
-    }
+    const statuses = [300, 301, 302, 303, 307, 308, 399];
+    const cancellations = [];
+    const requests = statuses.map((status) => {
+      const cancel = vi.fn(() => new Promise(() => {}));
+      cancellations.push(cancel);
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, headers: new Headers({ location: "/elsewhere" }), body: { locked: false, cancel }, json: vi.fn() });
+      return requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", token: "redirect-secret", fetchImpl, timeoutMs: 25, retries: 2 });
+    });
+    const results = await hardBound(Promise.all(requests));
+    expect(results).toEqual(statuses.map((status) => expect.objectContaining({ ok: false, status, error: "redirect_rejected", kind: "redirect", attempts: 1 })));
+    expect(cancellations.every((cancel) => cancel.mock.calls.length === 1)).toBe(true);
   });
 
   it("bounds declared and chunked JSON responses and cancels overflow streams", async () => {
@@ -227,6 +229,64 @@ describe("ops evidence and verdict honesty", () => {
     expect(json).not.toHaveBeenCalled();
   });
 
+  it("settles within a hard bound when cancellation never settles across every cleanup path", async () => {
+    const never = () => new Promise(() => {});
+    const declaredCancel = vi.fn(never);
+    const malformedCancel = vi.fn(never);
+    const chunkedCancel = vi.fn(never);
+    const timeoutCancel = vi.fn(never);
+    const requests = [
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "99" }), body: { locked: false, cancel: declaredCancel } }), maxResponseBytes: 8, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "0, 1" }), body: { locked: false, cancel: malformedCancel } }), maxResponseBytes: 8, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: false, value: Buffer.from("too large") }), cancel: chunkedCancel, releaseLock: vi.fn() }) } }), maxResponseBytes: 2, timeoutMs: 25, retries: 0 }),
+      requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), body: { getReader: () => ({ read: never, cancel: timeoutCancel, releaseLock: vi.fn() }) } }), maxResponseBytes: 8, timeoutMs: 10, retries: 0 }),
+    ];
+    const results = await hardBound(Promise.all(requests));
+    expect(results).toEqual([
+      expect.objectContaining({ error: "response_too_large" }),
+      expect.objectContaining({ error: "invalid_content_length" }),
+      expect.objectContaining({ error: "response_too_large" }),
+      expect.objectContaining({ error: "request_timeout" }),
+    ]);
+    expect([declaredCancel, malformedCancel, chunkedCancel, timeoutCancel].every((cancel) => cancel.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("absorbs thrown cancellation rejections without changing the bounded result", async () => {
+    const cancel = vi.fn(() => Promise.reject(new Error("hostile cancel rejection")));
+    const result = await requestOpsJson({
+      baseUrl: new URL("https://arena.example"),
+      path: "/api/health",
+      fetchImpl: vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers({ "content-length": "99" }), body: { locked: false, cancel } }),
+      maxResponseBytes: 8,
+      timeoutMs: 25,
+      retries: 0,
+    });
+    expect(result).toMatchObject({ error: "response_too_large" });
+    expect(cancel).toHaveBeenCalledOnce();
+    await delay(0);
+  });
+
+  it("fails closed without calling response.json when no readable stream is available", async () => {
+    const json = vi.fn(async () => ({ secret: "post-hoc" }));
+    let signal;
+    const fetchImpl = vi.fn(async (_url, init) => {
+      signal = init.signal;
+      return { ok: true, status: 200, headers: new Headers({ "content-length": "2" }), body: null, json };
+    });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl, timeoutMs: 25, retries: 0 })).resolves.toMatchObject({
+      ok: false,
+      error: "response_stream_unavailable",
+      kind: "response_stream_unavailable",
+    });
+    expect(json).not.toHaveBeenCalled();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("treats a syntactically valid zero content-length as bounded malformed JSON", async () => {
+    const response = new Response("", { status: 200, headers: { "content-length": "0" } });
+    await expect(requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: vi.fn().mockResolvedValue(response), timeoutMs: 25, retries: 0 })).resolves.toMatchObject({ error: "invalid_json" });
+  });
+
   it("aggregates every advertised inventory and correlates bounded run/event evidence", async () => {
     const fetchImpl = healthyApiFetch();
     const result = await collectAgentOpsStatus({ baseUrl: "https://arena.example", token: "not-for-output", fetchImpl, now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
@@ -247,7 +307,7 @@ describe("ops evidence and verdict honesty", () => {
   it("separates access blockers, transient failures, invalid JSON, and bounded retries", async () => {
     expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: vi.fn().mockResolvedValue(jsonResponse({ error: "unauthorized" }, 401)), platform: healthyPlatform })).verdict).toBe("access_blocked");
     expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: vi.fn().mockRejectedValue(new Error("socket failed token=leak")), platform: healthyPlatform })).verdict).toBe("failed");
-    const invalidJson = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => { throw new Error("bad json"); } });
+    const invalidJson = vi.fn().mockResolvedValue(new Response("{", { status: 200, headers: { "content-type": "application/json" } }));
     expect((await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: invalidJson, platform: healthyPlatform })).verdict).toBe("failed");
     const transient = vi.fn().mockResolvedValueOnce(jsonResponse({ error: "busy" }, 503)).mockResolvedValueOnce(jsonResponse({ ok: true }, 200));
     expect(await requestOpsJson({ baseUrl: new URL("https://arena.example"), path: "/api/health", fetchImpl: transient, timeoutMs: 100, retries: 1 })).toMatchObject({ ok: true, attempts: 2 });
@@ -294,6 +354,8 @@ describe("ops evidence and verdict honesty", () => {
 
     const pageOverflow = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ runCount: 101 }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
     expect(pageOverflow).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { records: 0, pages: 0, complete: false, error: "page_item_limit" } } } });
+    const serverPageOverflow = await collectAgentOpsStatus({ baseUrl: "https://arena.example", fetchImpl: healthyApiFetch({ serverPageLimit: true }), now: "2026-08-03T00:10:00.000Z", platform: healthyPlatform, environment: "production" });
+    expect(serverPageOverflow).toMatchObject({ verdict: "degraded", ops: { inventory: { runs: { complete: false, error: "page_item_limit" } } } });
   });
 
   it("classifies unreadable, corrupt, and event-hole integrity evidence as failed", async () => {
@@ -366,6 +428,21 @@ describe("redaction, platform wiring, and process bounds", () => {
     for (const leaked of ["cause-access", "cause-client", "cause-refresh", "error-access", "error-refresh", "error-client", "nested-access", "nested-refresh", "nested-client", "single-client", "bare-access"]) expect(output).not.toContain(leaked);
     expect(output).toContain('"name":"Error"');
     expect(output.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("strips URL userinfo and redacts quoted cookie and header variants in hostile strings", () => {
+    const error = new Error('upstream={"cookie":"error-cookie","setCookie":"error-set","proxyAuthorization":"error-proxy"} at https://error-user:error-pass@x.test/a?token=q#fragment');
+    const output = JSON.stringify(redactSensitive({
+      error,
+      urls: ["https://user:pass@x.test/a?token=q#fragment", "https://us%65r:p%40ss@x.test/b?sig=signed#secret"],
+      nested: [
+        '{"cookie":"nested-cookie","setCookie":"nested-set","set-cookie":"nested-dash","Cookie":"upper-cookie","cookieHeader":"header-cookie"}',
+        "Cookie: sid=one; csrf=two",
+        "set_cookie='snake-cookie' xApiKey='header-key'",
+      ],
+    }));
+    for (const leaked of ["user", "pass", "us%65r", "p%40ss", "error-user", "error-pass", "error-cookie", "error-set", "error-proxy", "nested-cookie", "nested-set", "nested-dash", "upper-cookie", "header-cookie", "sid=one", "csrf=two", "snake-cookie", "header-key", "token=q", "sig=signed", "fragment"]) expect(output).not.toContain(leaked);
+    expect(output).toContain("[REDACTED]");
   });
 
   it("wires the production CLI through injected Vercel/GitHub commands and emits JSON or human output", async () => {
