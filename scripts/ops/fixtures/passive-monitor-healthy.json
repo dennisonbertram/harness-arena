@@ -3,6 +3,7 @@
   "checked_at": "2026-08-03T12:00:00.000Z",
   "environment": "development",
   "verdict": "healthy",
+  "exit_code": 0,
   "health": { "sha": "abcdef1", "ok": true, "storage": "up" },
   "platform": { "deployment": { "id": "dpl_fixture", "sha": "abcdef1" } },
   "findings": [],

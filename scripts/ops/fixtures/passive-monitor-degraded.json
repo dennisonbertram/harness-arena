@@ -3,6 +3,7 @@
   "checked_at": "2026-08-03T12:00:00.000Z",
   "environment": "development",
   "verdict": "failed",
+  "exit_code": 2,
   "health": { "sha": "abcdef1", "ok": false, "storage": "down" },
   "platform": { "deployment": { "id": "dpl_fixture", "sha": "abcdef1" }, "logs": { "recent_errors": [{ "request_id": "req_fixture_01", "trace_id": "trace_fixture_02", "message": "safe failure" }] } },
   "findings": [

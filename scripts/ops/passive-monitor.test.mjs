@@ -1,15 +1,31 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildObservation,
+  executeMonitor,
+  issueBodyForAction,
   planIncidentTransitions,
   sanitizeMonitorRecord,
   stableFingerprint,
 } from "./passive-monitor.mjs";
 
-const healthy = { environment: "development", verdict: "healthy", checked_at: "2026-08-03T12:00:00.000Z", health: { sha: "abcdef1" }, platform: { deployment: { id: "dpl_1", sha: "abcdef1" } }, findings: [], blockers: [] };
-const failed = (codes, sha = "abcdef1") => ({ ...healthy, verdict: "failed", health: { sha }, platform: { deployment: { id: "dpl_1", sha } }, findings: codes.map((code) => ({ code, severity: "failed", detail: `secret=monitor-token prompt=private request ${code}` })) });
+const healthy = { schema_version: "agent_ops_status.v1", environment: "development", verdict: "healthy", exit_code: 0, checked_at: "2026-08-03T12:00:00.000Z", health: { sha: "abcdef1" }, platform: { deployment: { id: "dpl_1", sha: "abcdef1" } }, findings: [], blockers: [] };
+const failed = (codes, sha = "abcdef1") => ({ ...healthy, verdict: "failed", exit_code: 2, health: { sha }, platform: { deployment: { id: "dpl_1", sha } }, findings: codes.map((code) => ({ code, severity: "failed", detail: `secret=monitor-token prompt=private request ${code}` })) });
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
+
+function runApplier(plans) {
+  const directory = mkdtempSync(join(tmpdir(), "ha-monitor-applier-"));
+  const log = join(directory, "argv.jsonl");
+  const binary = join(directory, "gh");
+  writeFileSync(binary, `#!/usr/bin/env node\nconst fs=require("node:fs");const input=fs.readFileSync(0,"utf8");fs.appendFileSync(process.env.GH_ARGV_LOG,JSON.stringify({argv:process.argv.slice(2),input})+"\\n");`);
+  chmodSync(binary, 0o700);
+  const files = plans.map((plan, index) => { const path = join(directory, `plan-${index}.json`); writeFileSync(path, JSON.stringify(plan)); return path; });
+  const result = spawnSync(process.execPath, [new URL("./apply-passive-monitor-plan.mjs", import.meta.url).pathname, ...files], { encoding: "utf8", env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, GH_ARGV_LOG: log } });
+  return { result, calls: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
+}
 
 describe("passive monitor incident state machine", () => {
   it("creates one stable, secret-safe incident for a new product failure", () => {
@@ -57,12 +73,57 @@ describe("passive monitor incident state machine", () => {
     expect(stableFingerprint({ environment: "production", alert_class: "monitor", code: "monitor_execution_failed" })).toBe(monitorFailure.failures[0].fingerprint);
   });
 
+  it("rejects malformed collector schema, verdict/exit disagreement, and nonhealthy output without evidence", () => {
+    const invalid = [
+      null,
+      {},
+      { ...healthy, schema_version: "wrong.v1" },
+      { ...healthy, exit_code: 2 },
+      { ...healthy, verdict: "failed", exit_code: 2, findings: [], blockers: [] },
+      { ...healthy, verdict: "degraded", exit_code: 1, findings: [], blockers: [] },
+    ];
+    for (const status of invalid) {
+      const observation = buildObservation(status, { environment: "development" });
+      expect(observation).toMatchObject({ kind: "monitor_self_failure", failures: [expect.objectContaining({ alert_class: "monitor", code: "collector_output_invalid" })] });
+      const pending = { number: 99, state: "OPEN", fingerprint: "prior-product-failure", recovery_pending: true };
+      expect(planIncidentTransitions({ observation, incidents: [pending] }).actions).not.toContainEqual(expect.objectContaining({ action: "close", number: 99 }));
+    }
+  });
+
+  it("turns banner-contaminated collector output into monitor self-failure without recovery", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ha-monitor-collector-"));
+    const incidents = join(directory, "incidents.json"), output = join(directory, "plan.json"), malformed = join(directory, "status.json");
+    writeFileSync(incidents, JSON.stringify([{ number: 99, state: "OPEN", fingerprint: "prior-product-failure", recovery_pending: true }]));
+    writeFileSync(malformed, `> harness-arena@0.1.0 ops:status\n${JSON.stringify(healthy)}`);
+    expect(await executeMonitor(["--environment", "development", "--status", malformed, "--incidents", incidents, "--output", output])).toBe(2);
+    const plan = JSON.parse(readFileSync(output, "utf8"));
+    expect(plan.observation).toMatchObject({ environment: "development", kind: "monitor_self_failure" });
+    expect(plan.actions).not.toContainEqual(expect.objectContaining({ action: "close", number: 99 }));
+  });
+
   it("classifies controlled healthy and degraded fixtures without retaining prompts or credentials", () => {
     const good = buildObservation(fixture("passive-monitor-healthy.json"), { environment: "development", knownSecrets: ["fixture-token"] });
     const degraded = buildObservation(fixture("passive-monitor-degraded.json"), { environment: "development", knownSecrets: ["fixture-token"] });
     expect(good).toMatchObject({ kind: "healthy", failures: [] });
     expect(degraded).toMatchObject({ kind: "product_failure", request_ids: ["req_fixture_01", "trace_fixture_02"], failures: expect.arrayContaining([expect.objectContaining({ code: "storage_down", alert_class: "storage" }), expect.objectContaining({ code: "stale_runs", alert_class: "queue" })]) });
     expect(JSON.stringify(degraded)).not.toMatch(/fixture-token|private task body/);
+  });
+
+  it("clears persisted recovery_pending on a flap and edits the issue body", () => {
+    const observation = buildObservation(failed(["gateway_capability_missing"]), { environment: "development" });
+    const fingerprint = observation.failures[0].fingerprint;
+    const action = planIncidentTransitions({ observation, incidents: [{ number: 73, state: "CLOSED", fingerprint, recovery_pending: true }] }).actions[0];
+    expect(issueBodyForAction(action, observation)).toMatch(new RegExp(`harness-arena-monitor:.*\\"fingerprint\\":\\"${fingerprint}\\".*\\"recovery_pending\\":false`));
+    const { result, calls } = runApplier([{ observation, actions: [action] }]);
+    expect(result.status).toBe(0);
+    expect(calls.map(({ argv }) => argv.slice(0, 2))).toEqual([["issue", "reopen"], ["issue", "comment"], ["issue", "edit"]]);
+  });
+
+  it("includes only validated request and trace identifiers in incident payloads", () => {
+    const observation = buildObservation(fixture("passive-monitor-degraded.json"), { environment: "development" });
+    const body = issueBodyForAction({ action: "create", reason: "new_failure", fingerprint: observation.failures[0].fingerprint, failure: observation.failures[0] }, observation);
+    expect(body).toMatch(/Correlation IDs: req_fixture_01, trace_fixture_02/);
+    expect(body).not.toMatch(/fixture-token|private task body/);
   });
 });
 
@@ -80,6 +141,9 @@ describe("monitor workflow contract", () => {
     expect(workflow).not.toMatch(/(?:VERCEL_TOKEN|BLOB_READ_WRITE_TOKEN|RUNNER_CALLBACK_SECRET|AI_GATEWAY_API_KEY)/);
     expect(workflow).not.toMatch(/--label\s+agent-monitor/);
     expect(workflow).toMatch(/--search\s+"\[agent-monitor\] in:title"/);
+    expect(workflow).toMatch(/node scripts\/ops\/agent-status\.mjs --env development --json/);
+    expect(workflow).toMatch(/node scripts\/ops\/agent-status\.mjs --env production --json/);
+    expect(workflow).not.toMatch(/pnpm ops:status/);
     expect(runbook).toMatch(/GET-only/i);
     expect(runbook).toMatch(/access_blocked/i);
   });
@@ -94,5 +158,15 @@ describe("monitor workflow contract", () => {
     expect(applier).toMatch(/spawn\("gh", args, \{ shell: false/);
     expect(applier).not.toMatch(/\b(?:vercel|curl|fetch\(|POST|PUT|PATCH|DELETE|blob|admin)\b/i);
     expect(applier).toMatch(/\["issue", "(?:create|comment|edit|close|reopen)"/);
+  });
+
+  it("creates an incident without requiring a repository label", () => {
+    const observation = buildObservation(failed(["storage_down"]), { environment: "development" });
+    const action = planIncidentTransitions({ observation, incidents: [] }).actions[0];
+    const { result, calls } = runApplier([{ observation, actions: [action] }]);
+    expect(result.status).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].argv).toEqual(expect.arrayContaining(["issue", "create", "--body-file", "-"]));
+    expect(calls[0].argv).not.toEqual(expect.arrayContaining(["--label", "agent-monitor"]));
   });
 });
