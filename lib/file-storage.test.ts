@@ -135,7 +135,8 @@ describe("FileStorage", () => {
       child.once("error", (error) => reject(new Error(`worker ${index} failed to start: ${error.message}; output=${output}`)));
       child.once("close", (code, signal) => {
         workerOutput[index] = output;
-        code === 0 ? resolve() : reject(new Error(`worker ${index} failed (code=${code}, signal=${signal}): ${output}`));
+        if (code === 0) resolve();
+        else reject(new Error(`worker ${index} failed (code=${code}, signal=${signal}): ${output}`));
       });
     })));
     const events = await local.listRunEvents("run-1");

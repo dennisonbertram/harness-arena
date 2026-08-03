@@ -13,13 +13,18 @@ function processExists(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-async function waitForFile(path, timeoutMs = 10_000) {
+function fixtureDiagnostic(fixture) {
+  const output = fixture?.output?.().trim() ?? "";
+  return `; fixture=${fixture?.mode ?? "unknown"}; child output=${JSON.stringify(output)}`;
+}
+
+async function waitForFile(path, timeoutMs = 10_000, fixture) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try { return await readFile(path, "utf8"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
     await delay(20);
   }
-  throw new Error(`timed out waiting for ${path}`);
+  throw new Error(`timed out waiting for publication blocker ${path}${fixtureDiagnostic(fixture)}`);
 }
 
 async function waitForGroupExit(pid, timeoutMs = 5_000) {
@@ -89,21 +94,21 @@ function spawnFixture(mode, marker, preservationMarker) {
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
   const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal, output })));
-  return { child, closed };
+  return { child, closed, mode, output: () => output };
 }
 
-async function waitForClose(closed, timeoutMs = 10_000) {
-  return Promise.race([closed, delay(timeoutMs).then(() => { throw new Error("fixture Vitest process did not exit"); })]);
+async function waitForClose(closed, timeoutMs = 10_000, fixture) {
+  return Promise.race([closed, delay(timeoutMs).then(() => { throw new Error(`fixture Vitest process did not exit${fixtureDiagnostic(fixture)}`); })]);
 }
 
-async function waitForText(path, expected, timeoutMs = 5_000) {
+async function waitForText(path, expected, timeoutMs = 5_000, fixture) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await readFile(path, "utf8").catch(() => "");
     if (expected.every((item) => value.includes(item))) return value;
     await delay(20);
   }
-  throw new Error(`timed out waiting for ${expected.join(", ")} in ${path}`);
+  throw new Error(`timed out waiting for phase blocker ${expected.join(", ")} in ${path}${fixtureDiagnostic(fixture)}`);
 }
 
 describe.sequential("integration harness process cleanup", () => {
@@ -112,7 +117,7 @@ describe.sequential("integration harness process cleanup", () => {
     const marker = join(directory, "published.json");
     const fixture = spawnFixture("publication-delay", marker, join(directory, "preserved.json"));
     try {
-      expect(JSON.parse(await waitForFile(marker))).toEqual({ worker_pid: expect.any(Number) });
+      expect(JSON.parse(await waitForFile(marker, fixturePublicationDeadlineMs(10_100), fixture))).toEqual({ worker_pid: expect.any(Number) });
     } finally {
       await terminateGroup(fixture.child.pid);
       await rm(directory, { recursive: true, force: true });
@@ -126,13 +131,13 @@ describe.sequential("integration harness process cleanup", () => {
     const fixture = spawnFixture("signal", marker, preservationMarker);
     let published;
     try {
-      published = JSON.parse(await waitForFile(marker));
+      published = JSON.parse(await waitForFile(marker, undefined, fixture));
       expect(processExists(published.worker_pid)).toBe(true);
       expect(processExists(published.server_pid)).toBe(true);
       process.kill(published.worker_pid, "SIGTERM");
       await waitForGroupExit(published.server_pid, 5_000);
       expect(processExists(published.server_pid)).toBe(false);
-      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+      expect(JSON.parse(await waitForFile(preservationMarker, undefined, fixture))).toEqual({ preserved: true });
     } finally {
       if (published?.server_pid) await terminateGroup(published.server_pid);
       await terminateGroup(fixture.child.pid);
@@ -147,13 +152,13 @@ describe.sequential("integration harness process cleanup", () => {
     const fixture = spawnFixture(mode, marker, preservationMarker);
     let published;
     try {
-      published = JSON.parse(await waitForFile(marker));
-      const result = await waitForClose(fixture.closed);
+      published = JSON.parse(await waitForFile(marker, undefined, fixture));
+      const result = await waitForClose(fixture.closed, undefined, fixture);
       if (mode === "normal") expect(result.code, result.output).toBe(0);
       else expect(result.code, result.output).not.toBe(0);
       await waitForGroupExit(published.server_pid, 5_000);
       expect(processExists(published.server_pid)).toBe(false);
-      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+      expect(JSON.parse(await waitForFile(preservationMarker, undefined, fixture))).toEqual({ preserved: true });
     } finally {
       if (published?.server_pid) await terminateGroup(published.server_pid);
       await terminateGroup(fixture.child.pid);
@@ -174,17 +179,17 @@ describe.sequential("integration harness process cleanup", () => {
     const fixture = spawnFixture(`prerequisite-${target}`, marker, preservationMarker);
     let published;
     try {
-      published = JSON.parse(await waitForFile(marker));
+      published = JSON.parse(await waitForFile(marker, undefined, fixture));
       for (const pid of [published.worker_pid, published.init_pid, published.prerequisite_leader_pid, published.prerequisite_descendant_pid]) {
         expect(processExists(pid), `expected published process ${pid} to be alive`).toBe(true);
       }
       const started = Date.now();
       for (const signal of signals) process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
-      const result = await waitForClose(fixture.closed, 10_000);
+      const result = await waitForClose(fixture.closed, 10_000, fixture);
       expect(Date.now() - started).toBeLessThan(5_000);
       if (target === "worker") expect(result.code, result.output).not.toBe(0);
       else {
-        const exit = JSON.parse(await waitForFile(published.init_exit_marker));
+        const exit = JSON.parse(await waitForFile(published.init_exit_marker, undefined, fixture));
         expect(exit.code).toBeNull();
         expect(signals).toContain(exit.signal);
       }
@@ -193,8 +198,8 @@ describe.sequential("integration harness process cleanup", () => {
       for (const pid of [published.init_pid, published.prerequisite_leader_pid, published.prerequisite_descendant_pid]) {
         expect(processExists(pid), `published process ${pid} survived ${signals.join("/")}`).toBe(false);
       }
-      expect(await waitForText(published.prerequisite_events, ["leader:SIGTERM", "descendant:SIGTERM"])).toContain("descendant:ready");
-      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+      expect(await waitForText(published.prerequisite_events, ["leader:SIGTERM", "descendant:SIGTERM"], undefined, fixture)).toContain("descendant:ready");
+      expect(JSON.parse(await waitForFile(preservationMarker, undefined, fixture))).toEqual({ preserved: true });
       await waitForGroupExit(fixture.child.pid, 2_500);
     } finally {
       if (published?.prerequisite_leader_pid) await terminateGroup(published.prerequisite_leader_pid);
@@ -217,15 +222,15 @@ describe.sequential("integration harness process cleanup", () => {
     const fixture = spawnFixture("phase-durable_detach", marker, preservationMarker);
     let published;
     try {
-      published = JSON.parse(await waitForFile(marker, 5_000));
+      published = JSON.parse(await waitForFile(marker, 5_000, fixture));
       const serverTree = processTree(published.supervisor_pid);
       expect(serverTree.length).toBeGreaterThanOrEqual(4);
       for (const pid of [published.worker_pid, published.init_pid, ...serverTree]) expect(processExists(pid), `expected ${pid} alive at detach barrier`).toBe(true);
       for (const signal of signals) process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
-      const result = await waitForClose(fixture.closed, 10_000);
+      const result = await waitForClose(fixture.closed, 10_000, fixture);
       if (target === "worker") expect(result.code, result.output).not.toBe(0);
       else {
-        const exit = JSON.parse(await waitForFile(published.init_exit_marker));
+        const exit = JSON.parse(await waitForFile(published.init_exit_marker, undefined, fixture));
         expect(exit.code).toBeNull();
         expect(signals).toContain(exit.signal);
       }
@@ -234,7 +239,7 @@ describe.sequential("integration harness process cleanup", () => {
       for (const pid of [published.init_pid, ...serverTree]) expect(processExists(pid), `process ${pid} survived detach interruption`).toBe(false);
       await expect(readFile(join(published.state, "init.lock.owner"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
       await expect(readFile(join(published.state, "init.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+      expect(JSON.parse(await waitForFile(preservationMarker, undefined, fixture))).toEqual({ preserved: true });
     } finally {
       if (published?.supervisor_pid) await terminateGroup(published.supervisor_pid);
       if (published?.init_pid) await terminateGroup(published.init_pid);
@@ -258,16 +263,16 @@ describe.sequential("integration harness process cleanup", () => {
     const fixture = spawnFixture(`phase-${phase}`, marker, preservationMarker);
     let published;
     try {
-      published = JSON.parse(await waitForFile(marker));
+      published = JSON.parse(await waitForFile(marker, undefined, fixture));
       expect(published).toMatchObject({ phase, init_pid: expect.any(Number) });
       process.kill(published.init_pid, "SIGTERM");
-      const result = await waitForClose(fixture.closed, 10_000);
+      const result = await waitForClose(fixture.closed, 10_000, fixture);
       expect(result.code, result.output).toBe(0);
-      expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: "SIGTERM" });
+      expect(JSON.parse(await waitForFile(published.init_exit_marker, undefined, fixture))).toEqual({ code: null, signal: "SIGTERM" });
       await waitForGroupExit(published.init_pid, 2_500);
       if (published.supervisor_pid) await waitForGroupExit(published.supervisor_pid, 2_500);
       await expect(readFile(join(published.state, "init.lock.owner"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+      expect(JSON.parse(await waitForFile(preservationMarker, undefined, fixture))).toEqual({ preserved: true });
     } finally {
       if (published?.supervisor_pid) await terminateGroup(published.supervisor_pid);
       if (published?.init_pid) await terminateGroup(published.init_pid);
