@@ -50,7 +50,11 @@ export class FileCredentialStore implements CredentialStore {
   private async read(): Promise<CredentialFile> {
     try {
       const metadata = await lstat(this.path);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(READ_ERROR);
+      const directoryMetadata = await lstat(dirname(this.path));
+      if (!metadata.isFile() || metadata.isSymbolicLink() || !isPrivatePosixMetadata(metadata) ||
+          !directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() || !isPrivatePosixMetadata(directoryMetadata)) {
+        throw new Error(READ_ERROR);
+      }
       const parsed: unknown = JSON.parse(await readFile(this.path, "utf8"));
       if (!isCredentialFile(parsed)) throw new Error(READ_ERROR);
       return parsed;
@@ -94,6 +98,12 @@ export class FileCredentialStore implements CredentialStore {
 
 const isMissingFile = (error: unknown): error is NodeJS.ErrnoException =>
   typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+
+const isPrivatePosixMetadata = (metadata: { mode: number; uid: number }): boolean => {
+  if (process.platform === "win32") return true;
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return (metadata.mode & 0o077) === 0 && (currentUid === undefined || metadata.uid === currentUid);
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

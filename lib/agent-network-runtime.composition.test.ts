@@ -6,6 +6,7 @@ const fakes = vi.hoisted(() => ({
   createSaga: vi.fn(),
   getStorage: vi.fn(),
   createPolicy: vi.fn(),
+  scanDocument: vi.fn(),
   createPrivateBlob: vi.fn(),
 }));
 
@@ -15,7 +16,10 @@ vi.mock("./agent-network-data/neon-runtime", () => ({
 }));
 vi.mock("./competition-entries", () => ({ createDurableCompetitionEntrySaga: fakes.createSaga }));
 vi.mock("./storage", () => ({ getStorage: fakes.getStorage }));
-vi.mock("./entrant-traces/policy", () => ({ createEntrantTracePolicy: fakes.createPolicy }));
+vi.mock("./entrant-traces/policy", () => ({
+  createEntrantTracePolicy: fakes.createPolicy,
+  scanEntrantTraceDocument: fakes.scanDocument,
+}));
 vi.mock("./entrant-traces/private-blob", () => ({ createPrivateArtifactBlob: fakes.createPrivateBlob }));
 
 import { getAgentNetworkRuntime, resetAgentNetworkRuntimeForTests } from "./agent-network-runtime";
@@ -33,6 +37,7 @@ describe("agent network runtime production composition", () => {
     fakes.getStorage.mockReturnValue({ getCompetition: vi.fn(), getSubmission: vi.fn(), getRun: vi.fn(), putSubmission: vi.fn(), putRun: vi.fn(), ensureRunCreatedEvent: vi.fn() });
     fakes.createSaga.mockReturnValue({ submit: vi.fn() });
     fakes.createPolicy.mockReturnValue({ verify: vi.fn() });
+    fakes.scanDocument.mockImplementation((document) => JSON.stringify(document).includes("ghp_") ? { ok: false } : { ok: true });
   });
 
   afterEach(() => {
@@ -83,6 +88,7 @@ describe("agent network runtime production composition", () => {
       scan: expect.any(Function),
     });
     const scan = fakes.createPolicy.mock.calls[0][0].scan;
+    expect(scan).toBe(fakes.scanDocument);
     expect(scan({ schema_version: "rationale.v1", authored_by: "entrant", summary: "Verifier passed." })).toEqual({ ok: true });
     expect(scan({ schema_version: "rationale.v1", authored_by: "entrant", summary: `credential ${"ghp_"}${"a".repeat(36)}` })).toEqual({ ok: false });
     expect(fakes.createPrivateBlob).not.toHaveBeenCalled();

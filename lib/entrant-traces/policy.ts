@@ -14,6 +14,26 @@ const sensitive = /(?:access[_ -]?token|token|cookie|\benv(?:ironment)?\b|privat
 const executionKeys = new Set(["schema_version", "events"]);
 const eventKeys = new Set(["at", "type", "tool", "exit_code"]);
 const rationaleKeys = new Set(["schema_version", "authored_by", "summary"]);
+const credentialPatterns = [
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/,
+  /\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/,
+];
+
+/**
+ * Deterministic credential-pattern scan used by the production composition
+ * after the schema allowlist and sensitive-key/value checks have passed.
+ */
+export function scanEntrantTraceDocument(document: unknown): { ok: true } | { ok: false } {
+  try {
+    const serialized = JSON.stringify(document);
+    return credentialPatterns.some((pattern) => pattern.test(serialized)) ? { ok: false } : { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
 
 function freeze<Value>(value: Value): Value {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {

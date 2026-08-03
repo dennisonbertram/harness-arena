@@ -84,7 +84,7 @@ describe("HarnessArenaClient", () => {
     await writeFile(path, JSON.stringify({
       version: 1,
       credentials: { "https://arena.example.test": { token: "", github_login: 42, expires_at: "never" } },
-    }));
+    }), { mode: 0o600 });
 
     await expect(new FileCredentialStore(path).get("https://arena.example.test"))
       .rejects.toThrow("Unable to read Harness Arena credentials");

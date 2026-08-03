@@ -14,7 +14,7 @@ import {
 } from "./competition-entries";
 import { dispatchQueuedRuns } from "./dispatch";
 import { validateEntrantTraceManifest, type EntrantTraceManifest } from "./entrant-traces/manifest";
-import { createEntrantTracePolicy } from "./entrant-traces/policy";
+import { createEntrantTracePolicy, scanEntrantTraceDocument } from "./entrant-traces/policy";
 import { createPrivateArtifactBlob } from "./entrant-traces/private-blob";
 import { judgeSubmission } from "./judge";
 import { log } from "./log";
@@ -624,7 +624,11 @@ export function getAgentNetworkRuntime() {
     storage,
     tokenConfiguration,
     privateBlob: configuredPrivateArtifactBlob(),
-    tracePolicy: createEntrantTracePolicy({ maxUncompressedBytes: 8_388_608, scanTimeoutMs: 5_000 }),
+    tracePolicy: createEntrantTracePolicy({
+      maxUncompressedBytes: 8_388_608,
+      scanTimeoutMs: 5_000,
+      scan: scanEntrantTraceDocument,
+    }),
     entrySaga,
     onQueuedEntry: async ({ submission_id }) => {
       const kick = () => dispatchQueuedRuns(storage).catch(() => {

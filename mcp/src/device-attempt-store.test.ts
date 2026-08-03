@@ -46,8 +46,8 @@ describe("FileDeviceAttemptStore", () => {
 
   it("rejects malformed or schema-tampered files with a stable recovery error", async () => {
     const { path } = await storeAt();
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, "{not json", "utf8");
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await writeFile(path, "{not json", { encoding: "utf8", mode: 0o600 });
     await expect(new FileDeviceAttemptStore(path).get("https://arena.example.test", "attempt"))
       .rejects.toThrow("Unable to read Harness Arena device attempts. Fix or remove the device attempts file and run login again.");
 
@@ -89,7 +89,7 @@ describe("FileDeviceAttemptStore", () => {
 
   it("reads the earlier version-1 active shape without nextPollAt and upgrades it on the next write", async () => {
     const { path } = await storeAt();
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await writeFile(path, JSON.stringify({
       version: 1,
       attempts: {

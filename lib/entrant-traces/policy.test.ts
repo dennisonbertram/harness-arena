@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
-import { createEntrantTracePolicy } from "./policy";
+import { createEntrantTracePolicy, scanEntrantTraceDocument } from "./policy";
 
 const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
@@ -10,6 +10,21 @@ function artifact(kind: "execution" | "rationale", compression: "none" | "gzip",
 }
 
 describe("entrant trace policy boundary", () => {
+  it("uses the composed scanner to reject credential-shaped values that otherwise fit the rationale schema", async () => {
+    const safe = { schema_version: "rationale.v1", authored_by: "entrant", summary: "Verifier passed." };
+    const secret = { ...safe, summary: `credential ${"github_pat_"}${"a".repeat(30)}` };
+    expect(scanEntrantTraceDocument(safe)).toEqual({ ok: true });
+    expect(scanEntrantTraceDocument(secret)).toEqual({ ok: false });
+
+    const bytes = Buffer.from(JSON.stringify(secret));
+    const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50, scan: scanEntrantTraceDocument });
+    await expect(policy.verify(artifact("rationale", "none", bytes))).resolves.toEqual({
+      ok: false,
+      disposition: "rejected",
+      error: { code: "scan_rejected" },
+    });
+  });
+
   it("streams gzip to the configured ceiling and requires the exact declared uncompressed byte count", async () => {
     const policy = createEntrantTracePolicy({ maxUncompressedBytes: 1_024, scanTimeoutMs: 50 });
     const oversized = gzipSync(Buffer.from("x".repeat(1_025)));
