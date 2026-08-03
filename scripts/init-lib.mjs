@@ -149,12 +149,32 @@ export function spawnProcessGroup(command, args, options = {}) {
   return spawn(command, args, { ...options, detached: true, stdio: options.stdio ?? "ignore" });
 }
 
-export async function terminateProcessGroup(pid) {
-  if (!isProcessAlive(pid)) return;
-  try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch {} }
-  for (let attempt = 0; attempt < 20 && isProcessAlive(pid); attempt++) await delay(25);
-  if (isProcessAlive(pid)) { try { process.kill(-pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch {} } }
-  for (let attempt = 0; attempt < 20 && isProcessAlive(pid); attempt++) await delay(25);
+export function isProcessGroupAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(-pid, 0); return true; }
+  catch (error) { return error?.code === "EPERM"; }
+}
+
+async function waitForProcessGroupExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessGroupAlive(pid)) return true;
+    await delay(25);
+  }
+  return !isProcessGroupAlive(pid);
+}
+
+function signalProcessGroup(pid, signal) {
+  try { process.kill(-pid, signal); }
+  catch { try { process.kill(pid, signal); } catch {} }
+}
+
+export async function terminateProcessGroup(pid, { graceMs = 500, killWaitMs = 1_000 } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !isProcessGroupAlive(pid)) return;
+  signalProcessGroup(pid, "SIGTERM");
+  if (await waitForProcessGroupExit(pid, graceMs)) return;
+  signalProcessGroup(pid, "SIGKILL");
+  if (!await waitForProcessGroupExit(pid, killWaitMs)) throw new Error(`process group ${pid} survived SIGKILL`);
 }
 
 export async function failTimedOutStart({ worktree, pid, nonce, port, logPath }) {
@@ -236,6 +256,18 @@ export async function probeInstance(metadata, timeoutMs = 1000) {
     const body = await response.json();
     return body.pid === metadata.pid && body.nonce === metadata.nonce && body.seeded === true && body.writable === true ? body : undefined;
   } catch { return undefined; }
+}
+
+export async function probeLocalInstance(metadata, timeoutMs = 1000) {
+  if (!isProcessAlive(metadata.pid)) return false;
+  try {
+    const response = await fetch(`http://127.0.0.1:${metadata.port}/api/local-instance`, {
+      headers: { "x-harness-local-instance-nonce": metadata.nonce },
+      redirect: "error",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.status === 204;
+  } catch { return false; }
 }
 
 export async function resetLocalData(worktree) {

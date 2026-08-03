@@ -46,11 +46,20 @@ describe("GET /api/local-instance", () => {
     ["production NODE_ENV", { NODE_ENV: "production" }],
     ["Vercel runtime", { VERCEL: "1" }],
     ["Vercel environment", { VERCEL_ENV: "production" }],
+    ["Vercel hostname", { VERCEL_URL: "public.example" }],
     ["non-file storage", { STORAGE: "blob" }],
     ["non-init process", { HARNESS_LOCAL_INIT: "0" }],
   ])("cannot become a public diagnostic in %s", async (_label, overrides) => {
     Object.assign(process.env, overrides);
     const response = await GET(request("expected-local-nonce"));
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  });
+
+  it("rejects a non-loopback request even when local environment flags are forged", async () => {
+    const response = await GET(new NextRequest("https://public.example/api/local-instance", {
+      headers: { "x-harness-local-instance-nonce": "expected-local-nonce" },
+    }));
     expect(response.status).toBe(404);
     expect(await response.text()).toBe("");
   });

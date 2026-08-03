@@ -1,6 +1,5 @@
 import { access, open, readFile, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import {
   acquireInitLock,
@@ -11,6 +10,7 @@ import {
   isProcessAlive,
   inspectSafeStateDirectory,
   probeInstance,
+  probeLocalInstance,
   readInstanceMetadata,
   readManagedLocalConfig,
   removeInstanceMetadataIfOwned,
@@ -27,6 +27,7 @@ const validArgs = new Set(["--check", "--no-install", "--reset"]);
 const json = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const exists = async (path) => access(path).then(() => true).catch(() => false);
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+const prerequisiteTimeoutMs = positiveTimeout(process.env.HARNESS_INIT_PREREQUISITE_TIMEOUT_MS, 120_000);
 
 if ([...args].some((arg) => !validArgs.has(arg)) || (args.has("--reset") && args.size > 1)) {
   throw new Error("usage: ./scripts/init.sh [--check] [--no-install] [--reset]");
@@ -49,8 +50,8 @@ async function checkOnly() {
   const observed = inspected.exists ? await inspectPidForCheck(inspected.state) : { state: "absent" };
   if (observed.state === "live") {
     if (observed.legacy) throw new Error(`legacy PID metadata points to live process ${observed.pid}; stop it before restarting`);
-    const ready = await probeInstance(observed.metadata);
-    if (!ready) throw new Error(`local PID ${observed.pid} is alive but readiness ownership did not match; refusing a second server`);
+    const owned = await probeLocalInstance(observed.metadata);
+    if (!owned) throw new Error(`local PID ${observed.pid} is alive but read-only ownership did not match; refusing a second server`);
     json(instanceOutput("existing", observed.metadata, { stale_pid_recovered: false, stale_pid_detected: false }, inspected.state));
     return;
   }
@@ -157,19 +158,61 @@ async function initialize(state) {
 }
 
 function commandExists(command) {
-  return new Promise((resolveCommand) => {
-    const child = spawn(command, ["--version"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
-    child.once("error", () => resolveCommand(false));
-    child.once("exit", (code) => resolveCommand(code === 0));
+  return run(command, ["--version"], { env: { PATH: process.env.PATH }, stdio: "ignore" }, `${command} prerequisite check`)
+    .then(() => true)
+    .catch((error) => {
+      if (error?.code === "ENOENT" || error?.kind === "exit") return false;
+      throw error;
+    });
+}
+
+async function run(command, commandArgs, options, label) {
+  const child = spawnProcessGroup(command, commandArgs, options);
+  const outcome = new Promise((resolveOutcome) => {
+    let settled = false;
+    const finish = (value) => { if (!settled) { settled = true; resolveOutcome(value); } };
+    child.once("error", (error) => finish({ error }));
+    child.once("close", (code, signal) => finish({ code, signal }));
+  });
+  const result = await boundedOutcome(outcome, prerequisiteTimeoutMs, { timedOut: true });
+  if (result.timedOut) {
+    await terminateProcessGroup(child.pid);
+    await boundedOutcome(outcome, 1_000, undefined);
+    const error = new Error(`${label} timed out after ${prerequisiteTimeoutMs}ms`);
+    error.kind = "timeout";
+    throw error;
+  }
+  await terminateProcessGroup(child.pid);
+  if (result.error) {
+    const error = new Error(`${label} failed to start: ${result.error.message}`, { cause: result.error });
+    error.code = result.error.code;
+    throw error;
+  }
+  if (result.code !== 0) {
+    const error = new Error(`${label} failed (${result.signal ?? result.code})`);
+    error.kind = "exit";
+    throw error;
+  }
+}
+
+function boundedOutcome(promise, timeoutMs, timeoutValue) {
+  return new Promise((resolveOutcome) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(timeoutValue), timeoutMs);
+    timer.unref();
+    promise.then(finish);
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveOutcome(value);
+    }
   });
 }
 
-function run(command, commandArgs, options, label) {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, commandArgs, options);
-    child.once("error", (error) => rejectRun(new Error(`${label} failed to start: ${error.message}`)));
-    child.once("exit", (code) => code === 0 ? resolveRun() : rejectRun(new Error(`${label} failed (${code})`)));
-  });
+function positiveTimeout(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function instanceOutput(mode, instance, extra, state) {

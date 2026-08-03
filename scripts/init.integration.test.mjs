@@ -25,6 +25,17 @@ let root;
 let state;
 
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+let cleanupPromise;
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    void cleanupHarness().catch((error) => process.stderr.write(`${error?.stack ?? error}\n`)).finally(() => {
+      process.kill(process.pid, signal);
+    });
+  });
+}
+process.once("beforeExit", () => { void cleanupHarness().catch(() => {}); });
+process.once("exit", forceKillOwnedGroups);
 
 beforeAll(async () => {
   root = await createHermeticCheckout("harness-arena-init-integration-", { withFakeNext: true });
@@ -252,7 +263,12 @@ async function fakeHungPnpm(checkout, label) {
   return { marker, path: `${bin}:${process.env.PATH}` };
 }
 
-afterAll(async () => {
+function cleanupHarness() {
+  if (!cleanupPromise) cleanupPromise = performCleanup();
+  return cleanupPromise;
+}
+
+async function performCleanup() {
   if (process.env.HARNESS_INIT_META_PRESERVATION_MARKER && root) {
     let preserved = false;
     try {
@@ -276,7 +292,15 @@ afterAll(async () => {
   launcherGroups.clear(); serverGroups.clear();
   for (const path of cleanupRoots) await rm(path, { recursive: true, force: true });
   if (errors.length) throw new AggregateError(errors, "failed to reap integration process groups");
-}, 30_000);
+}
+
+function forceKillOwnedGroups() {
+  for (const pid of [...launcherGroups, ...serverGroups]) {
+    try { process.kill(-pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch {} }
+  }
+}
+
+afterAll(cleanupHarness, 30_000);
 
 describe.sequential("init process ownership integration", () => {
   it("makes simultaneous starts converge on one live owned instance and makes rerun/check idempotent", async () => {
@@ -391,20 +415,20 @@ describe.sequential("read-only init check integration", () => {
   it("bounds and reaps a hung pnpm prerequisite process group", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-hung-pnpm-");
     const pnpm = await fakeHungPnpm(checkout, "hung");
-    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "75" }, "--check");
+    const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "500" }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker));
     const started = Date.now();
-    const result = await Promise.race([invocation, delay(750).then(() => ({ timedOut: true }))]);
+    const result = await Promise.race([invocation, delay(2_000).then(() => ({ timedOut: true }))]);
     if (result.timedOut) {
       for (const pid of launcherGroups) await terminateProcessGroup(pid).catch(() => {});
     }
     expect(result.timedOut).not.toBe(true);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/timed out/i);
-    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(Date.now() - started).toBeLessThan(2_500);
     await expect(waitForProcessGroupExit(pids.leader, 2_000)).resolves.toBeUndefined();
     expect(processIsAlive(pids.child)).toBe(false);
-  }, 5_000);
+  }, 10_000);
 
   it("creates no state or surviving prerequisite process in a valid checkout", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-valid-");

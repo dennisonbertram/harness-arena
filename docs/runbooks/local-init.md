@@ -32,7 +32,12 @@ for an already-installed worktree. Check may run bounded prerequisite and port
 probes, but it starts no persistent process and creates, deletes, or modifies
 no state, lock, PID, or env file. Stale metadata is reported as
 `stale_pid_detected` and is left untouched for a normal start or explicit
-reset to recover. To stop, terminate the
+reset to recover. A live check authenticates by nonce to a local-only 204
+identity handshake that is unavailable under production, Vercel, or non-file
+storage; it never calls `/api/ready`. Normal reads may advance filesystem
+access time, so the guarantee is no application write, creation, repair, or
+deletion and no content, inode, mode, modification-time, or change-time
+change. To stop, terminate the
 reported PID/process group and wait for its ownership metadata to clear. Then
 run `./scripts/init.sh --reset`; reset is explicit and only deletes that
 worktree's `.harness-arena/local-data` directory after realpath/lstat
