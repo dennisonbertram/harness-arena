@@ -1,10 +1,80 @@
-import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
+const SOURCE_ROOTS = ["app", "lib", "scripts"] as const;
+const EXCLUDED_DIRECTORIES = new Set(["node_modules", ".next", ".git"]);
+
+function isWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+export function findBlobSdkCallers(workspace = process.cwd()): string[] {
+  const root = realpathSync(workspace);
+  const matches: string[] = [];
+
+  function visit(directory: string): void {
+    const canonicalDirectory = realpathSync(directory);
+    if (!isWithin(root, canonicalDirectory)) throw new Error(`inventory path escaped workspace: ${directory}`);
+    for (const entry of readdirSync(canonicalDirectory, { withFileTypes: true }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      if (entry.isSymbolicLink()) continue;
+      const absolute = resolve(canonicalDirectory, entry.name);
+      if (!isWithin(root, absolute)) throw new Error(`inventory entry escaped workspace: ${absolute}`);
+      if (entry.isDirectory()) {
+        if (!EXCLUDED_DIRECTORIES.has(entry.name)) visit(absolute);
+        continue;
+      }
+      if (!entry.isFile() || entry.name.includes(".test.")) continue;
+      if (readFileSync(absolute, "utf8").includes("@vercel/blob")) {
+        matches.push(relative(root, absolute).split(sep).join("/"));
+      }
+    }
+  }
+
+  for (const sourceRoot of SOURCE_ROOTS) visit(resolve(root, sourceRoot));
+  return matches.sort();
+}
+
 describe("Blob call-site inventory", () => {
+  it("derives the same inventory when PATH has no rg or other executable", () => {
+    const originalPath = process.env.PATH;
+    process.env.PATH = "/path/without/executables";
+    try {
+      const files = findBlobSdkCallers();
+      expect(files.length).toBeGreaterThan(0);
+      expect(files).toEqual([...files].sort());
+      expect(files.every((file) => !file.includes(".test.") && !file.startsWith("../"))).toBe(true);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  it("skips excluded directories, exact test-file patterns, and symlinked entries", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "blob-inventory-"));
+    try {
+      for (const sourceRoot of SOURCE_ROOTS) mkdirSync(join(workspace, sourceRoot), { recursive: true });
+      writeFileSync(join(workspace, "lib", "caller.ts"), 'import "@vercel/blob";');
+      writeFileSync(join(workspace, "lib", "contest.ts"), 'import "@vercel/blob";');
+      writeFileSync(join(workspace, "lib", "caller.test.ts"), 'import "@vercel/blob";');
+      for (const excluded of EXCLUDED_DIRECTORIES) {
+        mkdirSync(join(workspace, "lib", excluded), { recursive: true });
+        writeFileSync(join(workspace, "lib", excluded, "hidden.ts"), 'import "@vercel/blob";');
+      }
+      mkdirSync(join(workspace, "outside"));
+      writeFileSync(join(workspace, "outside", "linked.ts"), 'import "@vercel/blob";');
+      symlinkSync(join(workspace, "outside"), join(workspace, "lib", "linked"));
+
+      expect(findBlobSdkCallers(workspace)).toEqual(["lib/caller.ts", "lib/contest.ts"]);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("derives every SDK caller and forbids public literals or direct object URL delivery", () => {
-    const files = execFileSync("rg", ["-l", "@vercel/blob", "app", "lib", "scripts", "--glob", "!*.test.*"], { encoding: "utf8" }).trim().split("\n");
+    const files = findBlobSdkCallers();
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const source = readFileSync(file, "utf8");
