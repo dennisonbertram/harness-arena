@@ -31,6 +31,7 @@ let db: PGlite;
 beforeEach(async () => {
   db = await PGlite.create();
   await db.exec(migration("0001_agent_network.sql"));
+  await db.exec(migration("0007_payout_eligibility.sql"));
   await db.exec(migration("0008_entry_saga.sql"));
   await db.exec(migration("0011_entry_saga_leases.sql"));
   await db.exec(migration("0012_competition_lifecycle_gates.sql"));
@@ -193,7 +194,11 @@ describe("0008 durable competition-entry PostgreSQL ledger", () => {
 
     at = new Date("2026-08-03T00:00:20.000Z");
     await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: first.lease_token, lease_ms: 30_000 })).resolves.toBe(true);
-    at = new Date("2026-08-03T00:00:40.000Z");
+    // A delayed heartbeat computed from an older clock sample must never
+    // shorten the later expiry already persisted by a faster heartbeat.
+    at = new Date("2026-08-03T00:00:10.000Z");
+    await expect(subject.renew({ operation_id: reserved.operation_id, lease_token: first.lease_token, lease_ms: 30_000 })).resolves.toBe(true);
+    at = new Date("2026-08-03T00:00:45.000Z");
     await expect(subject.claim({ operation_id: reserved.operation_id, lease_ms: 30_000 })).resolves.toBeNull();
 
     at = new Date("2026-08-03T00:00:51.000Z");
