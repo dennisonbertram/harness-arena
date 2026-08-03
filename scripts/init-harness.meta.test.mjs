@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,21 @@ async function terminateGroup(pid) {
   try { await waitForGroupExit(pid, 1_000); return; } catch {}
   try { process.kill(-pid, "SIGKILL"); } catch {}
   await waitForGroupExit(pid).catch(() => {});
+}
+
+function processTree(rootPid) {
+  const result = spawnSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" });
+  const children = new Map();
+  for (const line of result.stdout.trim().split("\n")) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
+    const siblings = children.get(ppid) ?? [];
+    siblings.push(pid);
+    children.set(ppid, siblings);
+  }
+  const found = [rootPid];
+  for (let index = 0; index < found.length; index += 1) found.push(...(children.get(found[index]) ?? []));
+  return found;
 }
 
 function spawnFixture(mode, marker, preservationMarker) {
@@ -170,12 +185,48 @@ describe.sequential("integration harness process cleanup", () => {
   }, 25_000);
 
   it.each([
+    { name: "SIGINT", target: "worker", signals: ["SIGINT"] },
+    { name: "SIGTERM", target: "worker", signals: ["SIGTERM"] },
+    { name: "SIGINT", target: "init", signals: ["SIGINT"] },
+    { name: "SIGTERM", target: "init", signals: ["SIGTERM"] },
+    { name: "concurrent SIGINT/SIGTERM", target: "init", signals: ["SIGINT", "SIGTERM"] },
+  ])("$name interruption of the $target during authenticated durable detach reaps the complete server tree", async ({ target, signals }) => {
+    const directory = await mkdtemp(join(tmpdir(), `harness-arena-init-meta-detach-${target}-${signals.join("-").toLowerCase()}-`));
+    const marker = join(directory, "published.json");
+    const preservationMarker = join(directory, "preserved.json");
+    const fixture = spawnFixture("phase-durable_detach", marker, preservationMarker);
+    let published;
+    try {
+      published = JSON.parse(await waitForFile(marker, 5_000));
+      const serverTree = processTree(published.supervisor_pid);
+      expect(serverTree.length).toBeGreaterThanOrEqual(4);
+      for (const pid of [published.worker_pid, published.init_pid, ...serverTree]) expect(processExists(pid), `expected ${pid} alive at detach barrier`).toBe(true);
+      for (const signal of signals) process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
+      const result = await waitForClose(fixture.closed, 10_000);
+      if (target === "worker") expect(result.code, result.output).not.toBe(0);
+      else expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: signals[0] });
+      await waitForGroupExit(published.init_pid, 2_500);
+      await waitForGroupExit(published.supervisor_pid, 2_500);
+      for (const pid of [published.init_pid, ...serverTree]) expect(processExists(pid), `process ${pid} survived detach interruption`).toBe(false);
+      await expect(readFile(join(published.state, "init.lock.owner"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(join(published.state, "init.pid"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+    } finally {
+      if (published?.supervisor_pid) await terminateGroup(published.supervisor_pid);
+      if (published?.init_pid) await terminateGroup(published.init_pid);
+      await terminateGroup(fixture.child.pid);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 25_000);
+
+  it.each([
     "lock_wait",
     "active_prerequisite",
     "pre_server_spawn",
     "ownership_handshake",
     "readiness_poll",
     "server_lifecycle",
+    "durable_detach",
   ])("SIGTERM at the %s phase barrier cleans owned processes and releases the init lock", async (phase) => {
     const directory = await mkdtemp(join(tmpdir(), `harness-arena-init-meta-phase-${phase}-`));
     const marker = join(directory, "published.json");

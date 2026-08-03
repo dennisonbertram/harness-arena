@@ -128,7 +128,7 @@ describe("init security and lifecycle", () => {
 
   it("uses one abort signal across lock wait and ownership-handshake phase barriers", async () => {
     expect(init.INIT_CANCELLATION_PHASES).toEqual([
-      "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle",
+      "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle", "durable_detach",
     ]);
 
     const root = await temp();

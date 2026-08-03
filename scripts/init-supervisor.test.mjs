@@ -8,6 +8,11 @@ import * as init from "./init-lib.mjs";
 const roots = [];
 const looseChildren = new Set();
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+};
 
 afterEach(async () => {
   for (const child of looseChildren) {
@@ -252,6 +257,99 @@ describe("authenticated prerequisite supervisor", () => {
     expect(runs.every(({ terminated }) => terminated)).toBe(true);
     for (const { tree } of runs) expect([tree.command, tree.descendant].every((pid) => !processAlive(pid))).toBe(true);
     expect(signalGroup).not.toHaveBeenCalled();
+  });
+
+  it("aborts and reaps when cancellation wins just before the authenticated detach acknowledgement", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-before-ack.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const controller = new AbortController();
+    const observed = deferred();
+    let held;
+    const emit = owned.child.emit;
+    owned.child.emit = function holdDetachAck(event, ...args) {
+      if (event === "message" && args[0]?.type === "detached") {
+        held = args;
+        observed.resolve();
+        return false;
+      }
+      return emit.call(this, event, ...args);
+    };
+    try {
+      const detaching = init.detachOwnedSupervisor(owned, { signal: controller.signal });
+      await observed.promise;
+      controller.abort(new Error("cancel before detach ack"));
+      emit.call(owned.child, "message", ...held);
+      await expect(detaching).rejects.toThrow(/cancel before detach ack/);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.emit = emit;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("chains repeated cleanup immediately after an acknowledged detach when cancellation wins before disconnect", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-after-ack.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const controller = new AbortController();
+    const entered = deferred();
+    const release = deferred();
+    try {
+      const detaching = init.detachOwnedSupervisor(owned, {
+        signal: controller.signal,
+        beforeDisconnect: async () => { entered.resolve(); await release.promise; },
+      });
+      await Promise.race([entered.promise, delay(1_000).then(() => { throw new Error("detach barrier was not entered"); })]);
+      controller.abort(new Error("cancel after detach ack"));
+      const repeated = [init.terminateOwnedSupervisor(owned), init.terminateOwnedSupervisor(owned)];
+      release.resolve();
+      await expect(detaching).rejects.toThrow(/cancel after detach ack/);
+      await expect(Promise.all(repeated)).resolves.toEqual([true, true]);
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
+
+  it.each(["missing", "spoofed"])("keeps cleanup authority when the detach acknowledgement is %s", async (mode) => {
+    const root = await temp();
+    const marker = join(root, `detach-${mode}.json`);
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const emit = owned.child.emit;
+    owned.child.emit = function filterDetachAck(event, ...args) {
+      if (event !== "message" || args[0]?.type !== "detached") return emit.call(this, event, ...args);
+      if (mode === "missing") return false;
+      return emit.call(this, event, { ...args[0], nonce: "spoofed-nonce" }, ...args.slice(1));
+    };
+    try {
+      await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(false);
+      expect(owned.child.connected).toBe(true);
+      await expect(init.terminateOwnedSupervisor(owned)).resolves.toBe(true);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.emit = emit;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("preserves a successful authenticated durable detach", async () => {
+    const root = await temp();
+    const marker = join(root, "detach-success.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    try {
+      await expect(init.detachOwnedSupervisor(owned)).resolves.toBe(true);
+      expect(processAlive(owned.supervisorPid)).toBe(true);
+      expect(processAlive(tree.command)).toBe(true);
+      expect(processAlive(tree.descendant)).toBe(true);
+      try { process.kill(-owned.supervisorPid, "SIGTERM"); } catch {}
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
   it("closes synchronous-spawn and pre-handshake cancellation races without publishing ownership", async () => {
