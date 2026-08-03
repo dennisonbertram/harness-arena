@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-arena.local/schema/agent-access-policy.v1.json",
+  "title": "Harness Arena least-privilege agent access policy",
+  "type": "object",
+  "required": ["schema_version", "policy_version", "capabilities", "roles", "environment_inventory"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": "agent_access_policy.v1" },
+    "policy_version": { "const": 1 },
+    "default_role": { "enum": ["monitor", "diagnostic"] },
+    "capabilities": { "type": "object", "minProperties": 7 },
+    "roles": {
+      "type": "object",
+      "required": ["monitor", "diagnostic"],
+      "properties": {
+        "monitor": { "$ref": "#/$defs/role" },
+        "diagnostic": { "$ref": "#/$defs/role" }
+      },
+      "additionalProperties": false
+    },
+    "environment_inventory": {
+      "type": "object",
+      "required": ["source_paths", "exclude_directories", "exclude_suffixes", "approved_dynamic_access", "variables"],
+      "properties": {
+        "source_paths": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+        "exclude_directories": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "exclude_suffixes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "approved_dynamic_access": { "type": "array", "items": { "$ref": "#/$defs/dynamicAccess" } },
+        "variables": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/environmentVariable" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "role": {
+      "type": "object",
+      "required": ["purpose", "capabilities", "standing_credentials", "secret_value_access"],
+      "properties": {
+        "purpose": { "type": "string", "minLength": 1 },
+        "capabilities": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+        "standing_credentials": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "secret_value_access": { "enum": ["metadata_only", "protected_ephemeral_only"] }
+      },
+      "additionalProperties": false
+    },
+    "dynamicAccess": {
+      "type": "object",
+      "required": ["file", "accessor", "bounded_by"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "accessor": { "type": "string", "minLength": 1 },
+        "bounded_by": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "environmentVariable": {
+      "type": "object",
+      "required": ["purpose", "environments", "secret", "owner", "required", "safe_diagnostic"],
+      "properties": {
+        "purpose": { "type": "string", "minLength": 1 },
+        "environments": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+        "secret": { "type": "boolean" },
+        "owner": { "type": "string", "minLength": 1 },
+        "required": { "type": "string", "minLength": 1 },
+        "safe_diagnostic": {
+          "enum": [
+            "boolean_presence",
+            "command_presence_only",
+            "metadata_presence_only",
+            "names_only",
+            "path_basename_only",
+            "sanitized_origin",
+            "value_non_secret"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "secret": { "const": true } }, "required": ["secret"] },
+          "then": { "properties": { "safe_diagnostic": { "const": "metadata_presence_only" } } }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
