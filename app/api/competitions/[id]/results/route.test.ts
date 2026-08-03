@@ -17,6 +17,7 @@ const competition: Competition = {
   arena: "harness-arena",
   harness: "pi",
   model: "zai/glm-5.2",
+  pricing_version: "pricing-v1",
   prize_amount_usd: null,
   prize_cadence: null,
   status: "live",
@@ -46,6 +47,8 @@ function completedRun(id: string, submissionId: string, tasksPassed: number, tot
     status: "completed",
     tasks_passed: tasksPassed,
     total_cost_usd: totalCostUsd,
+    normalized_total_cost_usd: totalCostUsd,
+    pricing_version: "pricing-v1",
     task_results: [
       {
         task_id: "task-1",
