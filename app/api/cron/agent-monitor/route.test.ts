@@ -35,4 +35,12 @@ describe("GET /api/cron/agent-monitor", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ ok: false, error: "observation_not_retained" });
   });
+
+  it("does not emit a log for an unauthenticated request", async () => {
+    vi.mocked(executePassiveMonitorCron).mockResolvedValueOnce({ status: 401, body: { ok: false, error: "unauthorized" }, events: [] });
+    vi.mocked(log).mockClear();
+    const response = await GET(new Request("https://harness-arena-development.vercel.app/api/cron/agent-monitor"));
+    expect(response.status).toBe(401);
+    expect(log).not.toHaveBeenCalled();
+  });
 });

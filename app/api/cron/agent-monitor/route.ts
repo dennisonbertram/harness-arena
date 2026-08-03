@@ -3,6 +3,7 @@ import { log, type LogLevel } from "@/lib/log";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 15;
 
 function levelFor(event: Record<string, unknown>): LogLevel {
   if (event.kind === "monitor_self_failure" || event.verdict === "failed") return "error";
@@ -12,6 +13,8 @@ function levelFor(event: Record<string, unknown>): LogLevel {
 
 export async function GET(request: Request): Promise<Response> {
   const result = await executePassiveMonitorCron({ request, env: process.env, fetchImpl: globalThis.fetch });
-  for (const event of result.events) log(levelFor(event), "monitor.observation", event);
+  let retained = true;
+  for (const event of result.events) retained = log(levelFor(event), "monitor.observation", event) && retained;
+  if (!retained) return Response.json({ ok: false, error: "observation_not_retained" }, { status: 503 });
   return Response.json(result.body, { status: result.status });
 }

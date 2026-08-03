@@ -32,6 +32,16 @@ describe("log", () => {
     expect(log("error", "monitor.observation", { verdict: "failed" })).toBe(false);
     spy.mockRestore();
   });
+
+  it("reports serialization failure even when its bounded fallback is emitted", () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const original = JSON.stringify;
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementationOnce(() => { throw new Error("serialization failed"); }).mockImplementation(original);
+    expect(log("error", "monitor.observation", { verdict: "failed" })).toBe(false);
+    expect(consoleSpy).toHaveBeenCalledOnce();
+    stringify.mockRestore();
+    consoleSpy.mockRestore();
+  });
 });
 
 describe("observability logger contract", () => {

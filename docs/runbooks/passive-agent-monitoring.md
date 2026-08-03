@@ -20,6 +20,11 @@ Redirects are rejected. The reused status collector bounds each request to five
 seconds, bounds response bodies, inventory pages, advertised kinds, and run
 correlations, and redacts read tokens. There is no configurable URL, GitHub
 credential, Blob/admin/deployment credential, write API, or mutation path.
+The full two-environment collection has a twelve-second route-wide deadline,
+below the route's fifteen-second `maxDuration`. The inventory work is bounded to
+20 advertised kinds, 10 pages per kind, 100 records per page, and 20 correlated
+runs; the global deadline aborts outstanding probes before those worst-case
+loops can consume the function lifetime.
 
 Each successful invocation emits one sanitized `monitor.observation` record for
 each fixed environment. Records contain the timestamp, environment, verdict,
@@ -29,10 +34,18 @@ correlation IDs. The shared logger adds active OpenTelemetry `trace_id` and
 guard, or telemetry failures use `monitor_self_failure`. Missing application or
 production platform read access is explicit `access_blocked`, never inferred as
 healthy.
+Malformed or internally inconsistent collector results are monitor failures,
+not product failures. A missing or incorrect cron bearer returns a quiet bounded
+401 without emitting an observation, so unauthenticated traffic cannot flood the
+retained evidence stream. If the logger cannot acknowledge emission, the route
+returns 503 because logs and their OpenTelemetry correlation are the sole
+retained monitor evidence.
 
 Before enabling the isolated schedule, provision only `CRON_SECRET`,
 `DEVELOPMENT_OPS_READ_TOKEN`, and `PRODUCTION_OPS_READ_TOKEN` in the Development
 project. The two ops tokens must be independently scoped GET-only credentials.
+All three secrets must be distinct; hashed constant-time comparisons fail closed
+before probes if any configured values collide.
 Do not copy, print, rotate, or inspect a live write credential.
 
 After the separate Development deployment exists, invoke the route with its

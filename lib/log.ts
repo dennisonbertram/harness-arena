@@ -195,19 +195,24 @@ function traceFields(): Record<string, string> {
   }
 }
 
-function safeWrite(record: Record<string, unknown>, fallback: Record<string, unknown>): void {
+function writeLine(line: string): boolean {
+  try { console.log(line); return true; } catch { return false; }
+}
+
+function safeWrite(record: Record<string, unknown>, fallback: Record<string, unknown>): boolean {
   try {
     let line = JSON.stringify(record);
     const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
     if (bytes(line) > MAX_LOG_BYTES) line = JSON.stringify({ ...fallback, fields_truncated: true });
     if (bytes(line) > MAX_LOG_BYTES) line = JSON.stringify({ level: fallback.level, event: "logger.record_truncated" });
-    try { console.log(line); } catch { /* logging must never alter a request */ }
+    return writeLine(line);
   } catch {
-    try { console.log(JSON.stringify({ ...fallback, serialization_failed: true })); } catch { /* best effort */ }
+    try { writeLine(JSON.stringify({ ...fallback, serialization_failed: true })); } catch { /* best effort */ }
+    return false;
   }
 }
 
-export function log(level: LogLevel, event: string, fields: Record<string, unknown> = {}): void {
+export function log(level: LogLevel, event: string, fields: Record<string, unknown> = {}): boolean {
   try {
     const envelope = {
       ts: new Date().toISOString(),
@@ -218,8 +223,9 @@ export function log(level: LogLevel, event: string, fields: Record<string, unkno
       ...traceFields(),
     };
     const safeFields = redactLogValue(fields) as Record<string, unknown>;
-    safeWrite({ ...safeFields, ...envelope }, envelope);
+    return safeWrite({ ...safeFields, ...envelope }, envelope);
   } catch {
     safeWrite({ level, event: "logger.failure" }, { level, event: "logger.failure" });
+    return false;
   }
 }
