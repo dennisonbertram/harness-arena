@@ -129,12 +129,13 @@ describe.sequential("integration harness process cleanup", () => {
   }, 20_000);
 
   it.each([
-    { target: "worker", signal: "SIGINT" },
-    { target: "worker", signal: "SIGTERM" },
-    { target: "init", signal: "SIGINT" },
-    { target: "init", signal: "SIGTERM" },
-  ])("$signal interruption of the $target during a hung prerequisite reaps every published process", async ({ target, signal }) => {
-    const directory = await mkdtemp(join(tmpdir(), `harness-arena-init-meta-prerequisite-${target}-${signal.toLowerCase()}-`));
+    { name: "SIGINT", target: "worker", signals: ["SIGINT"] },
+    { name: "SIGTERM", target: "worker", signals: ["SIGTERM"] },
+    { name: "SIGINT", target: "init", signals: ["SIGINT"] },
+    { name: "SIGTERM", target: "init", signals: ["SIGTERM"] },
+    { name: "concurrent SIGINT/SIGTERM", target: "init", signals: ["SIGINT", "SIGTERM"] },
+  ])("$name interruption of the $target during a hung prerequisite reaps every published process", async ({ target, signals }) => {
+    const directory = await mkdtemp(join(tmpdir(), `harness-arena-init-meta-prerequisite-${target}-${signals.join("-").toLowerCase()}-`));
     const marker = join(directory, "published.json");
     const preservationMarker = join(directory, "preserved.json");
     const fixture = spawnFixture(`prerequisite-${target}`, marker, preservationMarker);
@@ -145,14 +146,15 @@ describe.sequential("integration harness process cleanup", () => {
         expect(processExists(pid), `expected published process ${pid} to be alive`).toBe(true);
       }
       const started = Date.now();
-      process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
+      for (const signal of signals) process.kill(target === "worker" ? published.worker_pid : published.init_pid, signal);
       const result = await waitForClose(fixture.closed, 10_000);
       expect(Date.now() - started).toBeLessThan(5_000);
       if (target === "worker") expect(result.code, result.output).not.toBe(0);
+      else expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: signals[0] });
       await waitForGroupExit(published.init_pid, 2_500);
       await waitForGroupExit(published.prerequisite_leader_pid, 2_500);
       for (const pid of [published.init_pid, published.prerequisite_leader_pid, published.prerequisite_descendant_pid]) {
-        expect(processExists(pid), `published process ${pid} survived ${signal}`).toBe(false);
+        expect(processExists(pid), `published process ${pid} survived ${signals.join("/")}`).toBe(false);
       }
       expect(await waitForText(published.prerequisite_events, ["leader:SIGTERM", "descendant:SIGTERM"])).toContain("descendant:ready");
       expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });

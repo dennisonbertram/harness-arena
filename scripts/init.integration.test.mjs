@@ -245,10 +245,10 @@ function processIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
-async function fakeHungPnpm(checkout, label) {
+async function fakeHungPnpm(checkout, label, eventPath) {
   const bin = join(checkout, "..", `bin-${label}`);
   const marker = join(checkout, "..", `pnpm-${label}.json`);
-  const events = join(checkout, "..", `pnpm-${label}.events`);
+  const events = eventPath ?? join(checkout, "..", `pnpm-${label}.events`);
   await mkdir(bin);
   const path = join(bin, "pnpm");
   await writeFile(path, [
@@ -503,7 +503,8 @@ describe.skipIf(!["signal", "normal", "assertion"].includes(metaMode))("test-wor
 
 describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisite interruption fixture", () => {
   it("publishes a hung prerequisite leader and descendant before interruption", async () => {
-    const pnpm = await fakeHungPnpm(root, `meta-${process.pid}`);
+    const pnpm = await fakeHungPnpm(root, `meta-${process.pid}`, `${process.env.HARNESS_INIT_META_MARKER}.events`);
+    const initExitMarker = `${process.env.HARNESS_INIT_META_MARKER}.init-exit`;
     const invocation = runInitWithEnv({ PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "60000" }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker));
     await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
@@ -512,9 +513,11 @@ describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisit
       prerequisite_leader_pid: pids.leader,
       prerequisite_descendant_pid: pids.child,
       prerequisite_events: pnpm.events,
+      init_exit_marker: initExitMarker,
     }));
     if (metaMode === "prerequisite-init") {
       const result = await invocation;
+      await writeFile(initExitMarker, JSON.stringify({ code: result.code, signal: result.signal }));
       expect(result.code === 0 && result.signal === null, result.stderr).toBe(false);
       return;
     }

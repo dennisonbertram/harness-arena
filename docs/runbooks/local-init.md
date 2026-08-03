@@ -18,6 +18,12 @@ refuses live owners; new ownership stays blocked until all live recovery pins
 have finished, while dead pins are removed only by their exact unique paths.
 Cold-start contenders wait at most 120 seconds for installation, seed, and
 readiness before emitting the queue's bounded blocker diagnostics. The
+launcher owns each detached prerequisite process group until the whole group
+is reaped. `SIGINT` and `SIGTERM` interrupt that work with a bounded
+TERM-then-KILL escalation, wait for the group, release init lifecycle state,
+and then preserve the original signal exit. `SIGKILL` cannot be intercepted;
+recovery from an init process killed that way requires an external OS-level
+supervisor. The
 detached wrapper fsyncs its `init.pid` ownership and handshakes it to the
 launcher before Next starts, so launcher failure cannot leave an untracked
 server. Init-managed environment and seed files, plus write-once local voice

@@ -28,20 +28,39 @@ const json = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const exists = async (path) => access(path).then(() => true).catch(() => false);
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 const prerequisiteTimeoutMs = positiveTimeout(process.env.HARNESS_INIT_PREREQUISITE_TIMEOUT_MS, 120_000);
+const shutdownHandlers = new Map();
+let activePrerequisite;
+let shutdownSignal;
+let shutdownCleanup;
 
-if ([...args].some((arg) => !validArgs.has(arg)) || (args.has("--reset") && args.size > 1)) {
-  throw new Error("usage: ./scripts/init.sh [--check] [--no-install] [--reset]");
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  const handler = () => requestShutdown(signal);
+  shutdownHandlers.set(signal, handler);
+  process.on(signal, handler);
 }
-assertNodeVersion(process.versions.node);
 
-if (args.has("--reset")) {
-  const result = await resetLocalData(worktree);
-  json({ ok: true, mode: "reset", ...result });
-  process.exit(0);
+try {
+  await main();
+} catch (error) {
+  if (!shutdownSignal) throw error;
 }
+if (shutdownSignal) await exitForSignal();
 
-if (args.has("--check")) await checkOnly();
-else await initialize(await assertSafeStateDirectory(worktree));
+async function main() {
+  if ([...args].some((arg) => !validArgs.has(arg)) || (args.has("--reset") && args.size > 1)) {
+    throw new Error("usage: ./scripts/init.sh [--check] [--no-install] [--reset]");
+  }
+  assertNodeVersion(process.versions.node);
+
+  if (args.has("--reset")) {
+    const result = await resetLocalData(worktree);
+    json({ ok: true, mode: "reset", ...result });
+    return;
+  }
+
+  if (args.has("--check")) await checkOnly();
+  else await initialize(await assertSafeStateDirectory(worktree));
+}
 
 async function checkOnly() {
   const inspected = await inspectSafeStateDirectory(worktree);
@@ -167,22 +186,33 @@ function commandExists(command) {
 }
 
 async function run(command, commandArgs, options, label) {
-  const child = spawnProcessGroup(command, commandArgs, options);
+  if (shutdownSignal) throw new Error(`${label} cancelled by ${shutdownSignal}`);
+  let child;
+  try { child = spawnProcessGroup(command, commandArgs, options); }
+  catch (cause) {
+    const error = new Error(`${label} failed to start: ${cause?.message ?? cause}`, { cause });
+    error.code = cause?.code;
+    throw error;
+  }
   const outcome = new Promise((resolveOutcome) => {
     let settled = false;
     const finish = (value) => { if (!settled) { settled = true; resolveOutcome(value); } };
     child.once("error", (error) => finish({ error }));
     child.once("close", (code, signal) => finish({ code, signal }));
   });
-  const result = await boundedOutcome(outcome, prerequisiteTimeoutMs, { timedOut: true });
+  const prerequisite = trackPrerequisite(child, outcome);
+  activePrerequisite = prerequisite;
+  let result;
+  try { result = await boundedOutcome(outcome, prerequisiteTimeoutMs, { timedOut: true }); }
+  finally {
+    await reapPrerequisite(prerequisite);
+    if (activePrerequisite === prerequisite) activePrerequisite = undefined;
+  }
   if (result.timedOut) {
-    await terminateProcessGroup(child.pid);
-    await boundedOutcome(outcome, 1_000, undefined);
     const error = new Error(`${label} timed out after ${prerequisiteTimeoutMs}ms`);
     error.kind = "timeout";
     throw error;
   }
-  await terminateProcessGroup(child.pid);
   if (result.error) {
     const error = new Error(`${label} failed to start: ${result.error.message}`, { cause: result.error });
     error.code = result.error.code;
@@ -193,6 +223,51 @@ async function run(command, commandArgs, options, label) {
     error.kind = "exit";
     throw error;
   }
+}
+
+function trackPrerequisite(child, outcome) {
+  const publishedPid = Number.isSafeInteger(child.pid) && child.pid > 0
+    ? Promise.resolve(child.pid)
+    : new Promise((resolvePid) => {
+        let settled = false;
+        const finish = (pid) => { if (!settled) { settled = true; resolvePid(pid); } };
+        child.once("spawn", () => finish(Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : undefined));
+        child.once("error", () => finish(undefined));
+        child.once("close", () => finish(undefined));
+      });
+  return { child, outcome, publishedPid, reap: undefined };
+}
+
+function reapPrerequisite(prerequisite) {
+  if (!prerequisite.reap) {
+    prerequisite.reap = (async () => {
+      const pid = await boundedOutcome(prerequisite.publishedPid, 250, undefined);
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        await terminateProcessGroup(pid, { graceMs: 250, killWaitMs: 750 });
+      }
+      await boundedOutcome(prerequisite.outcome, 1_000, undefined);
+    })();
+  }
+  return prerequisite.reap;
+}
+
+function requestShutdown(signal) {
+  shutdownSignal ??= signal;
+  if (!shutdownCleanup) {
+    shutdownCleanup = Promise.resolve()
+      .then(() => activePrerequisite ? reapPrerequisite(activePrerequisite) : undefined)
+      .catch((error) => {
+        try { process.stderr.write(`failed to reap active prerequisite during ${shutdownSignal}: ${error?.stack ?? error}\n`); } catch {}
+      });
+  }
+}
+
+async function exitForSignal() {
+  await (shutdownCleanup ?? Promise.resolve());
+  for (const [signal, handler] of shutdownHandlers) process.off(signal, handler);
+  // SIGKILL cannot be intercepted; cleanup after it requires an external OS-level supervisor.
+  try { process.kill(process.pid, shutdownSignal); }
+  catch { process.exitCode = shutdownSignal === "SIGINT" ? 130 : 143; }
 }
 
 function boundedOutcome(promise, timeoutMs, timeoutValue) {
