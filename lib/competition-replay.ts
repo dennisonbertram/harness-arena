@@ -126,19 +126,13 @@ export async function replayCompetition(
     storage.listRuns(),
     resolveLegacyOwnerId(storage),
   ]);
-  const sources = submissions.filter((submission) =>
+  const competitionSubmissions = submissions.filter((submission) =>
     belongsToCompetition(submission, competitionId, legacyOwnerId),
   );
-  if (sources.length !== expectedCount) {
-    invalid(`expected ${expectedCount} competition entries, found ${sources.length}`);
-  }
-  const baselines = sources.filter((submission) => submission.competition_baseline === true);
-  if (baselines.length !== 1) invalid(`expected exactly one baseline, found ${baselines.length}`);
-
-  const sourceIds = new Set(sources.map((submission) => submission.id));
+  const competitionSubmissionIds = new Set(competitionSubmissions.map((submission) => submission.id));
   const conflictingActive = runs.find(
     (run) =>
-      sourceIds.has(run.submission_id) &&
+      competitionSubmissionIds.has(run.submission_id) &&
       run.replay_operation_id &&
       run.replay_operation_id !== operationId &&
       (run.status === "queued" || run.status === "running"),
@@ -148,6 +142,35 @@ export async function replayCompetition(
       `another replay operation is active for submission ${conflictingActive.submission_id}`,
     );
   }
+
+  const sameOperationSubmissionIds = new Set(
+    runs
+      .filter((run) => run.replay_operation_id === operationId)
+      .map((run) => run.submission_id),
+  );
+  // listRuns may lag immediately after create-only Blob reservations. Recover
+  // same-operation retries from each submission's exact current pointer too.
+  await Promise.all(
+    competitionSubmissions.map(async (submission) => {
+      if (!submission.run_id || sameOperationSubmissionIds.has(submission.id)) return;
+      const current = runs.find((run) => run.id === submission.run_id) ?? await storage.getRun(submission.run_id);
+      if (current?.replay_operation_id === operationId) sameOperationSubmissionIds.add(submission.id);
+    }),
+  );
+  // A competition can retain rejected attempts that never received a run.
+  // Replay only entries that reached the scored board. On an idempotent retry,
+  // retain entries already moved to this operation's queued/running state.
+  const sources = competitionSubmissions.filter(
+    (submission) =>
+      (submission.status === "scored" || sameOperationSubmissionIds.has(submission.id)) &&
+      typeof submission.run_id === "string" &&
+      submission.run_id.length > 0,
+  );
+  if (sources.length !== expectedCount) {
+    invalid(`expected ${expectedCount} competition entries, found ${sources.length}`);
+  }
+  const baselines = sources.filter((submission) => submission.competition_baseline === true);
+  if (baselines.length !== 1) invalid(`expected exactly one baseline, found ${baselines.length}`);
 
   const plan: Array<{
     submission: Submission;
