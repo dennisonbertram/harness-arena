@@ -210,7 +210,6 @@ describe("CompetitionPage", () => {
 
     expect(html).toContain("selected-entrant");
     expect(html).not.toContain("default-entrant");
-    expect(html).toContain("Bounty Arena");
     expect(html).toContain("Codex");
     expect(html).toContain("Claude Opus 5");
   });
@@ -225,14 +224,10 @@ describe("CompetitionPage", () => {
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain("Current competition");
-    expect(html).toContain("Browse competitions");
-    expect(html).toContain('<option value="closed">Closed</option>');
-    expect(html).toContain("Arena");
-    expect(html).toContain("Harness");
-    expect(html).toContain("Model");
+    expect(html).toContain("Current configuration");
+    expect(html).not.toContain("Browse competitions");
+    expect(html).not.toContain('<option value="closed">Closed</option>');
     expect(html).toContain("Provider");
-    expect(html).toContain("Harness Arena");
     expect(html).toContain("Pi");
     expect(html).toContain("glm-5.2");
     expect(html).toContain("togetherai");
@@ -240,7 +235,21 @@ describe("CompetitionPage", () => {
     expect(html).not.toMatch(/<dt[^>]*>Status<\/dt>/);
   });
 
-  it("shows provider-versioned competitions separately even when their arena, harness, and model match", async () => {
+  it("hides the competition browser while the site has a single active competition", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition());
+    await storage.putCompetition(
+      defaultCompetition({ id: "archived-competition", status: "closed", closed_at: "2026-07-30T00:00:00.000Z" }),
+    );
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).not.toContain("Browse competitions");
+    expect(html).not.toContain('role="search"');
+  });
+
+  it("shows the selected provider when provider-versioned competitions share their other parameters", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition({ gateway_provider: "zai" }));
@@ -257,9 +266,9 @@ describe("CompetitionPage", () => {
     );
 
     expect(html).toContain("Provider");
-    expect(html).toContain("Browse competitions");
+    expect(html).not.toContain("Browse competitions");
     expect(html).toContain("morph");
-    expect(html).toContain("zai");
+    expect(html).not.toContain("zai");
   });
 
   it("keeps a direct link to a closed competition working and its live successor discoverable", async () => {
@@ -295,8 +304,8 @@ describe("CompetitionPage", () => {
       }),
     );
 
-    expect(html).toContain('role="search"');
-    expect(html).toContain("Browse competitions");
+    expect(html).not.toContain('role="search"');
+    expect(html).not.toContain("Browse competitions");
     expect(html).toMatch(/<dt[^>]*>Provider<\/dt><dd[^>]*>wafer<\/dd>/);
     expect(html).toContain("This competition is closed — submissions are no longer accepted.");
   });
@@ -317,6 +326,20 @@ describe("CompetitionPage", () => {
     expect(html).toMatch(/<dt[^>]*>Intermediary<\/dt><dd[^>]*>Vercel AI Gateway<\/dd>/);
   });
 
+  it("labels the current configuration with the harness and model, not the arena name", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ model: "thinkingmachines/inkling-small" }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("Current configuration");
+    expect(html).toContain("Pi");
+    expect(html).toContain("Inkling Small");
+    expect(html).not.toMatch(/<h2[^>]*>Harness Arena<\/h2>/);
+    expect(html).not.toMatch(/<dt[^>]*>Arena<\/dt>/);
+  });
+
   it("falls back to the default competition when the URL competition id is unknown (issue #78)", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
@@ -331,7 +354,7 @@ describe("CompetitionPage", () => {
     expect(html).toContain("default-entrant");
   });
 
-  it("keeps the parameter browser aligned with the selected competition", async () => {
+  it("shows the default competition details when historical competitions exist", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition({ harness: "pi", model: "zai/glm-5.2" }));
@@ -341,11 +364,12 @@ describe("CompetitionPage", () => {
 
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html).toContain('<option value="pi" selected="">Pi</option>');
-    expect(html).toContain('<option value="zai/glm-5.2" selected="">glm-5.2</option>');
+    expect(html).toContain("Pi");
+    expect(html).toContain("glm-5.2");
+    expect(html).not.toContain("Browse competitions");
   });
 
-  it("addresses every competition through its parameter values", async () => {
+  it("keeps direct competition links working while the browser is hidden", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition());
@@ -355,13 +379,11 @@ describe("CompetitionPage", () => {
       await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
     );
 
-    expect(html).toContain('form role="search"');
-    expect(html).toContain('name="model"');
-    expect(html).toContain('<option value="anthropic/claude-opus-5" selected="">Claude Opus 5</option>');
-    expect(html).toContain('<option value="zai/glm-5.2">glm-5.2</option>');
+    expect(html).toContain("Claude Opus 5");
+    expect(html).not.toContain("Browse competitions");
   });
 
-  it("marks the requested competition parameters selected in the native controls", async () => {
+  it("uses a direct competition link instead of rendering parameter controls", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition());
@@ -371,8 +393,8 @@ describe("CompetitionPage", () => {
       await CompetitionPage.default({ searchParams: Promise.resolve({ competition: "comp-other" }) }),
     );
 
-    expect(html).toMatch(/<option value="anthropic\/claude-opus-5" selected="">Claude Opus 5<\/option>/);
-    expect(html).not.toMatch(/<option value="zai\/glm-5\.2" selected="">glm-5\.2<\/option>/);
+    expect(html).toContain("Claude Opus 5");
+    expect(html).not.toContain('role="search"');
   });
 
   // A closed competition rejects submissions with 409, and the form maps every
@@ -461,7 +483,24 @@ describe("CompetitionPage", () => {
     expect((html.match(/href="\/runs\/r-/g) ?? []).length).toBe(3);
   });
 
-  it("puts competition details before the parameter-based competition browser when multiple competitions exist", async () => {
+  it("summarizes the current record's work and normalized-cost advantage over the stock harness prompt", async () => {
+    mockAuth.mockResolvedValue(null);
+    const storage = resetStorage();
+    await storage.putCompetition(defaultCompetition({ model: "thinkingmachines/inkling-small" }));
+    await storage.putSubmission(submission("base", { run_id: "r-base", competition_baseline: true }));
+    await storage.putRun(run("r-base", { submission_id: "base", tasks_passed: 9, total_cost_usd: 2.2982 }));
+    await storage.putSubmission(submission("winner", { run_id: "r-win", github_login: "beat-it" }));
+    await storage.putRun(run("r-win", { submission_id: "winner", tasks_passed: 12, total_cost_usd: 1.0912 }));
+
+    const html = renderToStaticMarkup(await CompetitionPage.default());
+
+    expect(html).toContain("Harness Arena · Pi × Inkling Small · Live");
+    expect(html).toContain("Now completes 33% more work at 25% less cost per task.");
+    expect(html).toContain("Current best prompt compared with the stock harness system prompt.");
+    expect(html).not.toContain("Find the best prompt");
+  });
+
+  it("keeps competition details visible and the parameter browser hidden when multiple competitions exist", async () => {
     mockAuth.mockResolvedValue(null);
     const storage = resetStorage();
     await storage.putCompetition(defaultCompetition());
@@ -470,15 +509,9 @@ describe("CompetitionPage", () => {
     );
     const html = renderToStaticMarkup(await CompetitionPage.default());
 
-    expect(html.indexOf('aria-labelledby="competition-details-heading"')).toBeLessThan(
-      html.indexOf('aria-labelledby="competition-browser-heading"'),
-    );
-    expect(html).toContain('name="arena"');
-    expect(html).toContain('name="harness"');
-    expect(html).toContain('name="model"');
-    expect(html).toContain('name="provider"');
-    expect(html).toContain('name="status"');
-    expect(html).not.toContain('id="competition-search"');
+    expect(html).toContain('aria-labelledby="competition-details-heading"');
+    expect(html).not.toContain('aria-labelledby="competition-browser-heading"');
+    expect(html).not.toContain('role="search"');
   });
 
   it("shows no below-baseline table when every entry cleared the bar", async () => {

@@ -50,10 +50,8 @@ export default async function RootLayout({
               Harness Arena
             </Link>
             <div className="site-nav-links">
-              <Link href="/benchmarks">Benchmarks</Link>
               <Link href="/how-it-works">How it works</Link>
               <Link href="/submit">Submit</Link>
-              <Link href="/voice">Voice</Link>
             </div>
             <SessionBlock githubLogin={session?.user?.githubLogin} />
           </nav>

@@ -39,10 +39,10 @@ describe("RootLayout header sign-in block", () => {
     mockAuth.mockResolvedValue(null);
     const html = renderToStaticMarkup(await RootLayout({ children: <p>page content</p> }));
 
-    expect(html).toContain('href="/benchmarks"');
+    expect(html).not.toContain('href="/benchmarks"');
     expect(html).toContain('href="/how-it-works"');
     expect(html).toContain('href="/submit"');
-    expect(html).toContain('href="/voice"');
+    expect(html).not.toContain('href="/voice"');
     expect(html).toContain('href="/status"');
     expect(html).toContain("page content");
     expect(html).toContain("runs on Vercel Sandbox");
