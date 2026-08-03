@@ -30,4 +30,12 @@ describe("read-only Development Vercel Cron scheduler", () => {
     expect(runbook).toMatch(/rollback/i);
     expect(runbook).not.toMatch(/GitHub token|issue (?:create|write|reopen|close)|workflow_dispatch/i);
   });
+
+  it("documents configured Hobby crons without promising runtime ordering", () => {
+    expect(runbook).toMatch(/`0 3 \* \* \*`/);
+    expect(runbook).toMatch(/`17 3 \* \* \*`/);
+    expect(runbook).toMatch(/Hobby[^.]*per-hour precision/i);
+    expect(runbook).toMatch(/no sequencing dependency/i);
+    expect(runbook).not.toMatch(/deterministic order|at 03:00 UTC|at 03:17 UTC/i);
+  });
 });
