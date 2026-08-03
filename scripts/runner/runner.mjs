@@ -45,6 +45,8 @@ import {
   parseReward,
   parseSessionCost,
   parseStdoutCost,
+  queueAgentFailureEvents,
+  queueAgentTraceEvents,
   redactSecrets,
   resolveTaskCost,
   safeCleanup,
@@ -313,6 +315,7 @@ async function uploadTrace(taskId, name, buffer) {
 async function uploadAgentTraces(taskId, sessionText, piStdout) {
   const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
   let traceBlobUrl;
+  const traceUploads = [];
   const redactedSession = redactSecrets(sessionText, secrets);
   const sessionUpload = await uploadTrace(
     taskId,
@@ -321,7 +324,7 @@ async function uploadAgentTraces(taskId, sessionText, piStdout) {
   );
   if (sessionUpload?.url) {
     traceBlobUrl = sessionUpload.url;
-    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: sessionUpload.url });
+    traceUploads.push({ task_id: taskId, name: AGENT_TRACE_NAMES[0], blob_url: sessionUpload.url });
   }
   const redactedStdout = Buffer.from(
     redactSecrets(piStdout.toString("utf8"), secrets),
@@ -329,9 +332,9 @@ async function uploadAgentTraces(taskId, sessionText, piStdout) {
   );
   const stdoutUpload = await uploadTrace(taskId, AGENT_TRACE_NAMES[1], redactedStdout);
   if (stdoutUpload?.url) {
-    queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: stdoutUpload.url });
+    traceUploads.push({ task_id: taskId, name: AGENT_TRACE_NAMES[1], blob_url: stdoutUpload.url });
   }
-  return { traceBlobUrl, secrets };
+  return { traceBlobUrl, secrets, traceUploads };
 }
 
 // Terminal status delivery (status completed/failed + totals) is the one
@@ -684,8 +687,8 @@ async function runOneTask(task, index, systemPrompt) {
         `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
       );
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: "agent_timeout",
         error,
@@ -716,8 +719,8 @@ async function runOneTask(task, index, systemPrompt) {
       const error =
         `${processFailure} ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: "agent_process_error",
         error,
@@ -750,8 +753,8 @@ async function runOneTask(task, index, systemPrompt) {
       const error =
         `${agentError.error} ` +
         `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
-      const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
-      queueEvent("task.failed", {
+      const { traceBlobUrl, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+      queueAgentFailureEvents(queueEvent, traceUploads, {
         task_id: task.id,
         stage: agentError.stage,
         error,
@@ -810,7 +813,8 @@ async function runOneTask(task, index, systemPrompt) {
     // own session/stdout, and these traces are uploaded publicly. The FULL
     // trace is uploaded (gzip-compressed by uploadTrace so it fits under the
     // ~4.5MB callback body limit) -- no truncation.
-    const { traceBlobUrl, secrets } = await uploadAgentTraces(task.id, sessionText, piStdout);
+    const { traceBlobUrl, secrets, traceUploads } = await uploadAgentTraces(task.id, sessionText, piStdout);
+    queueAgentTraceEvents(queueEvent, traceUploads);
     // Verifier output -- the test.sh stdout/stderr + reward, so the run page's
     // Verifier tab shows WHY a task passed or failed, not just the reward.
     const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];

@@ -5,6 +5,7 @@ import {
   buildTaskAgentFinishedEventPayload,
   buildTaskVerifiedEventPayload,
   computeTotals,
+  queueAgentFailureEvents,
   VERIFIER_TRACE_NAME,
 } from "../scripts/runner/lib.mjs";
 import { assertDeterministicLocalEnvironment } from "./development-identity";
@@ -165,6 +166,7 @@ export async function executeDeterministicRun(
     ];
     await requireAccepted(await callback(run.id, { events: taskEvents, task_results: results }, secret), "task callback");
     const traceNames = fails ? AGENT_TRACE_NAMES : [...AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME];
+    const pendingFailureTraces: Array<Record<string, unknown>> = [];
     for (const name of traceNames) {
       const traceBody = `${JSON.stringify({ type: "deterministic-trace", id: `${run.id}:${task.id}`, name })}\n`;
       const traceResponse = await requireAccepted(await trace(run.id, task.id, name, traceBody, secret), "trace callback");
@@ -172,18 +174,26 @@ export async function executeDeterministicRun(
         const traceUrl = new URL(String(traceResponse.url));
         result.trace_blob_url = `${localCallbackOrigin()}${traceUrl.pathname}${traceUrl.search}`;
       }
-      await requireAccepted(await callback(run.id, {
-        events: [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.trace_uploaded", payload: { task_id: task.id, name } }],
-        task_results: results,
-      }, secret), "trace event callback");
+      const tracePayload = { task_id: task.id, name };
+      if (fails) {
+        pendingFailureTraces.push(tracePayload);
+      } else {
+        await requireAccepted(await callback(run.id, {
+          events: [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.trace_uploaded", payload: tracePayload }],
+          task_results: results,
+        }, secret), "trace event callback");
+      }
     }
     if (fails) {
+      const failureEvents: NewRunEvent[] = [];
+      queueAgentFailureEvents(
+        (type: NewRunEvent["type"], payload: NewRunEvent["payload"]) =>
+          failureEvents.push({ ts: deterministicTimestamp(timelineRun, offset++), type, payload }),
+        pendingFailureTraces,
+        { task_id: task.id, stage: "agent_process_error", error: "deterministic task failure", duration_s: result.duration_s },
+      );
       await requireAccepted(await callback(run.id, {
-        events: [{
-          ts: deterministicTimestamp(timelineRun, offset++),
-          type: "task.failed",
-          payload: { task_id: task.id, stage: "agent_process_error", error: "deterministic task failure", duration_s: result.duration_s },
-        }],
+        events: failureEvents,
         task_results: results,
       }, secret), "task failure callback");
     }

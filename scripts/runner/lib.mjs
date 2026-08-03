@@ -723,6 +723,17 @@ export function computeTotals(taskResults) {
 export const AGENT_TRACE_NAMES = Object.freeze(["session.jsonl", "pi-stdout.txt"]);
 export const VERIFIER_TRACE_NAME = "verifier.txt";
 
+export function queueAgentTraceEvents(queueEvent, traceUploads) {
+  for (const payload of traceUploads) {
+    queueEvent("task.trace_uploaded", payload);
+  }
+}
+
+export function queueAgentFailureEvents(queueEvent, traceUploads, failurePayload) {
+  queueAgentTraceEvents(queueEvent, traceUploads);
+  queueEvent("task.failed", failurePayload);
+}
+
 // Event payload builders are shared with deterministic local execution so the
 // zero-provider fixture cannot drift from the real runner's public metrics.
 export function buildTaskAgentFinishedEventPayload({
