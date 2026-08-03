@@ -1,9 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
-import { getOpsReadAdapter, type OpsReadAdapter, type OpsRecordMetadata } from "./ops-read-adapter";
+import { getOpsReadAdapter, type OpsReadAdapter } from "./ops-read-adapter";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 import { isRunOperationallyStale } from "./stale-policy";
+import { configuredSecrets, redactOpsValue as redactSharedOpsValue, sanitizeHttpUrls } from "./ops-redaction.mjs";
 
 export const OPS_SCHEMA_VERSION = "ops.v1";
 export const OPS_RECORD_KINDS = [
@@ -30,19 +31,8 @@ export function opsAuthorized(value: string | null) {
   const equal = timingSafeEqual(digest(expected), digest(actual));
   return expected.length > 0 && Boolean(match) && equal;
 }
-const SECRET_KEY = /(authorization|cookie|password|secret|token|api[_-]?key|credential)/i;
-export function redactUrl(value: string) { return value.replace(/https?:\/\/[^\s"'<>]+/g,(candidate)=>{try{const url=new URL(candidate);url.search="";return url.toString();}catch{return candidate;}}); }
-export function redactOpsValue(value: unknown, key = ""): unknown {
-  if (SECRET_KEY.test(key)) return "[REDACTED]";
-  if (typeof value === "string") {
-    const secrets = Object.entries(process.env).filter(([name, item]) => SECRET_KEY.test(name) && item).map(([, item]) => item!);
-    let redacted=redactUrl(value).replace(/Bearer\s+[^\s"'<>]+/g,"Bearer [REDACTED]");
-    for(const secret of [...new Set(secrets)].sort((left,right)=>right.length-left.length))redacted=redacted.split(secret).join("[REDACTED]");
-    return redacted;
-  }
-  if (Array.isArray(value)) return value.map((item) => redactOpsValue(item));
-  return value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactOpsValue(item, name)])) : value;
-}
+export function redactUrl(value: string) { return sanitizeHttpUrls(value); }
+export function redactOpsValue(value: unknown, key = ""): unknown { return redactSharedOpsValue(value, configuredSecrets(process.env), key); }
 type CursorPayload = { kind: OpsKind; prefix: string; blob_cursor?: string; snapshot_at: string; filter?: string; run_id?: string; root?: string; last_event?: { run_id: string; seq: number }; v?: 1 };
 const cursorKey = () => {const value=process.env.OPS_READ_CURSOR_SECRET;if(!value||value===process.env.OPS_READ_TOKEN)throw new Error("cursor_secret_missing");return value;};
 export function encodeOpsCursor(payload: CursorPayload) { const body=Buffer.from(JSON.stringify({...payload,v:1})).toString("base64url");return `${body}.${createHmac("sha256",cursorKey()).update(body).digest("base64url")}`; }
@@ -82,7 +72,7 @@ export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter
       let prefix:string;try{prefix=prefixFor(kind,options.run_id);}catch{return {error:{code:"invalid_filter"}};}
       let state:CursorPayload|undefined;try{state=options.cursor?decodeOpsCursor(options.cursor,{kind,prefix}):undefined;}catch{return {error:{code:"invalid_cursor"}};}
       const snapshot=state?.snapshot_at??new Date().toISOString();
-      try {const page=await adapter.listPage({prefix,cursor:state?.blob_cursor,limit});const records=page.records.filter((record)=>record.uploaded_at<=snapshot);const integrity={event_holes:0,corrupt:0};let lastEvent=state?.last_event;if(kind==="events")for(const record of records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const current={run_id:match[1],seq:Number(match[2])};const previous=lastEvent?.run_id===current.run_id?lastEvent.seq:0;if(current.seq>previous+1)integrity.event_holes+=current.seq-previous-1;if(current.seq>previous)lastEvent=current;}const partial=integrity.event_holes>0||integrity.corrupt>0;return {items:records,next_cursor:page.has_more&&page.cursor?encodeOpsCursor({kind,prefix,blob_cursor:page.cursor,snapshot_at:snapshot,run_id:options.run_id,last_event:lastEvent}):null,has_more:page.has_more,snapshot_at:snapshot,integrity,partial,errors:partial?[{code:"event_integrity",...integrity}]:[]};}
+      try {const page=await adapter.listPage({prefix,cursor:state?.blob_cursor,limit});if(page.records.length>limit||page.records.length>MAX_LIMIT)return {error:{code:"page_item_limit",limit,received:page.records.length},partial:true};const records=page.records.filter((record)=>record.uploaded_at<=snapshot);const integrity={event_holes:0,corrupt:0};let lastEvent=state?.last_event;if(kind==="events")for(const record of records){const match=/^events\/([^/]+)\/(\d+)\.json$/.exec(record.pathname);if(!match){integrity.corrupt++;continue;}const current={run_id:match[1],seq:Number(match[2])};const previous=lastEvent?.run_id===current.run_id?lastEvent.seq:0;if(current.seq>previous+1)integrity.event_holes+=current.seq-previous-1;if(current.seq>previous)lastEvent=current;}const partial=integrity.event_holes>0||integrity.corrupt>0;return {items:records,next_cursor:page.has_more&&page.cursor?encodeOpsCursor({kind,prefix,blob_cursor:page.cursor,snapshot_at:snapshot,run_id:options.run_id,last_event:lastEvent}):null,has_more:page.has_more,snapshot_at:snapshot,integrity,partial,errors:partial?[{code:"event_integrity",...integrity}]:[]};}
       catch{return {error:{code:"partial_read",prefix},partial:true};}
     },
     async read(kind:OpsKind,input:Record<string,string|undefined>){let pathname:string;try{pathname=pathnameFor(kind,input);}catch{return {error:{code:"invalid_identifier"}};}let result;try{result=await adapter.read({pathname,maxBytes:MAX_BYTES,timeoutMs:READ_TIMEOUT_MS});}catch{return {error:{code:"transient",error:"read_failed"}};}if(result.status!=="ok")return {error:{code:result.status,...result}};const decoded=decodeStoredContent(definition(kind).format,pathname,result.bytes);if(decoded.error)return {error:{code:decoded.error,pathname}};return {item:redactOpsValue(decoded.value),metadata:result.metadata};},
@@ -100,8 +90,10 @@ export function createOpsReadService(adapter: OpsReadAdapter = getOpsReadAdapter
         do {
           if(scanned.records>=MAX_SUMMARY_RECORDS){scanned.complete=false;scanned.truncated=true;break;}
           let page;
-          try{page=await withinDeadline(adapter.listPage({prefix:def.prefix,cursor,limit:Math.min(MAX_LIMIT,MAX_SUMMARY_RECORDS-scanned.records)}));}
+          const pageLimit=Math.min(MAX_LIMIT,MAX_SUMMARY_RECORDS-scanned.records);
+          try{page=await withinDeadline(adapter.listPage({prefix:def.prefix,cursor,limit:pageLimit}));}
           catch(error){scanned.complete=false;if(error instanceof Error&&error.message==="summary_deadline"){scanned.truncated=true;(scanned as typeof scanned&{reason?:string}).reason="deadline";break scan;}integrity.unreadable++;break;}
+          if(page.records.length>pageLimit||page.records.length>MAX_LIMIT){scanned.complete=false;scanned.truncated=true;(scanned as typeof scanned&{reason?:string}).reason="page_item_limit";break scan;}
           counts[def.kind]=(counts[def.kind]??0)+page.records.length;
           latest[def.kind]=page.records.reduce((value,record)=>!value||record.uploaded_at>value?record.uploaded_at:value,latest[def.kind]??null);
           scanned.records+=page.records.length;

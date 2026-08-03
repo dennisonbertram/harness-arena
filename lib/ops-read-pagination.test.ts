@@ -19,4 +19,39 @@ describe("ops storage pagination", () => {
     await service.list("events", { limit: 2, run_id: "run-1", cursor: page.next_cursor! });
     expect(listPage).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "blob-next", limit: 2, prefix: "events/run-1/" }));
   });
+
+  it("fails closed when an adapter returns more than 100 items in one page", async () => {
+    process.env.OPS_READ_TOKEN = "cursor-secret";
+    process.env.OPS_READ_CURSOR_SECRET = "server-cursor-secret";
+    const listPage = vi.fn().mockResolvedValue({
+      records: Array.from({ length: 101 }, (_, index) => ({
+        pathname: `runs/r${index}.json`,
+        size: 1,
+        uploaded_at: "2026-08-02T00:00:01.000Z",
+        etag: String(index),
+      })),
+      has_more: false,
+    });
+    const service = createOpsReadService({ listPage, read: vi.fn() } as OpsReadAdapter);
+    await expect(service.list("runs", { limit: 100 })).resolves.toEqual({ error: { code: "page_item_limit", limit: 100, received: 101 }, partial: true });
+  });
+
+  it("stops a summary scan before consuming an oversized adapter page", async () => {
+    const records = Array.from({ length: 101 }, (_, index) => ({
+      pathname: `submissions/s${index}.json`,
+      size: 1,
+      uploaded_at: "2026-08-02T00:00:01.000Z",
+      etag: String(index),
+    }));
+    const listPage = vi.fn()
+      .mockResolvedValueOnce({ records, has_more: false })
+      .mockResolvedValue({ records: [], has_more: false });
+    const read = vi.fn().mockResolvedValue({ status: "missing" });
+
+    await expect(createOpsReadService({ listPage, read } as OpsReadAdapter).summary()).resolves.toMatchObject({
+      counts: {},
+      scan: { records: 0, complete: false, truncated: true, reason: "page_item_limit" },
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
 });

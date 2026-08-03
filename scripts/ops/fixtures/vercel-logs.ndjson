@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-03T00:08:00.000Z","level":"info","statusCode":200,"message":"healthy"}
+{"timestamp":"2026-08-03T00:09:00.000Z","level":"error","statusCode":503,"message":"gateway failed Bearer should-not-leak"}

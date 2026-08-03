@@ -1,0 +1,15 @@
+{
+  "deployments": [
+    {
+      "uid": "dpl_1",
+      "url": "arena.example",
+      "state": "READY",
+      "createdAt": "2026-08-03T00:00:00.000Z",
+      "meta": {
+        "githubCommitRef": "main",
+        "githubCommitSha": "abc123",
+        "gitDirty": "0"
+      }
+    }
+  ]
+}
