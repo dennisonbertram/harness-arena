@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +46,37 @@ function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
 }
 
+function processGroupId(pid) {
+  const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" });
+  const pgid = Number.parseInt(result.stdout.trim(), 10);
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) throw new Error(`missing process group for ${pid}`);
+  return pgid;
+}
+
+function processGroupAlive(pgid) {
+  try { process.kill(-pgid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
+async function waitForGone(pids, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !processAlive(pid))) return;
+    await delay(10);
+  }
+  throw new Error(`processes survived cleanup: ${pids.filter(processAlive).join(", ")}`);
+}
+
+async function forceCleanup(owned, pids = []) {
+  const groups = new Set();
+  for (const pid of pids) {
+    try { groups.add(processGroupId(pid)); } catch {}
+  }
+  for (const pgid of groups) { try { process.kill(-pgid, "SIGKILL"); } catch {} }
+  for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch {} }
+  try { owned?.child.kill("SIGKILL"); } catch {}
+  if (owned?.child) await waitForExit(owned.child).catch(() => {});
+}
+
 function stubbornTreeScript() {
   return [
     "const { spawn } = require('node:child_process');",
@@ -68,13 +99,50 @@ describe("authenticated prerequisite supervisor", () => {
       stdio: "ignore",
     });
     const tree = await waitForJson(marker);
+    const commandGroup = processGroupId(tree.command);
+    try {
+      expect(owned.supervisorPid).not.toBe(tree.command);
+      expect(commandGroup).not.toBe(owned.supervisorPid);
+      expect(processAlive(commandGroup)).toBe(true);
+      await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 2_000 })).resolves.toBe(true);
+      await waitForExit(owned.child);
+      expect(processAlive(owned.supervisorPid)).toBe(false);
+      expect(processAlive(tree.command)).toBe(false);
+      expect(processAlive(tree.descendant)).toBe(false);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
 
-    expect(owned.supervisorPid).not.toBe(tree.command);
-    await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 2_000 })).resolves.toBe(true);
-    await waitForExit(owned.child);
-    expect(processAlive(owned.supervisorPid)).toBe(false);
-    expect(processAlive(tree.command)).toBe(false);
-    expect(processAlive(tree.descendant)).toBe(false);
+  it("always reaps an unref descendant when the authenticated parent disconnects after command outcome", async () => {
+    const root = await temp();
+    const marker = join(root, "disconnect-after.json");
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const descendant = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+      "descendant.unref();",
+      "writeFileSync(process.argv[1], JSON.stringify({ command: process.pid, descendant: descendant.pid }));",
+    ].join("\n");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", script, marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    try {
+      await expect(owned.outcome).resolves.toMatchObject({ code: 0, signal: null });
+      expect(processAlive(tree.descendant)).toBe(true);
+      owned.child.disconnect();
+      await waitForExit(owned.child);
+      await waitForGone([tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.descendant]); }
+  });
+
+  it("always reaps the live leader and descendant when the parent disconnects before outcome", async () => {
+    const root = await temp();
+    const marker = join(root, "disconnect-before.json");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    try {
+      owned.child.disconnect();
+      await waitForExit(owned.child);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
   });
 
   it("stays group leader after the direct command exits until orphan descendants are reaped", async () => {
@@ -131,6 +199,63 @@ describe("authenticated prerequisite supervisor", () => {
     })).resolves.toBe(false);
     expect(signalGroup).not.toHaveBeenCalled();
     for (const pid of [tree.command, tree.descendant]) { try { process.kill(pid, "SIGKILL"); } catch {} }
+  });
+
+  it("fails closed when the inner group leader exits between TERM and KILL", async () => {
+    const root = await temp();
+    const marker = join(root, "leader-race.json");
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const descendant = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+      "process.on('SIGTERM', () => { try { process.kill(process.ppid, 'SIGKILL'); } catch {} });",
+      "writeFileSync(process.argv[1], JSON.stringify({ command: process.pid, descendant: descendant.pid }));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", script, marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    try {
+      await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 250 })).resolves.toBe(false);
+      expect(processAlive(tree.descendant)).toBe(true);
+    } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+  });
+
+  it.each(["missing", "spoofed"])("requires a valid group-reaped acknowledgement when it is %s", async (mode) => {
+    const root = await temp();
+    const marker = join(root, `ack-${mode}.json`);
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    const emit = owned.child.emit;
+    owned.child.emit = function filteredEmit(event, ...args) {
+      if (event !== "message" || args[0]?.type !== "group-reaped") return emit.call(this, event, ...args);
+      if (mode === "missing") return false;
+      return emit.call(this, event, { ...args[0], nonce: "spoofed-nonce" }, ...args.slice(1));
+    };
+    try {
+      await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 250 })).resolves.toBe(false);
+      await waitForGone([tree.command, tree.descendant]);
+    } finally {
+      owned.child.emit = emit;
+      await forceCleanup(owned, [tree.command, tree.descendant]);
+    }
+  });
+
+  it("never asks the parent to signal a bare group id and reaps three default trees in parallel", async () => {
+    const signalGroup = vi.fn();
+    const runs = await Promise.all(Array.from({ length: 3 }, async (_, index) => {
+      const root = await temp();
+      const marker = join(root, `parallel-${index}.json`);
+      const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", stubbornTreeScript(), marker], { cwd: root, stdio: "ignore" });
+      const tree = await waitForJson(marker);
+      try {
+        const terminated = await init.terminateOwnedSupervisor(owned, { signalGroup });
+        await waitForExit(owned.child);
+        return { terminated, tree };
+      } finally { await forceCleanup(owned, [tree.command, tree.descendant]); }
+    }));
+    expect(runs.every(({ terminated }) => terminated)).toBe(true);
+    for (const { tree } of runs) expect([tree.command, tree.descendant].every((pid) => !processAlive(pid))).toBe(true);
+    expect(signalGroup).not.toHaveBeenCalled();
   });
 
   it("closes synchronous-spawn and pre-handshake cancellation races without publishing ownership", async () => {
