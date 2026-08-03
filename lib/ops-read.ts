@@ -4,6 +4,7 @@ import { gunzipSync } from "node:zlib";
 import { getOpsReadAdapter, type OpsReadAdapter } from "./ops-read-adapter";
 import { BLOB_PATHS } from "./blob-paths.mjs";
 import { isRunOperationallyStale } from "./stale-policy";
+import { configuredSecrets, redactOpsValue as redactSharedOpsValue, sanitizeHttpUrls } from "./ops-redaction.mjs";
 
 export const OPS_SCHEMA_VERSION = "ops.v1";
 export const OPS_RECORD_KINDS = [
@@ -30,33 +31,8 @@ export function opsAuthorized(value: string | null) {
   const equal = timingSafeEqual(digest(expected), digest(actual));
   return expected.length > 0 && Boolean(match) && equal;
 }
-const SECRET_KEY = /(authorization|cookie|password|secret|token|api[_-]?key|credential)/i;
-export function redactUrl(value: string) { return value.replace(/https?:\/\/[^\s"'<>]+/g,(candidate)=>{try{const url=new URL(candidate);url.username="";url.password="";url.search="";url.hash="";return url.toString();}catch{return candidate;}}); }
-function redactOpsText(value:string) {
-  const secrets = Object.entries(process.env).filter(([name, item]) => SECRET_KEY.test(name) && item).map(([, item]) => item!);
-  let redacted=redactUrl(value)
-    .replace(/Bearer\s+[^\s"'<>]+/g,"Bearer [REDACTED]")
-    .replace(/((?:["'])?\b(?:cookie(?:[-_]?header)?|set[-_]?cookie)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)/gi,"$1[REDACTED]")
-    .replace(/((?:["'])?\b(?:authorization(?:[-_]?header)?|proxy[-_]?authorization(?:[-_]?header)?|x[-_]?api[-_]?key(?:[-_]?header)?|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi,"$1[REDACTED]");
-  for(const secret of [...new Set(secrets)].sort((left,right)=>right.length-left.length))redacted=redacted.split(secret).join("[REDACTED]");
-  return redacted;
-}
-export function redactOpsValue(value: unknown, key = ""): unknown { return redactOpsValueInternal(value,key,new WeakSet<object>()); }
-function redactOpsValueInternal(value: unknown, key: string, seen: WeakSet<object>): unknown {
-  if (SECRET_KEY.test(key)) return "[REDACTED]";
-  if (typeof value === "string") return redactOpsText(value);
-  if (!value || typeof value !== "object") return value;
-  if (seen.has(value)) return "[REDACTED]";
-  seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => redactOpsValueInternal(item,"",seen));
-  if (value instanceof Error) {
-    const output:Record<string,unknown>={name:value.name,message:redactOpsText(value.message)};
-    if(value.cause!==undefined)output.cause=redactOpsValueInternal(value.cause,"cause",seen);
-    for(const [name,item] of Object.entries(value))if(name!=="cause")output[name]=redactOpsValueInternal(item,name,seen);
-    return output;
-  }
-  return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactOpsValueInternal(item, name, seen)]));
-}
+export function redactUrl(value: string) { return sanitizeHttpUrls(value); }
+export function redactOpsValue(value: unknown, key = ""): unknown { return redactSharedOpsValue(value, configuredSecrets(process.env), key); }
 type CursorPayload = { kind: OpsKind; prefix: string; blob_cursor?: string; snapshot_at: string; filter?: string; run_id?: string; root?: string; last_event?: { run_id: string; seq: number }; v?: 1 };
 const cursorKey = () => {const value=process.env.OPS_READ_CURSOR_SECRET;if(!value||value===process.env.OPS_READ_TOKEN)throw new Error("cursor_secret_missing");return value;};
 export function encodeOpsCursor(payload: CursorPayload) { const body=Buffer.from(JSON.stringify({...payload,v:1})).toString("base64url");return `${body}.${createHmac("sha256",cursorKey()).update(body).digest("base64url")}`; }

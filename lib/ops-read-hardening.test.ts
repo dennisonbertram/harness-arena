@@ -21,8 +21,8 @@ describe("ops read hardening contract", () => {
     };
     try {
       const error = new Error(`auth token=${sentinels.errorMessage}`, { cause: { "credential header": sentinels.errorCause } });
-      error.name = `SessionAuth ${sentinels.errorName}`;
-      error.stack = `Error: ${sentinels.errorStack}`;
+      error.name = `authToken=${sentinels.errorName}`;
+      error.stack = `sessionCookie=${sentinels.errorStack}`;
       (error as Error & { context: unknown }).context = { session_id: sentinels.errorEnumerable };
       const output = redactOpsValue({
         error,

@@ -490,8 +490,8 @@ describe("redaction, platform wiring, and process bounds", () => {
       urlHash: "sentinel-url-hash",
     };
     const error = new Error(`auth token=${sentinels.errorMessage}`, { cause: { "credential header": sentinels.errorCause } });
-    error.name = `SessionAuth ${sentinels.errorName}`;
-    error.stack = `Error: ${sentinels.errorStack}`;
+    error.name = `authToken=${sentinels.errorName}`;
+    error.stack = `sessionCookie=${sentinels.errorStack}`;
     error.context = { session_id: sentinels.errorEnumerable };
     const output = redactSensitive({
       error,

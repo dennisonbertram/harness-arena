@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { redactOpsValue } from "../../lib/ops-redaction.mjs";
 
 export const STATUS_SCHEMA_VERSION = "agent_ops_status.v1";
 export const EXIT_CODES = Object.freeze({ healthy: 0, degraded: 1, failed: 2, access_blocked: 3, usage_error: 64 });
@@ -21,46 +22,8 @@ const ENVIRONMENTS = Object.freeze({
   local: { base_url: "http://127.0.0.1:3000", expected_ref: null, vercel_environment: "development", collect_platform: false },
 });
 
-function redactText(value, knownSecrets) {
-  let output = String(value)
-    .replace(/\b(?:Bearer|Basic)\s+[^\s,"'<>]+/gi, (match) => `${match.split(/\s/, 1)[0]} [REDACTED]`)
-    .replace(/\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]+/gi, (match) => `${match.split(":", 1)[0]}: [REDACTED]`)
-    .replace(/((?:["'])?\b(?:cookie(?:[-_]?header)?|set[-_]?cookie)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)/gi, "$1[REDACTED]")
-    .replace(/((?:["'])?\b(?:authorization(?:[-_]?header)?|proxy[-_]?authorization(?:[-_]?header)?|x[-_]?api[-_]?key(?:[-_]?header)?|client[-_]?secret|access[-_]?token|refresh[-_]?token|password|secret|token|api[-_]?key|credential)\b(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]"'<>]+)/gi, "$1[REDACTED]")
-    .replace(/https?:\/\/[^\s,"'<>]+/g, (candidate) => {
-      try { const url = new URL(candidate); url.username = ""; url.password = ""; url.search = ""; url.hash = ""; return url.toString(); } catch { return candidate; }
-    });
-  for (const secret of [...new Set(knownSecrets.filter((item) => typeof item === "string" && item.length >= 3))].sort((left, right) => right.length - left.length)) output = output.split(secret).join("[REDACTED]");
-  return output;
-}
-
 export function redactSensitive(value, knownSecrets = []) {
-  return redactSensitiveValue(value, knownSecrets, new WeakSet());
-}
-
-function redactSensitiveValue(value, knownSecrets, seen) {
-  if (typeof value === "string") return redactText(value, knownSecrets);
-  if (!value || typeof value !== "object") return value;
-  if (seen.has(value)) return "[REDACTED]";
-  seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => redactSensitiveValue(item, knownSecrets, seen));
-  if (value instanceof Error) {
-    const output = { name: value.name, message: redactText(value.message, knownSecrets) };
-    if (value.cause !== undefined) output.cause = redactSensitiveValue(value.cause, knownSecrets, seen);
-    for (const [key, item] of Object.entries(value)) {
-      if (key === "cause") continue;
-      output[key] = redactSensitiveEntry(key, item, knownSecrets, seen);
-    }
-    return output;
-  }
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSensitiveEntry(key, item, knownSecrets, seen)]));
-}
-
-function redactSensitiveEntry(key, item, knownSecrets, seen) {
-    const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
-    const sensitive = /(?:^|_)(?:authorization|proxy_authorization|cookie|set_cookie|x_api_key|password|secret|token|api_key|credential)(?:$|_)/.test(normalized);
-    const presenceFlag = normalized.endsWith("_present") && typeof item === "boolean";
-    return sensitive && !presenceFlag ? "[REDACTED]" : redactSensitiveValue(item, knownSecrets, seen);
+  return redactOpsValue(value, knownSecrets);
 }
 
 function safeBaseUrl(value) {
@@ -267,67 +230,149 @@ function requestKind(result) {
   if (result.error === "response_stream_unavailable") return "response_stream_unavailable";
   if (result.error === "invalid_json") return "invalid_json";
   if (result.error === "request_timeout") return "timeout";
-  if (result.error === "request_failed") return "transport";
+  if (result.error === "request_failed" || result.error === "invalid_response") return "transport";
   if (result.status === 429 || result.status >= 500) return "transient";
   return "http";
 }
 
-function responseError(code) { const error = new Error(code); error.code = code; return error; }
+const INTERNAL_FAILURE = Symbol("ops-internal-failure");
+const INTERNAL_FAILURE_CODES = new Set(["redirect_rejected", "response_too_large", "invalid_content_length", "response_stream_unavailable", "invalid_response", "invalid_json", "request_timeout", "request_failed"]);
+function responseError(code) {
+  const error = new Error(code);
+  Object.defineProperty(error, INTERNAL_FAILURE, { value: code });
+  return error;
+}
+function failureCode(error, fallback) {
+  try {
+    const code = error?.[INTERNAL_FAILURE];
+    return INTERNAL_FAILURE_CODES.has(code) ? code : fallback;
+  } catch { return fallback; }
+}
 
 function withAbort(promise, signal) {
   if (signal.aborted) return Promise.reject(responseError("request_timeout"));
   return new Promise((resolve, reject) => {
-    const abort = () => reject(responseError("request_timeout"));
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, responseError("request_timeout"));
     signal.addEventListener("abort", abort, { once: true });
-    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    Promise.resolve(promise).then((value) => finish(resolve, value), (error) => finish(reject, error));
   });
+}
+
+function invokeCleanup(callback) {
+  if (typeof callback !== "function") return;
+  try { Promise.resolve(callback()).catch(() => {}); } catch {}
+}
+
+function disposeRawResponse(response, controller) {
+  controller.abort();
+  try {
+    const body = response && (typeof response === "object" || typeof response === "function") ? response.body : undefined;
+    if (!body || (typeof body !== "object" && typeof body !== "function")) return;
+    const cancel = body.cancel;
+    invokeCleanup(typeof cancel === "function" ? cancel.bind(body) : undefined);
+  } catch {}
+}
+
+function normalizeResponse(response, controller) {
+  try {
+    if (!response || (typeof response !== "object" && typeof response !== "function")) throw responseError("invalid_response");
+    const status = response.status;
+    if (!Number.isInteger(status) || status < 100 || status > 599) throw responseError("invalid_response");
+    const headers = response.headers;
+    if (!headers || (typeof headers !== "object" && typeof headers !== "function")) throw responseError("invalid_response");
+    const getHeader = headers.get;
+    if (typeof getHeader !== "function") throw responseError("invalid_response");
+    const contentLength = getHeader.call(headers, "content-length");
+    if (contentLength !== null && typeof contentLength !== "string") throw responseError("invalid_response");
+    const bodyUsed = response.bodyUsed;
+    if (bodyUsed !== undefined && typeof bodyUsed !== "boolean") throw responseError("invalid_response");
+    if (bodyUsed === true) throw responseError("invalid_response");
+    const body = response.body;
+    if (body !== null && body !== undefined && typeof body !== "object" && typeof body !== "function") throw responseError("invalid_response");
+    let bodyCancel, getReader;
+    if (body) {
+      const locked = body.locked;
+      if (locked !== undefined && typeof locked !== "boolean") throw responseError("invalid_response");
+      if (locked === true) throw responseError("invalid_response");
+      const cancel = body.cancel;
+      if (cancel !== undefined && typeof cancel !== "function") throw responseError("invalid_response");
+      bodyCancel = typeof cancel === "function" ? cancel.bind(body) : undefined;
+      const acquire = body.getReader;
+      if (acquire !== undefined && typeof acquire !== "function") throw responseError("invalid_response");
+      getReader = typeof acquire === "function" ? acquire.bind(body) : undefined;
+    }
+    return { status, ok: status >= 200 && status < 300, contentLength, body, bodyCancel, getReader };
+  } catch (error) {
+    disposeRawResponse(response, controller);
+    throw responseError(failureCode(error, "invalid_response"));
+  }
+}
+
+function acquireReader(response, reader) {
+  if (!response.body || !response.getReader) throw responseError("response_stream_unavailable");
+  let raw;
+  try { raw = response.getReader(); }
+  catch { throw responseError("invalid_response"); }
+  if (!raw || (typeof raw !== "object" && typeof raw !== "function")) throw responseError("invalid_response");
+  let valid = true;
+  for (const name of ["cancel", "releaseLock", "read"]) {
+    try {
+      const method = raw[name];
+      if (typeof method === "function") reader[name] = method.bind(raw);
+      else valid = false;
+    } catch { valid = false; }
+  }
+  if (!valid) throw responseError("invalid_response");
+  return reader;
 }
 
 function cancelResponse(response, controller, reader) {
   controller.abort();
-  try {
-    const cancellation = reader ? reader.cancel() : response.body && !response.body.locked ? response.body.cancel() : undefined;
-    if (cancellation !== undefined) Promise.resolve(cancellation).catch(() => {});
-  } catch {}
+  invokeCleanup(reader?.cancel ?? response?.bodyCancel);
 }
 
 async function readBoundedJson(response, controller, maxBytes) {
-  const rawLength = response.headers?.get?.("content-length");
-  if (rawLength !== null && rawLength !== undefined) {
-    const normalized = rawLength.trim();
-    if (!/^(?:0|[1-9]\d*)$/.test(normalized) || !Number.isSafeInteger(Number(normalized))) {
-      cancelResponse(response, controller);
-      throw responseError("invalid_content_length");
+  const reader = {};
+  try {
+    const rawLength = response.contentLength;
+    if (rawLength !== null) {
+      const normalized = rawLength.trim();
+      if (!/^(?:0|[1-9]\d*)$/.test(normalized) || !Number.isSafeInteger(Number(normalized))) throw responseError("invalid_content_length");
+      if (Number(normalized) > maxBytes) throw responseError("response_too_large");
     }
-    if (Number(normalized) > maxBytes) {
-      cancelResponse(response, controller);
-      throw responseError("response_too_large");
-    }
-  }
-  if (response.body?.getReader) {
-    const reader = response.body.getReader(), chunks = [];
+    acquireReader(response, reader);
+    const chunks = [];
     let bytes = 0;
-    try {
-      while (true) {
-        const { done, value } = await withAbort(reader.read(), controller.signal);
-        if (done) break;
-        const chunk = Buffer.from(value);
-        bytes += chunk.byteLength;
-        if (bytes > maxBytes) throw responseError("response_too_large");
-        chunks.push(chunk);
-      }
-      try { return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")); }
-      catch { throw responseError("invalid_json"); }
-    } catch (error) {
-      const normalized = error?.code ?? (controller.signal.aborted ? "request_timeout" : "invalid_json");
-      cancelResponse(response, controller, reader);
-      throw responseError(normalized);
-    } finally {
-      try { reader.releaseLock(); } catch {}
+    while (true) {
+      const result = await withAbort(Promise.resolve().then(() => reader.read()), controller.signal);
+      if (!result || (typeof result !== "object" && typeof result !== "function")) throw responseError("invalid_response");
+      const done = result.done;
+      if (typeof done !== "boolean") throw responseError("invalid_response");
+      if (done) break;
+      const value = result.value;
+      if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) throw responseError("invalid_response");
+      let chunk;
+      try { chunk = Buffer.from(value); } catch { throw responseError("invalid_response"); }
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) throw responseError("response_too_large");
+      chunks.push(chunk);
     }
+    try { return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")); }
+    catch { throw responseError("invalid_json"); }
+  } catch (error) {
+    const code = controller.signal.aborted ? "request_timeout" : failureCode(error, "invalid_response");
+    cancelResponse(response, controller, reader);
+    throw responseError(code);
+  } finally {
+    invokeCleanup(reader?.releaseLock);
   }
-  cancelResponse(response, controller);
-  throw responseError("response_stream_unavailable");
 }
 
 export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, retries = 1, maxResponseBytes = MAX_HTTP_RESPONSE_BYTES }) {
@@ -339,25 +384,36 @@ export async function requestOpsJson({ baseUrl, path, token, fetchImpl = fetch, 
   for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      let response;
-      try { response = await fetchImpl(url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, redirect: "manual", signal: controller.signal }); }
-      catch (error) { last = { ok: false, status: 0, error: controller.signal.aborted ? "request_timeout" : "request_failed", detail: redactSensitive(error instanceof Error ? error.message : "unknown", token ? [token] : []), attempts: attempt }; }
-      if (response) {
-        if (response.status >= 300 && response.status < 400) {
+      let rawResponse, fetched = false;
+      try {
+        const fetchPromise = Promise.resolve().then(() => fetchImpl(url.toString(), { method: "GET", headers: token ? { authorization: `Bearer ${token}` } : {}, redirect: "manual", signal: controller.signal }));
+        fetchPromise.then((late) => { if (controller.signal.aborted) disposeRawResponse(late, controller); }, () => {});
+        rawResponse = await withAbort(fetchPromise, controller.signal);
+        fetched = true;
+      } catch (error) {
+        const code = failureCode(error, controller.signal.aborted ? "request_timeout" : "request_failed");
+        last = { ok: false, status: 0, error: code, detail: redactSensitive(error instanceof Error ? error.message : "unknown", token ? [token] : []), attempts: attempt };
+      }
+      if (fetched) {
+        let response;
+        try { response = normalizeResponse(rawResponse, controller); }
+        catch (error) { last = { ok: false, status: 0, error: failureCode(error, controller.signal.aborted ? "request_timeout" : "invalid_response"), attempts: attempt }; }
+        if (response && response.status >= 300 && response.status < 400) {
           cancelResponse(response, controller);
           last = { ok: false, status: response.status, error: "redirect_rejected", attempts: attempt };
-        } else {
+        } else if (response) {
           try {
             const body = await readBoundedJson(response, controller, maxResponseBytes);
             last = { ok: response.ok, status: response.status, body: redactSensitive(body, token ? [token] : []), attempts: attempt };
           } catch (error) {
-            last = { ok: false, status: response.status, error: error?.code ?? "invalid_json", attempts: attempt };
+            last = { ok: false, status: response.status, error: failureCode(error, controller.signal.aborted ? "request_timeout" : "invalid_response"), attempts: attempt };
           }
         }
       }
     } finally { clearTimeout(timer); }
     const kind = requestKind(last);
-    if (last.ok || !["transient", "transport", "timeout"].includes(kind) || attempt === attemptsAllowed) return { ...last, kind };
+    const retryable = kind === "transient" || last.error === "request_failed" || last.error === "request_timeout";
+    if (last.ok || !retryable || attempt === attemptsAllowed) return { ...last, kind };
   }
   return last;
 }
