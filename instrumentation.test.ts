@@ -1,8 +1,33 @@
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BoundedSpanProcessor, createSafeSpanProcessors, createSafeSpanProcessor, onRequestError, parseOtlpHeaders, StructuredSpanExporter, structuredSpanReadiness } from "./instrumentation";
+
+async function startOtlpCollector(statuses: number[]) {
+  const requests: number[] = [];
+  const server = createServer((request, response) => {
+    request.resume();
+    request.once("end", () => {
+      const status = statuses.shift() ?? 200;
+      requests.push(status);
+      response.writeHead(status);
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address() as AddressInfo;
+  return {
+    endpoint: `http://127.0.0.1:${address.port}/v1/traces`,
+    requests,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
+}
 
 describe("onRequestError", () => {
   afterEach(() => {
@@ -188,27 +213,42 @@ describe("onRequestError", () => {
     });
   });
 
-  it.each([401, 429, 500, 503])("does not acknowledge a resolved hosted OTLP HTTP %i response and retries it", async (status) => {
-    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
+  it.each([401, 429, 500, 503])("does not acknowledge a hosted OTLP HTTP %i response and retries the retained batch", async (status) => {
+    const retryable = status === 429 || status === 503;
+    const collector = await startOtlpCollector([status, 200]);
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.endpoint);
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json");
-    const responses = [status, 200];
-    const fetchSpy = vi.fn(async () => new Response(null, { status: responses.shift() ?? 200 }));
-    vi.stubGlobal("fetch", fetchSpy);
+    const unrelatedFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", unrelatedFetch);
     const processors = createSafeSpanProcessors();
     const provider = new BasicTracerProvider({ spanProcessors: [processors[1]!] });
     provider.getTracer("hosted-otlp-status").startSpan("request-root").end();
 
-    await expect(provider.forceFlush()).rejects.toBeDefined();
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(structuredSpanReadiness()).toMatchObject({
-      ready: false,
-      otlp: { configured: true, ready: false, queued: 1, reason: "export_unacknowledged" },
-    });
+    try {
+      if (retryable) {
+        await provider.forceFlush();
+        expect(collector.requests).toEqual([status, 200]);
+        expect(unrelatedFetch).not.toHaveBeenCalled();
+        expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { ready: true, queued: 0 } });
+        await provider.shutdown();
+        return;
+      }
 
-    await provider.forceFlush();
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { ready: true, queued: 0 } });
-    await provider.shutdown();
+      await expect(provider.forceFlush()).rejects.toBeDefined();
+      expect(collector.requests).toEqual([status]);
+      expect(unrelatedFetch).not.toHaveBeenCalled();
+      expect(structuredSpanReadiness()).toMatchObject({
+        ready: false,
+        otlp: { configured: true, ready: false, queued: 1, reason: "export_unacknowledged" },
+      });
+
+      await provider.forceFlush();
+      expect(collector.requests).toEqual([status, 200]);
+      expect(structuredSpanReadiness()).toMatchObject({ ready: true, otlp: { ready: true, queued: 0 } });
+      await provider.shutdown();
+    } finally {
+      await collector.close();
+    }
   });
 
   it("bounds automatic span retention, preserves a root span, and publishes safe drop readiness", async () => {

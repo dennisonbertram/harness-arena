@@ -1,4 +1,6 @@
-import { OTLPHttpJsonTraceExporter, OTLPHttpProtoTraceExporter, registerOTel } from "@vercel/otel";
+import { OTLPTraceExporter as OTLPHttpJsonTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter as OTLPHttpProtoTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { registerOTel } from "@vercel/otel";
 import { context, ROOT_CONTEXT, SpanKind, SpanStatusCode, type Attributes, type SpanContext, type SpanStatus } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { type ReadableSpan, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
@@ -10,6 +12,7 @@ const SAFE_SCOPE = { name: "harness-arena-sanitized" };
 const MAX_BUFFERED_SPANS = 32;
 const MAX_EXPORT_BATCH = 16;
 const DROP_SIGNAL_EVERY = 32;
+const EXPORT_ACK_DEADLINE_MILLIS = 5_000;
 
 type ReadinessReason = "unsupported_protocol" | "invalid_endpoint" | "invalid_headers" | "log_unacknowledged" | "export_unacknowledged";
 type SinkReadiness = { configured: boolean; ready: boolean; queued: number; dropped: number; reason?: ReadinessReason };
@@ -114,46 +117,6 @@ export class SafeSpanExporter implements SpanExporter {
   constructor(private readonly delegate: SpanExporter) {}
   export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
     this.delegate.export(spans.map(safeExportSpan), callback);
-  }
-  forceFlush(): Promise<void> { return this.delegate.forceFlush?.() ?? Promise.resolve(); }
-  shutdown(): Promise<void> { return this.delegate.shutdown(); }
-}
-
-/**
- * @vercel/otel 2.1.3 reports every resolved fetch as successful, including
- * collector 4xx/5xx responses. Its exporters call fetch synchronously from
- * export(), so this short-lived wrapper is captured by that one request before
- * the global is restored; it never crosses an event-loop boundary.
- */
-export class StatusAwareHostedOtlpExporter implements SpanExporter {
-  constructor(private readonly delegate: SpanExporter) {}
-  export(spans: ReadableSpan[], callback: Parameters<SpanExporter["export"]>[1]): void {
-    const originalFetch = globalThis.fetch;
-    if (typeof originalFetch !== "function") {
-      callback({ code: 1, error: new Error("OTLP collector did not acknowledge export") });
-      return;
-    }
-    const statusAwareFetch: typeof globalThis.fetch = async (input, init) => {
-      try {
-        const response = await originalFetch(input, init);
-        if (response.ok) return response;
-        // The bundled exporter only drains successful responses. Drain this
-        // rejected response too, without retaining its provider-controlled body.
-        void response.arrayBuffer().catch(() => undefined);
-      } catch {
-        // Never hand endpoint, headers, response data, or provider errors to
-        // @vercel/otel's diagnostic logger.
-      }
-      throw new Error("OTLP collector did not acknowledge export");
-    };
-    globalThis.fetch = statusAwareFetch;
-    try {
-      this.delegate.export(spans, callback);
-    } catch {
-      callback({ code: 1, error: new Error("OTLP collector did not acknowledge export") });
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
   }
   forceFlush(): Promise<void> { return this.delegate.forceFlush?.() ?? Promise.resolve(); }
   shutdown(): Promise<void> { return this.delegate.shutdown(); }
@@ -287,10 +250,26 @@ export class BoundedSpanProcessor implements SpanProcessor {
       this.inFlightBatchLength = batchLength;
       const batch = this.queue.slice(0, batchLength).map(safeExportSpan);
       try {
-        await new Promise<void>((resolve, reject) => this.exporter.export(batch, (result) => {
-          if (result.code === 0) resolve();
-          else reject(result.error ?? new Error("span exporter did not acknowledge retention"));
-        }));
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const settle = (completion: () => void) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(deadline);
+            completion();
+          };
+          const deadline = setTimeout(() => {
+            settle(() => reject(new Error("span exporter acknowledgement deadline exceeded")));
+          }, EXPORT_ACK_DEADLINE_MILLIS);
+          try {
+            this.exporter.export(batch, (result) => {
+              if (result.code === 0) settle(resolve);
+              else settle(() => reject(result.error ?? new Error("span exporter did not acknowledge retention")));
+            });
+          } catch (error) {
+            settle(() => reject(error));
+          }
+        });
       } catch (error) {
         this.inFlightBatchLength = 0;
         // The structured exporter already records its more specific failure
@@ -338,7 +317,7 @@ export function createSafeSpanProcessors(): SpanProcessor[] {
     const exporter = collector.protocol === "http/json"
       ? new OTLPHttpJsonTraceExporter({ url: collector.url, headers: collector.headers })
       : new OTLPHttpProtoTraceExporter({ url: collector.url, headers: collector.headers });
-    processors.push(createSafeSpanProcessor(new StatusAwareHostedOtlpExporter(exporter), "otlp"));
+    processors.push(createSafeSpanProcessor(exporter, "otlp"));
   } else {
     updateSinkReadiness("otlp", { configured: false, ready: true, queued: 0, dropped: 0, reason: undefined });
   }
