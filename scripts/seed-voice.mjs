@@ -46,11 +46,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { get, put } from "@vercel/blob";
+import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
-const MANIFEST_PATH = "voice/manifest.json";
+const MANIFEST_PATH = BLOB_PATHS.voiceManifest;
 
 function blobKeyFor(kind, id) {
-  return kind === "prompt" ? `voice/audio/prompts/${id}.wav` : `voice/audio/responses/${id}.wav`;
+  return kind === "prompt" ? `${BLOB_PATHS.voiceAudioPrompts}${id}.wav` : `${BLOB_PATHS.voiceAudioResponses}${id}.wav`;
 }
 
 // ---------------------------------------------------------------------------

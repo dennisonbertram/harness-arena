@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { copy, del, get, list, put } from "@vercel/blob";
+import { BLOB_PATHS } from "./blob-paths.mjs";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "reaped"]);
 const DELETE_BATCH_SIZE = 100;
-const OPERATION_INDEX_PREFIX = "archives/competition-cleanup-operations";
+const OPERATION_INDEX_PREFIX = BLOB_PATHS.cleanupOperations.slice(0, -1);
 
 export class CompetitionCleanupError extends Error {
   constructor(message: string) {
@@ -450,7 +451,7 @@ export async function archiveAndDeleteCompetitionSubmissions(
   if (!/^[a-zA-Z0-9._-]+$/.test(archiveId)) {
     throw new CompetitionCleanupError("archive ID contains invalid characters");
   }
-  const archivePrefix = `archives/competition-cleanups/${input.competitionId}/${archiveId}`;
+  const archivePrefix = `${BLOB_PATHS.cleanupArchives}${input.competitionId}/${archiveId}`;
   const manifestPath = `${archivePrefix}/manifest.json`;
   const identity = operationIdentity({
     operationId: archiveId,

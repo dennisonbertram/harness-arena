@@ -36,20 +36,19 @@ instead of silently proceeding without production evidence.
 
 # Epic-first delivery
 
-For every code change, create or select an Epic and a PR-sized **native GitHub
-subissue** before implementation. PRs must close exactly one implementation
-issue, and the issue must have a native parent labeled `epic`; body checklists
+All work starts with an Epic and a PR-sized native GitHub subissue before
+implementation. The issue must have a native parent labeled `epic`; checklists
 and textual parent references are not lineage. Use the Epic and implementation
 slice forms, record red/green evidence, and preserve the operator, rollback,
 and handoff path. Emergency work uses an incident Epic and native follow-up
 subissue rather than a silent bypass.
 
-The `pr-lineage` check validates GitHub's native `closingIssuesReferences`, not
-PR-body regexes. Both the closing issue and its native Epic parent must belong
-to this repository. GitHub only provides those references for pull requests
-aimed at the default branch (`main`), so non-draft `dev` PRs intentionally fail
-closed. Keep intermediate `dev` work draft or retarget it to `main` before
-requesting merge review.
+`main` PRs use GitHub native `closingIssuesReferences`: exactly one closing
+issue, with both that issue and its native Epic parent in this repository.
+`dev` PRs must contain exactly one standalone same-repository `Closes #N` line.
+The referenced issue is queried and must be a native child of a same-repository Epic
+labeled `epic`; cross-repository, malformed, or extra closing references fail
+closed. Development-only work stays on `dev` and must never be retargeted to or merged into `main` without explicit future approval.
 
 **Before writing any new feature, write the test that would have caught the
 last bug in that area — and watch it fail.** A test authored after the fix, and

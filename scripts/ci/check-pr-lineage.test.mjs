@@ -59,8 +59,8 @@ describe("checkPullRequestLineage", () => {
     expect(url).toBe("https://api.github.com/graphql");
     const request = JSON.parse(options.body);
     expect(request.query).toContain("closingIssuesReferences");
-    expect(request.query.match(/\bnameWithOwner\b/g)).toHaveLength(3);
-    expect(request.variables).toEqual({ owner: "dennisonbertram", name: "harness-arena", number: 149 });
+    expect(request.query.match(/\bnameWithOwner\b/g)).toHaveLength(5);
+    expect(request.variables).toEqual({ owner: "dennisonbertram", name: "harness-arena", number: 149, issueNumber: 1 });
   });
 
   it("rejects a foreign closing issue and foreign Epic from the GraphQL fixture", async () => {
@@ -120,8 +120,18 @@ describe("checkPullRequestLineage", () => {
   it("fails closed with explicit semantics for dev targets", async () => {
     const devEvent = structuredClone(event);
     devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
     const payload = structuredClone(validPayload);
     payload.data.repository.pullRequest.closingIssuesReferences = { totalCount: 0, nodes: [] };
+    payload.data.repository.issue = {
+      number: 173,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
 
     await expect(
       checker()({
@@ -130,7 +140,70 @@ describe("checkPullRequestLineage", () => {
         repository: "dennisonbertram/harness-arena",
         fetchImpl: async () => response(payload),
       }),
-    ).rejects.toThrow("GitHub only populates native closing issue references for the default branch");
+    ).resolves.toEqual({ issueNumber: 173, parentEpicNumber: 139 });
+  });
+
+  it("rejects a dev issue response whose number differs from the parsed Closes reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173";
+    const payload = structuredClone(validPayload);
+    payload.data.repository.issue = {
+      number: 174,
+      repository: { nameWithOwner: repositoryNameWithOwner },
+      parent: {
+        number: 139,
+        repository: { nameWithOwner: repositoryNameWithOwner },
+        labels: { nodes: [{ name: "epic" }] },
+      },
+    };
+
+    await expect(
+      checker()({
+        event: devEvent,
+        token: "test-token",
+        repository: repositoryNameWithOwner,
+        fetchImpl: async () => response(payload),
+      }),
+    ).rejects.toThrow("does not match parsed Closes #173");
+  });
+
+  it("rejects a dev PR without exactly one local Closes #N reference", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes #173\nCloses #174";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one local Closes #N");
+  });
+
+  it("rejects cross-repository closing syntax for a dev PR", async () => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = "Closes attacker/foreign-repo#173";
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("local Closes #N");
+  });
+
+  it.each([
+    ["malformed", "Closes #173\nCloses not-an-issue"],
+    ["cross-repository", "Closes #173\nCloses attacker/foreign-repo#174"],
+    ["extra-token", "Closes #173\nCloses #174 because this also changed"],
+    ["second closing keyword", "Closes #173\nFixes #174"],
+    ["inline closing keyword", "Closes #173\nThis also fixes #174"],
+    ["list-item closing keyword", "Closes #173\n- Fixes #174"],
+    ["blockquote closing keyword", "Closes #173\n> Resolves #174"],
+  ])("rejects a valid dev reference plus a %s closing-directive candidate", async (_name, body) => {
+    const devEvent = structuredClone(event);
+    devEvent.pull_request.base.ref = "dev";
+    devEvent.pull_request.body = body;
+
+    await expect(
+      checker()({ event: devEvent, token: "test-token", repository: repositoryNameWithOwner, fetchImpl: vi.fn() }),
+    ).rejects.toThrow("exactly one entire canonical local Closes #N");
   });
 
   it("fails closed when GitHub returns an HTTP error", async () => {
