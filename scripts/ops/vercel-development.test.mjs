@@ -75,6 +75,8 @@ function inspection(overrides = {}) {
       ownerId: TEAM_ID,
       projectId: DEVELOPMENT_PROJECT_ID,
       type: "blob",
+      access: "private",
+      status: "available",
     },
     ...overrides,
   };
@@ -116,6 +118,31 @@ function productionDomain(overrides = {}) {
   };
 }
 
+function developmentStoreResponse(overrides = {}) {
+  return {
+    store: {
+      id: DEVELOPMENT_STORE_ID,
+      ownerId: TEAM_ID,
+      type: "blob",
+      access: "private",
+      status: "available",
+      totalConnectedProjects: 1,
+      projectsMetadata: [{
+        projectId: DEVELOPMENT_PROJECT_ID,
+        name: DEVELOPMENT_PROJECT_NAME,
+        framework: "nextjs",
+        latestDeployment: null,
+        current: true,
+        environments: ["production", "preview", "development"],
+        envVarPrefix: "BLOB",
+        environmentVariables: ["BLOB_READ_WRITE_TOKEN"],
+        id: "spc_development",
+      }],
+      ...overrides,
+    },
+  };
+}
+
 function verifierApiFetch({
   aliases,
   domains,
@@ -129,6 +156,7 @@ function verifierApiFetch({
   liveStoreTargets = ["production"],
   liveDeployment = {},
   liveEnvironment = {},
+  developmentStore,
 }) {
   const project = {
     id: DEVELOPMENT_PROJECT_ID,
@@ -185,12 +213,7 @@ function verifierApiFetch({
       return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
     }
     if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-      return jsonResponse({
-        id: DEVELOPMENT_STORE_ID,
-        ownerId: TEAM_ID,
-        type: "blob",
-        projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-      });
+      return jsonResponse(developmentStore ?? developmentStoreResponse());
     }
     throw new Error(`unexpected request ${url.pathname}`);
   });
@@ -322,6 +345,49 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the real nested private Blob store metadata", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ developmentStore: developmentStoreResponse() }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
+  it.each([
+    ["malformed envelope", { id: DEVELOPMENT_STORE_ID }],
+    ["public access", developmentStoreResponse({ access: "public" })],
+    [
+      "multiple connected projects",
+      developmentStoreResponse({
+        totalConnectedProjects: 2,
+        projectsMetadata: [
+          developmentStoreResponse().store.projectsMetadata[0],
+          { ...developmentStoreResponse().store.projectsMetadata[0], projectId: "prj_other", name: "other" },
+        ],
+      }),
+    ],
+    [
+      "wrong connected project",
+      developmentStoreResponse({
+        projectsMetadata: [{ ...developmentStoreResponse().store.projectsMetadata[0], projectId: "prj_other" }],
+      }),
+    ],
+  ])("rejects unsafe nested Blob store metadata: %s", async (_name, developmentStore) => {
+    const api = subject.createReadOnlyVercelApi({ fetchImpl: verifierApiFetch({ developmentStore }) });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).rejects.toThrow(/^Development Vercel read-only preflight denied by local safety policy$/);
+  });
+
   it("accepts the real live environment shape and multi-target Blob binding", async () => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({
@@ -571,12 +637,7 @@ describe("bounded read-only Vercel adapter", () => {
         return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
       }
       if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse({
-          id: DEVELOPMENT_STORE_ID,
-          ownerId: TEAM_ID,
-          type: "blob",
-          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-        });
+        return jsonResponse(developmentStoreResponse());
       }
       throw new Error(`unexpected request ${url.pathname}`);
     });
@@ -647,12 +708,7 @@ describe("bounded read-only Vercel adapter", () => {
         return jsonResponse({ value: "https://harness-arena-development.vercel.app" });
       }
       if (url.pathname === `/v1/storage/stores/${DEVELOPMENT_STORE_ID}`) {
-        return jsonResponse({
-          id: DEVELOPMENT_STORE_ID,
-          ownerId: TEAM_ID,
-          type: "blob",
-          projects: [{ projectId: DEVELOPMENT_PROJECT_ID }],
-        });
+        return jsonResponse(developmentStoreResponse());
       }
       throw new Error(`unexpected request ${url.pathname}`);
     });

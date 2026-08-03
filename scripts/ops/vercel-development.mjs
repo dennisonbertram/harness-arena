@@ -283,6 +283,61 @@ function identical(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function normalizeDevelopmentStore(value, { storeId, projectId }) {
+  const storeKeys = ["id", "ownerId", "type", "access", "status", "totalConnectedProjects", "projectsMetadata"];
+  const projectKeys = [
+    "projectId",
+    "name",
+    "framework",
+    "latestDeployment",
+    "current",
+    "environments",
+    "envVarPrefix",
+    "environmentVariables",
+    "id",
+  ];
+  const allowedEnvironments = new Set(["production", "preview", "development"]);
+  if (!exactKeys(value, ["store"]) || !exactKeys(value.store, storeKeys)) throw denied();
+  const store = value.store;
+  if (
+    store.id !== storeId
+    || store.ownerId !== DEVELOPMENT_TEAM_ID
+    || store.type !== "blob"
+    || store.access !== "private"
+    || store.status !== "available"
+    || store.totalConnectedProjects !== 1
+    || !Array.isArray(store.projectsMetadata)
+    || store.projectsMetadata.length !== 1
+  ) throw denied();
+  const metadata = store.projectsMetadata[0];
+  if (
+    !exactKeys(metadata, projectKeys)
+    || metadata.projectId !== projectId
+    || metadata.name !== DEVELOPMENT_PROJECT_NAME
+    || typeof metadata.framework !== "string"
+    || !metadata.framework
+    || typeof metadata.id !== "string"
+    || !metadata.id
+    || metadata.envVarPrefix !== "BLOB"
+    || !Array.isArray(metadata.environments)
+    || metadata.environments.length === 0
+    || metadata.environments.some((environment) => typeof environment !== "string" || !allowedEnvironments.has(environment))
+    || new Set(metadata.environments).size !== metadata.environments.length
+    || !Array.isArray(metadata.environmentVariables)
+    || metadata.environmentVariables.some((variable) => typeof variable !== "string" || !variable)
+    || new Set(metadata.environmentVariables).size !== metadata.environmentVariables.length
+    || !metadata.environmentVariables.includes("BLOB_READ_WRITE_TOKEN")
+  ) throw denied();
+  return {
+    id: store.id,
+    ownerId: store.ownerId,
+    projectId: metadata.projectId,
+    type: store.type,
+    access: store.access,
+    status: store.status,
+  };
+}
+
 /** A fixed-endpoint, GET-only adapter. It never reads credential values. */
 export function createReadOnlyVercelApi({
   fetchImpl = globalThis.fetch,
@@ -378,8 +433,7 @@ export function createReadOnlyVercelApi({
           || !identical(domainInventoryBefore, domainInventoryAfter)
           || !identical(liveBefore, liveAfter)
         ) throw denied();
-        const projectConnections = Array.isArray(store?.projects) ? store.projects : [];
-        const connection = projectConnections.find((item) => item?.projectId === projectId);
+        const normalizedStore = normalizeDevelopmentStore(store, { storeId, projectId });
         const environmentStoreIds = [...new Set(entries.flatMap((entry) => {
           const id = entry?.contentHint?.storeId;
           return typeof id === "string" && id ? [id] : [];
@@ -392,12 +446,7 @@ export function createReadOnlyVercelApi({
             blobStoreId: blobTokenEntries[0].contentHint.storeId,
             storeIds: environmentStoreIds,
           },
-          store: {
-            id: store?.id,
-            ownerId: store?.ownerId,
-            projectId: connection?.projectId,
-            type: store?.type,
-          },
+          store: normalizedStore,
         };
       } catch {
         throw denied();
@@ -427,7 +476,7 @@ function validateInspection(actual, manifest) {
     || !exactKeys(actual.project, ["id", "ownerId", "name", "git", "aliases"])
     || !exactKeys(actual.project.git, ["type", "org", "repo", "productionBranch"])
     || !exactKeys(actual.environment, ["callbackBase", "networkModeConfigured", "blobStoreId", "storeIds"])
-    || !exactKeys(actual.store, ["id", "ownerId", "projectId", "type"])
+    || !exactKeys(actual.store, ["id", "ownerId", "projectId", "type", "access", "status"])
     || actual.project.id !== DEVELOPMENT_PROJECT_ID
     || actual.project.id === LIVE_PROJECT_ID
     || actual.project.ownerId !== DEVELOPMENT_TEAM_ID
@@ -458,6 +507,8 @@ function validateInspection(actual, manifest) {
     || actual.store.ownerId !== DEVELOPMENT_TEAM_ID
     || actual.store.projectId !== DEVELOPMENT_PROJECT_ID
     || actual.store.type !== "blob"
+    || actual.store.access !== "private"
+    || actual.store.status !== "available"
   ) {
     throw denied();
   }
