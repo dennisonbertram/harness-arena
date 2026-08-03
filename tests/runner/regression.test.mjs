@@ -53,6 +53,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS,
   buildContainerName,
   buildPiCommand,
   deliverTerminalStatus,
@@ -196,6 +197,196 @@ describe("deliverTerminalStatus regression: fallback file content", () => {
 
     expect(result).toBe(false);
     expect(written).toEqual(payload);
+  });
+});
+
+describe("runner regression: task-container setup failures", () => {
+  const PRE_PI_SETUP_OPERATIONS = new Set([
+    "container_create",
+    "models_directory",
+    "models_config_copy",
+    "settings_config_copy",
+    "agentkit_copy",
+    "agentkit_extract",
+    "system_prompt_copy",
+  ]);
+
+  it.each(REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS)("fails closed for required setup operation %s", async (operation) => {
+    const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-setup-failure-"));
+    const dockerLog = path.join(fixtureRoot, "docker.log");
+    const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    writeFileSync(
+      fakeDocker,
+      [
+        "#!/usr/bin/env sh",
+        "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"",
+        "if [ \"$1\" = info ]; then exit 0; fi",
+        "case \"$*\" in",
+        "  run\\ *) operation=container_create ;;",
+        "  *'mkdir -p /root/.pi/agent'*) operation=models_directory ;;",
+        "  *':/root/.pi/agent/models.json'*) operation=models_config_copy ;;",
+        "  *':/root/.pi/agent/settings.json'*) operation=settings_config_copy ;;",
+        "  *':/tmp/agentkit.tgz'*) operation=agentkit_copy ;;",
+        "  *'tar -xzf /tmp/agentkit.tgz -C /usr/local'*) operation=agentkit_extract ;;",
+        "  *':/tmp/system-prompt.txt'*) operation=system_prompt_copy ;;",
+        "  *'rm -rf /tests'*) operation=verifier_tests_remove ;;",
+        "  *':/tests'*) operation=verifier_tests_copy ;;",
+        "  *'mkdir -p /logs/verifier'*) operation=verifier_logs_directory ;;",
+        "esac",
+        "if [ \"$operation\" = \"$FAIL_SETUP_OPERATION\" ]; then",
+        "  printf '%s\\n' 'setup failed: vck_setup_secret_123' >&2",
+        "  exit 43",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(fakeDocker, 0o755);
+
+    const { state, baseUrl, stop } = await startCallbackServer({ secret: "setup-secret" });
+    const tasks = [{
+      id: "setup-failure",
+      image: "example.invalid/task:latest",
+      instruction: "This must not reach Pi.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
+    const env = {
+      ...process.env,
+      RUN_ID: `setup-failure-${operation}`,
+      CALLBACK_BASE: baseUrl,
+      RUNNER_CALLBACK_SECRET: "setup-secret",
+      AI_GATEWAY_API_KEY: "vck_setup_secret_123",
+      GATEWAY_UPSTREAM: baseUrl,
+      GATEWAY_PROXY_PORT: "14604",
+      RUNNER_MODEL: "zai/glm-5.2-fast",
+      TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      SYSTEM_PROMPT_B64: Buffer.from("Use the fixture.", "utf8").toString("base64"),
+      DOCKER_CMD: fakeDocker,
+      DOCKER_LOG: dockerLog,
+      FAIL_SETUP_OPERATION: operation,
+    };
+
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    await stop();
+
+    try {
+      expect(exitCode).toBe(0);
+      const failure = state.events.find((event) => event.type === "task.failed");
+      expect(failure?.payload).toMatchObject({
+        task_id: "setup-failure",
+        stage: "task_setup_error",
+      });
+      expect(failure?.payload.error).toContain(`"operation":"${operation}"`);
+      expect(failure?.payload.error).toContain('"code":43');
+      expect(failure?.payload.error).toContain("[REDACTED]");
+      expect(failure?.payload.error).not.toContain("vck_setup_secret_123");
+      const dockerCommands = readFileSync(dockerLog, "utf8");
+      if (PRE_PI_SETUP_OPERATIONS.has(operation)) {
+        expect(dockerCommands).not.toContain("-e AI_GATEWAY_API_KEY");
+      } else {
+        expect(dockerCommands).toContain("-e AI_GATEWAY_API_KEY");
+      }
+      expect(dockerCommands).not.toContain("bash /tests/test.sh");
+      expect(state.events.map((event) => event.type)).not.toContain("task.verify_started");
+      const runnerTrace = state.traces.find((trace) => trace.name === "runner-log.txt");
+      const runnerLog = gunzipSync(runnerTrace.body).toString("utf8");
+      expect(runnerLog).toContain(`"operation":"${operation}"`);
+      expect(runnerLog).toContain("[REDACTED]");
+      expect(runnerLog).not.toContain("vck_setup_secret_123");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the canonical operation registry aligned with setup call sites", () => {
+    const runnerSource = readFileSync(RUNNER_SCRIPT, "utf8");
+    const taskRunner = runnerSource.slice(runnerSource.indexOf("async function runOneTask"));
+    const operations = [...taskRunner.matchAll(/setup\s*\(\s*"([a-z_]+)"/g)].map((match) => match[1]);
+    // Do not deduplicate: duplicate labels must fail the alignment check.
+    expect(operations.sort()).toEqual([...REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS].sort());
+    // Whitespace-tolerant guard catches the current multiline verifier call,
+    // which the old same-line regex silently missed.
+    expect(taskRunner).not.toMatch(/\bsh\s*\(\s*DOCKER_CMD\s*,/);
+    // Exactly two runner-local Docker call sites are permitted: setup's
+    // fail-closed wrapper and the verifier execution. A direct runDocker call
+    // added elsewhere would bypass setup and fail this count/shape guard.
+    expect(taskRunner.match(/\brunDocker\s*\(/g)).toHaveLength(2);
+    expect(taskRunner).toMatch(/const result = runDocker\s*\(\s*args\s*\)/);
+    expect(taskRunner).toMatch(/const verifyResult = runDocker\s*\(\s*\[\s*"exec"\s*,\s*"-w"/);
+  });
+
+  it("keeps completed Pi cost and agent traces when verifier setup fails", async () => {
+    const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-verifier-setup-cost-"));
+    const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    writeFileSync(
+      fakeDocker,
+      [
+        "#!/usr/bin/env sh",
+        "if [ \"$1\" = info ]; then exit 0; fi",
+        "case \"$*\" in",
+        "  *'-e AI_GATEWAY_API_KEY'*)",
+        "    printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"cost\":{\"total\":0.25}}}}'",
+        "    exit 0 ;;",
+        "  *'rm -rf /tests'*) printf '%s\\n' 'tests cleanup failed' >&2; exit 43 ;;",
+        "esac",
+        "exit 0",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(fakeDocker, 0o755);
+    const { state, baseUrl, stop } = await startCallbackServer({ secret: "verifier-setup-secret" });
+    const tasks = [{
+      id: "verifier-setup-cost",
+      image: "example.invalid/task:latest",
+      instruction: "Produce evidence before verifier setup.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
+    const env = {
+      ...process.env,
+      RUN_ID: "verifier-setup-cost",
+      CALLBACK_BASE: baseUrl,
+      RUNNER_CALLBACK_SECRET: "verifier-setup-secret",
+      AI_GATEWAY_API_KEY: "test-key",
+      GATEWAY_UPSTREAM: baseUrl,
+      GATEWAY_PROXY_PORT: "14605",
+      TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      SYSTEM_PROMPT_B64: Buffer.from("", "utf8").toString("base64"),
+      DOCKER_CMD: fakeDocker,
+      PI_INSTALL_MODE: "none",
+    };
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    await stop();
+
+    try {
+      expect(exitCode).toBe(0);
+      const failure = state.events.find((event) => event.type === "task.failed");
+      expect(failure?.payload).toMatchObject({ task_id: "verifier-setup-cost", stage: "task_setup_error" });
+      expect(state.events.map((event) => event.type)).toContain("task.agent_finished");
+      expect(state.events.map((event) => event.type)).not.toContain("task.verify_started");
+      const stdoutTrace = state.traces.find((trace) => trace.name === "pi-stdout.txt");
+      expect(gunzipSync(stdoutTrace.body).toString("utf8")).toContain('"total":0.25');
+      const terminal = state.statusUpdates.at(-1);
+      expect(terminal.totals.total_cost_usd).toBeCloseTo(0.25, 10);
+      expect(terminal.task_results[0]).toMatchObject({
+        task_id: "verifier-setup-cost",
+        cost_usd: 0.25,
+        cost_source: "stdout",
+        failure_stage: "task_setup_error",
+      });
+      expect(terminal.task_results[0].trace_blob_url).toBe("fake://blob/verifier-setup-cost/session.jsonl");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -35,6 +35,7 @@ import {
   safeCleanup,
   sh,
   shQuote,
+  taskSetupFailureDiagnostic,
 } from "../../scripts/runner/lib.mjs";
 
 describe("runner event payload contract", () => {
@@ -66,6 +67,30 @@ describe("runner event payload contract", () => {
     expect(emitted.filter(({ type }) => type === "task.trace_uploaded").map(({ payload }) => payload.name))
       .toEqual(AGENT_TRACE_NAMES);
     expect(emitted.at(-1)).toEqual({ type: "task.failed", payload: failure });
+  });
+});
+
+describe("taskSetupFailureDiagnostic", () => {
+  it("returns valid redacted JSON bounded by final UTF-8 bytes even for escaped multibyte output", () => {
+    const secret = "vck_setup_secret_123";
+    const diagnostic = taskSetupFailureDiagnostic({
+      operation: "container_create",
+      result: {
+        code: 43,
+        timedOut: false,
+        stdout: Buffer.from((`\"\\\\\n😀${secret}`).repeat(2_000), "utf8"),
+        stderr: Buffer.from((`${secret}\t\u0000😈`).repeat(2_000), "utf8"),
+      },
+      secrets: [secret],
+      maxBytes: 512,
+    });
+
+    expect(Buffer.byteLength(diagnostic, "utf8")).toBeLessThanOrEqual(512);
+    expect(diagnostic).not.toContain(secret);
+    const parsed = JSON.parse(diagnostic);
+    expect(parsed).toMatchObject({ operation: "container_create", code: 43, timedOut: false });
+    expect(typeof parsed.stdout).toBe("string");
+    expect(typeof parsed.stderr).toBe("string");
   });
 });
 
