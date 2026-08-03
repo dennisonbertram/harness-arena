@@ -6,6 +6,7 @@ describe("resolveBlobAccess", () => {
     expect(resolveBlobAccess({
       BLOB_READ_WRITE_TOKEN: "rw",
       VERCEL_PROJECT_ID: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA",
+      HARNESS_BLOB_STORE_ID: "store_dev",
     })).toEqual({ access: "private" });
   });
 

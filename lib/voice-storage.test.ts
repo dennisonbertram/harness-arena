@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { get, list, put } from "@vercel/blob";
@@ -109,6 +109,15 @@ describe("FileVoiceStorage", () => {
     await expect(storage.putJudgment(makeJudgment({ evaluator_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.putJudgment(makeJudgment({ comparison_id: part }))).rejects.toThrow(/path segment/);
     await expect(storage.listJudgmentKeys(part)).rejects.toThrow(/path segment/);
+  });
+
+  it("rejects audio symlinks escaping the local storage root", async () => {
+    const outside = join(root, "..", "outside-audio.wav");
+    await writeFile(outside, "secret");
+    await mkdir(join(root, "voice", "audio", "prompts"), { recursive: true });
+    await symlink(outside, join(root, "voice", "audio", "prompts", "prompt-1.wav"));
+    try { await expect(new FileVoiceStorage(root).getAudioBytes("prompts", "prompt-1")).rejects.toThrow(/path|symlink|storage/i); }
+    finally { await rm(outside, { force: true }); }
   });
 
   it("rejects a symlink component before manifest reads or atomic writes and preserves the external target", async () => {
@@ -289,6 +298,7 @@ describe("getVoiceStorage factory", () => {
   const originalStorage = process.env.STORAGE;
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalToken === undefined) {
       delete process.env.BLOB_READ_WRITE_TOKEN;
     } else {
@@ -311,6 +321,12 @@ describe("getVoiceStorage factory", () => {
     delete process.env.STORAGE;
     process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_test_token";
     expect(getVoiceStorage()).toBeInstanceOf(BlobVoiceStorage);
+  });
+
+  it("eagerly rejects mixed isolated Development store identity", () => {
+    delete process.env.STORAGE; process.env.BLOB_READ_WRITE_TOKEN = "rw";
+    vi.stubEnv("VERCEL_PROJECT_ID", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA"); vi.stubEnv("HARNESS_BLOB_STORE_ID", "store_dev"); vi.stubEnv("BLOB_STORE_ID", "store_other");
+    expect(() => getVoiceStorage()).toThrow("Blob store identity mismatch");
   });
 
   it("throws when neither STORAGE=memory nor BLOB_READ_WRITE_TOKEN is set", () => {

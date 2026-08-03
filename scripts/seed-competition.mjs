@@ -25,6 +25,7 @@
 // parse, so a plain `node scripts/seed-competition.mjs` can't import it.
 
 import { get, list, put } from "@vercel/blob";
+import { blobAccess } from "../lib/blob-access.mjs";
 
 const ARENA = "harness-arena";
 const HARNESS = "pi";
@@ -99,13 +100,13 @@ export async function backfillCompetition(
 // so this writes to exactly the entities the running app reads.
 function blobStorage() {
   async function readJson(pathname) {
-    const result = await get(pathname, { access: "public" });
+    const result = await get(pathname, { access: blobAccess() });
     if (!result) return undefined;
     return JSON.parse(await new Response(result.stream).text());
   }
   async function writeJson(pathname, value) {
     await put(pathname, JSON.stringify(value), {
-      access: "public",
+      access: blobAccess(),
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",

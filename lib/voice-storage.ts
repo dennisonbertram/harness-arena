@@ -1,5 +1,6 @@
 import { get, list, put } from "@vercel/blob";
 import { blobAccess } from "./blob-access";
+import { readBoundedStream } from "./bounded-stream";
 import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertLocalFileStorageAllowed, LocalStorageReadError, safeStoragePart } from "./file-storage";
@@ -133,7 +134,8 @@ export class FileVoiceStorage implements VoiceStorage {
     return { judgments, unreadable };
   }
   async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
-    try { return await readFile(this.path("audio", kind, `${safeStoragePart(id)}.wav`)); }
+    const path = this.path("audio", kind, `${safeStoragePart(id)}.wav`); await assertSafeStoragePath(this.storageRoot, path);
+    try { return await readFile(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   }
 }
@@ -233,13 +235,13 @@ export class BlobVoiceStorage implements VoiceStorage {
   async getAudioBytes(kind: VoiceAudioKind, id: string): Promise<Buffer | null> {
     const response = await get(audioPath(kind, id), { access: blobAccess() });
     if (!response || response.statusCode !== 200 || !response.stream) return null;
-    return Buffer.from(await new Response(response.stream).arrayBuffer());
+    return readBoundedStream(response.stream, 12 * 1024 * 1024);
   }
 }
 
 export function getVoiceStorage(): VoiceStorage {
   if (process.env.STORAGE === "file") return new FileVoiceStorage(process.env.LOCAL_STORAGE_DIR ?? "");
   if (process.env.STORAGE === "memory") return new MemoryVoiceStorage();
-  if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobVoiceStorage();
+  if (process.env.BLOB_READ_WRITE_TOKEN) { blobAccess(); return new BlobVoiceStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

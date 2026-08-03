@@ -55,4 +55,9 @@ describe("GET trace-view", () => {
     const res = await GET(req("run-1", "task-a", "../../secret"), { params: params("run-1") });
     expect(res.status).toBe(400);
   });
+
+  it("400s on unsafe run and task identifiers", async () => {
+    const res = await GET(req("..", "../escape", "session.jsonl"), { params: params("..") });
+    expect(res.status).toBe(400);
+  });
 });

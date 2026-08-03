@@ -1,17 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { log } from "@/lib/log";
 import type { NextComparison, Progress } from "@/lib/voice-session";
 import { enumerateComparisons, pickNext, progress } from "@/lib/voice-session";
 import type { VoiceManifest } from "@/lib/voice-types";
 import { getVoiceStorage } from "@/lib/voice-storage";
+import { mintVoiceCapability, verifyVoiceCapability } from "@/lib/voice-capability";
 
 const COOKIE_NAME = "voice_evaluator";
 const COOKIE_MAX_AGE_SECONDS = 31536000; // ~1 year
 const EXCLUDE_CAP = 25;
 
-const EvaluatorIdSchema = z.uuid();
 const audioUrl = (kind: "prompts" | "responses", id: string) => `/api/voice/audio/${kind}/${encodeURIComponent(id)}`;
 
 // ponytail: naive in-memory per-IP cap on cookie *minting* — POC-level, not
@@ -38,10 +37,7 @@ function clientIp(request: NextRequest): string {
 // A malformed cookie value is treated the same as an absent one -- re-mint
 // rather than 500 or trust an unvalidated value as an evaluator identity.
 function validEvaluatorId(request: NextRequest): string | undefined {
-  const raw = request.cookies.get(COOKIE_NAME)?.value;
-  if (!raw) return undefined;
-  const parsed = EvaluatorIdSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
+  return verifyVoiceCapability(request.cookies.get(COOKIE_NAME)?.value);
 }
 
 function parseExclude(request: NextRequest): string[] {
@@ -57,7 +53,7 @@ function parseExclude(request: NextRequest): string[] {
 }
 
 function setEvaluatorCookie(response: NextResponse, evaluatorId: string): void {
-  response.cookies.set(COOKIE_NAME, evaluatorId, {
+  response.cookies.set(COOKIE_NAME, mintVoiceCapability(evaluatorId), {
     httpOnly: true,
     sameSite: "lax",
     path: "/",

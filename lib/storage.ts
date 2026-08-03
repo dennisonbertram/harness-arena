@@ -1,5 +1,6 @@
 import { get, list, put } from "@vercel/blob";
 import { blobAccess } from "./blob-access";
+import { readBoundedStream } from "./bounded-stream";
 import { FileStorage } from "./file-storage";
 import { log, normalizeError } from "./log";
 import type { Competition, NewRunEvent, Run, RunEvent, Submission } from "./types";
@@ -184,16 +185,6 @@ export function seqFromEventPathname(pathname: string | undefined): number | nul
   return Number.isSafeInteger(seq) ? seq : null;
 }
 
-export async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: "no-store" });
-  // Blob 403/404s return an HTML error page, not JSON, so a non-OK response
-  // must throw BEFORE parsing (a bare JSON.parse on "<!DOCTYPE..." is the
-  // exact crash this replaces). res.ok may be undefined in unit mocks; only
-  // a strictly-false ok is treated as a failure.
-  if (res.ok === false) throw new Error(`blob fetch ${res.status}`);
-  return JSON.parse(await res.text()) as T;
-}
-
 async function getJson<T>(identifier: string): Promise<T> {
   const result = await get(identifier, { access: blobAccess() });
   // The caller derived this identifier from list(), so a null/304 here is a
@@ -205,23 +196,8 @@ async function getJson<T>(identifier: string): Promise<T> {
   return JSON.parse(await new Response(result.stream).text()) as T;
 }
 
-function versionedBlobUrl(blob: { url: string; uploadedAt: string | Date }): string {
-  // `uploadedAt` is present on real Blob list results. Keep the helper
-  // tolerant of older/custom storage adapters that only provide a URL rather
-  // than turning a readable entity into a partial-read failure.
-  if (!blob.uploadedAt) return blob.url;
-  let url: URL;
-  try {
-    url = new URL(blob.url);
-  } catch {
-    return blob.url;
-  }
-  const uploadedAt = new Date(blob.uploadedAt).getTime();
-  url.searchParams.set("v", Number.isFinite(uploadedAt) ? String(uploadedAt) : String(blob.uploadedAt));
-  return url.toString();
-}
-
 export class BlobStorage implements Storage {
+  private static readonly TRACE_LIMIT = 4 * 1024 * 1024;
   private readonly readConcurrency = 8;
   private activeReads = 0;
   private readonly readWaiters: Array<() => void> = [];
@@ -247,27 +223,7 @@ export class BlobStorage implements Storage {
     // listRuns/listSubmissions/listCompetitions are often requested together.
     // Keep one instance-wide semaphore across all three so Promise.all cannot
     // turn a 90-object page read into 90 simultaneous Blob requests.
-    return this.withReadSlot(async () => {
-      try {
-        // Prefer the authenticated read plane. The production app was
-        // receiving persistent 403s from public URLs while get(pathname)
-        // stayed healthy; trying the failing public edge first added ~300 ms
-        // per blob and pushed /status static generation past 60 seconds.
-        //
-        // Authenticate the uploadedAt-versioned URL, not the bare pathname.
-        // Production proved the bare get can return a pre-overwrite "running"
-        // document for minutes after list() already reports the completed
-        // upload. The version keeps authenticated reads on the current object
-        // while retaining the reliable SDK data plane.
-        return await withRetry(() => getJson<T>(versionedBlobUrl(blob)), 2);
-      } catch {
-        // A public store retains its historical edge fallback. Private stores
-        // must never hand a listed object URL to fetch: only the authenticated
-        // SDK data plane may read them.
-        if (blobAccess() === "public") return withRetry(() => fetchJson<T>(versionedBlobUrl(blob)), 2);
-        throw new Error("private blob read failed");
-      }
-    });
+    return this.withReadSlot(() => withRetry(() => getJson<T>(blob.pathname), 2));
   }
 
   private async readJson<T>(pathname: string): Promise<T | undefined> {
@@ -493,7 +449,7 @@ export class BlobStorage implements Storage {
         if (!blob) return null;
         const response = await get(blob.pathname, { access: blobAccess() });
         if (!response || response.statusCode !== 200 || !response.stream) throw new Error("blob get failed");
-        return Buffer.from(await new Response(response.stream).arrayBuffer());
+        return readBoundedStream(response.stream, BlobStorage.TRACE_LIMIT);
       });
     } catch {
       return null;
@@ -516,6 +472,6 @@ export function getStorage(): Storage {
     g[MEMORY_STORAGE_KEY] ??= new MemoryStorage();
     return g[MEMORY_STORAGE_KEY];
   }
-  if (process.env.BLOB_READ_WRITE_TOKEN) return new BlobStorage();
+  if (process.env.BLOB_READ_WRITE_TOKEN) { blobAccess(); return new BlobStorage(); }
   throw new Error("storage misconfigured: set BLOB_READ_WRITE_TOKEN or STORAGE=memory");
 }

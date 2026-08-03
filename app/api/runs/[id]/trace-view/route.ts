@@ -20,6 +20,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   if (!taskId || !name || !VALID_NAMES.has(name)) {
     return NextResponse.json({ error: "task_id and a valid name are required" }, { status: 400 });
   }
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(id) || !/^[A-Za-z0-9._-]{1,128}$/.test(taskId)) return NextResponse.json({ error: "invalid identifier" }, { status: 400 });
 
   const bytes = await getStorage().getTraceBytes(id, taskId, name);
   if (!bytes) {

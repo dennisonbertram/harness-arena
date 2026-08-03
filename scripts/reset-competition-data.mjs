@@ -13,6 +13,7 @@
 //     --yes
 
 import { copy, del, get, list, put } from "@vercel/blob";
+import { blobAccess } from "../lib/blob-access.mjs";
 import { BLOB_PATHS } from "../lib/blob-paths.mjs";
 
 const DELETE_BATCH_SIZE = 100;
@@ -37,7 +38,7 @@ async function listAll(prefix, token) {
 }
 
 async function readJson(pathname, token) {
-  const result = await get(pathname, { access: "public", token });
+  const result = await get(pathname, { access: blobAccess(), token });
   if (!result) throw new Error(`required blob not found: ${pathname}`);
   return JSON.parse(await new Response(result.stream).text());
 }
@@ -138,7 +139,7 @@ export async function resetCompetitionData({
   // definition have been copied successfully.
   for (const pathname of archiveSources) {
     await copy(pathname, `${resolvedArchivePrefix}/${pathname}`, {
-      access: "public",
+      access: blobAccess(),
       addRandomSuffix: false,
       allowOverwrite: true,
       token,
@@ -163,7 +164,7 @@ export async function resetCompetitionData({
       competitionPath,
       JSON.stringify({ ...competition, gateway_provider: gatewayProvider }),
       {
-        access: "public",
+        access: blobAccess(),
         addRandomSuffix: false,
         allowOverwrite: true,
         contentType: "application/json",

@@ -3,13 +3,12 @@ import { z } from "zod";
 import { log, normalizeError } from "@/lib/log";
 import { comparisonIdFor } from "@/lib/voice-session";
 import { getVoiceStorage } from "@/lib/voice-storage";
+import { verifyVoiceCapability } from "@/lib/voice-capability";
 import { VOICE_JUDGMENT_REASONS, VOICE_OUTCOMES, VoicePlayCountsSchema } from "@/lib/voice-types";
 import type { VoiceJudgment } from "@/lib/voice-types";
 
 const COOKIE_NAME = "voice_evaluator";
 const MAX_BODY_BYTES = 65536; // 64KB
-
-const EvaluatorIdSchema = z.uuid();
 
 const JudgmentInputSchema = z.object({
   response_a_id: z.string(),
@@ -48,10 +47,7 @@ function clientIp(request: NextRequest): string {
 // client is told to re-mint via GET /api/voice/next rather than trusting an
 // unvalidated value as an evaluator identity.
 function validEvaluatorId(request: NextRequest): string | undefined {
-  const raw = request.cookies.get(COOKIE_NAME)?.value;
-  if (!raw) return undefined;
-  const parsed = EvaluatorIdSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
+  return verifyVoiceCapability(request.cookies.get(COOKIE_NAME)?.value);
 }
 
 export async function POST(request: NextRequest) {
