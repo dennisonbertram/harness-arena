@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -146,8 +147,12 @@ function spawnFixture(mode, marker, preservationMarker, { env: configuredEnv = {
   if (mode === "immediate-exit") {
     childEnv.HARNESS_META_OUTPUT_BYTES = String(outputBytes);
     childArgs = ["-e", [
+      "const { createHash } = require('node:crypto');",
       "const outputBytes = Number(process.env.HARNESS_META_OUTPUT_BYTES || 0);",
-      "process.stderr.write(`${process.env.LOCAL_INSTANCE_NONCE || ''}\\n${process.env.HARNESS_META_CONFIG_TOKEN || ''}\\n${'x'.repeat(outputBytes)}`);",
+      "const inherited = process.env.LOCAL_INSTANCE_NONCE || '';",
+      "const configured = process.env.HARNESS_META_CONFIG_TOKEN || '';",
+      "const digest = (value) => createHash('sha256').update(value).digest('hex');",
+      "process.stderr.write(`${inherited}\\n${configured}\\n${digest(inherited)}\\n${digest(configured)}\\n${'x'.repeat(outputBytes)}`);",
       "process.exit(17);",
     ].join("\n")];
   } else if (mode === "never-publish") {
@@ -204,6 +209,8 @@ describe.sequential("integration harness process cleanup", () => {
       const failure = await waitForFile(marker, 1_000, fixture).then(() => null, (error) => error);
       expect(Date.now() - started).toBeLessThan(750);
       expect(failure?.message).toMatch(/code=17.*signal=null/);
+      expect(failure?.message).not.toContain(createHash("sha256").update(inheritedSecret).digest("hex"));
+      expect(failure?.message).not.toContain(createHash("sha256").update(configuredSecret).digest("hex"));
       expect(failure?.message).not.toContain(inheritedSecret);
       expect(failure?.message).not.toContain(configuredSecret);
       expect(failure?.message).toContain("[REDACTED]");
