@@ -25,9 +25,15 @@ GETs to Vercel deployment metadata, project environment metadata (never with
 decryption), and deployment runtime-log endpoints. It retains variable names
 and error counts only; it never retains environment values, log text, or the
 token. Missing credentials, 401/403 responses, malformed metadata, and
-unavailable endpoints are `access_blocked`, with unknown cron and missing-env
-evidence rather than a fabricated ready deployment. The full two-environment
-collection has a twelve-second route-wide deadline,
+unavailable endpoints are `access_blocked`. Unobserved environment variables,
+runtime logs, cron configuration, and deployment identity remain explicitly
+unknown; the monitor does not manufacture missing variables, an empty error
+list, or a ready deployment. The stable requested alias is retained separately
+from Vercel's returned unique deployment URL, and deployment evidence is
+accepted only when the deployment ID, project ID, and alias all match the fixed
+target. `expected_sha` remains unknown unless a future independent GET supplies
+the expected ref; runtime `VERCEL_GIT_COMMIT_SHA` is not independent evidence.
+The full two-environment collection has a twelve-second route-wide deadline,
 below the route's fifteen-second `maxDuration`. The inventory work is bounded to
 20 advertised kinds, 10 pages per kind, 100 records per page, and 20 correlated
 runs; the global deadline aborts outstanding probes before those worst-case
