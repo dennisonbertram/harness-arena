@@ -1,8 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { acquireDirectoryLock, assertNoSymlinksInTree, atomicCreateFile, atomicWriteFile, isProcessAlive as processAlive } from "../lib/file-storage-lock.mjs";
 
 const MANAGED_ENV_MARKER = "# harness-arena-init:v2";
@@ -11,7 +12,11 @@ const INHERITED_ALLOWLIST = new Set(["PATH", "TMPDIR", "LANG", "LC_ALL", "TERM",
 const SAFE_LOCAL_KEYS = new Set(["STORAGE", "LOCAL_STORAGE_DIR", "AUTH_SECRET", "LOCAL_INSTANCE_NONCE", "HARNESS_LOCAL_INIT", "LOCAL_NEUTRALIZED_ENV_KEYS", "NODE_ENV"]);
 const REQUIRED_NODE_VERSION = [20, 9, 0];
 const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
-const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+const SUPERVISOR_PATH = fileURLToPath(new URL("./init-process-supervisor.mjs", import.meta.url));
+const SUPERVISOR_OWNERSHIP = new WeakMap();
+export const INIT_CANCELLATION_PHASES = Object.freeze([
+  "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle",
+]);
 
 export function choosePort(worktree) {
   let hash = 2166136261;
@@ -145,40 +150,181 @@ export async function acquireInitLock(lockPath, options) {
   return acquireDirectoryLock(lockPath, { timeoutMs: DEFAULT_INIT_LOCK_TIMEOUT_MS, confinementRoot: dirname(lockPath), ...options });
 }
 
-export function spawnProcessGroup(command, args, options = {}) {
-  return spawn(command, args, { ...options, detached: true, stdio: options.stdio ?? "ignore" });
-}
+export async function spawnSupervisedProcess(command, args, options = {}, {
+  signal,
+  spawnImpl = spawn,
+  handshakeTimeoutMs = 10_000,
+} = {}) {
+  signal?.throwIfAborted();
+  const nonce = randomUUID();
+  const requestedStdio = options.stdio ?? "ignore";
+  const childStdio = Array.isArray(requestedStdio)
+    ? requestedStdio
+    : Array.from({ length: 3 }, () => requestedStdio);
+  const supervisorStdio = [...childStdio, "ipc"];
+  const config = JSON.stringify({ command, args, cwd: options.cwd, stdioLength: childStdio.length });
+  let child;
+  try {
+    child = spawnImpl(process.execPath, [SUPERVISOR_PATH], {
+      cwd: options.cwd,
+      detached: true,
+      env: { ...(options.env ?? process.env), HARNESS_INIT_SUPERVISOR_NONCE: nonce, HARNESS_INIT_SUPERVISOR_CONFIG: config },
+      stdio: supervisorStdio,
+    });
+  } catch (error) { throw error; }
 
-export function isProcessGroupAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try { process.kill(-pid, 0); return true; }
-  catch (error) { return error?.code === "EPERM"; }
-}
-
-async function waitForProcessGroupExit(pid, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!isProcessGroupAlive(pid)) return true;
-    await delay(25);
+  let resolveOutcome;
+  const outcome = new Promise((resolve) => { resolveOutcome = resolve; });
+  let outcomeSettled = false;
+  const onOutcome = (message) => {
+    if (message?.type !== "outcome" || message.nonce !== nonce || outcomeSettled) return;
+    outcomeSettled = true;
+    resolveOutcome(message.error ? { error: Object.assign(new Error(message.error.message), { code: message.error.code }) } : { code: message.code, signal: message.signal });
+  };
+  child.on("message", onOutcome);
+  child.once("exit", (code, exitSignal) => {
+    if (!outcomeSettled) { outcomeSettled = true; resolveOutcome({ error: new Error(`supervisor exited before command outcome (${exitSignal ?? code})`) }); }
+  });
+  const owned = Object.freeze({ child, supervisorPid: child.pid, outcome });
+  const record = { child, nonce, supervisorPid: child.pid };
+  SUPERVISOR_OWNERSHIP.set(owned, record);
+  try {
+    await supervisorHandshake(child, nonce, handshakeTimeoutMs, signal);
+    return owned;
+  } catch (error) {
+    await terminateOwnedSupervisor(owned, { graceMs: 50, killWaitMs: 500 }).catch(() => {});
+    throw error;
   }
-  return !isProcessGroupAlive(pid);
 }
 
-function signalProcessGroup(pid, signal) {
-  try { process.kill(-pid, signal); }
-  catch { try { process.kill(pid, signal); } catch {} }
+async function supervisorHandshake(child, nonce, timeoutMs, signal) {
+  return new Promise((resolveHandshake, rejectHandshake) => {
+    let settled = false;
+    let startRequested = false;
+    const timer = setTimeout(() => finish(new Error(`supervisor ownership handshake timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer.unref();
+    const onMessage = (message) => {
+      if (message?.nonce !== nonce || message.supervisorPid !== child.pid) return;
+      if (message.type === "supervisor-ready" && !startRequested) {
+        startRequested = true;
+        try { signal?.throwIfAborted(); child.send({ type: "start", nonce }); }
+        catch (error) { finish(error); }
+      } else if (message.type === "started" && startRequested) finish(undefined, message);
+    };
+    const onError = (error) => finish(error);
+    const onExit = (code, exitSignal) => finish(new Error(`supervisor exited before ownership handshake (${exitSignal ?? code})`));
+    const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : new Error("init cancelled"));
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) rejectHandshake(error); else resolveHandshake(value);
+    }
+  });
 }
 
-export async function terminateProcessGroup(pid, { graceMs = 500, killWaitMs = 1_000 } = {}) {
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !isProcessGroupAlive(pid)) return;
-  signalProcessGroup(pid, "SIGTERM");
-  if (await waitForProcessGroupExit(pid, graceMs)) return;
-  signalProcessGroup(pid, "SIGKILL");
-  if (!await waitForProcessGroupExit(pid, killWaitMs)) throw new Error(`process group ${pid} survived SIGKILL`);
+export async function terminateOwnedSupervisor(owned, {
+  graceMs = 500,
+  killWaitMs = 1_000,
+  signalGroup = (pid, signal) => process.kill(-pid, signal),
+  beforeEscalate,
+} = {}) {
+  const record = SUPERVISOR_OWNERSHIP.get(owned);
+  if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid || !liveChild(record.child)) return false;
+  try { record.child.send({ type: "terminate", nonce: record.nonce }); } catch {}
+  if (await waitForChildExit(record.child, graceMs)) return true;
+  if (beforeEscalate) await beforeEscalate();
+  if (!liveChild(record.child)) return false;
+  const verified = await waitForSupervisorVerification(record, Math.min(250, killWaitMs));
+  if (!verified || !liveChild(record.child)) return false;
+  try { signalGroup(record.supervisorPid, "SIGKILL"); } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  if (!await waitForChildExit(record.child, killWaitMs)) throw new Error(`owned supervisor ${record.supervisorPid} survived SIGKILL`);
+  return true;
 }
 
-export async function failTimedOutStart({ worktree, pid, nonce, port, logPath }) {
-  await terminateProcessGroup(pid);
+function waitForSupervisorVerification(record, timeoutMs) {
+  if (!record.child.connected) return Promise.resolve(false);
+  return new Promise((resolveVerified) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    const onMessage = (message) => {
+      if (message?.type === "verified" && message.nonce === record.nonce && message.supervisorPid === record.supervisorPid) finish(true);
+    };
+    const onExit = () => finish(false);
+    record.child.on("message", onMessage);
+    record.child.once("exit", onExit);
+    try { record.child.send({ type: "verify", nonce: record.nonce }); } catch { finish(false); }
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      record.child.off("message", onMessage);
+      record.child.off("exit", onExit);
+      resolveVerified(value);
+    }
+  });
+}
+
+function liveChild(child) { return child.exitCode === null && child.signalCode === null; }
+
+function waitForChildExit(child, timeoutMs) {
+  if (!liveChild(child)) return Promise.resolve(true);
+  return new Promise((resolveExit) => {
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once("exit", onExit);
+    function onExit() { finish(true); }
+    function finish(value) { clearTimeout(timer); child.off("exit", onExit); resolveExit(value); }
+  });
+}
+
+export async function detachOwnedSupervisor(owned) {
+  const record = SUPERVISOR_OWNERSHIP.get(owned);
+  if (!record || !liveChild(record.child)) return false;
+  const detached = waitForAuthenticatedMessage(record, "detached", 500);
+  try { record.child.send({ type: "detach", nonce: record.nonce }); } catch { return false; }
+  if (!await detached || !liveChild(record.child)) return false;
+  record.child.unref();
+  return true;
+}
+
+function waitForAuthenticatedMessage(record, type, timeoutMs) {
+  return new Promise((resolveMatched) => {
+    let settled = false;
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    const onMessage = (message) => {
+      if (message?.type === type && message.nonce === record.nonce && message.supervisorPid === record.supervisorPid) finish(true);
+    };
+    const onExit = () => finish(false);
+    record.child.on("message", onMessage);
+    record.child.once("exit", onExit);
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      record.child.off("message", onMessage);
+      record.child.off("exit", onExit);
+      resolveMatched(value);
+    }
+  });
+}
+
+export async function failTimedOutStart({ worktree, owned, pid, nonce, port, logPath }) {
+  if (!owned || pid !== owned.supervisorPid) throw new Error("timed-out start requires the matching live supervisor handle");
+  await terminateOwnedSupervisor(owned);
   const state = resolve(worktree, ".harness-arena");
   await mkdir(state, { recursive: true, mode: 0o700 });
   await atomicWriteFile(join(state, "init-failure.json"), JSON.stringify({ reason: "readiness_timeout", pid, nonce, port, log: resolve(logPath), occurred_at: new Date().toISOString() }));
@@ -193,8 +339,8 @@ export async function readInstanceMetadata(state) {
   } catch { return undefined; }
 }
 
-export async function writeInstanceMetadata(state, metadata) {
-  await atomicWriteFile(join(state, "init.pid"), JSON.stringify(metadata));
+export async function writeInstanceMetadata(state, metadata, { beforePublish } = {}) {
+  await atomicWriteFile(join(state, "init.pid"), JSON.stringify(metadata), 0o600, undefined, { beforePublish });
 }
 
 export async function removeInstanceMetadataIfOwned(state, metadata) {
@@ -202,7 +348,10 @@ export async function removeInstanceMetadataIfOwned(state, metadata) {
   if (current?.pid === metadata.pid && current?.nonce === metadata.nonce) await rm(join(state, "init.pid"), { force: true });
 }
 
-export function waitForOwnershipHandshake(child, expected, timeoutMs = 10_000) {
+export function waitForOwnershipHandshake(child, expected, options = 10_000) {
+  const { timeoutMs, signal } = typeof options === "number"
+    ? { timeoutMs: options, signal: undefined }
+    : { timeoutMs: options?.timeoutMs ?? 10_000, signal: options?.signal };
   return new Promise((resolveHandshake, rejectHandshake) => {
     const channel = child.stdio?.[3];
     if (!channel) {
@@ -214,6 +363,7 @@ export function waitForOwnershipHandshake(child, expected, timeoutMs = 10_000) {
     const timer = setTimeout(() => finish(new Error(`local wrapper ownership handshake timed out after ${timeoutMs}ms`)), timeoutMs);
     const onError = (error) => finish(error);
     const onExit = (code, signal) => finish(new Error(`local wrapper exited before ownership handshake (${signal ?? code})`));
+    const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : new Error("ownership handshake cancelled"));
     const onData = (chunk) => {
       buffer += chunk;
       const newline = buffer.indexOf("\n");
@@ -234,6 +384,8 @@ export function waitForOwnershipHandshake(child, expected, timeoutMs = 10_000) {
     channel.once("error", onError);
     child.once("error", onError);
     child.once("exit", onExit);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     function finish(error, value) {
       if (settled) return;
@@ -243,28 +395,31 @@ export function waitForOwnershipHandshake(child, expected, timeoutMs = 10_000) {
       channel.off("error", onError);
       child.off("error", onError);
       child.off("exit", onExit);
+      signal?.removeEventListener("abort", onAbort);
       if (error) rejectHandshake(error); else resolveHandshake(value);
     }
   });
 }
 
-export async function probeInstance(metadata, timeoutMs = 1000) {
+export async function probeInstance(metadata, timeoutMs = 1000, signal) {
   if (!isProcessAlive(metadata.pid)) return undefined;
   try {
-    const response = await fetch(`http://127.0.0.1:${metadata.port}/api/ready`, { signal: AbortSignal.timeout(timeoutMs) });
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const response = await fetch(`http://127.0.0.1:${metadata.port}/api/ready`, { signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal });
     if (!response.ok) return undefined;
     const body = await response.json();
     return body.pid === metadata.pid && body.nonce === metadata.nonce && body.seeded === true && body.writable === true ? body : undefined;
   } catch { return undefined; }
 }
 
-export async function probeLocalInstance(metadata, timeoutMs = 1000) {
+export async function probeLocalInstance(metadata, timeoutMs = 1000, signal) {
   if (!isProcessAlive(metadata.pid)) return false;
   try {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const response = await fetch(`http://127.0.0.1:${metadata.port}/api/local-instance`, {
       headers: { "x-harness-local-instance-nonce": metadata.nonce },
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
     });
     return response.status === 204;
   } catch { return false; }

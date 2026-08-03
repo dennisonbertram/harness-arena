@@ -6,10 +6,12 @@ const [nextBin, ...nextArgs] = process.argv.slice(2);
 const state = process.env.HARNESS_INIT_STATE;
 const nonce = process.env.LOCAL_INSTANCE_NONCE;
 const port = Number.parseInt(process.env.LOCAL_INSTANCE_PORT ?? "", 10);
+const requestedSupervisorPid = Number.parseInt(process.env.HARNESS_INIT_SUPERVISOR_PID ?? "", 10);
+const supervisorPid = Number.isSafeInteger(requestedSupervisorPid) && requestedSupervisorPid > 0 ? requestedSupervisorPid : process.pid;
 if (!nextBin) throw new Error("local Next wrapper requires the Next CLI path");
 if (!state || !nonce || !Number.isSafeInteger(port) || port <= 0) throw new Error("local Next wrapper requires complete ownership metadata");
 
-const instance = { pid: process.pid, nonce, port, started_at: new Date().toISOString() };
+const instance = { pid: supervisorPid, nonce, port, started_at: new Date().toISOString() };
 let requestedSignal;
 let finalized = false;
 let child;
@@ -42,7 +44,7 @@ if (requestedSignal) {
 
 try {
   child = spawn(process.execPath, [nextBin, ...nextArgs], {
-    env: { ...process.env, LOCAL_INSTANCE_PID: String(process.pid) },
+    env: { ...process.env, LOCAL_INSTANCE_PID: String(supervisorPid) },
     stdio: "inherit",
   });
 } catch (error) {

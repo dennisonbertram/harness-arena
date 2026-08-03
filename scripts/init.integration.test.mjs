@@ -3,6 +3,7 @@ import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { atomicWriteFile } from "../lib/file-storage-lock.mjs";
 
 const repositoryRoot = process.cwd();
 const cleanupRoots = new Set();
@@ -99,7 +100,7 @@ async function createHermeticCheckout(prefix, { withFakeNext = false } = {}) {
   checkoutRoots.add(checkout);
   await mkdir(join(checkout, "scripts"), { recursive: true });
   await mkdir(join(checkout, "lib"), { recursive: true });
-  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
+  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
     await cp(join(repositoryRoot, path), join(checkout, path));
   }
   await chmod(join(checkout, "scripts/init.sh"), 0o755);
@@ -233,8 +234,8 @@ async function fakePnpm(checkout, label, exitCode = 0) {
   const path = join(bin, "pnpm");
   await writeFile(path, [
     "#!/usr/bin/env node",
-    "import { writeFile } from 'node:fs/promises';",
-    `await writeFile(${JSON.stringify(marker)}, String(process.pid));`,
+    `import { atomicWriteFile } from ${JSON.stringify(join(checkout, "lib", "file-storage-lock.mjs"))};`,
+    `await atomicWriteFile(${JSON.stringify(marker)}, String(process.pid));`,
     `process.exit(${exitCode});`,
   ].join("\n"));
   await chmod(path, 0o700);
@@ -255,13 +256,14 @@ async function fakeHungPnpm(checkout, label, eventPath) {
     "#!/usr/bin/env node",
     "import { spawn } from 'node:child_process';",
     "import { appendFileSync } from 'node:fs';",
-    "import { readFile, writeFile } from 'node:fs/promises';",
+    "import { readFile } from 'node:fs/promises';",
+    `import { atomicWriteFile } from ${JSON.stringify(join(checkout, "lib", "file-storage-lock.mjs"))};`,
     `const events = ${JSON.stringify(events)};`,
     "process.on('SIGTERM', () => appendFileSync(events, 'leader:SIGTERM\\n'));",
     "const descendant = `const { appendFileSync } = require('node:fs'); const events = process.argv[1]; process.on('SIGTERM', () => appendFileSync(events, 'descendant:SIGTERM\\\\n')); appendFileSync(events, 'descendant:ready\\\\n'); setInterval(() => {}, 1000);`;",
     "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
     "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
-    `await writeFile(${JSON.stringify(marker)}, JSON.stringify({ init: process.ppid, leader: process.pid, child: child.pid }));`,
+    `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(path, 0o700);
@@ -282,7 +284,7 @@ async function performCleanup() {
       preserved = env.bytes.equals(operatorEnvBytes) && env.mode === operatorEnvMode
         && local.bytes.equals(managedEnvLocalBytes()) && local.mode === operatorEnvLocalMode;
     } catch {}
-    await writeFile(process.env.HARNESS_INIT_META_PRESERVATION_MARKER, JSON.stringify({ preserved }));
+    await atomicWriteFile(process.env.HARNESS_INIT_META_PRESERVATION_MARKER, JSON.stringify({ preserved }));
   }
   for (const checkout of checkoutRoots) {
     try {
@@ -349,9 +351,9 @@ describe.sequential("init process ownership integration", () => {
     const fakePnpmPath = join(fakeBin, "pnpm");
     await writeFile(fakePnpmPath, [
       "#!/usr/bin/env node",
-      "import { writeFile } from 'node:fs/promises';",
+      `import { atomicWriteFile } from ${JSON.stringify(join(repositoryRoot, "lib", "file-storage-lock.mjs"))};`,
       "if (process.argv[2] === '--version') { console.log('10.0.0'); process.exit(0); }",
-      `if (process.argv[2] === 'install') { await writeFile(${JSON.stringify(marker)}, 'started'); await new Promise((resolve) => setTimeout(resolve, 16_000)); process.exit(0); }`,
+      `if (process.argv[2] === 'install') { await atomicWriteFile(${JSON.stringify(marker)}, 'started'); await new Promise((resolve) => setTimeout(resolve, 16_000)); process.exit(0); }`,
       "process.exit(2);",
     ].join("\n"));
     await chmod(fakePnpmPath, 0o700);
@@ -494,7 +496,7 @@ describe.skipIf(!["signal", "normal", "assertion"].includes(metaMode))("test-wor
     const result = await runInit("--no-install");
     expect(result.code, result.stderr).toBe(0);
     const instance = parseLastJson(result.stdout);
-    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
+    await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
     if (metaMode === "assertion") expect("deliberate assertion failure").toBe("success");
     if (metaMode === "normal") return;
     await new Promise(() => {});
@@ -507,7 +509,7 @@ describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisit
     const initExitMarker = `${process.env.HARNESS_INIT_META_MARKER}.init-exit`;
     const invocation = runInitWithEnv({ PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: "60000" }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker));
-    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
+    await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
       worker_pid: process.pid,
       init_pid: pids.init,
       prerequisite_leader_pid: pids.leader,
@@ -517,11 +519,38 @@ describe.skipIf(!metaMode?.startsWith("prerequisite-"))("test-worker prerequisit
     }));
     if (metaMode === "prerequisite-init") {
       const result = await invocation;
-      await writeFile(initExitMarker, JSON.stringify({ code: result.code, signal: result.signal }));
+      await atomicWriteFile(initExitMarker, JSON.stringify({ code: result.code, signal: result.signal }));
       expect(result.code === 0 && result.signal === null, result.stderr).toBe(false);
       return;
     }
     await new Promise(() => {});
+  });
+});
+
+describe.skipIf(!metaMode?.startsWith("phase-"))("test-worker phase barrier interruption fixture", () => {
+  it("publishes an initializer blocked at the requested lifecycle phase", async () => {
+    const phase = metaMode?.slice("phase-".length);
+    const phaseMarker = `${process.env.HARNESS_INIT_META_MARKER}.phase`;
+    const gate = `${process.env.HARNESS_INIT_META_MARKER}.gate`;
+    const exitMarker = `${process.env.HARNESS_INIT_META_MARKER}.init-exit`;
+    const invocation = runInitWithEnv({
+      NODE_ENV: "test",
+      HARNESS_INIT_TEST_PHASE: phase,
+      HARNESS_INIT_TEST_PHASE_MARKER: phaseMarker,
+      HARNESS_INIT_TEST_PHASE_GATE: gate,
+    }, "--no-install");
+    const published = JSON.parse(await waitForFile(phaseMarker));
+    await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({
+      worker_pid: process.pid,
+      init_pid: published.pid,
+      supervisor_pid: published.supervisor_pid,
+      phase,
+      state,
+      init_exit_marker: exitMarker,
+    }));
+    const result = await invocation;
+    await atomicWriteFile(exitMarker, JSON.stringify({ code: result.code, signal: result.signal }));
+    expect(result.code === 0 && result.signal === null, result.stderr).toBe(false);
   });
 });
 
@@ -530,7 +559,7 @@ describe.skipIf(metaMode !== "setup")("test-worker setup-failure cleanup fixture
     const result = await runInit("--no-install");
     expect(result.code, result.stderr).toBe(0);
     const instance = parseLastJson(result.stdout);
-    await writeFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
+    await atomicWriteFile(process.env.HARNESS_INIT_META_MARKER, JSON.stringify({ worker_pid: process.pid, server_pid: instance.pid }));
     throw new Error("deliberate setup failure");
   });
 

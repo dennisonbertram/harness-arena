@@ -41,6 +41,8 @@ async function terminateGroup(pid) {
 function spawnFixture(mode, marker, preservationMarker) {
   const testNamePattern = mode.startsWith("prerequisite-")
     ? "publishes a hung prerequisite"
+    : mode.startsWith("phase-")
+      ? "publishes an initializer blocked"
     : mode === "setup"
       ? "test-worker setup-failure cleanup fixture"
       : "publishes a fake server";
@@ -161,6 +163,38 @@ describe.sequential("integration harness process cleanup", () => {
       await waitForGroupExit(fixture.child.pid, 2_500);
     } finally {
       if (published?.prerequisite_leader_pid) await terminateGroup(published.prerequisite_leader_pid);
+      if (published?.init_pid) await terminateGroup(published.init_pid);
+      await terminateGroup(fixture.child.pid);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 25_000);
+
+  it.each([
+    "lock_wait",
+    "active_prerequisite",
+    "pre_server_spawn",
+    "ownership_handshake",
+    "readiness_poll",
+    "server_lifecycle",
+  ])("SIGTERM at the %s phase barrier cleans owned processes and releases the init lock", async (phase) => {
+    const directory = await mkdtemp(join(tmpdir(), `harness-arena-init-meta-phase-${phase}-`));
+    const marker = join(directory, "published.json");
+    const preservationMarker = join(directory, "preserved.json");
+    const fixture = spawnFixture(`phase-${phase}`, marker, preservationMarker);
+    let published;
+    try {
+      published = JSON.parse(await waitForFile(marker));
+      expect(published).toMatchObject({ phase, init_pid: expect.any(Number) });
+      process.kill(published.init_pid, "SIGTERM");
+      const result = await waitForClose(fixture.closed, 10_000);
+      expect(result.code, result.output).toBe(0);
+      expect(JSON.parse(await waitForFile(published.init_exit_marker))).toEqual({ code: null, signal: "SIGTERM" });
+      await waitForGroupExit(published.init_pid, 2_500);
+      if (published.supervisor_pid) await waitForGroupExit(published.supervisor_pid, 2_500);
+      await expect(readFile(join(published.state, "init.lock.owner"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      expect(JSON.parse(await waitForFile(preservationMarker))).toEqual({ preserved: true });
+    } finally {
+      if (published?.supervisor_pid) await terminateGroup(published.supervisor_pid);
       if (published?.init_pid) await terminateGroup(published.init_pid);
       await terminateGroup(fixture.child.pid);
       await rm(directory, { recursive: true, force: true });

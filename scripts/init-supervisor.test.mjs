@@ -77,6 +77,26 @@ describe("authenticated prerequisite supervisor", () => {
     expect(processAlive(tree.descendant)).toBe(false);
   });
 
+  it("stays group leader after the direct command exits until orphan descendants are reaped", async () => {
+    const root = await temp();
+    const marker = join(root, "orphan.json");
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const descendant = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+      "descendant.unref();",
+      "writeFileSync(process.argv[1], JSON.stringify({ descendant: descendant.pid }));",
+    ].join("\n");
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", script, marker], { cwd: root, stdio: "ignore" });
+    const tree = await waitForJson(marker);
+    await expect(owned.outcome).resolves.toMatchObject({ code: 0, signal: null });
+    expect(processAlive(owned.supervisorPid)).toBe(true);
+    expect(processAlive(tree.descendant)).toBe(true);
+
+    await expect(init.terminateOwnedSupervisor(owned, { graceMs: 40, killWaitMs: 2_000 })).resolves.toBe(true);
+    expect(processAlive(tree.descendant)).toBe(false);
+  });
+
   it("never signals an injected, cloned, or already-exited ownership record", async () => {
     const root = await temp();
     const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
@@ -84,6 +104,7 @@ describe("authenticated prerequisite supervisor", () => {
     await new Promise((resolveSpawn, rejectSpawn) => { unrelated.once("spawn", resolveSpawn); unrelated.once("error", rejectSpawn); });
     const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", "process.exit(0)"], { cwd: root, stdio: "ignore" });
     await owned.outcome;
+    await init.terminateOwnedSupervisor(owned, { graceMs: 20 });
     await waitForExit(owned.child);
     const signalGroup = vi.fn();
 
@@ -121,6 +142,20 @@ describe("authenticated prerequisite supervisor", () => {
     const neverSpawn = vi.fn();
     await expect(init.spawnSupervisedProcess("ignored", [], {}, { spawnImpl: neverSpawn, signal: controller.signal })).rejects.toThrow(/cancel before spawn/);
     expect(neverSpawn).not.toHaveBeenCalled();
+
+    const root = await temp();
+    const marker = join(root, "must-not-start");
+    const duringHandshake = new AbortController();
+    let supervisor;
+    const pending = init.spawnSupervisedProcess(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`], { cwd: root, stdio: "ignore" }, {
+      signal: duringHandshake.signal,
+      spawnImpl: (...args) => { supervisor = spawn(...args); return supervisor; },
+    });
+    duringHandshake.abort(new Error("cancel during handshake"));
+    await expect(pending).rejects.toThrow(/cancel during handshake/);
+    await waitForExit(supervisor);
+    expect(processAlive(supervisor.pid)).toBe(false);
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 

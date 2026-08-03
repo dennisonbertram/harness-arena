@@ -59,15 +59,16 @@ describe("detached local ownership handoff", () => {
 
     const launcher = join(root, "launcher.mjs");
     const wrapper = resolve("scripts/local-next-wrapper.mjs");
+    const atomic = resolve("lib/file-storage-lock.mjs");
     await writeFile(launcher, [
       "import { spawn } from 'node:child_process';",
-      "import { writeFile } from 'node:fs/promises';",
+      `import { atomicWriteFile } from ${JSON.stringify(atomic)};`,
       `const child = spawn(process.execPath, [${JSON.stringify(wrapper)}, ${JSON.stringify(fakeNext)}], {`,
       "  detached: true,",
       "  stdio: 'ignore',",
       `  env: { PATH: process.env.PATH, HARNESS_INIT_STATE: ${JSON.stringify(state)}, LOCAL_INSTANCE_NONCE: 'handoff-nonce', LOCAL_INSTANCE_PORT: '29991' },`,
       "});",
-      `await writeFile(${JSON.stringify(wrapperPidPath)}, String(child.pid));`,
+      `await atomicWriteFile(${JSON.stringify(wrapperPidPath)}, String(child.pid));`,
       "child.unref();",
       "process.exit(23);",
     ].join("\n"));

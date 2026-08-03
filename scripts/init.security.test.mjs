@@ -155,11 +155,11 @@ describe("init security and lifecycle", () => {
 
   it("retains secret-safe failure evidence while terminating a timed-out process group", async () => {
     const root = await temp();
-    const child = init.spawnProcessGroup(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { cwd: root, env: { PATH: process.env.PATH } });
-    await init.failTimedOutStart({ worktree: root, pid: child.pid, nonce: "nonce-1", port: 29999, logPath: join(root, "safe.log") });
-    expect(init.isProcessAlive(child.pid)).toBe(false);
+    const owned = await init.spawnSupervisedProcess(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { cwd: root, env: { PATH: process.env.PATH }, stdio: "ignore" });
+    await init.failTimedOutStart({ worktree: root, owned, pid: owned.supervisorPid, nonce: "nonce-1", port: 29999, logPath: join(root, "safe.log") });
+    expect(init.isProcessAlive(owned.supervisorPid)).toBe(false);
     const failure = JSON.parse(await readFile(join(root, ".harness-arena", "init-failure.json"), "utf8"));
-    expect(failure).toMatchObject({ nonce: "nonce-1", pid: child.pid, port: 29999, reason: "readiness_timeout" });
+    expect(failure).toMatchObject({ nonce: "nonce-1", pid: owned.supervisorPid, port: 29999, reason: "readiness_timeout" });
     expect(JSON.stringify(failure)).not.toMatch(/TOKEN|SECRET|KEY=/);
   });
 });
