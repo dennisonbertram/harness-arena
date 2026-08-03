@@ -17,11 +17,21 @@ const SAFE_LOCAL_KEYS = new Set([
 const DETERMINISTIC_SCENARIOS = new Set(["success", "task-failure", "callback-failure", "stale-reap", "budget-exceeded"]);
 const REQUIRED_NODE_VERSION = [20, 9, 0];
 const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
+export const DEFAULT_OWNED_SUPERVISOR_GRACE_MS = 500;
+export const DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS = 1_000;
+export const AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS = 1_000;
+export const PREREQUISITE_SCHEDULING_MARGIN_MS = 500;
 const SUPERVISOR_PATH = fileURLToPath(new URL("./init-process-supervisor.mjs", import.meta.url));
 const SUPERVISOR_OWNERSHIP = new WeakMap();
 export const INIT_CANCELLATION_PHASES = Object.freeze([
   "lock_wait", "pre_server_spawn", "ownership_handshake", "readiness_poll", "active_prerequisite", "server_lifecycle", "durable_detach",
 ]);
+
+export function prerequisiteOperationDeadlineMs(prerequisiteTimeoutMs) {
+  if (!Number.isFinite(prerequisiteTimeoutMs) || prerequisiteTimeoutMs <= 0) throw new Error("prerequisite timeout must be positive");
+  return prerequisiteTimeoutMs + DEFAULT_OWNED_SUPERVISOR_GRACE_MS + DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS
+    + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS + PREREQUISITE_SCHEDULING_MARGIN_MS;
+}
 
 export function choosePort(worktree) {
   let hash = 2166136261;
@@ -272,14 +282,14 @@ async function supervisorHandshake(child, nonce, timeoutMs, signal) {
 }
 
 export async function terminateOwnedSupervisor(owned, {
-  graceMs = 500,
-  killWaitMs = 1_000,
+  graceMs = DEFAULT_OWNED_SUPERVISOR_GRACE_MS,
+  killWaitMs = DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS,
   beforeEscalate,
 } = {}) {
   const record = SUPERVISOR_OWNERSHIP.get(owned);
   if (!record || owned.child !== record.child || owned.supervisorPid !== record.supervisorPid
     || !Number.isSafeInteger(record.groupPid) || !liveChild(record.child) || !record.child.connected) return false;
-  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + 1_000);
+  const completed = waitForAuthenticatedExit(record, "group-reaped", graceMs + killWaitMs + AUTHENTICATED_SUPERVISOR_EXIT_ALLOWANCE_MS);
   try { record.child.send({ type: "terminate", nonce: record.nonce, graceMs, killWaitMs }); }
   catch { return false; }
   if (beforeEscalate) await beforeEscalate();

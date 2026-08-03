@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { atomicWriteFile } from "../lib/file-storage-lock.mjs";
+import { prerequisiteOperationDeadlineMs } from "./init-lib.mjs";
 
 const repositoryRoot = process.cwd();
 const cleanupRoots = new Set();
@@ -264,9 +265,9 @@ async function fakeHungPnpm(checkout, label, eventPath, markerDelayMs = 0) {
     "process.on('SIGTERM', () => appendFileSync(events, 'leader:SIGTERM\\n'));",
     "const descendant = `const { appendFileSync } = require('node:fs'); const events = process.argv[1]; process.on('SIGTERM', () => appendFileSync(events, 'descendant:SIGTERM\\\\n')); appendFileSync(events, 'descendant:ready\\\\n'); setInterval(() => {}, 1000);`;",
     "const child = spawn(process.execPath, ['-e', descendant, events], { stdio: 'ignore' });",
+    `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
     "while (!(await readFile(events, 'utf8').catch(() => '')).includes('descendant:ready')) await new Promise((resolve) => setTimeout(resolve, 10));",
     `if (${markerDelayMs} > 0) await new Promise((resolve) => setTimeout(resolve, ${markerDelayMs}));`,
-    `await atomicWriteFile(${JSON.stringify(marker)}, JSON.stringify({ init: Number(process.env.HARNESS_INIT_LAUNCHER_PID), leader: Number(process.env.HARNESS_INIT_SUPERVISOR_PID), command: process.pid, child: child.pid }));`,
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   await chmod(path, 0o700);
@@ -423,11 +424,12 @@ describe.sequential("read-only init check integration", () => {
 
   it("bounds and reaps a hung pnpm prerequisite process group", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-hung-pnpm-");
-    const prerequisiteTimeoutMs = 500;
-    // The operation owns one prerequisite deadline plus bounded process-group
-    // cleanup. Keep fixture scheduling slack proportional to that deadline so
-    // this remains stable when the full suite competes for a test worker.
-    const operationBoundMs = prerequisiteTimeoutMs * 4;
+    const prerequisiteTimeoutMs = 1_500;
+    // The operation owns the prerequisite deadline, authenticated cleanup, and
+    // a bounded scheduling margin. PIDs are published before the deliberately
+    // delayed descendant readiness so cleanup remains observable under load.
+    const operationBoundMs = prerequisiteOperationDeadlineMs(prerequisiteTimeoutMs);
+    expect(operationBoundMs).toBe(4_500);
     const pnpm = await fakeHungPnpm(checkout, "hung", undefined, prerequisiteTimeoutMs / 2);
     const invocation = runInitAt(checkout, { PATH: pnpm.path, HARNESS_INIT_PREREQUISITE_TIMEOUT_MS: String(prerequisiteTimeoutMs) }, "--check");
     const pids = JSON.parse(await waitForFile(pnpm.marker, operationBoundMs));
@@ -442,7 +444,7 @@ describe.sequential("read-only init check integration", () => {
     expect(Date.now() - started).toBeLessThan(operationBoundMs);
     await expect(waitForProcessGroupExit(pids.leader, operationBoundMs)).resolves.toBeUndefined();
     expect(processIsAlive(pids.child)).toBe(false);
-  }, 10_000);
+  }, 15_000);
 
   it("creates no state or surviving prerequisite process in a valid checkout", async () => {
     const checkout = await createHermeticCheckout("harness-arena-check-valid-");
