@@ -121,24 +121,40 @@ function productionDomain(overrides = {}) {
 function developmentStoreResponse(overrides = {}) {
   return {
     store: {
-      id: DEVELOPMENT_STORE_ID,
-      ownerId: TEAM_ID,
-      type: "blob",
+      ...currentDevelopmentStoreResponse().store,
+      ...overrides,
+    },
+  };
+}
+
+function currentDevelopmentStoreResponse() {
+  return {
+    store: {
       access: "private",
-      status: "available",
-      totalConnectedProjects: 1,
+      billingState: "active",
+      count: 0,
+      createdAt: 1785709088100,
+      id: DEVELOPMENT_STORE_ID,
+      isTokenExpired: false,
+      name: DEVELOPMENT_PROJECT_NAME,
+      ownerId: TEAM_ID,
       projectsMetadata: [{
-        projectId: DEVELOPMENT_PROJECT_ID,
-        name: DEVELOPMENT_PROJECT_NAME,
-        framework: "nextjs",
-        latestDeployment: null,
-        current: true,
-        environments: ["production", "preview", "development"],
         envVarPrefix: "BLOB",
         environmentVariables: ["BLOB_READ_WRITE_TOKEN"],
+        environments: ["production", "preview", "development"],
+        framework: "nextjs",
         id: "spc_development",
+        latestDeployment: null,
+        name: DEVELOPMENT_PROJECT_NAME,
+        projectId: DEVELOPMENT_PROJECT_ID,
       }],
-      ...overrides,
+      region: "iad1",
+      size: 0,
+      status: "available",
+      totalConnectedProjects: 1,
+      type: "blob",
+      updatedAt: 1785709088100,
+      usageQuotaExceeded: false,
     },
   };
 }
@@ -345,6 +361,19 @@ describe("trusted remote Git provenance", () => {
 });
 
 describe("bounded read-only Vercel adapter", () => {
+  it("accepts the current complete nested Blob store shape", async () => {
+    const api = subject.createReadOnlyVercelApi({
+      fetchImpl: verifierApiFetch({ developmentStore: currentDevelopmentStoreResponse() }),
+    });
+
+    await expect(api.inspect({
+      projectId: DEVELOPMENT_PROJECT_ID,
+      teamId: TEAM_ID,
+      storeId: DEVELOPMENT_STORE_ID,
+      token: TOKEN,
+    })).resolves.toEqual(inspection());
+  });
+
   it("accepts the real nested private Blob store metadata", async () => {
     const api = subject.createReadOnlyVercelApi({
       fetchImpl: verifierApiFetch({ developmentStore: developmentStoreResponse() }),

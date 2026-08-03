@@ -284,17 +284,33 @@ function identical(left, right) {
 }
 
 function normalizeDevelopmentStore(value, { storeId, projectId }) {
-  const storeKeys = ["id", "ownerId", "type", "access", "status", "totalConnectedProjects", "projectsMetadata"];
-  const projectKeys = [
-    "projectId",
+  const storeKeys = [
+    "access",
+    "billingState",
+    "count",
+    "createdAt",
+    "id",
+    "isTokenExpired",
     "name",
-    "framework",
-    "latestDeployment",
-    "current",
-    "environments",
+    "ownerId",
+    "projectsMetadata",
+    "region",
+    "size",
+    "status",
+    "totalConnectedProjects",
+    "type",
+    "updatedAt",
+    "usageQuotaExceeded",
+  ];
+  const projectKeys = [
     "envVarPrefix",
     "environmentVariables",
+    "environments",
+    "framework",
     "id",
+    "latestDeployment",
+    "name",
+    "projectId",
   ];
   const allowedEnvironments = new Set(["production", "preview", "development"]);
   if (!exactKeys(value, ["store"]) || !exactKeys(value.store, storeKeys)) throw denied();
@@ -305,6 +321,21 @@ function normalizeDevelopmentStore(value, { storeId, projectId }) {
     || store.type !== "blob"
     || store.access !== "private"
     || store.status !== "available"
+    || store.name !== DEVELOPMENT_PROJECT_NAME
+    || typeof store.billingState !== "string"
+    || !store.billingState
+    || typeof store.region !== "string"
+    || !store.region
+    || !Number.isSafeInteger(store.count)
+    || store.count < 0
+    || !Number.isSafeInteger(store.size)
+    || store.size < 0
+    || !Number.isSafeInteger(store.createdAt)
+    || store.createdAt < 0
+    || !Number.isSafeInteger(store.updatedAt)
+    || store.updatedAt < 0
+    || typeof store.isTokenExpired !== "boolean"
+    || typeof store.usageQuotaExceeded !== "boolean"
     || store.totalConnectedProjects !== 1
     || !Array.isArray(store.projectsMetadata)
     || store.projectsMetadata.length !== 1
@@ -319,6 +350,7 @@ function normalizeDevelopmentStore(value, { storeId, projectId }) {
     || typeof metadata.id !== "string"
     || !metadata.id
     || metadata.envVarPrefix !== "BLOB"
+    || (metadata.latestDeployment !== null && (typeof metadata.latestDeployment !== "string" || !metadata.latestDeployment))
     || !Array.isArray(metadata.environments)
     || metadata.environments.length === 0
     || metadata.environments.some((environment) => typeof environment !== "string" || !allowedEnvironments.has(environment))
