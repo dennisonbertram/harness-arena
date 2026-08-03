@@ -12,7 +12,9 @@ describe("local deterministic HTTP smoke", () => {
       id: "run-1", submission_id: "sub-1", status: "completed", task_results: [], created_at: new Date().toISOString(),
     }));
     const responses = [
-      new Response(JSON.stringify({ ok: true, seeded: true, writable: true }), { status: 200 }),
+      new Response(JSON.stringify({
+        ok: true, seeded: true, writable: true, execution_mode: "deterministic-success", development_identity: "seeded",
+      }), { status: 200 }),
       new Response(JSON.stringify({ submission_id: "sub-1", run_id: "run-1", run_ids: ["run-1"], status: "queued" }), { status: 200 }),
       new Response(JSON.stringify({ id: "run-1", status: "completed" }), { status: 200 }),
       new Response(JSON.stringify([

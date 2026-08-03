@@ -12,7 +12,6 @@ vi.mock("@/lib/storage", async (importOriginal) => {
 
 import { executeDeterministicRun } from "./deterministic-execution";
 
-const scenarios = ["success", "task-failure", "callback-failure", "stale-reap", "budget-exceeded"] as const;
 const originalFetch = globalThis.fetch;
 
 function records(id: string): { run: Run; submission: Submission } {
@@ -28,10 +27,12 @@ beforeEach(() => {
   mockSandboxCreate.mockReset();
   globalThis.fetch = vi.fn(() => { throw new Error("deterministic mode attempted network access"); }) as typeof fetch;
   vi.stubEnv("RUNNER_CALLBACK_SECRET", "deterministic-test-secret");
+  vi.stubEnv("NODE_ENV", "development");
   vi.stubEnv("HARNESS_EXECUTION_MODE", "deterministic-success");
   vi.stubEnv("HARNESS_LOCAL_INIT", "1");
   vi.stubEnv("HARNESS_GIT_BRANCH", "codex/deterministic-local-sandbox");
   vi.stubEnv("STORAGE", "file");
+  for (const key of ["VERCEL", "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_PROJECT_ID"]) vi.stubEnv(key, "");
 });
 
 afterEach(() => {

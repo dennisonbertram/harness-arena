@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/auth", () => ({ auth: vi.fn() }));
 import { auth } from "@/auth";
 import { mintAgentToken } from "./agent-token";
+import { resolveSeededDevelopmentIdentity } from "./development-identity";
 import { resolveIdentity } from "./identity";
 import { asMockAuth } from "./test-support/auth-mock";
 
@@ -70,5 +71,57 @@ describe("resolveIdentity", () => {
     for (const [key, value] of Object.entries(base)) vi.stubEnv(key, value);
 
     await expect(resolveIdentity(new NextRequest("http://127.0.0.1:3000/api/submissions"))).resolves.toBeNull();
+  });
+});
+
+describe("hosted seeded Development identity", () => {
+  const manifest = {
+    environment: "development",
+    branch: "dev",
+    git: { provider: "github", repository: "dennisonbertram/harness-arena", productionBranch: "dev" },
+    vercelProject: { id: "prj_development", name: "harness-arena-development" },
+    host: "harness-arena-development.example.test",
+    store: { id: "store_development" },
+    callbackOrigin: "https://harness-arena-development.example.test",
+    live: {
+      projectId: "prj_live",
+      aliases: ["harness-arena-live.example.test"],
+      storeIds: ["store_live"],
+    },
+  };
+  const valid = {
+    HARNESS_DEVELOPMENT_IDENTITY: "seeded",
+    VERCEL: "1",
+    VERCEL_ENV: "production",
+    VERCEL_PROJECT_ID: manifest.vercelProject.id,
+    VERCEL_GIT_COMMIT_REF: manifest.branch,
+    STORAGE: "blob",
+    BLOB_READ_WRITE_TOKEN: "configured-without-inspection",
+    HARNESS_BLOB_STORE_ID: manifest.store.id,
+    CALLBACK_BASE: manifest.callbackOrigin,
+  };
+
+  it("accepts only the fully manifest-bound isolated Development identity", () => {
+    expect(resolveSeededDevelopmentIdentity(
+      new NextRequest(`${manifest.callbackOrigin}/api/submissions`),
+      valid,
+      manifest as never,
+    )).toEqual({ githubId: -144, githubLogin: "harness-local-development" });
+  });
+
+  it.each([
+    ["missing project", { VERCEL_PROJECT_ID: "" }, manifest.callbackOrigin],
+    ["unknown project", { VERCEL_PROJECT_ID: "prj_unknown" }, manifest.callbackOrigin],
+    ["live project", { VERCEL_PROJECT_ID: manifest.live.projectId }, manifest.callbackOrigin],
+    ["main branch", { VERCEL_GIT_COMMIT_REF: "main" }, manifest.callbackOrigin],
+    ["live store", { HARNESS_BLOB_STORE_ID: manifest.live.storeIds[0] }, manifest.callbackOrigin],
+    ["live callback", { CALLBACK_BASE: `https://${manifest.live.aliases[0]}` }, manifest.callbackOrigin],
+    ["live request alias", {}, `https://${manifest.live.aliases[0]}`],
+  ])("rejects %s", (_label, override, requestOrigin) => {
+    expect(resolveSeededDevelopmentIdentity(
+      new NextRequest(`${requestOrigin}/api/submissions`),
+      { ...valid, ...override },
+      manifest as never,
+    )).toBeNull();
   });
 });

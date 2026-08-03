@@ -32,6 +32,8 @@ export async function GET() {
       pid: Number.parseInt(process.env.LOCAL_INSTANCE_PID ?? String(process.pid), 10),
       nonce: process.env.LOCAL_INSTANCE_NONCE ?? null,
       environment_sanitized: environmentSanitized,
+      execution_mode: isVerifiedLocalInit ? process.env.HARNESS_EXECUTION_MODE ?? null : null,
+      development_identity: isVerifiedLocalInit ? process.env.HARNESS_DEVELOPMENT_IDENTITY ?? null : null,
       ...(localReadiness ?? {}),
     });
   } catch {
