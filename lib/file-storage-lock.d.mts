@@ -20,6 +20,20 @@ export function acquireDirectoryLock(lockPath: string, options?: {
   beforeDeadFenceRemoved?: () => void | Promise<void>;
   afterDeadFenceRemoved?: () => void | Promise<void>;
 }): Promise<() => Promise<void>>;
-export function appendRunEventsFile(root: string, runId: string, values: NewRunEvent[]): Promise<RunEvent[]>;
+export function appendRunEventsFile(root: string, runId: string, values: NewRunEvent[], options?: {
+  lock?: {
+    staleMs?: number;
+    timeoutMs?: number;
+    pollMs?: number;
+    beforePublish?: () => void | Promise<void>;
+    afterOrderAllocated?: () => void | Promise<void>;
+    afterClaimPublished?: () => void | Promise<void>;
+    afterFencePrepared?: () => void | Promise<void>;
+    afterFencePublished?: () => void | Promise<void>;
+    afterDeadFencePinned?: () => void | Promise<void>;
+    beforeDeadFenceRemoved?: () => void | Promise<void>;
+    afterDeadFenceRemoved?: () => void | Promise<void>;
+  };
+}): Promise<RunEvent[]>;
 export function readRunEventsFile(root: string, runId: string): Promise<RunEvent[]>;
 export function latestEventTimestampFile(root: string, runId: string): Promise<string | undefined>;
