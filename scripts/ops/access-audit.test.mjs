@@ -533,6 +533,18 @@ describe("least-privilege access policy", () => {
         { method: "DELETE", source: "DELETE", canonical_denial: true },
       ] }),
     ]) });
+    const { methodNotAllowed } = await import("../../lib/ops-route");
+    for (const route of coverage.routes) {
+      const loader = routeModules[`../../${route.file}`];
+      expect(loader, route.file).toBeTypeOf("function");
+      const routeModule = await loader();
+      for (const handler of route.handlers) {
+        expect(routeModule[handler.method], `${route.pathname} ${handler.method}`).toBe(methodNotAllowed);
+        const response = await routeModule[handler.method](new Request(`http://localhost${route.pathname}`, { method: handler.method }));
+        expect(response.status, `${route.pathname} ${handler.method}`).toBe(405);
+        expect(response.headers.get("allow"), `${route.pathname} ${handler.method}`).toBe("GET");
+      }
+    }
 
     const raw = await evidence("viewer");
     raw.ops.mutation_route_coverage = coverage;
