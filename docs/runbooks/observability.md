@@ -19,10 +19,10 @@ Local and isolated-development evidence must never be described as production pr
 For the isolated development project only, start from the deployment serving its
 development hostname, then query its logs with the Vercel CLI. Filter JSON
 messages by `event`, `run_id`, or `trace_id`; compare the deployment SHA in each
-event with the deployment under investigation. Every ended OpenTelemetry span is
-also exported as a redacted `trace.span` JSON event, so agents retain a queryable
-trace path even when no OTLP collector is configured. An explicitly configured
-OTLP collector is an additive sink, not the only copy.
+event with the deployment under investigation. Root/server/error spans are
+exported as redacted `trace.span` JSON events, so agents retain a queryable trace
+path even when no OTLP collector is configured. An explicitly configured OTLP
+collector is an additive sink, not the only copy.
 
 For an error, begin with `request.error`, then follow the trace/span fields to
 storage, sandbox, dispatch, provider, callback, or cron events. Route-level
@@ -32,13 +32,21 @@ and search only with an approved Vercel access path.
 
 ## Local behavior
 
-`instrumentation.ts` disables `@vercel/otel`'s automatic exporters so every span
-crosses the safe-clone boundary. The always-on exporter writes bounded
-`trace.span` JSON events to runtime logs. If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-`OTEL_EXPORTER_OTLP_ENDPOINT`, or Vercel's HTTP/protobuf collector discovery
-variables prove a collector exists, the same safe clone is additionally sent
-through the official OTLP HTTP/protobuf exporter. Never re-enable an automatic
-exporter as a debugging workaround because that bypasses the safe clone boundary.
+`instrumentation.ts` disables `@vercel/otel`'s automatic exporters so every
+retained span crosses the safe-clone boundary. A flushable queue retains only
+root/server/error spans, caps the pending queue at 32 spans and batches at 16;
+automatic child spans therefore cannot synchronously flood runtime logs.
+`trace.span_dropped` is rate-limited and the safe `structuredSpanReadiness()`
+surface exposes queued/dropped counts and an unready reason without collector
+headers or their values. Serverless shutdown/force-flush drains the bounded queue.
+
+OTLP is enabled only for an explicit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_ENDPOINT`, or Vercel's discovered HTTP/protobuf collector.
+The trace-specific `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`/`_HEADERS` override
+their general `OTEL_EXPORTER_OTLP_PROTOCOL`/`_HEADERS` counterparts; supported
+protocols are `http/protobuf` and `http/json`. Invalid endpoints or headers and
+unsupported protocols fail closed before a request is sent. Header values must
+never be printed, copied into diagnostics, or pasted into an incident.
 
 ## Rollback
 

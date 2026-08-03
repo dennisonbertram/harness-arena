@@ -2,7 +2,6 @@ import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ExportResultCode } from "@opentelemetry/core";
 import { createSafeSpanProcessors, createSafeSpanProcessor, onRequestError, StructuredSpanExporter, structuredSpanReadiness } from "./instrumentation";
 
 describe("onRequestError", () => {
@@ -125,13 +124,15 @@ describe("onRequestError", () => {
   it("fails structured export when the runtime log sink does not acknowledge retention", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => { throw new Error("runtime log sink unavailable"); });
     const exporter = new StructuredSpanExporter();
-    const result = await new Promise<{ code: ExportResultCode }>((resolve) => exporter.export([], resolve));
-    expect(result.code).toBe(ExportResultCode.FAILED);
+    const span = { name: "root", kind: SpanKind.SERVER, spanContext: () => ({ traceId: "1".repeat(32), spanId: "2".repeat(16), traceFlags: 1 }), status: { code: SpanStatusCode.OK }, attributes: {} } as ReadableSpan;
+    const result = await new Promise<{ code: number }>((resolve) => exporter.export([span], resolve));
+    expect(result.code).toBe(1);
     spy.mockRestore();
   });
 
   it("bounds automatic span retention, preserves a root span, and publishes safe drop readiness", async () => {
-    const exporter = { export: vi.fn((_spans: ReadableSpan[], callback: (result: { code: ExportResultCode }) => void) => callback({ code: ExportResultCode.SUCCESS })), forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const exporter = { export: vi.fn((_spans: ReadableSpan[], callback: (result: { code: 0 }) => void) => callback({ code: 0 })), forceFlush: async () => {}, shutdown: async () => {} } satisfies SpanExporter;
     const processor = createSafeSpanProcessor(exporter);
     const provider = new BasicTracerProvider({ spanProcessors: [processor] });
     const tracer = provider.getTracer("test");
@@ -142,6 +143,7 @@ describe("onRequestError", () => {
     expect(structuredSpanReadiness()).toMatchObject({ ready: true, dropped: expect.any(Number) });
     expect(structuredSpanReadiness().dropped).toBeGreaterThan(0);
     await provider.shutdown();
+    logSpy.mockRestore();
   });
 
   it("fails closed for unsupported configured OTLP protocol without exposing header values", () => {
@@ -150,5 +152,15 @@ describe("onRequestError", () => {
     vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=Bearer secret-value");
     expect(createSafeSpanProcessors()).toHaveLength(1);
     expect(structuredSpanReadiness()).toMatchObject({ ready: false, reason: "unsupported_protocol" });
+  });
+
+  it("accepts standard trace-specific HTTP JSON headers without emitting their values", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.test/v1/traces");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/json");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-tenant=arena,authorization=Bearer secret-value");
+    expect(createSafeSpanProcessors()).toHaveLength(2);
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-value");
+    spy.mockRestore();
   });
 });
