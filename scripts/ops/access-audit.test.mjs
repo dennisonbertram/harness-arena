@@ -536,6 +536,20 @@ describe("least-privilege access policy", () => {
     expect(calls.filter(([, method]) => method === "POST")).toEqual([["https://harness-arena-development.vercel.app/api/ops/v1", "POST", "Bearer development-read-token"]]);
   });
 
+  it("never sends a mutation denial probe to Production", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const fetchImpl = vi.fn();
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: { OPS_READ_TOKEN: "production-read-token", VERCEL_PROJECT_ID: policy.capabilities.get_only_ops.targets.production.project_id, HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app" },
+      commandRunner: vi.fn(), fetchImpl,
+    });
+
+    expect(collected.ops).toMatchObject({ state: "missing", reason: "ops_mutation_probe_development_only" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("uses a 0600 ephemeral secret file, redacts output, and cleans up on success", async () => {
     const audit = await subject();
     let secretPath;
