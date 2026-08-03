@@ -24,7 +24,7 @@ describe("read-only Development Vercel Cron scheduler", () => {
     expect(runbook).toMatch(/PRODUCTION_OPS_READ_TOKEN/);
     expect(runbook).toMatch(/access_blocked/);
     expect(runbook).toMatch(/monitor\.observation/);
-    expect(runbook).toMatch(/once daily/i);
+    expect(runbook).toMatch(/once[- ]daily/i);
     expect(runbook).toMatch(/\/api\/cron\/reap/);
     expect(runbook).toMatch(/OpenTelemetry|trace/i);
     expect(runbook).toMatch(/rollback/i);

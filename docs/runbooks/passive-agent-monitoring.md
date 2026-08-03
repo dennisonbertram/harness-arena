@@ -1,12 +1,14 @@
 # Passive agent monitoring
 
-The only scheduled monitor runs in the isolated Development Vercel project
-`harness-arena-development` (`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`). At minute
-17 and 47, Vercel Cron sends an authenticated GET to
-`/api/cron/agent-monitor`. The route fails closed unless the immutable runtime
-project ID is exact, `VERCEL_ENV=production` for that project, the request uses
-the canonical `https://harness-arena-development.vercel.app` origin, and the
-bearer value exactly matches a 32-byte-or-longer `CRON_SECRET`.
+The isolated Development Vercel project
+`harness-arena-development` (`prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA`) has two
+once-daily scheduled backstops, in deterministic order: at 03:00 UTC,
+`/api/cron/reap` reaps stale runs and ensures the baseline; at 03:17 UTC,
+Vercel Cron sends an authenticated GET to `/api/cron/agent-monitor`. The
+monitor route fails closed unless the immutable runtime project ID is exact,
+`VERCEL_ENV=production` for that project, the request uses the canonical
+`https://harness-arena-development.vercel.app` origin, and the bearer value
+exactly matches a 32-byte-or-longer `CRON_SECRET`.
 
 The collector has two fixed application targets:
 
@@ -76,6 +78,8 @@ cron bearer and inspect that deployment's Vercel logs for both target-scoped
 that missing auth, a wrong project, a redirect, and a missing read token fail
 closed. Production validation is passive only.
 
-Rollback is removing the single cron entry from the Development project or
-removing its isolated `CRON_SECRET`. This monitor does not modify application
-data, deployments, provider state, repository state, or production settings.
+Rollback of passive monitoring removes only the `/api/cron/agent-monitor`
+entry (or its isolated `CRON_SECRET`) from the Development project; retain the
+`/api/cron/reap` once-daily stale-run and baseline backstop. This monitor does
+not modify application data, deployments, provider state, repository state, or
+production settings.

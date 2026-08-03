@@ -1,4 +1,7 @@
 {
   "buildCommand": "node scripts/build-runner-bundle.mjs && next build",
-  "crons": [{ "path": "/api/cron/agent-monitor", "schedule": "17,47 * * * *" }]
+  "crons": [
+    { "path": "/api/cron/reap", "schedule": "0 3 * * *" },
+    { "path": "/api/cron/agent-monitor", "schedule": "17 3 * * *" }
+  ]
 }
