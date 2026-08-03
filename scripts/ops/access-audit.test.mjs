@@ -118,7 +118,9 @@ describe("least-privilege access policy", () => {
     });
 
     const collected = await audit.collectActiveAccessEvidence({
-      policy, role: "monitor", cwd: repo, env: { GH_TOKEN: "fine-grained-pat" }, commandRunner, fetchImpl: vi.fn(),
+      policy, role: "monitor", cwd: repo,
+      env: { GH_TOKEN: "fine-grained-pat", GH_INSTALLATION_TOKEN_EVIDENCE_FILE: "/does/not/exist" },
+      commandRunner, fetchImpl: vi.fn(),
     });
 
     expect(collected.github).toMatchObject({ identity_kind: "authenticated_user", permissions: {} });
@@ -296,6 +298,41 @@ describe("least-privilege access policy", () => {
     const writeCapable = await collect({ pull: true, push: true, admin: false, maintain: false, triage: false });
     expect(audit.auditAccessEvidence(policy, writeCapable, { authority: "authoritative" }).systems.find(({ name }) => name === "github"))
       .toMatchObject({ state: "overprivileged" });
+  });
+
+  it("preserves an authoritative GitHub App token issuance permission map without emitting its token", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const directory = await mkdtemp(join(tmpdir(), "github-installation-evidence-"));
+    const evidencePath = join(directory, "token-response.json");
+    const permissions = { metadata: "read", contents: "read", actions: "read", issues: "read", pull_requests: "read" };
+    await writeFile(evidencePath, JSON.stringify({
+      token: "installation-token-never-emit",
+      expires_at: "2026-09-03T10:00:00.000Z",
+      permissions,
+      repository_selection: "selected",
+      repositories: [{ full_name: policy.capabilities.github.repository }],
+    }), { mode: 0o600 });
+    try {
+      const commandRunner = vi.fn(async (_binary, args) => {
+        if (args[1] === "user") return { exitCode: 1, stdout: "" };
+        if (args[1] === "installation/repositories") return { exitCode: 0, stdout: JSON.stringify({
+          total_count: 1,
+          repositories: [{ full_name: policy.capabilities.github.repository, owner: { login: "github-app" }, permissions: { pull: true, push: false, admin: false } }],
+          repository_selection: "selected",
+        }) };
+        return { exitCode: 0, stdout: JSON.stringify(args[1] === `repos/${policy.capabilities.github.repository}` ? { permissions: { pull: true, push: false, admin: false } } : []) };
+      });
+      const collected = await audit.collectActiveAccessEvidence({
+        policy, role: "monitor", cwd: repo,
+        env: { GH_TOKEN: "installation-token-never-emit", GH_INSTALLATION_TOKEN_EVIDENCE_FILE: evidencePath },
+        commandRunner, fetchImpl: vi.fn(), now: "2026-08-03T10:00:00.000Z",
+      });
+      expect(collected.github).toMatchObject({ identity_kind: "github_app", permissions, expires_at: "2026-09-03T10:00:00.000Z" });
+      expect(audit.auditAccessEvidence(policy, collected, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "github"))
+        .toMatchObject({ state: "observable" });
+      expect(JSON.stringify(collected)).not.toContain("installation-token-never-emit");
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it.each(["GH_TOKEN", "GITHUB_TOKEN", "VERCEL_TOKEN"])("attests local %s before making any external request", async (collidingName) => {

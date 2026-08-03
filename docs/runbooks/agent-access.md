@@ -26,6 +26,12 @@ The audit requires an explicitly supplied `GH_TOKEN` for GitHub reads. It does
 not use the GitHub CLI credential store or other inherited authentication, so
 the token can be compared locally with `OPS_READ_TOKEN` before any command or
 network request. `GH_TOKEN` must be a separately scoped read-only identity.
+For a GitHub App installation token, `GH_INSTALLATION_TOKEN_EVIDENCE_FILE`
+must name the protected `0600` JSON response retained when that exact token was
+issued. The collector compares its `token` field to `GH_TOKEN` in memory, keeps
+only the authoritative `permissions` and expiry fields, and never emits the
+token. Without that issuance evidence, successful App GETs remain unverifiable;
+user and fine-grained PAT GETs can never consume App issuance evidence.
 
 Before any external probe, the collector runs the central credential-separation
 attestation across every locally available audit/runtime credential. A collision

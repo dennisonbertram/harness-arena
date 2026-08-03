@@ -425,11 +425,33 @@ function githubRepositoryRole(permissions = {}) {
   return permissions.pull ? "read" : "none";
 }
 
+async function readGitHubInstallationTokenEvidence(path, token, repository) {
+  if (typeof path !== "string" || !path) return null;
+  let info;
+  try { info = await lstat(path); } catch { throw new Error("github_app_permission_evidence_unavailable"); }
+  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_JSON_BYTES || (info.mode & 0o077) !== 0) {
+    throw new Error("github_app_permission_evidence_unsafe");
+  }
+  let value;
+  try { value = JSON.parse(await readFile(path, "utf8")); } catch { throw new Error("github_app_permission_evidence_invalid"); }
+  const permissions = value?.permissions;
+  const selection = value?.repository_selection;
+  const repositories = value?.repositories;
+  if (value?.token !== token || typeof value?.expires_at !== "string" || !Number.isFinite(Date.parse(value.expires_at))
+    || !plainObject(permissions) || Object.entries(permissions).some(([name, level]) => !/^[a-z][a-z0-9_]*$/.test(name) || !["read", "write"].includes(level))
+    || !["all", "selected", "subset"].includes(selection)
+    || ((selection === "selected" || selection === "subset")
+      && (!Array.isArray(repositories) || !repositories.some((item) => item?.full_name === repository)))) {
+    throw new Error("github_app_permission_evidence_invalid");
+  }
+  return { permissions: { ...permissions }, expires_at: value.expires_at };
+}
+
 async function probeGitHub(policy, env, commandRunner) {
   if (!env.GH_TOKEN) throw new Error("github_explicit_identity_missing");
   const commandOptions = { env: { PATH: env.PATH ?? process.env.PATH, GH_TOKEN: env.GH_TOKEN } };
   const repository = policy.capabilities.github.repository;
-  let identity, identityKind, installationRepositoryRole = null;
+  let identity, identityKind, installationRepositoryRole = null, installationTokenEvidence = null;
   try {
     identity = await runJsonCommand(commandRunner, "gh", ["api", "user"], commandOptions);
     identityKind = "authenticated_user";
@@ -446,6 +468,7 @@ async function probeGitHub(policy, env, commandRunner) {
     identity = { login: installationRepository.owner?.login ?? "github-app" };
     installationRepositoryRole = githubRepositoryRole(repositoryPermissions);
     identityKind = "github_app";
+    installationTokenEvidence = await readGitHubInstallationTokenEvidence(env.GH_INSTALLATION_TOKEN_EVIDENCE_FILE, env.GH_TOKEN, repository);
   }
   const endpoints = {
     repository: `repos/${repository}`,
@@ -461,13 +484,13 @@ async function probeGitHub(policy, env, commandRunner) {
     identity_kind: identityKind,
     identity: identity.login ?? identity.slug ?? null,
     repository_role: levelIsWrite(installationRepositoryRole) ? installationRepositoryRole : repositoryRole,
-    expires_at: null,
+    expires_at: installationTokenEvidence?.expires_at ?? null,
     // Repository GETs establish endpoint reachability and coarse repository
     // access only. They do not establish the five independent GitHub
     // permissions required by this policy, particularly for a fine-grained
     // PAT. Keep this empty until an authoritative token permission map is
     // supplied (for example, a GitHub App installation permission response).
-    permissions: {},
+    permissions: installationTokenEvidence?.permissions ?? {},
   };
 }
 
