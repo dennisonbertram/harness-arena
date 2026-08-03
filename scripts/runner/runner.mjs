@@ -20,11 +20,15 @@ import path from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   agentProcessFailure,
+  AGENT_TRACE_NAMES,
   budgetExceeded,
   buildPiSettings,
   buildContainerName,
   buildPiCommand,
   buildPinnedModelsConfig,
+  buildRunCompletedEventPayload,
+  buildTaskAgentFinishedEventPayload,
+  buildTaskVerifiedEventPayload,
   PI_MODELS_CONFIG_PATH,
   PI_SETTINGS_CONFIG_PATH,
   preflightProxy,
@@ -48,6 +52,7 @@ import {
   shAsync,
   summarizeGatewayRequests,
   trustedGatewayPricing,
+  VERIFIER_TRACE_NAME,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -311,7 +316,7 @@ async function uploadAgentTraces(taskId, sessionText, piStdout) {
   const redactedSession = redactSecrets(sessionText, secrets);
   const sessionUpload = await uploadTrace(
     taskId,
-    "session.jsonl",
+    AGENT_TRACE_NAMES[0],
     Buffer.from(redactedSession, "utf8"),
   );
   if (sessionUpload?.url) {
@@ -322,7 +327,7 @@ async function uploadAgentTraces(taskId, sessionText, piStdout) {
     redactSecrets(piStdout.toString("utf8"), secrets),
     "utf8",
   );
-  const stdoutUpload = await uploadTrace(taskId, "pi-stdout.txt", redactedStdout);
+  const stdoutUpload = await uploadTrace(taskId, AGENT_TRACE_NAMES[1], redactedStdout);
   if (stdoutUpload?.url) {
     queueEvent("task.trace_uploaded", { task_id: taskId, blob_url: stdoutUpload.url });
   }
@@ -657,16 +662,16 @@ async function runOneTask(task, index, systemPrompt) {
     if (execResult.outputTruncated) {
       log(`task ${task.id}: Pi stdout/stderr capture reached ${STDOUT_CAP_BYTES} bytes; child continued`);
     }
-    queueEvent("task.agent_finished", {
-      task_id: task.id,
+    queueEvent("task.agent_finished", buildTaskAgentFinishedEventPayload({
+      taskId: task.id,
       turns,
-      ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
-      ...normalizedCostFields,
-      ...(totalCost === null ? {} : { cost_usd: totalCost }),
-      cost_source: costSource,
-      duration_s: agentDurationS,
-      ...(execResult.outputTruncated ? { output_capture_truncated: true } : {}),
-    });
+      outputTokens: parsed.validOutputTokenCount > 0 ? parsed.totalOutputTokens : undefined,
+      normalizedCostFields,
+      totalCost,
+      costSource,
+      durationS: agentDurationS,
+      outputTruncated: execResult.outputTruncated,
+    }));
     await flushEvents();
 
     // GNU timeout exits 124 after the configured agent deadline. This is a
@@ -792,12 +797,12 @@ async function runOneTask(task, index, systemPrompt) {
     const rewardNumber = rewardText != null ? Number(String(rewardText).trim()) : NaN;
     const reward = Number.isFinite(rewardNumber) ? rewardNumber : 0;
 
-    queueEvent("task.verified", {
-      task_id: task.id,
+    queueEvent("task.verified", buildTaskVerifiedEventPayload({
+      taskId: task.id,
       passed,
       reward,
-      duration_s: verifyDurationS,
-    });
+      durationS: verifyDurationS,
+    }));
     await flushEvents();
 
     // Trace uploads -- secrets scrubbed from the bytes first (issue #19
@@ -814,7 +819,7 @@ async function runOneTask(task, index, systemPrompt) {
     verifierParts.push(`\n[reward.txt] ${rewardText ?? "(missing)"}`);
     const verifierUpload = await uploadTrace(
       task.id,
-      "verifier.txt",
+      VERIFIER_TRACE_NAME,
       Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
     );
     if (verifierUpload?.url) {
@@ -949,14 +954,7 @@ async function main() {
 
     const totals = computeTotals(taskResults);
     const durationS = (Date.now() - startedAt) / 1000;
-    queueEvent("run.completed", {
-      tasks_passed: totals.tasks_passed,
-      total_cost_usd: totals.total_cost_usd,
-      ...(totals.normalized_total_cost_usd === null ? {} : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
-      ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
-      ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
-      duration_s: durationS,
-    });
+    queueEvent("run.completed", buildRunCompletedEventPayload(totals, durationS));
 
     await uploadTrace("_run", "runner-log.txt", Buffer.from(runnerLogLines.toString(), "utf8"));
 

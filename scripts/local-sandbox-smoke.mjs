@@ -1,18 +1,17 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PUBLIC_RUN_EVENT_FIELDS } from "../lib/public-run-event-fields.mjs";
+import { AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME } from "./runner/lib.mjs";
 
 const PROMPT = "Plan carefully, execute the task, and verify the result.";
 const JUDGE_REASON = "Approved by deterministic local fairness fixture; no provider request was made.";
 const RUN_PREFIX = ["run.created", "run.sandbox_creating", "run.sandbox_ready"];
-const TASK_EVENTS = ["task.started", "task.agent_finished", "task.verify_started", "task.verified", "task.trace_uploaded"];
-const PUBLIC_EVENT_FIELDS = {
-  "task.started": ["task_id", "index"],
-  "task.agent_finished": ["task_id", "turns", "output_tokens", "cost_usd", "duration_s"],
-  "task.verify_started": ["task_id"],
-  "task.verified": ["task_id", "passed", "reward", "duration_s"],
-  "task.trace_uploaded": ["task_id"],
-};
+const TRACE_NAMES = [...AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME];
+const TASK_EVENTS = [
+  "task.started", "task.agent_finished", "task.verify_started", "task.verified",
+  ...TRACE_NAMES.map(() => "task.trace_uploaded"),
+];
 
 async function jsonResponse(response, label) {
   if (!response?.ok) throw new Error(`${label} failed (${response?.status ?? "no response"})`);
@@ -35,11 +34,48 @@ function assertExactTaskResults(run, taskIds) {
 
 function publicEvent(event) {
   const payload = {};
-  for (const field of PUBLIC_EVENT_FIELDS[event.type] ?? []) {
+  for (const field of PUBLIC_RUN_EVENT_FIELDS[event.type] ?? []) {
     const value = event.payload?.[field];
     if (["string", "number", "boolean"].includes(typeof value)) payload[field] = value;
   }
   return { ...event, payload };
+}
+
+function requireFiniteMetric(payload, field, eventType) {
+  if (typeof payload?.[field] !== "number" || !Number.isFinite(payload[field])) {
+    throw new Error(`local smoke public runner metrics require numeric ${eventType}.${field}`);
+  }
+  return payload[field];
+}
+
+function assertPublicMetrics(run, events, taskIds) {
+  for (const taskId of taskIds) {
+    const result = run.task_results.find((candidate) => candidate.task_id === taskId);
+    const agent = events.find((event) => event.type === "task.agent_finished" && event.payload?.task_id === taskId)?.payload;
+    const verified = events.find((event) => event.type === "task.verified" && event.payload?.task_id === taskId)?.payload;
+    if (!agent || !verified) throw new Error(`local smoke public runner metrics missing task events for ${taskId}`);
+    const turns = requireFiniteMetric(agent, "turns", "task.agent_finished");
+    const outputTokens = requireFiniteMetric(agent, "output_tokens", "task.agent_finished");
+    const cost = requireFiniteMetric(agent, "cost_usd", "task.agent_finished");
+    const agentDuration = requireFiniteMetric(agent, "duration_s", "task.agent_finished");
+    const verifyDuration = requireFiniteMetric(verified, "duration_s", "task.verified");
+    if (!Number.isInteger(turns) || turns < 0 || !Number.isInteger(outputTokens) || outputTokens < 0
+      || cost !== result.cost_usd || agentDuration !== result.agent_duration_s
+      || turns !== result.turns || outputTokens !== result.output_tokens
+      || verified.passed !== result.passed || verified.reward !== result.reward
+      || Math.abs(agentDuration + verifyDuration - result.duration_s) > Number.EPSILON) {
+      throw new Error(`local smoke public runner metrics are inconsistent for task ${taskId}`);
+    }
+  }
+  const completed = events.find((event) => event.type === "run.completed")?.payload;
+  const tasksPassed = requireFiniteMetric(completed, "tasks_passed", "run.completed");
+  const totalCost = requireFiniteMetric(completed, "total_cost_usd", "run.completed");
+  const duration = requireFiniteMetric(completed, "duration_s", "run.completed");
+  const resultDuration = run.task_results.reduce((sum, result) => sum + (result.duration_s ?? 0), 0);
+  if (!Number.isInteger(tasksPassed) || tasksPassed !== run.tasks_passed
+    || totalCost !== run.total_cost_usd || Math.abs(duration - resultDuration) > Number.EPSILON) {
+    throw new Error("local smoke public runner metrics are inconsistent with run totals");
+  }
 }
 
 function assertLifecycle(run, events, taskIds) {
@@ -75,6 +111,7 @@ function assertLifecycle(run, events, taskIds) {
     }
     previous = timestamp;
   }
+  assertPublicMetrics(run, events, taskIds);
 }
 
 export async function runLocalSandboxSmoke({
@@ -140,7 +177,11 @@ export async function runLocalSandboxSmoke({
     throw new Error("local smoke persisted trace set does not match the task manifest");
   }
   for (const result of persistedRun.task_results) {
-    await readFile(join(traceRoot, result.task_id, "session.jsonl"));
+    const names = (await readdir(join(traceRoot, result.task_id))).sort();
+    if (JSON.stringify(names) !== JSON.stringify([...TRACE_NAMES].sort())) {
+      throw new Error(`local smoke trace files do not match runner contract for task ${result.task_id}`);
+    }
+    for (const name of TRACE_NAMES) await readFile(join(traceRoot, result.task_id, name));
     if (!result.trace_blob_url) throw new Error(`local smoke missing trace URL for task ${result.task_id}`);
     const traceUrl = new URL(result.trace_blob_url);
     if (traceUrl.origin !== origin) throw new Error(`local smoke trace URL has the wrong origin for task ${result.task_id}`);

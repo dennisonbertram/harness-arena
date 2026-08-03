@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME } from "../scripts/runner/lib.mjs";
 import { buildRunnerTasks } from "./tasks-for-runner";
 import { redactRunEventPayload } from "./run-error";
 import { resetStorage, storageRef } from "./test-support/storage-ref";
@@ -53,8 +54,10 @@ describe("deterministic local execution", () => {
 
     const taskIds = buildRunnerTasks().map((task) => task.id);
     const events = await storageRef.current.listRunEvents(run.id);
+    const traceNames = [...AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME];
     const expectedTaskEvents = taskIds.flatMap(() => [
-      "task.started", "task.agent_finished", "task.verify_started", "task.verified", "task.trace_uploaded",
+      "task.started", "task.agent_finished", "task.verify_started", "task.verified",
+      ...traceNames.map(() => "task.trace_uploaded"),
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "run.created", "run.sandbox_creating", "run.sandbox_ready", ...expectedTaskEvents, "run.completed",
@@ -71,7 +74,9 @@ describe("deterministic local execution", () => {
     expect(stored?.task_results.every((result) => result.trace_blob_url?.startsWith("http://127.0.0.1:4123/"))).toBe(true);
     expect(events.every((event) => Date.parse(event.ts) <= Date.parse(stored?.finished_at ?? ""))).toBe(true);
     for (const taskId of taskIds) {
-      await expect(storageRef.current.getTraceBytes(run.id, taskId, "session.jsonl")).resolves.not.toBeNull();
+      for (const name of traceNames) {
+        await expect(storageRef.current.getTraceBytes(run.id, taskId, name)).resolves.not.toBeNull();
+      }
       const result = stored?.task_results.find((candidate) => candidate.task_id === taskId);
       const agentFinished = events.find((event) => event.type === "task.agent_finished" && event.payload.task_id === taskId);
       const verified = events.find((event) => event.type === "task.verified" && event.payload.task_id === taskId);

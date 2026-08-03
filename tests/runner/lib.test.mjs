@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   budgetExceeded,
+  buildRunCompletedEventPayload,
+  buildTaskAgentFinishedEventPayload,
+  buildTaskVerifiedEventPayload,
   buildContainerName,
   buildModelsConfig,
   buildPiCommand,
@@ -31,6 +34,26 @@ import {
   sh,
   shQuote,
 } from "../../scripts/runner/lib.mjs";
+
+describe("runner event payload contract", () => {
+  it("builds the public task and run metrics from the same values used in results and totals", () => {
+    expect(buildTaskAgentFinishedEventPayload({
+      taskId: "t1", turns: 2, outputTokens: 8, totalCost: 0, costSource: "session", durationS: 0.1,
+    })).toEqual({
+      task_id: "t1", turns: 2, output_tokens: 8, cost_usd: 0, cost_source: "session", duration_s: 0.1,
+    });
+    expect(buildTaskVerifiedEventPayload({ taskId: "t1", passed: true, reward: 1, durationS: 0.15 })).toEqual({
+      task_id: "t1", passed: true, reward: 1, duration_s: 0.15,
+    });
+    expect(buildRunCompletedEventPayload({
+      tasks_passed: 1,
+      total_cost_usd: 0,
+      normalized_total_cost_usd: null,
+      pricing_version: undefined,
+      pricing_source: undefined,
+    }, 0.25)).toEqual({ tasks_passed: 1, total_cost_usd: 0, duration_s: 0.25 });
+  });
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_JSONL = readFileSync(

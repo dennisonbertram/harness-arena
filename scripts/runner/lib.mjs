@@ -720,6 +720,48 @@ export function computeTotals(taskResults) {
   return { tasks_passed, total_cost_usd, normalized_total_cost_usd, pricing_version, pricing_source };
 }
 
+export const AGENT_TRACE_NAMES = Object.freeze(["session.jsonl", "pi-stdout.txt"]);
+export const VERIFIER_TRACE_NAME = "verifier.txt";
+
+// Event payload builders are shared with deterministic local execution so the
+// zero-provider fixture cannot drift from the real runner's public metrics.
+export function buildTaskAgentFinishedEventPayload({
+  taskId,
+  turns,
+  outputTokens,
+  normalizedCostFields = {},
+  totalCost,
+  costSource,
+  durationS,
+  outputTruncated = false,
+}) {
+  return {
+    task_id: taskId,
+    turns,
+    ...(outputTokens === undefined ? {} : { output_tokens: outputTokens }),
+    ...normalizedCostFields,
+    ...(totalCost === null ? {} : { cost_usd: totalCost }),
+    cost_source: costSource,
+    duration_s: durationS,
+    ...(outputTruncated ? { output_capture_truncated: true } : {}),
+  };
+}
+
+export function buildTaskVerifiedEventPayload({ taskId, passed, reward, durationS }) {
+  return { task_id: taskId, passed, reward, duration_s: durationS };
+}
+
+export function buildRunCompletedEventPayload(totals, durationS) {
+  return {
+    tasks_passed: totals.tasks_passed,
+    total_cost_usd: totals.total_cost_usd,
+    ...(totals.normalized_total_cost_usd === null ? {} : { normalized_total_cost_usd: totals.normalized_total_cost_usd }),
+    ...(totals.pricing_version ? { pricing_version: totals.pricing_version } : {}),
+    ...(totals.pricing_source ? { pricing_source: totals.pricing_source } : {}),
+    duration_s: durationS,
+  };
+}
+
 // Cumulative cost check performed after each task completes (spec: budget
 // granularity is between tasks, not mid-task).
 export function budgetExceeded(spent, cap) {

@@ -1,4 +1,12 @@
 import { NextRequest } from "next/server";
+import {
+  AGENT_TRACE_NAMES,
+  buildRunCompletedEventPayload,
+  buildTaskAgentFinishedEventPayload,
+  buildTaskVerifiedEventPayload,
+  computeTotals,
+  VERIFIER_TRACE_NAME,
+} from "../scripts/runner/lib.mjs";
 import { assertDeterministicLocalEnvironment } from "./development-identity";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
@@ -35,9 +43,9 @@ async function callback(runId: string, body: unknown, secret: string): Promise<R
   }), { params: Promise.resolve({ id: runId }) });
 }
 
-async function trace(runId: string, taskId: string, body: string, secret: string): Promise<Response> {
+async function trace(runId: string, taskId: string, name: string, body: string, secret: string): Promise<Response> {
   const { POST } = await import("@/app/api/runs/[id]/trace/route");
-  const query = new URLSearchParams({ task_id: taskId, name: "session.jsonl" });
+  const query = new URLSearchParams({ task_id: taskId, name });
   return POST(new NextRequest(`${localCallbackOrigin()}/api/runs/${runId}/trace?${query}`, {
     method: "POST",
     headers: { "content-type": "application/octet-stream", "x-runner-secret": secret },
@@ -108,6 +116,8 @@ export async function executeDeterministicRun(
 
   const tasks = buildRunnerTasks();
   const results: TaskResult[] = [];
+  const agentDurationS = 0.1;
+  const verifyDurationS = 0.15;
   let offset = 3;
   for (const [index, task] of tasks.entries()) {
     if (opts.scenario === "budget-exceeded" && index > 0) {
@@ -122,52 +132,81 @@ export async function executeDeterministicRun(
       reward: fails ? 0 : 1,
       cost_usd: opts.scenario === "budget-exceeded" ? 0.02 : 0,
       cost_source: "deterministic-fixture",
-      duration_s: 0.25,
-      agent_duration_s: 0.1,
+      duration_s: fails ? agentDurationS : agentDurationS + verifyDurationS,
+      agent_duration_s: agentDurationS,
       turns: 1,
       input_tokens: 16,
       output_tokens: 8,
-      ...(fails ? { failure_stage: "agent", error: "deterministic task failure" } : {}),
+      ...(fails ? { failure_stage: "agent_process_error", error: "deterministic task failure" } : {}),
     };
     results.push(result);
     const taskEvents: NewRunEvent[] = [
       { ts: deterministicTimestamp(timelineRun, offset++), type: "task.started", payload: { task_id: task.id, index } },
-      { ts: deterministicTimestamp(timelineRun, offset++), type: "task.agent_finished", payload: { task_id: task.id, exit_code: fails ? 1 : 0 } },
-      ...(fails
-        ? [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.failed" as const, payload: { task_id: task.id, stage: "agent", error: "deterministic task failure" } }]
-        : [
-          { ts: deterministicTimestamp(timelineRun, offset++), type: "task.verify_started" as const, payload: { task_id: task.id } },
-          { ts: deterministicTimestamp(timelineRun, offset++), type: "task.verified" as const, payload: { task_id: task.id, passed: true, reward: 1 } },
-        ]),
+      {
+        ts: deterministicTimestamp(timelineRun, offset++),
+        type: "task.agent_finished",
+        payload: buildTaskAgentFinishedEventPayload({
+          taskId: task.id,
+          turns: result.turns,
+          outputTokens: result.output_tokens,
+          totalCost: result.cost_usd,
+          costSource: result.cost_source,
+          durationS: result.agent_duration_s,
+        }),
+      },
+      ...(!fails ? [
+        { ts: deterministicTimestamp(timelineRun, offset++), type: "task.verify_started" as const, payload: { task_id: task.id } },
+        {
+          ts: deterministicTimestamp(timelineRun, offset++),
+          type: "task.verified" as const,
+          payload: buildTaskVerifiedEventPayload({ taskId: task.id, passed: true, reward: 1, durationS: verifyDurationS }),
+        },
+      ] : []),
     ];
     await requireAccepted(await callback(run.id, { events: taskEvents, task_results: results }, secret), "task callback");
-    const traceBody = `${JSON.stringify({ type: "session", id: `${run.id}:${task.id}`, deterministic: true })}\n`;
-    const traceResponse = await requireAccepted(await trace(run.id, task.id, traceBody, secret), "trace callback");
-    const traceUrl = new URL(String(traceResponse.url));
-    result.trace_blob_url = `${localCallbackOrigin()}${traceUrl.pathname}${traceUrl.search}`;
-    await requireAccepted(await callback(run.id, {
-      events: [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.trace_uploaded", payload: { task_id: task.id, name: "session.jsonl" } }],
-      task_results: results,
-    }, secret), "trace event callback");
+    const traceNames = fails ? AGENT_TRACE_NAMES : [...AGENT_TRACE_NAMES, VERIFIER_TRACE_NAME];
+    for (const name of traceNames) {
+      const traceBody = `${JSON.stringify({ type: "deterministic-trace", id: `${run.id}:${task.id}`, name })}\n`;
+      const traceResponse = await requireAccepted(await trace(run.id, task.id, name, traceBody, secret), "trace callback");
+      if (name === AGENT_TRACE_NAMES[0]) {
+        const traceUrl = new URL(String(traceResponse.url));
+        result.trace_blob_url = `${localCallbackOrigin()}${traceUrl.pathname}${traceUrl.search}`;
+      }
+      await requireAccepted(await callback(run.id, {
+        events: [{ ts: deterministicTimestamp(timelineRun, offset++), type: "task.trace_uploaded", payload: { task_id: task.id, name } }],
+        task_results: results,
+      }, secret), "trace event callback");
+    }
+    if (fails) {
+      await requireAccepted(await callback(run.id, {
+        events: [{
+          ts: deterministicTimestamp(timelineRun, offset++),
+          type: "task.failed",
+          payload: { task_id: task.id, stage: "agent_process_error", error: "deterministic task failure", duration_s: result.duration_s },
+        }],
+        task_results: results,
+      }, secret), "task failure callback");
+    }
   }
 
   const overBudget = opts.scenario === "budget-exceeded";
-  const virtualCost = overBudget ? 0.02 : 0;
+  const totals = computeTotals(results);
+  const durationS = results.reduce((sum, result) => sum + (result.duration_s ?? 0), 0);
   const terminalEvents: NewRunEvent[] = [
     ...(overBudget ? [{
       ts: deterministicTimestamp(timelineRun, offset++),
       type: "run.budget_exceeded" as const,
-      payload: { spent_usd: virtualCost, cap_usd: 0.01, tasks_completed: 1, deterministic: true },
+      payload: { spent_usd: totals.total_cost_usd, cap_usd: 0.01, tasks_completed: 1, deterministic: true },
     }] : []),
-    { ts: deterministicTimestamp(timelineRun, offset), type: "run.completed", payload: { deterministic: true } },
+    { ts: deterministicTimestamp(timelineRun, offset), type: "run.completed", payload: buildRunCompletedEventPayload(totals, durationS) },
   ];
   await requireAccepted(await callback(run.id, {
     events: terminalEvents,
     status: "completed",
     task_results: results,
     totals: {
-      tasks_passed: results.filter((result) => result.passed).length,
-      total_cost_usd: virtualCost,
+      tasks_passed: totals.tasks_passed,
+      total_cost_usd: totals.total_cost_usd,
       over_budget: overBudget,
     },
   }, secret), "terminal callback");

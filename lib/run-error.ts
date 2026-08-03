@@ -1,3 +1,5 @@
+import { PUBLIC_RUN_EVENT_FIELDS } from "./public-run-event-fields.mjs";
+
 const PROVIDER_ERROR_PATTERN = /\bprovider[_ ]error:\s*(\d{3})\b/i;
 const HTTP_STATUS_PATTERN = /^\s*(\d{3})\b/;
 
@@ -13,19 +15,6 @@ export function redactRunError(error: string, stage?: string): string {
 
   return error;
 }
-
-const PUBLIC_EVENT_FIELDS: Record<string, readonly string[]> = {
-  "task.started": ["task_id", "index"],
-  "task.agent_finished": ["task_id", "turns", "output_tokens", "cost_usd", "duration_s"],
-  "task.verify_started": ["task_id"],
-  "task.verified": ["task_id", "passed", "reward", "duration_s"],
-  "task.failed": ["task_id", "stage", "duration_s"],
-  "task.trace_uploaded": ["task_id"],
-  "task.cost_tamper_signal": ["task_id", "reason", "negative_cost_count"],
-  "run.budget_exceeded": ["spent_usd", "cap_usd", "tasks_completed"],
-  "run.completed": ["tasks_passed", "total_cost_usd", "duration_s"],
-  "run.failed": ["stage"],
-};
 
 function recordPayload(payload: unknown): Record<string, unknown> {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
@@ -62,7 +51,7 @@ export function redactRunEventPayload(type: string, payload: unknown): Record<st
     };
   }
 
-  const safeFields = PUBLIC_EVENT_FIELDS[type] ?? [];
+  const safeFields = (PUBLIC_RUN_EVENT_FIELDS as Record<string, readonly string[]>)[type] ?? [];
   const result: Record<string, unknown> = {};
   for (const key of safeFields) {
     const value = source[key];

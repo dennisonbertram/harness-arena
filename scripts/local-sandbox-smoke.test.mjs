@@ -11,10 +11,14 @@ describe("local deterministic HTTP smoke", () => {
     const traceUrl = "http://127.0.0.1:3000/api/runs/run-1/trace-view?task_id=manifest-task&name=session.jsonl";
     const run = {
       id: "run-1", submission_id: "sub-1", status: "completed", tasks_passed: 1, total_cost_usd: 0,
-      over_budget: false, task_results: [{ task_id: taskId, attempted: true, passed: true, cost_usd: 0, trace_blob_url: traceUrl }],
+      over_budget: false,
+      task_results: [{
+        task_id: taskId, attempted: true, passed: true, reward: 1, cost_usd: 0,
+        turns: 1, output_tokens: 8, agent_duration_s: 0.1, duration_s: 0.25, trace_blob_url: traceUrl,
+      }],
       created_at: new Date().toISOString(), finished_at: new Date().toISOString(),
     };
-    const types = ["run.created", "run.sandbox_creating", "run.sandbox_ready", "task.started", "task.agent_finished", "task.verify_started", "task.verified", "task.trace_uploaded", "run.completed"];
+    const types = ["run.created", "run.sandbox_creating", "run.sandbox_ready", "task.started", "task.agent_finished", "task.verify_started", "task.verified", "task.trace_uploaded", "task.trace_uploaded", "task.trace_uploaded", "run.completed"];
     const events = types.map((type, index) => ({
       run_id: run.id, seq: index + 1, ts: run.created_at, type,
       payload: type === "task.agent_finished"
@@ -31,6 +35,8 @@ describe("local deterministic HTTP smoke", () => {
     await writeFile(join(state, "runs", `${run.id}.json`), JSON.stringify(run));
     await writeFile(join(state, "events", `${run.id}.json`), JSON.stringify(events));
     await writeFile(join(state, "traces", run.id, taskId, "session.jsonl"), "{}\n");
+    await writeFile(join(state, "traces", run.id, taskId, "pi-stdout.txt"), "fixture\n");
+    await writeFile(join(state, "traces", run.id, taskId, "verifier.txt"), "fixture\n");
     let submittedPrompt;
     const fetchImpl = vi.fn(async (url, options = {}) => {
       const pathname = new URL(url).pathname;
@@ -73,7 +79,7 @@ describe("local deterministic HTTP smoke", () => {
       ["task.agent_finished", { task_id: taskId, turns: 1, cost_usd: 0, duration_s: 0.1 }],
       ["task.verify_started", { task_id: taskId }],
       ["task.verified", { task_id: taskId, passed: true, reward: 1, duration_s: 0.15 }],
-      ["task.trace_uploaded", { task_id: taskId }],
+      ["task.trace_uploaded", { task_id: taskId }], ["task.trace_uploaded", { task_id: taskId }], ["task.trace_uploaded", { task_id: taskId }],
       ["run.completed", { tasks_passed: 1, total_cost_usd: 0, duration_s: 0.25 }],
     ];
     const events = eventSpecs.map(([type, payload], index) => ({ run_id: run.id, seq: index + 1, ts: createdAt, type, payload }));
@@ -83,6 +89,8 @@ describe("local deterministic HTTP smoke", () => {
     await writeFile(join(state, "runs", `${run.id}.json`), JSON.stringify(run));
     await writeFile(join(state, "events", `${run.id}.json`), JSON.stringify(events));
     await writeFile(join(state, "traces", run.id, taskId, "session.jsonl"), "{}\n");
+    await writeFile(join(state, "traces", run.id, taskId, "pi-stdout.txt"), "fixture\n");
+    await writeFile(join(state, "traces", run.id, taskId, "verifier.txt"), "fixture\n");
     const fetchImpl = vi.fn(async (url) => {
       const pathname = new URL(url).pathname;
       if (pathname === "/api/ready") return Response.json({ ok: true, seeded: true, writable: true, execution_mode: "deterministic-success", development_identity: "seeded" });
