@@ -41,8 +41,9 @@ pagination that prevents proving the complete grant set is reported as
 unverifiable, never observable.
 
 The default command actively probes the authenticated GitHub and Vercel
-identities and the application operations API. It uses only documented
-read-only `gh api`, Vercel CLI/API, and HTTP GET operations:
+identities and the application operations API. It uses documented read-only
+`gh api`, Vercel CLI/API, and HTTP GET operations, plus one deliberately
+rejected `POST /api/ops/v1` only against the isolated Development host:
 
 ```bash
 HARNESS_ARENA_URL=https://harness-arena-development.vercel.app \
@@ -51,10 +52,11 @@ pnpm ops:access-audit -- --role monitor --json
 ```
 
 GitHub CLI and Vercel CLI must already be authenticated as the identity being
-audited. Tokens are never accepted as CLI arguments. The audit checks the
-active GitHub repository permissions, Vercel team role plus explicit or
-inherited project role, deployment/log/environment-metadata reads, and three
-authenticated operations GET endpoints. Hosted targets must be an exact
+audited. Tokens are never accepted as CLI arguments. Successful GitHub GETs
+prove endpoint reachability, not the independent fine-grained permission map:
+without an authoritative map, GitHub is `missing`. The audit checks Vercel team
+role plus explicit or inherited project role, deployment/log/environment-
+metadata reads, and three authenticated operations GET endpoints. Hosted targets must be an exact
 versioned hostname/project pair: the canonical production hostname belongs to
 the live project, while the stable Development hostnames belong to the isolated
 Development project. Hosted HTTP, nonstandard ports, unknown hosts, project
@@ -131,10 +133,13 @@ Provider references: [GitHub fine-grained token permissions](https://docs.github
    Viewer identity for each project.
 2. Run it with the current owner identity and retain only the redacted report;
    it must classify `overprivileged`.
-3. Retain the test evidence that derives every credential-protected mutation
-   route and invokes each handler with `OPS_READ_TOKEN`; every handler must
-   reject it before mutation. The same tests fail closed if the read token
-   collides with an admin or runner callback credential.
+3. Retain static coverage of every mutation method exported by the `/api/ops/v1`
+   route family and a live `405 Allow: GET` denial using `OPS_READ_TOKEN` against
+   the isolated Development deployment only. The audit requires the inspected
+   deployment's Git SHA to equal the local source SHA; it reports `missing` when
+   either identity or denial evidence is unavailable. It never sends a write
+   probe to Production. The same tests fail closed if the read token collides
+   with an admin or runner callback credential.
 4. Record the invitation/role assignment and short-lived secret broker setup in
    the Epic evidence. These are external configuration changes and are not made
    by this code change.

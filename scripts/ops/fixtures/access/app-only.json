@@ -27,6 +27,10 @@
     "token_present": true,
     "methods": ["GET"],
     "credential_separation_attested": true,
+    "target": { "environment": "development", "project_id": "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "hostname": "harness-arena-development.vercel.app" },
+    "mutation_route_coverage": { "complete": true },
+    "deployed_source": { "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "hostname": "harness-arena-development.vercel.app" },
+    "mutation_denial": { "environment": "development", "status": 405, "allow": "GET" },
     "write_probes": { "POST": 405, "PUT": 405, "PATCH": 405, "DELETE": 405 }
   },
   "blob": { "credential_present": false, "read_via": "get_only_ops" },

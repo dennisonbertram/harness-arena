@@ -263,7 +263,19 @@ function auditOps(evidence) {
   if (evidence.get_probes && Object.values(evidence.get_probes).some((status) => status !== 200)) return capability("get_only_ops", "missing", ["ops_get_read_failed"]);
   if (evidence.credential_separation_attested !== true) return capability("get_only_ops", "missing", ["ops_credential_separation_unattested"]);
   if (evidence.credential_collisions?.length) return capability("get_only_ops", "overprivileged", ["ops_credential_collision"]);
-  return evidence.mutation_guards_derived === false ? capability("get_only_ops", "missing", ["ops_mutation_guards_unproven"]) : capability("get_only_ops", "observable");
+  if (evidence.mutation_route_coverage?.complete !== true) return capability("get_only_ops", "missing", ["ops_mutation_route_coverage_unproven"]);
+  if (evidence.target?.environment !== "development"
+    || evidence.mutation_denial?.environment !== "development"
+    || evidence.mutation_denial?.status !== 405
+    || evidence.mutation_denial?.allow !== "GET") {
+    return capability("get_only_ops", "missing", ["ops_development_mutation_denial_unproven"]);
+  }
+  if (!/^[0-9a-f]{40}$/i.test(evidence.deployed_source?.sha ?? "")
+    || evidence.deployed_source?.sha !== evidence.deployed_source?.source_sha
+    || evidence.deployed_source?.hostname !== evidence.target?.hostname) {
+    return capability("get_only_ops", "missing", ["ops_deployed_source_identity_unproven"]);
+  }
+  return capability("get_only_ops", "observable");
 }
 
 function auditBrokered(name, evidence, expectedReadVia, credentialKey = "credential_present") {
@@ -326,6 +338,43 @@ export async function deriveProtectedMutationRoutes({ cwd }) {
   };
   await visit(resolve(cwd, "app/api"));
   return routes.sort((left, right) => `${left.file}:${left.method}`.localeCompare(`${right.file}:${right.method}`));
+}
+
+const OPS_MUTATION_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
+
+function exportedMutationMethods(source) {
+  const methods = new Set();
+  for (const match of source.matchAll(/export\s+(?:async\s+function|const)\s+(POST|PUT|PATCH|DELETE)\b/g)) methods.add(match[1]);
+  for (const match of source.matchAll(/export\s*{([^}]+)}/g)) {
+    for (const entry of match[1].split(",")) {
+      const name = entry.trim().split(/\s+as\s+/i, 1)[0];
+      if (OPS_MUTATION_METHODS.includes(name)) methods.add(name);
+    }
+  }
+  return OPS_MUTATION_METHODS.filter((method) => methods.has(method));
+}
+
+export async function deriveOpsMutationRouteCoverage({ cwd }) {
+  const routes = [];
+  const root = resolve(cwd, "app/api/ops");
+  const visit = async (directory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = join(directory, entry.name);
+      if (entry.isDirectory()) { await visit(absolute); continue; }
+      if (entry.name !== "route.ts") continue;
+      const file = relative(cwd, absolute).replaceAll("\\", "/");
+      const pathname = `/${file.replace(/^app\//, "").replace(/\/route\.ts$/, "")}`;
+      const methods = exportedMutationMethods(await readFile(absolute, "utf8"));
+      routes.push({ file, pathname, methods, missing_methods: OPS_MUTATION_METHODS.filter((method) => !methods.includes(method)) });
+    }
+  };
+  await visit(root);
+  routes.sort((left, right) => left.pathname.localeCompare(right.pathname));
+  return {
+    source_files: routes.map(({ file }) => file),
+    routes,
+    complete: routes.length > 0 && routes.every((route) => route.missing_methods.length === 0),
+  };
 }
 
 async function runJsonCommand(commandRunner, binary, args, options = {}) {
@@ -532,6 +581,37 @@ async function fetchOpsJson(fetchImpl, url, { origin, token }) {
   try { return JSON.parse(text); } catch { throw new Error("ops_get_probe_failed"); }
 }
 
+async function deployedOpsSourceIdentity({ commandRunner, env, target, cwd }) {
+  if (!env.VERCEL_TOKEN) throw new Error("ops_deployment_identity_missing");
+  const commandOptions = { cwd, env: { PATH: env.PATH ?? process.env.PATH, VERCEL_TOKEN: env.VERCEL_TOKEN, VERCEL_ORG_ID: env.VERCEL_TEAM_ID ?? "", VERCEL_PROJECT_ID: target.project_id ?? "" } };
+  const deployment = await runJsonCommand(commandRunner, "vercel", ["inspect", target.hostname, "--json"], commandOptions);
+  const hostname = deployment?.url ?? deployment?.hostname ?? deployment?.alias?.[0] ?? null;
+  const projectId = deployment?.projectId ?? deployment?.project?.id ?? deployment?.meta?.projectId ?? null;
+  const sha = deployment?.gitSource?.sha ?? deployment?.meta?.githubCommitSha ?? deployment?.sha ?? null;
+  if (hostname !== target.hostname || projectId !== target.project_id || !/^[0-9a-f]{40}$/i.test(sha ?? "")) throw new Error("ops_deployment_identity_invalid");
+  const local = await runReadCommand(commandRunner, "git", ["rev-parse", "HEAD"], { cwd });
+  const sourceSha = local.trim();
+  if (!/^[0-9a-f]{40}$/i.test(sourceSha) || sourceSha.toLowerCase() !== sha.toLowerCase()) throw new Error("ops_deployment_source_mismatch");
+  return { hostname, sha: sha.toLowerCase(), source_sha: sourceSha.toLowerCase() };
+}
+
+async function probeOpsMutationDenial(fetchImpl, target, token) {
+  if (target.environment !== "development") throw new Error("ops_mutation_probe_development_only");
+  let response;
+  try {
+    response = await fetchImpl(`${target.origin}/api/ops/v1`, {
+      method: "POST", headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000),
+    });
+  } catch { throw new Error("ops_mutation_probe_failed"); }
+  if (response?.status !== 405 || response?.redirected === true || response?.headers?.get("allow") !== "GET") throw new Error("ops_mutation_denial_unproven");
+  if (response.url) {
+    let responseUrl;
+    try { responseUrl = new URL(response.url); } catch { throw new Error("ops_mutation_denial_unproven"); }
+    if (responseUrl.origin !== target.origin) throw new Error("ops_mutation_denial_unproven");
+  }
+  return { environment: "development", status: 405, allow: "GET" };
+}
+
 async function probeVercel(policy, env, commandRunner, fetchImpl) {
   const token = env.VERCEL_TOKEN;
   const teamId = env.VERCEL_TEAM_ID;
@@ -590,10 +670,11 @@ async function probeVercel(policy, env, commandRunner, fetchImpl) {
   };
 }
 
-async function probeOps(policy, env, fetchImpl, cwd) {
+async function probeOps(policy, env, commandRunner, fetchImpl, cwd) {
   const token = env.OPS_READ_TOKEN;
   if (!token || !env.HARNESS_ARENA_URL) throw new Error("ops_active_identity_missing");
   const target = resolveOpsTarget(policy, { url: env.HARNESS_ARENA_URL, projectId: env.VERCEL_PROJECT_ID });
+  if (target.environment !== "development") throw new Error("ops_mutation_probe_development_only");
   const health = await fetchOpsJson(fetchImpl, `${target.origin}/api/health`, { origin: target.origin });
   if (!validHealth(health)) throw new Error("ops_health_schema_invalid");
   const root = await fetchOpsJson(fetchImpl, `${target.origin}/api/ops/v1`, { origin: target.origin, token });
@@ -604,7 +685,10 @@ async function probeOps(policy, env, fetchImpl, cwd) {
   if (!validInventory(inventory, kind)) throw new Error("ops_inventory_schema_invalid");
   const summary = await fetchOpsJson(fetchImpl, `${target.origin}${root.summary}`, { origin: target.origin, token });
   if (!validSummary(summary)) throw new Error("ops_summary_schema_invalid");
-  const routes = await deriveProtectedMutationRoutes({ cwd });
+  const mutation_route_coverage = await deriveOpsMutationRouteCoverage({ cwd });
+  if (!mutation_route_coverage.complete) throw new Error("ops_mutation_route_coverage_unproven");
+  const deployed_source = await deployedOpsSourceIdentity({ commandRunner, env, target, cwd });
+  const mutation_denial = await probeOpsMutationDenial(fetchImpl, target, token);
   return {
     state: "authenticated",
     token_present: true,
@@ -612,7 +696,9 @@ async function probeOps(policy, env, fetchImpl, cwd) {
     get_probes: { "/api/health": 200, "/api/ops/v1": 200, [inventoryPath]: 200, [root.summary]: 200 },
     credential_separation_attested: true,
     target: { environment: target.environment, project_id: target.project_id, hostname: target.hostname },
-    mutation_guards_derived: routes.length > 0,
+    mutation_route_coverage,
+    deployed_source,
+    mutation_denial,
   };
 }
 
@@ -632,7 +718,7 @@ export async function collectActiveAccessEvidence({ policy, role, cwd, env = pro
   const [github, vercel, ops] = await Promise.all([
     guarded(() => probeGitHub(policy, env, commandRunner), { state: "missing" }),
     guarded(() => probeVercel(policy, env, commandRunner, fetchImpl), { state: "missing" }),
-    guarded(() => probeOps(policy, env, fetchImpl, cwd), { state: "missing", token_present: Boolean(env.OPS_READ_TOKEN), methods: [] }),
+    guarded(() => probeOps(policy, env, commandRunner, fetchImpl, cwd), { state: "missing", token_present: Boolean(env.OPS_READ_TOKEN), methods: [] }),
   ]);
   const opsObservable = ops.state === "authenticated" && Object.values(ops.get_probes ?? {}).every((status) => status === 200);
   const vercelObservable = vercel.state === "authenticated" && vercel.logs;

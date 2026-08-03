@@ -107,7 +107,6 @@ describe("least-privilege access policy", () => {
     expect(commands.every(([binary, action]) => (binary === "gh" && action === "api") || (binary === "vercel" && ["env", "ls", "logs"].includes(action)))).toBe(true);
     expect(requests.every(([, method]) => method === "GET")).toBe(true);
     expect(requests.some(([url]) => url.includes("since=123"))).toBe(true);
-    expect(requests.some(([url]) => url.includes("/api/ops/v1/inventory?kind=runs&limit=1"))).toBe(true);
   });
 
   it("never manufactures fine-grained GitHub permissions from successful user GET probes", async () => {
@@ -354,11 +353,11 @@ describe("least-privilege access policy", () => {
     });
     const collected = await audit.collectActiveAccessEvidence({
       policy, role: "monitor", cwd: repo,
-      env: { OPS_READ_TOKEN: "never-follow-me", VERCEL_PROJECT_ID: policy.capabilities.vercel.project_ids[0], HARNESS_ARENA_URL: "https://harness-arena-psi.vercel.app" },
+      env: { OPS_READ_TOKEN: "never-follow-me", VERCEL_PROJECT_ID: policy.capabilities.get_only_ops.targets.development.project_id, HARNESS_ARENA_URL: "https://harness-arena-development.vercel.app" },
       commandRunner: vi.fn(async () => ({ exitCode: 1, stdout: "" })), fetchImpl,
     });
     expect(collected.ops.state).toBe("missing");
-    expect(calls).toEqual([{ url: "https://harness-arena-psi.vercel.app/api/health", authorization: undefined }]);
+    expect(calls).toEqual([{ url: "https://harness-arena-development.vercel.app/api/health", authorization: undefined }]);
   });
 
   it("normalizes a project-scoped Vercel token with the inherited Viewer role", async () => {
@@ -457,6 +456,58 @@ describe("least-privilege access policy", () => {
     const raw = await evidence("viewer");
     raw.ops.methods = [];
     expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative", now: "2026-08-03T10:00:00.000Z" }).systems.find(({ name }) => name === "get_only_ops")?.state).toBe("missing");
+  });
+
+  it("requires complete static ops mutation coverage and a Development-only live denial", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const coverage = await audit.deriveOpsMutationRouteCoverage({ cwd: repo });
+    expect(coverage).toMatchObject({ complete: true, routes: expect.arrayContaining([
+      expect.objectContaining({ pathname: "/api/ops/v1", methods: ["POST", "PUT", "PATCH", "DELETE"] }),
+    ]) });
+
+    const raw = await evidence("viewer");
+    raw.ops.mutation_route_coverage = coverage;
+    raw.ops.target = { environment: "development", project_id: policy.capabilities.get_only_ops.targets.development.project_id, hostname: "harness-arena-development.vercel.app" };
+    raw.ops.deployed_source = { sha: "a".repeat(40), source_sha: "a".repeat(40), hostname: "harness-arena-development.vercel.app" };
+    raw.ops.mutation_denial = { environment: "development", status: 405, allow: "GET" };
+    expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative" }).systems.find(({ name }) => name === "get_only_ops"))
+      .toMatchObject({ state: "observable" });
+
+    raw.ops.target.environment = "production";
+    expect(audit.auditAccessEvidence(policy, raw, { authority: "authoritative" }).systems.find(({ name }) => name === "get_only_ops"))
+      .toMatchObject({ state: "missing", reasons: ["ops_development_mutation_denial_unproven"] });
+  });
+
+  it("sends the live mutation denial probe only to the isolated Development target", async () => {
+    const audit = await subject();
+    const policy = await audit.loadPolicy(policyPath);
+    const calls = [];
+    const policySize = policy.capabilities.get_only_ops.separate_from.length;
+    const fetchImpl = vi.fn(async (url, init) => {
+      calls.push([String(url), init?.method, init?.headers?.authorization]);
+      const address = String(url);
+      const body = address.endsWith("/api/health") ? { ok: true, credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 0, policy_size: policySize } }
+        : address.endsWith("/api/ops/v1") && init?.method === "GET" ? { schema_version: "ops.v1", credential_separation: { schema_version: "credential_separation.v1", state: "ok", checked_count: 0, policy_size: policySize }, kinds: ["runs"], inventory: "/api/ops/v1/inventory", summary: "/api/ops/v1/summary" }
+          : address.includes("/inventory?") ? { schema_version: "ops.v1", kind: "runs", items: [], has_more: false, next_cursor: null }
+            : address.endsWith("/summary") ? { schema_version: "ops.v1", counts: {}, latest: {}, run_states: {}, integrity: {}, scan: {} }
+              : null;
+      if (address.endsWith("/api/ops/v1") && init?.method === "POST") return { ok: false, status: 405, headers: new Headers({ allow: "GET" }), redirected: false, text: async () => "" };
+      return { ok: true, status: 200, redirected: false, text: async () => JSON.stringify(body) };
+    });
+
+    const collected = await audit.collectActiveAccessEvidence({
+      policy, role: "monitor", cwd: repo,
+      env: { OPS_READ_TOKEN: "development-read-token", VERCEL_TOKEN: "development-vercel-viewer", VERCEL_TEAM_ID: "team-development", VERCEL_PROJECT_ID: policy.capabilities.get_only_ops.targets.development.project_id, HARNESS_ARENA_URL: "https://harness-arena-development.vercel.app" },
+      commandRunner: vi.fn(async (binary, args) => {
+        if (binary === "vercel" && args[0] === "inspect") return { exitCode: 0, stdout: JSON.stringify({ url: "harness-arena-development.vercel.app", projectId: policy.capabilities.get_only_ops.targets.development.project_id, gitSource: { sha: "a".repeat(40) } }) };
+        if (binary === "git" && args[0] === "rev-parse") return { exitCode: 0, stdout: `${"a".repeat(40)}\n` };
+        return { exitCode: 1, stdout: "" };
+      }), fetchImpl,
+    });
+
+    expect(collected.ops.mutation_denial).toMatchObject({ environment: "development", status: 405, allow: "GET" });
+    expect(calls.filter(([, method]) => method === "POST")).toEqual([["https://harness-arena-development.vercel.app/api/ops/v1", "POST", "Bearer development-read-token"]]);
   });
 
   it("uses a 0600 ephemeral secret file, redacts output, and cleans up on success", async () => {
