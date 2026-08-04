@@ -260,6 +260,11 @@ turns remains visible for investigation and is not automatically erased.
 Retry rules:
 
 - preflight retries only transient 429/5xx inside bounded attempts;
+- Gateway preflight reads bounded, blank-line-delimited SSE frames and succeeds
+  only after a real `choices[0].delta.content` token or terminal `[DONE]`
+  marker. Public failure evidence contains only the stable class, provider HTTP
+  status, attempt count, and bounded byte/event counts; it never retains
+  request or response bodies, credentials, prompts, or authorization values;
 - an infrastructure-invalid baseline may be retried through
   `POST /api/competition/admin/baseline`;
 - a judge rejection requires explicit admin review;

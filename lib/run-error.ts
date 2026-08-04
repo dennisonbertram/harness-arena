@@ -2,6 +2,16 @@ import { PUBLIC_RUN_EVENT_FIELDS } from "./public-run-event-fields.mjs";
 
 const PROVIDER_ERROR_PATTERN = /\bprovider[_ ]error:\s*(\d{3})\b/i;
 const HTTP_STATUS_PATTERN = /^\s*(\d{3})\b/;
+export const PUBLIC_GATEWAY_PREFLIGHT_CLASSES = Object.freeze([
+  "local_sidecar_unreachable",
+  "upstream_fetch_failed",
+  "provider_rejected",
+  "provider_http_error",
+  "response_stream_timeout",
+  "response_stream_incomplete",
+  "response_stream_limit",
+] as const);
+const PUBLIC_PREFLIGHT_CLASS_SET = new Set<string>(PUBLIC_GATEWAY_PREFLIGHT_CLASSES);
 
 /** Keep provider response bodies out of public run pages. */
 export function redactRunError(error: string, stage?: string): string {
@@ -32,6 +42,23 @@ function recordPayload(payload: unknown): Record<string, unknown> {
  */
 export function redactRunEventPayload(type: string, payload: unknown): Record<string, unknown> {
   const source = recordPayload(payload);
+
+  if (type === "run.failed" && source.stage === "gateway_preflight") {
+    const finiteCount = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    return {
+      stage: "gateway_preflight",
+      ...(typeof source.preflight_class === "string" && PUBLIC_PREFLIGHT_CLASS_SET.has(source.preflight_class)
+        ? { preflight_class: source.preflight_class }
+        : {}),
+      ...(typeof source.preflight_status === "number" && Number.isSafeInteger(source.preflight_status)
+        && source.preflight_status >= 100 && source.preflight_status <= 599
+        ? { preflight_status: source.preflight_status }
+        : {}),
+      ...(finiteCount(source.preflight_attempts) ? { preflight_attempts: source.preflight_attempts } : {}),
+      ...(finiteCount(source.preflight_observed_bytes) ? { preflight_observed_bytes: source.preflight_observed_bytes } : {}),
+      ...(finiteCount(source.preflight_observed_events) ? { preflight_observed_events: source.preflight_observed_events } : {}),
+    };
+  }
 
   if (type === "task.gateway_correlation") {
     const proxyRequests = Array.isArray(source.proxy_requests) ? source.proxy_requests : [];

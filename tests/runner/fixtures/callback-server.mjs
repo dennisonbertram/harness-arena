@@ -66,8 +66,8 @@ export function startCallbackServer({ secret, tasksRoot = null }) {
         req.method === "POST" &&
         (url.pathname === "/v1/messages" || url.pathname === "/v1/chat/completions")
       ) {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ content: [] }));
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n');
         return;
       }
 

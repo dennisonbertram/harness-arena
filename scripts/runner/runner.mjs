@@ -1031,8 +1031,13 @@ async function main() {
     if (!preflight.ok) {
       log(`gateway preflight FAILED: ${preflight.detail}`);
       queueEvent("run.failed", {
-        error: `gateway sidecar preflight failed (pinned=${PINNED_PROVIDER || "none"}): ${preflight.detail}`,
+        error: `gateway sidecar preflight failed: ${preflight.detail}`,
         stage: "gateway_preflight",
+        preflight_class: preflight.classification,
+        ...(preflight.status === undefined ? {} : { preflight_status: preflight.status }),
+        preflight_attempts: preflight.attempts,
+        preflight_observed_bytes: preflight.observedBytes,
+        preflight_observed_events: preflight.observedEvents,
       });
       const delivered = await finalizeTerminalStatus({ status: "failed" });
       process.exit(delivered ? 0 : 1);
