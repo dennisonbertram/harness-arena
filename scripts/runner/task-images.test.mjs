@@ -1,8 +1,11 @@
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import imageLock from "../../config/task-image-lock.json" with { type: "json" };
 import { describe, expect, it } from "vitest";
 import { buildRunnerTasks } from "../../lib/tasks-for-runner.ts";
+import { sh } from "./lib.mjs";
 import { resolveTaskImageIdentities } from "./task-images.mjs";
 
 function runnerPayload() {
@@ -85,6 +88,45 @@ describe("resolveTaskImageIdentities", () => {
     expect(inspections).toEqual([task.image, immutableRef]);
     expect(result.tasks[0].image).toBe(entry.config_digest);
     expect(JSON.stringify(result)).not.toContain("token");
+  });
+
+  it("discards output-heavy Docker pull progress without killing a successful immutable acquisition", () => {
+    const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-image-pull-output-"));
+    const fakeDocker = path.join(fixtureRoot, "docker.sh");
+    writeFileSync(fakeDocker, [
+      "#!/usr/bin/env sh",
+      "i=0",
+      "while [ \"$i\" -lt 200 ]; do",
+      "  printf '%s\\n' 'pull progress layer=fixture status=downloading'",
+      "  printf '%s\\n' 'untrusted pull detail=fixture-only' >&2",
+      "  i=$((i + 1))",
+      "done",
+      "exit 0",
+    ].join("\n"));
+    chmodSync(fakeDocker, 0o755);
+
+    try {
+      const result = sh(fakeDocker, ["pull", "example.invalid/task@sha256:fixture"], {
+        timeout: 2_000,
+        maxBuffer: 1_024,
+        stdio: "ignore",
+      });
+      expect(result).toMatchObject({ code: 0, timedOut: false });
+      expect(result.stdout).toEqual(Buffer.alloc(0));
+      expect(result.stderr).toEqual(Buffer.alloc(0));
+
+      const runnerSource = readFileSync(new URL("./runner.mjs", import.meta.url), "utf8");
+      const pullStart = runnerSource.indexOf('runDocker(["pull", immutableRef]');
+      const pullEnd = runnerSource.indexOf("  }, { deadlineMs });", pullStart);
+      expect(pullStart).toBeGreaterThanOrEqual(0);
+      expect(pullEnd).toBeGreaterThan(pullStart);
+      const pullWiring = runnerSource.slice(pullStart, pullEnd);
+      expect(pullWiring).toContain("timeout: Math.min(TASK_IMAGE_PULL_TIMEOUT_MS, remainingMs)");
+      expect(pullWiring).toContain('stdio: "ignore"');
+      expect(pullWiring).not.toContain("maxBuffer");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it("fails closed with bounded credential-free evidence when immutable acquisition cannot complete", () => {

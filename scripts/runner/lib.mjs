@@ -562,9 +562,10 @@ export function sh(cmd, args, opts = {}) {
   try {
     const stdout = execFileSync(cmd, args, {
       maxBuffer: opts.maxBuffer ?? 20 * 1024 * 1024,
+      stdio: opts.stdio,
       timeout: opts.timeout,
     });
-    return { code: 0, stdout, stderr: Buffer.alloc(0), timedOut: false };
+    return { code: 0, stdout: stdout ?? Buffer.alloc(0), stderr: Buffer.alloc(0), timedOut: false };
   } catch (err) {
     return {
       code: typeof err.status === "number" ? err.status : 1,

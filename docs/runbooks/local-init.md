@@ -64,6 +64,9 @@ is deliberately excluded: it is not a documented Docker Hub pull endpoint and
 the retained runtime evidence did not require it. A malformed lock, failed
 acquisition, or identity mismatch fails once at `task_image_readiness`, before
 Pi or gateway work, with bounded credential-free evidence.
+Routine `docker pull` progress is discarded rather than retained or uploaded;
+the bounded acquisition timeout, exit code, and post-pull immutable identity
+inspection remain the only readiness evidence.
 `run.sandbox_ready` records safe task-ID/config-ID/manifest-digest bindings and
 the task IDs that required acquisition.
 See [Task image lock provenance and refresh](task-image-lock.md) for the
