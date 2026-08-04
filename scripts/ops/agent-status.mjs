@@ -107,9 +107,9 @@ export async function spawnCommand(binary, args, { timeoutMs = DEFAULT_TIMEOUT_M
 
 function validVercelArgs(args) {
   if (!Array.isArray(args)) return false;
-  if (args.length === 5 && args[0] === "ls" && SAFE_PROJECT_ID.test(args[1]) && args[2] === "--json" && args[3] === "--environment") return ["production", "preview", "development"].includes(args[4]);
+  if (args.length === 6 && args[0] === "ls" && SAFE_PROJECT_ID.test(args[1]) && args[2] === "--format" && args[3] === "json" && args[4] === "--environment") return ["production", "preview", "development"].includes(args[5]);
   if (args.length === 3 && args[0] === "inspect" && args[2] === "--json") return SAFE_TARGET.test(args[1]) && !args[1].startsWith("-");
-  if (args.length === 6 && args[0] === "env" && args[1] === "ls" && ["production", "preview", "development"].includes(args[2]) && args[3] === "--project" && SAFE_PROJECT_ID.test(args[4]) && args[5] === "--json") return true;
+  if (args.length === 7 && args[0] === "env" && args[1] === "ls" && ["production", "preview", "development"].includes(args[2]) && args[3] === "--project" && SAFE_PROJECT_ID.test(args[4]) && args[5] === "--format" && args[6] === "json") return true;
   if (args.length === 5 && args[0] === "logs" && args[2] === "--json" && args[3] === "--since" && args[4] === "1h") return SAFE_TARGET.test(args[1]) && !args[1].startsWith("-");
   return false;
 }
@@ -121,9 +121,9 @@ export function createVercelCommandAdapter(run = spawnCommand) {
   };
   return {
     run: execute,
-    list: (environment, projectId) => execute(["ls", projectId, "--json", "--environment", environment]),
+    list: (environment, projectId) => execute(["ls", projectId, "--format", "json", "--environment", environment]),
     inspect: (target) => execute(["inspect", target, "--json"]),
-    environment: (environment, projectId) => execute(["env", "ls", environment, "--project", projectId, "--json"]),
+    environment: (environment, projectId) => execute(["env", "ls", environment, "--project", projectId, "--format", "json"]),
     logs: (target) => execute(["logs", target, "--json", "--since", "1h"]),
   };
 }
@@ -205,9 +205,9 @@ export async function collectPlatformEvidence({ environment, commandRunner = spa
   if (!resolvedTarget) return { requested_environment: environment, state: "access_blocked", expected_sha: null, deployment: null, environment: { target: config.vercel_environment, records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "unknown" }, blockers: [{ code: "platform_target_missing", detail: `Set HARNESS_ARENA_${environment.toUpperCase()}_URL to a deployed hostname` }], command_provenance: [] };
   const vercel = createVercelCommandAdapter(commandRunner), github = createGitHubCommandAdapter(commandRunner);
   const operations = [
-    { name: "vercel_list", binary: "vercel", args: ["ls", config.project_id, "--json", "--environment", config.vercel_environment], promise: vercel.list(config.vercel_environment, config.project_id), parse: (output) => parseVercelList(output, { now }) },
+    { name: "vercel_list", binary: "vercel", args: ["ls", config.project_id, "--format", "json", "--environment", config.vercel_environment], promise: vercel.list(config.vercel_environment, config.project_id), parse: (output) => parseVercelList(output, { now }) },
     { name: "vercel_inspect", binary: "vercel", args: ["inspect", resolvedTarget, "--json"], promise: vercel.inspect(resolvedTarget), parse: (output) => parseVercelInspect(output, { now }) },
-    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--project", config.project_id, "--json"], promise: vercel.environment(config.vercel_environment, config.project_id), parse: (output) => parseVercelEnvironment(output, config.vercel_environment, { now }) },
+    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--project", config.project_id, "--format", "json"], promise: vercel.environment(config.vercel_environment, config.project_id), parse: (output) => parseVercelEnvironment(output, config.vercel_environment, { now }) },
     { name: "vercel_logs", binary: "vercel", args: ["logs", resolvedTarget, "--json", "--since", "1h"], promise: vercel.logs(resolvedTarget), parse: parseVercelLogs },
     { name: "github_expected_sha", binary: "gh", args: ["api", `repos/dennisonbertram/harness-arena/commits/${resolvedRef}`, "--jq", ".sha"], promise: github.expectedSha(resolvedRef), parse: parseGitHubExpectedSha },
   ];

@@ -78,9 +78,9 @@ describe("CLI contract and command safety", () => {
   it("uses exact Vercel argv grammars and rejects mutation and option injection", async () => {
     const run = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "", exitCode: 0 });
     const adapter = createVercelCommandAdapter(run);
-    await expect(adapter.run(["ls", "prj_abc123", "--json", "--environment", "production"])).resolves.toMatchObject({ exitCode: 0 });
+    await expect(adapter.run(["ls", "prj_abc123", "--format", "json", "--environment", "production"])).resolves.toMatchObject({ exitCode: 0 });
     for (const args of [["env", "rm", "FOO", "production"], ["env", "add", "FOO", "production"], ["inspect", "--token=leak", "--json"], ["logs", "--evil", "--json", "--since", "1h"], ["deploy"], ["alias"], ["promote"], ["rollback"]]) await expect(adapter.run(args)).rejects.toThrow("unsafe_vercel_command");
-    expect(run).toHaveBeenCalledWith("vercel", ["ls", "prj_abc123", "--json", "--environment", "production"], expect.objectContaining({ timeoutMs: expect.any(Number) }));
+    expect(run).toHaveBeenCalledWith("vercel", ["ls", "prj_abc123", "--format", "json", "--environment", "production"], expect.objectContaining({ timeoutMs: expect.any(Number) }));
   });
 
   it("uses an exact read-only GitHub expected-SHA grammar", async () => {
@@ -123,7 +123,7 @@ describe("fixture-driven evidence parsers", () => {
     });
     const development = await collectPlatformEvidence({ environment: "development", target: "harness-arena-development.vercel.app", expectedRef: "dev", commandRunner });
     expect(development).toMatchObject({ requested_environment: "development", environment: { target: "production", required_missing: [] } });
-    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "production", "--project", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "--json"], expect.any(Object)]);
+    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "production", "--project", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "--format", "json"], expect.any(Object)]);
     const production = await collectPlatformEvidence({ environment: "production", target: "arena.example", commandRunner });
     expect(production).toMatchObject({ requested_environment: "production", environment: { target: "production" } });
     const localRunner = vi.fn();
