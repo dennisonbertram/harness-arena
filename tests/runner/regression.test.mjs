@@ -48,6 +48,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -71,6 +72,71 @@ const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
 const TEST_GATEWAY_PROXY_PORT = "14599";
 const LEGACY_REGEX_INSTRUCTION =
   "Write a deterministic regex result to /app/regex.txt for the synthetic runner fixture.";
+const FIXTURE_MANIFEST_DIGEST = `sha256:${"b".repeat(64)}`;
+const FIXTURE_CONFIG_DIGEST = `sha256:${"c".repeat(64)}`;
+
+function taskImageLock(tasks) {
+  return {
+    version: 1,
+    images: tasks.map((task) => ({
+      task_id: task.id,
+      lookup_ref: task.image,
+      manifest_digest: FIXTURE_MANIFEST_DIGEST,
+      config_digest: FIXTURE_CONFIG_DIGEST,
+    })),
+  };
+}
+
+function taskImageLockB64(tasks) {
+  return Buffer.from(JSON.stringify(taskImageLock(tasks)), "utf8").toString("base64");
+}
+
+function fakeDockerIdentityLine(tasks) {
+  const [entry] = taskImageLock(tasks).images;
+  if (!entry || tasks.length !== 1) throw new Error("fake Docker identity requires exactly one locked task");
+  const repository = entry.lookup_ref.slice(0, entry.lookup_ref.lastIndexOf(":"));
+  const identity = JSON.stringify({
+    Id: entry.config_digest,
+    RepoDigests: [`${repository}@${entry.manifest_digest}`],
+  });
+  return `if [ "$1" = image ]; then printf '%s' '${identity}'; exit 0; fi`;
+}
+
+function availableLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(String(address.port));
+      });
+    });
+  });
+}
+
+function runRunnerWithDiagnostics(env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-64 * 1024); });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-64 * 1024); });
+    child.on("error", reject);
+    child.on("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+  });
+}
+
+function runnerFailureContext(result, state) {
+  return JSON.stringify({
+    exit_code: result.exitCode,
+    event_types: state.events.map((event) => event.type),
+    status_updates: state.statusUpdates.map((update) => update.status),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
+}
 
 describe("buildPiCommand regression: shell-injection safety", () => {
   it("does not execute a semicolon/command-substitution injection attempt embedded in the instruction", () => {
@@ -211,16 +277,29 @@ describe("runner regression: task-container setup failures", () => {
     "system_prompt_copy",
   ]);
 
+  it("does not reuse fixed gateway proxy ports under full-suite parallelism", () => {
+    const source = readFileSync(new URL(import.meta.url), "utf8");
+    expect(source).not.toMatch(/GATEWAY_PROXY_PORT:\s*"1460[45]"/);
+  });
+
   it.each(REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS)("fails closed for required setup operation %s", async (operation) => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-setup-failure-"));
     const dockerLog = path.join(fixtureRoot, "docker.log");
     const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    const tasks = [{
+      id: "setup-failure",
+      image: "example.invalid/task:latest",
+      instruction: "This must not reach Pi.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
     writeFileSync(
       fakeDocker,
       [
         "#!/usr/bin/env sh",
         "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"",
         "if [ \"$1\" = info ]; then exit 0; fi",
+        fakeDockerIdentityLine(tasks),
         "case \"$*\" in",
         "  run\\ *) operation=container_create ;;",
         "  *'mkdir -p /root/.pi/agent'*) operation=models_directory ;;",
@@ -244,13 +323,6 @@ describe("runner regression: task-container setup failures", () => {
     chmodSync(fakeDocker, 0o755);
 
     const { state, baseUrl, stop } = await startCallbackServer({ secret: "setup-secret" });
-    const tasks = [{
-      id: "setup-failure",
-      image: "example.invalid/task:latest",
-      instruction: "This must not reach Pi.",
-      agent_timeout_sec: 1,
-      verifier_timeout_sec: 1,
-    }];
     const env = {
       ...process.env,
       RUN_ID: `setup-failure-${operation}`,
@@ -258,26 +330,24 @@ describe("runner regression: task-container setup failures", () => {
       RUNNER_CALLBACK_SECRET: "setup-secret",
       AI_GATEWAY_API_KEY: "vck_setup_secret_123",
       GATEWAY_UPSTREAM: baseUrl,
-      GATEWAY_PROXY_PORT: "14604",
+      GATEWAY_PROXY_PORT: await availableLoopbackPort(),
       RUNNER_MODEL: "zai/glm-5.2-fast",
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
       SYSTEM_PROMPT_B64: Buffer.from("Use the fixture.", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       DOCKER_LOG: dockerLog,
       FAIL_SETUP_OPERATION: operation,
     };
 
-    const exitCode = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
-      child.on("error", reject);
-      child.on("close", resolve);
-    });
+    const result = await runRunnerWithDiagnostics(env);
     await stop();
 
     try {
-      expect(exitCode).toBe(0);
+      const diagnostic = runnerFailureContext(result, state);
+      expect(result.exitCode, diagnostic).toBe(0);
       const failure = state.events.find((event) => event.type === "task.failed");
-      expect(failure?.payload).toMatchObject({
+      expect(failure?.payload, diagnostic).toMatchObject({
         task_id: "setup-failure",
         stage: "task_setup_error",
       });
@@ -323,11 +393,19 @@ describe("runner regression: task-container setup failures", () => {
   it("keeps completed Pi cost and agent traces when verifier setup fails", async () => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-verifier-setup-cost-"));
     const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    const tasks = [{
+      id: "verifier-setup-cost",
+      image: "example.invalid/task:latest",
+      instruction: "Produce evidence before verifier setup.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
     writeFileSync(
       fakeDocker,
       [
         "#!/usr/bin/env sh",
         "if [ \"$1\" = info ]; then exit 0; fi",
+        fakeDockerIdentityLine(tasks),
         "case \"$*\" in",
         "  *'-e AI_GATEWAY_API_KEY'*)",
         "    printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"cost\":{\"total\":0.25}}}}'",
@@ -340,13 +418,6 @@ describe("runner regression: task-container setup failures", () => {
     );
     chmodSync(fakeDocker, 0o755);
     const { state, baseUrl, stop } = await startCallbackServer({ secret: "verifier-setup-secret" });
-    const tasks = [{
-      id: "verifier-setup-cost",
-      image: "example.invalid/task:latest",
-      instruction: "Produce evidence before verifier setup.",
-      agent_timeout_sec: 1,
-      verifier_timeout_sec: 1,
-    }];
     const env = {
       ...process.env,
       RUN_ID: "verifier-setup-cost",
@@ -354,23 +425,21 @@ describe("runner regression: task-container setup failures", () => {
       RUNNER_CALLBACK_SECRET: "verifier-setup-secret",
       AI_GATEWAY_API_KEY: "test-key",
       GATEWAY_UPSTREAM: baseUrl,
-      GATEWAY_PROXY_PORT: "14605",
+      GATEWAY_PROXY_PORT: await availableLoopbackPort(),
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
       SYSTEM_PROMPT_B64: Buffer.from("", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       PI_INSTALL_MODE: "none",
     };
-    const exitCode = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
-      child.on("error", reject);
-      child.on("close", resolve);
-    });
+    const result = await runRunnerWithDiagnostics(env);
     await stop();
 
     try {
-      expect(exitCode).toBe(0);
+      const diagnostic = runnerFailureContext(result, state);
+      expect(result.exitCode, diagnostic).toBe(0);
       const failure = state.events.find((event) => event.type === "task.failed");
-      expect(failure?.payload).toMatchObject({ task_id: "verifier-setup-cost", stage: "task_setup_error" });
+      expect(failure?.payload, diagnostic).toMatchObject({ task_id: "verifier-setup-cost", stage: "task_setup_error" });
       expect(state.events.map((event) => event.type)).toContain("task.agent_finished");
       expect(state.events.map((event) => event.type)).not.toContain("task.verify_started");
       const stdoutTrace = state.traces.find((trace) => trace.name === "pi-stdout.txt");

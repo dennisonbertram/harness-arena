@@ -38,6 +38,32 @@ testing requires the separately provisioned canonical, publicly reachable
 HTTPS origin of the isolated Development deployment; never substitute a live
 or production origin.
 
+The deterministic local startup never creates a Sandbox or pulls task images.
+Before it installs or starts Next, `./scripts/init.sh` runs the same manifest
+inventory check and rejects a lock with missing, extra, or changed task refs.
+For a hosted Development runner, `config/task-image-lock.json` is the
+versioned authority: it must have exactly one entry for every task derived from
+`TASKS_JSON_B64`, with the task's lookup ref, immutable registry manifest
+digest, and Docker config digest. Before gateway preflight, the runner checks
+the local cached lookup ref's `.Id` and `.RepoDigests` against that lock. A
+missing or mismatched cache entry is acquired only as
+`repository@manifest-digest`, then rechecked; it never pulls a mutable tag and
+runs the task only by its locked config SHA-256 ID.
+
+Docker Hub access (`auth.docker.io`, `registry-1.docker.io`, and Docker's
+current pull CDN `production.cloudfront.docker.com`) is added only to
+Sandboxes launched by the isolated Development Vercel project. Production and
+local policies do not receive those domains. The historical R2 host
+`docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com`
+is deliberately excluded: it is not a documented Docker Hub pull endpoint and
+we have no direct runtime redirect requiring it. A malformed lock, failed
+acquisition, or identity mismatch fails once at `task_image_readiness`, before
+Pi or gateway work, with bounded credential-free evidence.
+`run.sandbox_ready` records safe task-ID/config-ID/manifest-digest bindings and
+the task IDs that required acquisition.
+See [Task image lock provenance and refresh](task-image-lock.md) for the
+review evidence and operator procedure required to change a locked identity.
+
 Init selects `HARNESS_EXECUTION_MODE=deterministic-success`, a seeded local
 development identity, one run per submission, and an ephemeral local callback
 secret in its sanitized child environment. It refuses `main`, detached HEAD,

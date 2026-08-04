@@ -101,10 +101,17 @@ async function createHermeticCheckout(prefix, { withFakeNext = false } = {}) {
   checkoutRoots.add(checkout);
   await mkdir(join(checkout, "scripts"), { recursive: true });
   await mkdir(join(checkout, "lib"), { recursive: true });
+  await mkdir(join(checkout, "config"), { recursive: true });
+  await mkdir(join(checkout, "tasks"), { recursive: true });
   await mkdir(join(checkout, ".git"), { recursive: true });
   await writeFile(join(checkout, ".git", "HEAD"), "ref: refs/heads/codex/init-integration\n");
-  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/init-command-group-anchor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "lib/file-storage-lock.mjs"]) {
+  for (const path of ["scripts/init.sh", "scripts/init.mjs", "scripts/init-lib.mjs", "scripts/init-process-supervisor.mjs", "scripts/init-command-group-anchor.mjs", "scripts/local-next-wrapper.mjs", "scripts/seed-local.mjs", "scripts/check-task-image-lock.mjs", "lib/file-storage-lock.mjs", "config/task-image-lock.json"]) {
     await cp(join(repositoryRoot, path), join(checkout, path));
+  }
+  for (const task of await readdir(join(repositoryRoot, "tasks"), { withFileTypes: true })) {
+    if (!task.isDirectory()) continue;
+    await mkdir(join(checkout, "tasks", task.name), { recursive: true });
+    await cp(join(repositoryRoot, "tasks", task.name, "task.toml"), join(checkout, "tasks", task.name, "task.toml"));
   }
   await chmod(join(checkout, "scripts/init.sh"), 0o755);
   if (withFakeNext) await installFakeNext(checkout);
