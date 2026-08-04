@@ -75,8 +75,8 @@ const LEGACY_REGEX_INSTRUCTION =
 const FIXTURE_MANIFEST_DIGEST = `sha256:${"b".repeat(64)}`;
 const FIXTURE_CONFIG_DIGEST = `sha256:${"c".repeat(64)}`;
 
-function taskImageLockB64(tasks) {
-  return Buffer.from(JSON.stringify({
+function taskImageLock(tasks) {
+  return {
     version: 1,
     images: tasks.map((task) => ({
       task_id: task.id,
@@ -84,7 +84,22 @@ function taskImageLockB64(tasks) {
       manifest_digest: FIXTURE_MANIFEST_DIGEST,
       config_digest: FIXTURE_CONFIG_DIGEST,
     })),
-  }), "utf8").toString("base64");
+  };
+}
+
+function taskImageLockB64(tasks) {
+  return Buffer.from(JSON.stringify(taskImageLock(tasks)), "utf8").toString("base64");
+}
+
+function fakeDockerIdentityLine(tasks) {
+  const [entry] = taskImageLock(tasks).images;
+  if (!entry || tasks.length !== 1) throw new Error("fake Docker identity requires exactly one locked task");
+  const repository = entry.lookup_ref.slice(0, entry.lookup_ref.lastIndexOf(":"));
+  const identity = JSON.stringify({
+    Id: entry.config_digest,
+    RepoDigests: [`${repository}@${entry.manifest_digest}`],
+  });
+  return `if [ "$1" = image ]; then printf '%s' '${identity}'; exit 0; fi`;
 }
 
 function availableLoopbackPort() {
@@ -271,13 +286,20 @@ describe("runner regression: task-container setup failures", () => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-setup-failure-"));
     const dockerLog = path.join(fixtureRoot, "docker.log");
     const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    const tasks = [{
+      id: "setup-failure",
+      image: "example.invalid/task:latest",
+      instruction: "This must not reach Pi.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
     writeFileSync(
       fakeDocker,
       [
         "#!/usr/bin/env sh",
         "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"",
         "if [ \"$1\" = info ]; then exit 0; fi",
-        "if [ \"$1\" = image ]; then for last; do :; done; repo=${last%%@*}; repo=${repo%:*}; printf '{\\\"Id\\\":\\\"%s\\\",\\\"RepoDigests\\\":[\\\"%s@%s\\\"]}' \"$TASK_IMAGE_CONFIG_DIGEST\" \"$repo\" \"$TASK_IMAGE_MANIFEST_DIGEST\"; exit 0; fi",
+        fakeDockerIdentityLine(tasks),
         "case \"$*\" in",
         "  run\\ *) operation=container_create ;;",
         "  *'mkdir -p /root/.pi/agent'*) operation=models_directory ;;",
@@ -301,13 +323,6 @@ describe("runner regression: task-container setup failures", () => {
     chmodSync(fakeDocker, 0o755);
 
     const { state, baseUrl, stop } = await startCallbackServer({ secret: "setup-secret" });
-    const tasks = [{
-      id: "setup-failure",
-      image: "example.invalid/task:latest",
-      instruction: "This must not reach Pi.",
-      agent_timeout_sec: 1,
-      verifier_timeout_sec: 1,
-    }];
     const env = {
       ...process.env,
       RUN_ID: `setup-failure-${operation}`,
@@ -319,8 +334,6 @@ describe("runner regression: task-container setup failures", () => {
       RUNNER_MODEL: "zai/glm-5.2-fast",
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
       TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
-      TASK_IMAGE_MANIFEST_DIGEST: FIXTURE_MANIFEST_DIGEST,
-      TASK_IMAGE_CONFIG_DIGEST: FIXTURE_CONFIG_DIGEST,
       SYSTEM_PROMPT_B64: Buffer.from("Use the fixture.", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       DOCKER_LOG: dockerLog,
@@ -380,12 +393,19 @@ describe("runner regression: task-container setup failures", () => {
   it("keeps completed Pi cost and agent traces when verifier setup fails", async () => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-verifier-setup-cost-"));
     const fakeDocker = path.join(fixtureRoot, "fake-docker.sh");
+    const tasks = [{
+      id: "verifier-setup-cost",
+      image: "example.invalid/task:latest",
+      instruction: "Produce evidence before verifier setup.",
+      agent_timeout_sec: 1,
+      verifier_timeout_sec: 1,
+    }];
     writeFileSync(
       fakeDocker,
       [
         "#!/usr/bin/env sh",
         "if [ \"$1\" = info ]; then exit 0; fi",
-        "if [ \"$1\" = image ]; then for last; do :; done; repo=${last%%@*}; repo=${repo%:*}; printf '{\\\"Id\\\":\\\"%s\\\",\\\"RepoDigests\\\":[\\\"%s@%s\\\"]}' \"$TASK_IMAGE_CONFIG_DIGEST\" \"$repo\" \"$TASK_IMAGE_MANIFEST_DIGEST\"; exit 0; fi",
+        fakeDockerIdentityLine(tasks),
         "case \"$*\" in",
         "  *'-e AI_GATEWAY_API_KEY'*)",
         "    printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"cost\":{\"total\":0.25}}}}'",
@@ -398,13 +418,6 @@ describe("runner regression: task-container setup failures", () => {
     );
     chmodSync(fakeDocker, 0o755);
     const { state, baseUrl, stop } = await startCallbackServer({ secret: "verifier-setup-secret" });
-    const tasks = [{
-      id: "verifier-setup-cost",
-      image: "example.invalid/task:latest",
-      instruction: "Produce evidence before verifier setup.",
-      agent_timeout_sec: 1,
-      verifier_timeout_sec: 1,
-    }];
     const env = {
       ...process.env,
       RUN_ID: "verifier-setup-cost",
@@ -415,8 +428,6 @@ describe("runner regression: task-container setup failures", () => {
       GATEWAY_PROXY_PORT: await availableLoopbackPort(),
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
       TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
-      TASK_IMAGE_MANIFEST_DIGEST: FIXTURE_MANIFEST_DIGEST,
-      TASK_IMAGE_CONFIG_DIGEST: FIXTURE_CONFIG_DIGEST,
       SYSTEM_PROMPT_B64: Buffer.from("", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       PI_INSTALL_MODE: "none",
