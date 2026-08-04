@@ -15,7 +15,12 @@ const SAFE_LOCAL_KEYS = new Set([
   "HARNESS_GIT_BRANCH", "RUNNER_CALLBACK_SECRET", "RUNS_PER_SUBMISSION",
 ]);
 const DETERMINISTIC_SCENARIOS = new Set(["success", "task-failure", "callback-failure", "stale-reap", "budget-exceeded"]);
-const REQUIRED_NODE_VERSION = [20, 9, 0];
+const NODE_COMPATIBILITY = Object.freeze({
+  legacyMinimum: Object.freeze([20, 19, 0]),
+  legacyMaximumExclusive: Object.freeze([21, 0, 0]),
+  currentMinimum: Object.freeze([22, 12, 0]),
+});
+export const SUPPORTED_NODE_RANGE = `^${NODE_COMPATIBILITY.legacyMinimum.join(".")} || >=${NODE_COMPATIBILITY.currentMinimum.join(".")}`;
 const DEFAULT_INIT_LOCK_TIMEOUT_MS = 120_000;
 export const DEFAULT_OWNED_SUPERVISOR_GRACE_MS = 500;
 export const DEFAULT_OWNED_SUPERVISOR_KILL_WAIT_MS = 1_000;
@@ -43,23 +48,28 @@ export function assertNodeVersion(version = process.versions.node) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(version));
   const parsed = match?.slice(1).map(Number);
   const valid = parsed?.length === 3 && parsed.every(Number.isSafeInteger);
-  let comparison = 0;
-  if (valid) {
-    for (let index = 0; index < REQUIRED_NODE_VERSION.length; index++) {
-      if (parsed[index] === REQUIRED_NODE_VERSION[index]) continue;
-      comparison = parsed[index] > REQUIRED_NODE_VERSION[index] ? 1 : -1;
-      break;
-    }
-  }
-  if (!valid || comparison < 0) throw new Error(`Node.js 20.9.0+ is required (found ${version})`);
+  const supported = valid && (
+    (compareVersion(parsed, NODE_COMPATIBILITY.legacyMinimum) >= 0
+      && compareVersion(parsed, NODE_COMPATIBILITY.legacyMaximumExclusive) < 0)
+    || compareVersion(parsed, NODE_COMPATIBILITY.currentMinimum) >= 0
+  );
+  if (!supported) throw new Error(`Node.js ${SUPPORTED_NODE_RANGE} is required (found ${version})`);
 }
 
 export function validateStartup({ node, nodeVersion = process.versions.node, pnpm, portAvailable, stalePid }) {
-  if (!node) throw new Error("Node.js 20.9.0+ is required");
+  if (!node) throw new Error(`Node.js ${SUPPORTED_NODE_RANGE} is required`);
   assertNodeVersion(nodeVersion);
   if (!pnpm) throw new Error("pnpm is required");
   if (!portAvailable) throw new Error("selected port is already in use");
   if (stalePid) throw new Error("stale PID metadata detected; run ./scripts/init.sh --reset");
+}
+
+function compareVersion(left, right) {
+  for (let index = 0; index < right.length; index++) {
+    if (left[index] === right[index]) continue;
+    return left[index] > right[index] ? 1 : -1;
+  }
+  return 0;
 }
 
 export function isPortAvailable(port) {

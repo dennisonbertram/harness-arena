@@ -57,12 +57,16 @@ describe("init security and lifecycle", () => {
     })).rejects.toThrow(/unknown deterministic scenario/);
   });
 
-  it("enforces Next 16.2.11's complete Node >=20.9.0 semver floor and probes the selected port", async () => {
-    for (const version of ["19.9.0", "20.8.999", "20.9", "20", "garbage", "", "20.9.0.1"]) {
-      expect(() => init.assertNodeVersion(version), version).toThrow(/Node\.js 20(?:\.9\.0)?\+/);
+  it("enforces the checked toolchain's complete Node compatibility range", () => {
+    for (const version of ["19.9.0", "20.18.999", "21.0.0", "22.11.999", "20.19", "20", "garbage", "", "20.19.0.1"]) {
+      expect(() => init.assertNodeVersion(version), version).toThrow(/\^20\.19\.0 \|\| >=22\.12\.0/);
     }
-    expect(() => init.assertNodeVersion("20.9.0")).not.toThrow();
-    expect(() => init.assertNodeVersion("21.0.0")).not.toThrow();
+    for (const version of ["20.19.0", "20.99.0", "22.12.0", "23.0.0", "24.0.0"]) {
+      expect(() => init.assertNodeVersion(version), version).not.toThrow();
+    }
+  });
+
+  it("probes the selected port", async () => {
     const server = createServer();
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = server.address().port;
