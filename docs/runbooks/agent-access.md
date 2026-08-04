@@ -115,6 +115,20 @@ must be passed through `withEphemeralSecretFile`. It creates a 0600 file in a
 directory on normal completion, error, SIGINT, and SIGTERM. `.agent-access-secrets/`
 is ignored as defense in depth; the default location remains the OS temp area.
 
+### Runner-log read redaction
+
+The operations read API handles multiline runner logs record by record. JSON
+arrays and objects are parsed and recursively redacted wherever they occur in
+the log, including after ordinary text records. A malformed JSON-shaped or
+arbitrary bracketed record becomes `[REDACTED]` without hiding safe neighboring
+records. The sole bracket-marker exception is the runner's exact
+`[TRUNCATED]` record; decorated or lookalike markers fail closed.
+
+One bounded redaction state is shared across records, recursive strings,
+sanitized keys, object traversal, and plain assignments. If its traversal or
+assignment budget is exhausted, the complete returned value is `[REDACTED]`
+rather than a partial result that could expose unvisited content.
+
 OpenTelemetry endpoint, protocol, port, and availability variables are
 inventory metadata only: the audit may report their presence but never their
 values. OTLP header variables are additionally classified as secrets. These
