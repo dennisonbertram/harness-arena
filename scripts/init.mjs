@@ -150,6 +150,7 @@ async function initialize(state) {
   const gitBranch = await readCurrentBranch(worktree);
   const guardedLocalConfig = { ...localConfig, HARNESS_GIT_BRANCH: gitBranch };
   const installEnv = await safeChildEnv(worktree, process.env, guardedLocalConfig);
+  await run(process.execPath, ["scripts/check-task-image-lock.mjs"], { cwd: worktree, env: installEnv, stdio: "inherit" }, "task image lock readiness");
   if (!args.has("--no-install")) await run("pnpm", ["install", "--frozen-lockfile"], { cwd: worktree, env: installEnv, stdio: "inherit" }, "pnpm install");
 
   await run(process.execPath, ["scripts/seed-local.mjs"], { cwd: worktree, env: installEnv, stdio: "inherit" }, "local seed");

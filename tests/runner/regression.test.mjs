@@ -71,6 +71,20 @@ const RUNNER_SCRIPT = path.join(REPO_ROOT, "scripts", "runner", "runner.mjs");
 const TEST_GATEWAY_PROXY_PORT = "14599";
 const LEGACY_REGEX_INSTRUCTION =
   "Write a deterministic regex result to /app/regex.txt for the synthetic runner fixture.";
+const FIXTURE_MANIFEST_DIGEST = `sha256:${"b".repeat(64)}`;
+const FIXTURE_CONFIG_DIGEST = `sha256:${"c".repeat(64)}`;
+
+function taskImageLockB64(tasks) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    images: tasks.map((task) => ({
+      task_id: task.id,
+      lookup_ref: task.image,
+      manifest_digest: FIXTURE_MANIFEST_DIGEST,
+      config_digest: FIXTURE_CONFIG_DIGEST,
+    })),
+  }), "utf8").toString("base64");
+}
 
 describe("buildPiCommand regression: shell-injection safety", () => {
   it("does not execute a semicolon/command-substitution injection attempt embedded in the instruction", () => {
@@ -221,6 +235,7 @@ describe("runner regression: task-container setup failures", () => {
         "#!/usr/bin/env sh",
         "printf '%s\\n' \"$*\" >> \"$DOCKER_LOG\"",
         "if [ \"$1\" = info ]; then exit 0; fi",
+        "if [ \"$1\" = image ]; then for last; do :; done; repo=${last%%@*}; repo=${repo%:*}; printf '{\\\"Id\\\":\\\"%s\\\",\\\"RepoDigests\\\":[\\\"%s@%s\\\"]}' \"$TASK_IMAGE_CONFIG_DIGEST\" \"$repo\" \"$TASK_IMAGE_MANIFEST_DIGEST\"; exit 0; fi",
         "case \"$*\" in",
         "  run\\ *) operation=container_create ;;",
         "  *'mkdir -p /root/.pi/agent'*) operation=models_directory ;;",
@@ -261,6 +276,9 @@ describe("runner regression: task-container setup failures", () => {
       GATEWAY_PROXY_PORT: "14604",
       RUNNER_MODEL: "zai/glm-5.2-fast",
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
+      TASK_IMAGE_MANIFEST_DIGEST: FIXTURE_MANIFEST_DIGEST,
+      TASK_IMAGE_CONFIG_DIGEST: FIXTURE_CONFIG_DIGEST,
       SYSTEM_PROMPT_B64: Buffer.from("Use the fixture.", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       DOCKER_LOG: dockerLog,
@@ -328,6 +346,7 @@ describe("runner regression: task-container setup failures", () => {
       [
         "#!/usr/bin/env sh",
         "if [ \"$1\" = info ]; then exit 0; fi",
+        "if [ \"$1\" = image ]; then for last; do :; done; repo=${last%%@*}; repo=${repo%:*}; printf '{\\\"Id\\\":\\\"%s\\\",\\\"RepoDigests\\\":[\\\"%s@%s\\\"]}' \"$TASK_IMAGE_CONFIG_DIGEST\" \"$repo\" \"$TASK_IMAGE_MANIFEST_DIGEST\"; exit 0; fi",
         "case \"$*\" in",
         "  *'-e AI_GATEWAY_API_KEY'*)",
         "    printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"cost\":{\"total\":0.25}}}}'",
@@ -356,6 +375,9 @@ describe("runner regression: task-container setup failures", () => {
       GATEWAY_UPSTREAM: baseUrl,
       GATEWAY_PROXY_PORT: "14605",
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
+      TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
+      TASK_IMAGE_MANIFEST_DIGEST: FIXTURE_MANIFEST_DIGEST,
+      TASK_IMAGE_CONFIG_DIGEST: FIXTURE_CONFIG_DIGEST,
       SYSTEM_PROMPT_B64: Buffer.from("", "utf8").toString("base64"),
       DOCKER_CMD: fakeDocker,
       PI_INSTALL_MODE: "none",

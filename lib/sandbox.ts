@@ -1,6 +1,7 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
 import developmentEnvironment from "@/config/development-environment.json";
+import taskImageLock from "@/config/task-image-lock.json";
 import { PINNED_PROVIDERS } from "./arena-params";
 import { log, normalizeError } from "./log";
 import { getStorage } from "./storage";
@@ -72,7 +73,17 @@ const NETWORK_BASE_ALLOWLIST = [
   "security.ubuntu.com",
   "ports.ubuntu.com",
   "registry.npmjs.org",
-  // Docker images are baked into the snapshot -- no docker registry needed.
+  // Docker Hub is intentionally excluded here. Only the isolated Development
+  // Vercel project receives its two acquisition endpoints below.
+];
+// Docker Hub's documented 2026 CDN migration requires this host in addition
+// to registry authentication and manifest endpoints. Keep the list scoped to
+// the isolated Development project; do not add historical Cloudflare/R2 hosts
+// without direct runtime evidence.
+const DEVELOPMENT_DOCKER_HUB_ALLOWLIST = [
+  "auth.docker.io",
+  "registry-1.docker.io",
+  "production.cloudfront.docker.com",
 ];
 
 function networkPolicy(callbackBase: string): NetworkPolicy {
@@ -81,7 +92,8 @@ function networkPolicy(callbackBase: string): NetworkPolicy {
     if (vercelContext) throw new Error("sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel");
     return "allow-all";
   }
-  return { allow: [new URL(callbackBase).hostname, ...NETWORK_BASE_ALLOWLIST] };
+  const imageAcquisitionAllowlist = isDevelopmentVercelProject() ? DEVELOPMENT_DOCKER_HUB_ALLOWLIST : [];
+  return { allow: [new URL(callbackBase).hostname, ...NETWORK_BASE_ALLOWLIST, ...imageAcquisitionAllowlist] };
 }
 
 interface VercelCredentials {
@@ -192,6 +204,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
     const runnerTasks = buildRunnerTasks();
     const tasksJsonB64 = Buffer.from(JSON.stringify(runnerTasks), "utf8").toString("base64");
+    const taskImageLockB64 = Buffer.from(JSON.stringify(taskImageLock), "utf8").toString("base64");
 
     const sandbox = await Sandbox.create({
       source: { type: "snapshot", snapshotId: process.env.RUNNER_SNAPSHOT_ID ?? DEFAULT_SNAPSHOT_ID },
@@ -245,6 +258,7 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
       SYSTEM_PROMPT_B64: systemPromptB64,
       BUDGET_CAP_USD: budgetCapUsd,
       TASKS_JSON_B64: tasksJsonB64,
+      TASK_IMAGE_LOCK_B64: taskImageLockB64,
     };
     // Model routing (default = Vercel AI Gateway). The run's own model wins so
     // different runs can use different models (glm-5.2, Claude Sonnet 5, …);

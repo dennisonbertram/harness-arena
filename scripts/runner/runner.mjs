@@ -58,6 +58,7 @@ import {
   trustedGatewayPricing,
   VERIFIER_TRACE_NAME,
 } from "./lib.mjs";
+import { resolveTaskImageIdentities } from "./task-images.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
 const PI_INSTALL_MODE = process.env.PI_INSTALL_MODE || "agentkit";
@@ -102,6 +103,17 @@ const RUNNER_LOG_MAX_BYTES = parseInt(process.env.RUNNER_LOG_MAX_BYTES ?? String
 const RUNNER_LOG_MAX_LINE_BYTES = parseInt(process.env.RUNNER_LOG_MAX_LINE_BYTES ?? String(8 * 1024), 10);
 const HTTP_TIMEOUT_MS = parseInt(process.env.RUNNER_HTTP_TIMEOUT_MS ?? "20000", 10);
 const DOCKER_INFO_TIMEOUT_MS = parseInt(process.env.RUNNER_DOCKER_INFO_TIMEOUT_MS ?? "10000", 10);
+function boundedTimeoutMs(value, fallback, max = 60_000) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
+}
+const TASK_IMAGE_INSPECT_TIMEOUT_MS = boundedTimeoutMs(process.env.RUNNER_TASK_IMAGE_INSPECT_TIMEOUT_MS, 10_000);
+const TASK_IMAGE_PULL_TIMEOUT_MS = boundedTimeoutMs(process.env.RUNNER_TASK_IMAGE_PULL_TIMEOUT_MS, 300_000, 300_000);
+const TASK_IMAGE_READINESS_TIMEOUT_MS = boundedTimeoutMs(
+  process.env.RUNNER_TASK_IMAGE_READINESS_TIMEOUT_MS,
+  10 * 60_000,
+  30 * 60_000,
+);
 const TERMINAL_FALLBACK_PATH =
   process.env.RUNNER_TERMINAL_FALLBACK_PATH || "/var/log/runner-terminal.json";
 // Test-only hook: throws inside runOneTask for the named task id, to prove
@@ -195,6 +207,25 @@ async function ensureDockerReady() {
     log(`dockerd not ready after ${waitSec}s`);
   }
   return false;
+}
+
+// A snapshot cache is only a fast path. The lock controls identity and any
+// cache miss/mismatch can acquire only its immutable registry manifest before
+// gateway/model preflight can spend anything.
+function ensureTaskImagesReady(tasks, imageLock) {
+  const deadlineMs = Date.now() + TASK_IMAGE_READINESS_TIMEOUT_MS;
+  return resolveTaskImageIdentities(tasks, imageLock, {
+    inspect: (image, remainingMs) =>
+      runDocker(["image", "inspect", "--format", "{{json .}}", image], {
+        timeout: Math.min(TASK_IMAGE_INSPECT_TIMEOUT_MS, remainingMs),
+        maxBuffer: 64 * 1024,
+      }),
+    pull: (immutableRef, remainingMs) =>
+      runDocker(["pull", immutableRef], {
+        timeout: Math.min(TASK_IMAGE_PULL_TIMEOUT_MS, remainingMs),
+        maxBuffer: 1024,
+      }),
+  }, { deadlineMs });
 }
 
 // --- callback client (retry 3x with backoff; never crash the run) --------
@@ -949,6 +980,38 @@ async function main() {
   let cumulativeCost = 0;
   let overBudget = false;
   try {
+    // TASKS_JSON_B64 is the task-manifest-derived transport contract. Decode
+    // it before any gateway work so a malformed or unavailable image fails
+    // once, before a model request or task starts.
+    const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
+    const imageLock = JSON.parse(decodeB64(process.env.TASK_IMAGE_LOCK_B64));
+    const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
+
+    const dockerReady = await ensureDockerReady();
+    if (!dockerReady) {
+      queueEvent("run.failed", {
+        error: `dockerd did not become ready: ${tailFile(DOCKERD_LOG, 4000)}`,
+        stage: "sandbox_ready",
+      });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
+    }
+
+    const imageReadiness = ensureTaskImagesReady(tasks, imageLock);
+    if (!imageReadiness.ok) {
+      log(`task image readiness FAILED: ${imageReadiness.diagnostic}`);
+      queueEvent("run.failed", { error: imageReadiness.diagnostic, stage: "task_image_readiness" });
+      const delivered = await finalizeTerminalStatus({ status: "failed" });
+      process.exit(delivered ? 0 : 1);
+    }
+
+    const readyTasks = imageReadiness.tasks;
+    queueEvent("run.sandbox_ready", {
+      sandbox_id: os.hostname(),
+      task_image_identities: imageReadiness.identities,
+      acquired_task_ids: imageReadiness.acquired_task_ids,
+    });
+
     // Must be listening before any task container starts, since pi's models.json
     // points at it. Started here rather than per-task so all 16 tasks in a run
     // share one pinned upstream.
@@ -973,16 +1036,6 @@ async function main() {
     }
     log(`gateway preflight ok (pinned to ${PINNED_PROVIDER || "nothing"})`);
 
-    const dockerReady = await ensureDockerReady();
-    if (!dockerReady) {
-      queueEvent("run.failed", {
-        error: `dockerd did not become ready: ${tailFile(DOCKERD_LOG, 4000)}`,
-        stage: "sandbox_ready",
-      });
-      const delivered = await finalizeTerminalStatus({ status: "failed" });
-      process.exit(delivered ? 0 : 1);
-    }
-    queueEvent("run.sandbox_ready", { sandbox_id: os.hostname() });
     // First status transition of the run (issue #23 finding B): posting
     // "running" here, before the task loop starts, closes the window
     // where a run sits at "queued" until its (possibly much later)
@@ -1008,11 +1061,8 @@ async function main() {
       process.exit(delivered ? 0 : 1);
     }
 
-    const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
-    const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
-
-    for (let index = 0; index < tasks.length; index++) {
-      const task = tasks[index];
+    for (let index = 0; index < readyTasks.length; index++) {
+      const task = readyTasks[index];
       if (overBudget) {
         taskResults.push({ task_id: task.id, attempted: false, passed: false });
         continue;

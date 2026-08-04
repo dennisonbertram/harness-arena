@@ -31,6 +31,7 @@ vi.mock("@/config/development-environment.json", async (importOriginal) => {
 });
 
 import { buildRunnerTasks } from "@/lib/tasks-for-runner";
+import taskImageLock from "@/config/task-image-lock.json";
 import { createRunSandbox } from "@/lib/sandbox";
 import type { Run } from "@/lib/types";
 
@@ -241,6 +242,22 @@ describe("createRunSandbox", () => {
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ networkPolicy: "allow-all" }));
     });
 
+    it("adds Docker Hub acquisition domains only for the isolated Development project", async () => {
+      process.env.VERCEL = "1";
+      process.env.VERCEL_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+      process.env.AI_GATEWAY_KEY_PARTIAL = "key";
+      process.env.AI_GATEWAY_API_KEY = "test-gw-key";
+      mockCreate.mockResolvedValue(makeSandbox());
+
+      await createRunSandbox(makeRun(), { prompt: "be careful" });
+
+      expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
+        networkPolicy: {
+          allow: [...NETWORK_ALLOWLIST, "auth.docker.io", "registry-1.docker.io", "production.cloudfront.docker.com"],
+        },
+      }));
+    });
+
     it.each(["production", "preview", "development"])(
       "rejects RUNNER_NETWORK_MODE=allow-all in a Vercel %s context",
       async (vercelEnvironment) => {
@@ -407,6 +424,8 @@ describe("createRunSandbox", () => {
 
       const decodedTasks = JSON.parse(Buffer.from(launchCall.env.TASKS_JSON_B64, "base64").toString("utf8"));
       expect(decodedTasks).toEqual(buildRunnerTasks());
+      const decodedImageLock = JSON.parse(Buffer.from(launchCall.env.TASK_IMAGE_LOCK_B64, "base64").toString("utf8"));
+      expect(decodedImageLock).toEqual(taskImageLock);
 
       // No argv element (the bootstrap's `cmd`/`args`, or the launch call's
       // own `cmd`/`args`, excluding its dedicated `env` map) may contain the
