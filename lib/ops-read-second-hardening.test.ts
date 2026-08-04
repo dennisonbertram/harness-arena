@@ -91,6 +91,13 @@ describe("second Sol hardening", () => {
     ].join("\n"));
   });
 
+  it("parses embedded JSON arrays after a strict runner timestamp without confusing the timestamp brackets", () => {
+    expect(redactOpsText(
+      '[2026-08-04T00:00:00.000Z] diagnostic ["configured\\u002dsecret"]',
+      ["configured-secret"],
+    )).toBe('[2026-08-04T00:00:00.000Z] diagnostic ["[REDACTED]"]');
+  });
+
   it("fails closed for later arbitrary bracket records but preserves the exact truncation marker and neighbors", () => {
     const output = redactOpsText([
       "runner started component=runner",
