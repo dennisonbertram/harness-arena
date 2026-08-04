@@ -111,6 +111,12 @@ describe("second Sol hardening", () => {
     expect(redactOpsValue({ embedded: assignments, trailing: "api_key=last-secret" })).toBe("[REDACTED]");
   });
 
+  it("bounds properties parsed from text at 256 without lowering the structured object traversal cap", () => {
+    const structured = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`safe_${index}`, "ok"]));
+    expect(redactOpsValue(JSON.stringify(structured))).toBe("[REDACTED]");
+    expect(redactOpsValue(structured)).toEqual(structured);
+  });
+
   it("requires a server-only cursor key that the caller token cannot forge", () => {
     process.env.OPS_READ_TOKEN="caller"; delete process.env.OPS_READ_CURSOR_SECRET;
     expect(() => encodeOpsCursor({kind:"runs",prefix:"runs/",snapshot_at:"2026-08-02T00:00:00.000Z"})).toThrow("cursor_secret_missing");
