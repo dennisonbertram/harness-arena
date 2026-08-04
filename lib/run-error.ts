@@ -1,16 +1,9 @@
 import { PUBLIC_RUN_EVENT_FIELDS } from "./public-run-event-fields.mjs";
+import { PUBLIC_GATEWAY_PREFLIGHT_FAILURE_CLASSES } from "../scripts/runner/gateway-preflight-contract.mjs";
 
 const PROVIDER_ERROR_PATTERN = /\bprovider[_ ]error:\s*(\d{3})\b/i;
 const HTTP_STATUS_PATTERN = /^\s*(\d{3})\b/;
-export const PUBLIC_GATEWAY_PREFLIGHT_CLASSES = Object.freeze([
-  "local_sidecar_unreachable",
-  "upstream_fetch_failed",
-  "provider_rejected",
-  "provider_http_error",
-  "response_stream_timeout",
-  "response_stream_incomplete",
-  "response_stream_limit",
-] as const);
+export const PUBLIC_GATEWAY_PREFLIGHT_CLASSES = PUBLIC_GATEWAY_PREFLIGHT_FAILURE_CLASSES;
 const PUBLIC_PREFLIGHT_CLASS_SET = new Set<string>(PUBLIC_GATEWAY_PREFLIGHT_CLASSES);
 
 /** Keep provider response bodies out of public run pages. */

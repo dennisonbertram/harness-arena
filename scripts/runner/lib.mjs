@@ -2,6 +2,10 @@
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
 import { execFileSync, spawn } from "node:child_process";
+import {
+  GATEWAY_PREFLIGHT_CLASS,
+  GATEWAY_PREFLIGHT_LIMITS,
+} from "./gateway-preflight-contract.mjs";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
@@ -981,9 +985,6 @@ async function waitForRetry(ms, signal) {
   });
 }
 
-const PREFLIGHT_MAX_STREAM_BYTES = 16 * 1024;
-const PREFLIGHT_MAX_STREAM_EVENTS = 64;
-
 function preflightResult(classification, {
   ok = false,
   status,
@@ -1016,7 +1017,7 @@ function preflightResult(classification, {
 async function readPreflightSse(response, { signal, attempts }) {
   const reader = response.body?.getReader?.();
   if (!reader) {
-    return preflightResult("response_stream_incomplete", { status: response.status, attempts });
+    return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, { status: response.status, attempts });
   }
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1026,26 +1027,24 @@ async function readPreflightSse(response, { signal, attempts }) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        return preflightResult("response_stream_incomplete", {
+        return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, {
           status: response.status, attempts, observedBytes, observedEvents,
         });
       }
-      observedBytes += value?.byteLength ?? 0;
-      if (observedBytes > PREFLIGHT_MAX_STREAM_BYTES) {
-        await reader.cancel().catch(() => {});
-        return preflightResult("response_stream_limit", {
-          status: response.status, attempts, observedBytes: PREFLIGHT_MAX_STREAM_BYTES, observedEvents,
-        });
-      }
-      buffer += decoder.decode(value, { stream: true });
+      const chunkBytes = value?.byteLength ?? 0;
+      const remainingBytes = Math.max(0, GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes - observedBytes);
+      const crossedByteLimit = chunkBytes > remainingBytes;
+      const boundedValue = crossedByteLimit ? value.subarray(0, remainingBytes) : value;
+      observedBytes += boundedValue?.byteLength ?? 0;
+      buffer += decoder.decode(boundedValue, { stream: true });
       const frames = buffer.split(/\r?\n\r?\n/);
       buffer = frames.pop() ?? "";
       for (const frame of frames) {
         observedEvents += 1;
-        if (observedEvents > PREFLIGHT_MAX_STREAM_EVENTS) {
+        if (observedEvents > GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents) {
           await reader.cancel().catch(() => {});
-          return preflightResult("response_stream_limit", {
-            status: response.status, attempts, observedBytes, observedEvents: PREFLIGHT_MAX_STREAM_EVENTS,
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_LIMIT, {
+            status: response.status, attempts, observedBytes, observedEvents: GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents,
           });
         }
         const data = frame.split(/\r?\n/)
@@ -1054,7 +1053,7 @@ async function readPreflightSse(response, { signal, attempts }) {
           .join("\n");
         if (data === "[DONE]") {
           await reader.cancel().catch(() => {});
-          return preflightResult("terminal_observed", {
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.TERMINAL_OBSERVED, {
             ok: true, status: response.status, attempts, proof: "done", observedBytes, observedEvents,
           });
         }
@@ -1063,14 +1062,22 @@ async function readPreflightSse(response, { signal, attempts }) {
         const content = event?.choices?.[0]?.delta?.content;
         if (typeof content === "string" && content.length > 0) {
           await reader.cancel().catch(() => {});
-          return preflightResult("token_observed", {
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.TOKEN_OBSERVED, {
             ok: true, status: response.status, attempts, proof: "token", observedBytes, observedEvents,
           });
         }
       }
+      if (crossedByteLimit) {
+        await reader.cancel().catch(() => {});
+        return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_LIMIT, {
+          status: response.status, attempts, observedBytes, observedEvents,
+        });
+      }
     }
   } catch {
-    return preflightResult(signal.aborted ? "response_stream_timeout" : "response_stream_incomplete", {
+    return preflightResult(signal.aborted
+      ? GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_TIMEOUT
+      : GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, {
       status: response.status, attempts, observedBytes, observedEvents,
     });
   }
@@ -1112,19 +1119,21 @@ export async function preflightProxy({
 
       const retryable = response.status === 429 || response.status >= 500;
       const classification = response.headers?.get?.("x-harness-gateway-failure-class") === "upstream_fetch"
-        ? "upstream_fetch_failed"
+        ? GATEWAY_PREFLIGHT_CLASS.UPSTREAM_FETCH_FAILED
         : response.status >= 400 && response.status < 500
-          ? "provider_rejected"
-          : "provider_http_error";
+          ? GATEWAY_PREFLIGHT_CLASS.PROVIDER_REJECTED
+          : GATEWAY_PREFLIGHT_CLASS.PROVIDER_HTTP_ERROR;
       await response.body?.cancel?.().catch(() => {});
       if (!retryable || attempt === maxAttempts || controller.signal.aborted) {
         return preflightResult(classification, { status: response.status, attempts: attempt });
       }
       await waitForRetry(retryDelayMs, controller.signal);
     }
-    return preflightResult("provider_http_error", { attempts: maxAttempts });
+    return preflightResult(GATEWAY_PREFLIGHT_CLASS.PROVIDER_HTTP_ERROR, { attempts: maxAttempts });
   } catch {
-    return preflightResult(controller.signal.aborted ? "response_stream_timeout" : "local_sidecar_unreachable", {
+    return preflightResult(controller.signal.aborted
+      ? GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_TIMEOUT
+      : GATEWAY_PREFLIGHT_CLASS.LOCAL_SIDECAR_UNREACHABLE, {
       attempts: Math.max(1, lastAttempt),
     });
   } finally {

@@ -7,6 +7,7 @@ import {
   sanitizeDiagnosticEvent,
   serializeDiagnosticError,
 } from "./gateway-proxy.mjs";
+import { GATEWAY_PREFLIGHT_LIMITS } from "./gateway-preflight-contract.mjs";
 
 const servers = [];
 function listen(server) {
@@ -1027,6 +1028,57 @@ describe("preflightProxy", () => {
       status: 200,
       attempts: 1,
       proof: "done",
+    });
+  });
+
+  it("accepts proof inside the remaining budget when one coalesced chunk crosses the byte limit", async () => {
+    const encoder = new TextEncoder();
+    const proof = 'data: {"choices":[{"delta":{"content":"x"}}]}\n\n';
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`${proof}${"later".repeat(4_000)}`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: true,
+      classification: "token_observed",
+      proof: "token",
+    });
+  });
+
+  it("stops at the exact byte budget when no proof arrives", async () => {
+    const encoder = new TextEncoder();
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("x".repeat(GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes + 1)));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: false,
+      classification: "response_stream_limit",
+      observedBytes: GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes,
+      observedEvents: 0,
+    });
+  });
+
+  it("stops after exactly 64 complete frames when no proof arrives", async () => {
+    const encoder = new TextEncoder();
+    const frame = 'data: {"choices":[{"delta":{}}]}\n\n';
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(frame.repeat(GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents + 1)));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: false,
+      classification: "response_stream_limit",
+      observedEvents: GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents,
     });
   });
 
