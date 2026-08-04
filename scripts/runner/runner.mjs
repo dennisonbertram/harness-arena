@@ -223,7 +223,10 @@ function ensureTaskImagesReady(tasks, imageLock) {
     pull: (immutableRef, remainingMs) =>
       runDocker(["pull", immutableRef], {
         timeout: Math.min(TASK_IMAGE_PULL_TIMEOUT_MS, remainingMs),
-        maxBuffer: 1024,
+        // Docker writes routine layer progress to both streams. It is neither
+        // identity evidence nor a safe diagnostic, so discard it instead of
+        // buffering it and killing a healthy pull at an arbitrary byte cap.
+        stdio: "ignore",
       }),
   }, { deadlineMs });
 }
