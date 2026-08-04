@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -38,5 +38,22 @@ describe("clean clone toolchain contract", () => {
     await expect(safeChildEnv(root, {}, { HARNESS_GIT_BRANCH: "main" })).rejects.toThrow(/forbidden on main/);
     expect(readme).toContain("corepack enable");
     expect(readme).toContain("git clone --branch dev");
+  });
+
+  it("resolves every repository-local README link", () => {
+    const localLinks = [...read("README.md").matchAll(/\[[^\]]+\]\((?<target>[^)]+)\)/g)]
+      .map((match) => match.groups.target)
+      .filter((target) => !/^(?:[a-z]+:|#)/i.test(target))
+      .map((target) => target.split(/[?#]/, 1)[0]);
+
+    expect(localLinks.length).toBeGreaterThan(0);
+    for (const target of localLinks) {
+      expect(existsSync(path.resolve(root, target)), target).toBe(true);
+    }
+  });
+
+  it("derives the local-init Node requirement from the runtime authority", () => {
+    const localInit = read("docs/runbooks/local-init.md").replace(/\s+/g, " ");
+    expect(localInit).toContain(`Node.js \`${SUPPORTED_NODE_RANGE}\``);
   });
 });

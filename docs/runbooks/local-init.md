@@ -1,8 +1,8 @@
 # Safe local startup
 
 Run `./scripts/init.sh` from the worktree root. Its JSON output has the URL,
-PID, local storage directory, and log file. Node.js 20.9.0 or newer is
-required. The process uses `STORAGE=file`;
+PID, local storage directory, and log file. Node.js
+`^20.19.0 || >=22.12.0` is required. The process uses `STORAGE=file`;
 it does not use Blob or production variables. `/api/ready` is the startup gate
 and matches the owner PID/nonce while checking the seed and a real storage
 write, so an open port alone is not ready. Concurrent or repeat invocations
