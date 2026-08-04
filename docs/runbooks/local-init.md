@@ -53,10 +53,12 @@ runs the task only by its locked config SHA-256 ID.
 Docker Hub access (`auth.docker.io`, `registry-1.docker.io`, Docker's pull CDN
 `production.cloudfront.docker.com`, and the exact observed pull host
 `docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`) is added only to
-Sandboxes launched by the isolated Development Vercel project. Production,
-preview, other-project, and local policies do not receive those domains. On
-2026-08-04, a real isolated Development immutable pull reached that S3 host
-and restricted DNS denied it before Gateway work. The historical R2 host
+Sandboxes launched by the production deployment of the isolated Development
+Vercel project. The live project, Preview deployments (including that isolated
+project's Previews), other projects, and local policies do not receive those
+domains. On 2026-08-04, a real isolated Development immutable pull reached
+that S3 host and restricted DNS denied it before Gateway work. The historical
+R2 host
 `docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com`
 is deliberately excluded: it is not a documented Docker Hub pull endpoint and
 the retained runtime evidence did not require it. A malformed lock, failed

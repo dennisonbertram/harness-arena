@@ -79,7 +79,8 @@ const NETWORK_BASE_ALLOWLIST = [
 // A real isolated Development immutable pull on 2026-08-04 reached the exact
 // S3 hostname below after registry authentication/CDN routing; restricted DNS
 // denied it before Gateway work. Keep every acquisition host scoped to the
-// isolated Development project. Historical Cloudflare/R2 remains excluded.
+// isolated Development project's production deployment; its Previews remain
+// denied. Historical Cloudflare/R2 remains excluded.
 const DEVELOPMENT_DOCKER_HUB_ALLOWLIST = [
   "auth.docker.io",
   "registry-1.docker.io",
@@ -93,7 +94,9 @@ function networkPolicy(callbackBase: string): NetworkPolicy {
     if (vercelContext) throw new Error("sandbox: RUNNER_NETWORK_MODE=allow-all denied in Vercel");
     return "allow-all";
   }
-  const imageAcquisitionAllowlist = isDevelopmentVercelProject() ? DEVELOPMENT_DOCKER_HUB_ALLOWLIST : [];
+  const imageAcquisitionAllowlist = isDevelopmentImageAcquisitionDeployment()
+    ? DEVELOPMENT_DOCKER_HUB_ALLOWLIST
+    : [];
   return { allow: [new URL(callbackBase).hostname, ...NETWORK_BASE_ALLOWLIST, ...imageAcquisitionAllowlist] };
 }
 
@@ -130,6 +133,10 @@ function requireEnv(name: string): string {
 
 function isDevelopmentVercelProject(): boolean {
   return process.env.VERCEL === "1" && process.env.VERCEL_PROJECT_ID === DEVELOPMENT_PROJECT_ID;
+}
+
+function isDevelopmentImageAcquisitionDeployment(): boolean {
+  return isDevelopmentVercelProject() && process.env.VERCEL_ENV === "production";
 }
 
 // The isolated Development project must use only its metered AI Gateway key.

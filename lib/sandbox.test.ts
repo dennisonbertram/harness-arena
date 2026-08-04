@@ -36,7 +36,14 @@ import { createRunSandbox } from "@/lib/sandbox";
 import type { Run } from "@/lib/types";
 
 const GOLDEN_SNAPSHOT_ID = "snap_Abzf52PEGHdTSZpsPIAZpKmj08Ds";
+const ISOLATED_DEVELOPMENT_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
 const OBSERVED_DOCKER_S3_PULL_HOST = "docker-images-prod.s3.dualstack.us-east-1.amazonaws.com";
+const DEVELOPMENT_DOCKER_HOSTS = [
+  "auth.docker.io",
+  "registry-1.docker.io",
+  "production.cloudfront.docker.com",
+  OBSERVED_DOCKER_S3_PULL_HOST,
+];
 const NETWORK_ALLOWLIST = [
   "cb.example.test",
   "ai-gateway.vercel.sh",
@@ -245,7 +252,8 @@ describe("createRunSandbox", () => {
 
     it("adds Docker Hub acquisition domains only for the isolated Development project", async () => {
       process.env.VERCEL = "1";
-      process.env.VERCEL_PROJECT_ID = "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA";
+      process.env.VERCEL_ENV = "production";
+      process.env.VERCEL_PROJECT_ID = ISOLATED_DEVELOPMENT_PROJECT_ID;
       process.env.AI_GATEWAY_KEY_PARTIAL = "key";
       process.env.AI_GATEWAY_API_KEY = "test-gw-key";
       mockCreate.mockResolvedValue(makeSandbox());
@@ -254,13 +262,7 @@ describe("createRunSandbox", () => {
 
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
         networkPolicy: {
-          allow: [
-            ...NETWORK_ALLOWLIST,
-            "auth.docker.io",
-            "registry-1.docker.io",
-            "production.cloudfront.docker.com",
-            OBSERVED_DOCKER_S3_PULL_HOST,
-          ],
+          allow: [...NETWORK_ALLOWLIST, ...DEVELOPMENT_DOCKER_HOSTS],
         },
       }));
     });
@@ -270,14 +272,20 @@ describe("createRunSandbox", () => {
       ["production", { VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_other" }],
       ["preview", { VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_other" }],
       ["other Development", { VERCEL: "1", VERCEL_ENV: "development", VERCEL_PROJECT_ID: "prj_other" }],
-    ])("does not grant the observed Docker S3 pull host to %s context", async (_context, environment) => {
+      ["isolated-project Preview", {
+        VERCEL: "1",
+        VERCEL_ENV: "preview",
+        VERCEL_PROJECT_ID: ISOLATED_DEVELOPMENT_PROJECT_ID,
+        AI_GATEWAY_KEY_PARTIAL: "key",
+      }],
+    ])("does not grant Development Docker hosts to %s context", async (_context, environment) => {
       Object.assign(process.env, environment);
       mockCreate.mockResolvedValue(makeSandbox());
 
       await createRunSandbox(makeRun(), { prompt: "be careful" });
 
       const options = mockCreate.mock.calls[0][0] as { networkPolicy: { allow: string[] } };
-      expect(options.networkPolicy.allow).not.toContain(OBSERVED_DOCKER_S3_PULL_HOST);
+      expect(options.networkPolicy.allow.filter((host) => DEVELOPMENT_DOCKER_HOSTS.includes(host))).toEqual([]);
     });
 
     it.each(["production", "preview", "development"])(

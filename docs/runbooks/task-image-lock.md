@@ -44,3 +44,5 @@ Docker routing also required the exact public host
 `docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`; restricted DNS
 denied it before Gateway work. That literal host is Development-only. No S3
 wildcard, allow-all policy, or historical Cloudflare/R2 hostname is permitted.
+Here, Development-only means the isolated Development project's production
+deployment; its Preview deployments do not receive image-registry egress.
