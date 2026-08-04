@@ -9,9 +9,9 @@ pnpm ops:status --env development --json
 pnpm ops:status --env local
 ```
 
-Remote ops API access uses `OPS_READ_TOKEN` from the process environment. Do not pass tokens on the command line. Override a mapped application URL with `HARNESS_ARENA_PRODUCTION_URL` or `HARNESS_ARENA_DEVELOPMENT_URL`. Local defaults to `http://127.0.0.1:3000` and skips platform commands.
+Remote ops API access uses `OPS_READ_TOKEN` from the process environment. Do not pass tokens on the command line. Remote origins are derived from `config/development-environment.json` and are intentionally not overrideable: production reads only the live `main` host/project, while Development reads only the isolated `dev` host/project. Local defaults to `http://127.0.0.1:3000` and skips platform commands.
 
-The requested `development` environment is labeled `development` in output but reads Vercel `preview` environment metadata. Production maps to Vercel `production`; local performs no Vercel or GitHub inspection.
+The requested `development` environment is labeled `development` in output but reads the isolated `harness-arena-development` project’s Vercel `production` target: Vercel’s target label does not change the repository’s Development-only boundary. Production maps only to the live project’s Vercel `production` target; local performs no Vercel or GitHub inspection.
 
 The collector only issues allowlisted application GETs. Remote environments also run exact read-only command shapes for Vercel deployment list/inspect, environment metadata listing, recent logs, and the expected GitHub ref SHA. Vercel environment values are never retained. Mutation subcommands, option-shaped targets, shell execution, and command-line tokens are rejected.
 
