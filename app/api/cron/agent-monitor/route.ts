@@ -21,6 +21,8 @@ export async function GET(request: Request): Promise<Response> {
       VERCEL_READ_TOKEN: process.env.VERCEL_READ_TOKEN,
       VERCEL_PROJECT_ID: process.env.VERCEL_PROJECT_ID,
       VERCEL_ENV: process.env.VERCEL_ENV,
+      VERCEL_URL: process.env.VERCEL_URL,
+      VERCEL_DEPLOYMENT_ID: process.env.VERCEL_DEPLOYMENT_ID,
     },
     fetchImpl: globalThis.fetch,
   });
