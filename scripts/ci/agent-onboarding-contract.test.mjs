@@ -8,6 +8,10 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const agents = await readFile(resolve(repositoryRoot, "AGENTS.md"), "utf8");
 const packageJson = JSON.parse(await readFile(resolve(repositoryRoot, "package.json"), "utf8"));
 const initSource = await readFile(resolve(repositoryRoot, "scripts/init.mjs"), "utf8");
+const writeCapableOpsSource = await readFile(
+  resolve(repositoryRoot, "scripts/ops/backfill-normalized-pricing.mjs"),
+  "utf8",
+);
 
 function extractStartHere(document) {
   const heading = "# Start here";
@@ -75,6 +79,15 @@ describe("agent onboarding contract", () => {
     expect(linkedContents.some((content) => /Production Branch[^\n]*`dev`/i.test(content))).toBe(true);
     expect(linkedContents.some((content) => /OPS_READ_TOKEN/.test(content))).toBe(true);
     expect(linkedContents.some((content) => /harness-arena-development/.test(content))).toBe(true);
+  });
+
+  it("does not present mixed operator tooling as blanket read-only access", () => {
+    expect(writeCapableOpsSource).toMatch(/process\.argv\.includes\("--yes"\)/);
+    expect(writeCapableOpsSource).toMatch(/async putRun\([^)]*\).*\bput\(/s);
+    expect(startHere).not.toMatch(/`scripts\/ops\/`\s+is\s+(?:the\s+)?read-only/i);
+    expect(startHere).toMatch(/`scripts\/ops\/`.*mixed operator tooling/is);
+    expect(startHere).toMatch(/agents?.*only.*documented.*GET-only.*status.*audit/is);
+    expect(startHere).toMatch(/write-capable maintenance.*explicit operator authority.*never.*default/is);
   });
 
   it("describes the source-backed pre-run fairness and execution flow", async () => {

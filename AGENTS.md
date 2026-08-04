@@ -18,14 +18,17 @@ traces/results. Persisted events/results drive
 [GET-only ops](lib/ops-read.ts) provide observation.
 
 Source map: `app/` contains routes and UI, `lib/` contains domain/storage and
-safety boundaries, `scripts/runner/` is the Sandbox runner, `scripts/ops/` is
-the read-only operator tooling, and `docs/runbooks/` is the operational source
+safety boundaries, `scripts/runner/` is the Sandbox runner, `scripts/ops/`
+contains mixed operator tooling, and `docs/runbooks/` is the operational source
 of truth. Start with the [local init runbook](docs/runbooks/local-init.md),
 [Development environment runbook](docs/runbooks/development-environment.md),
 [agent access runbook](docs/runbooks/agent-access.md),
 [Development policy](config/development-environment.json), and
 [access policy](config/agent-access-policy.json); link rather than copy their
-details into code or PRs.
+details into code or PRs. Agents may use only documented GET-only/status/audit
+paths, starting with the [agent operations status runbook](docs/runbooks/agent-ops-status.md).
+Write-capable maintenance requires explicit operator authority and is never
+the default.
 
 Keep the boundaries explicit: local uses `STORAGE=file` only; hosted
 Development is the isolated `dev` branch/project and native Git owns its
