@@ -48,6 +48,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -84,6 +85,42 @@ function taskImageLockB64(tasks) {
       config_digest: FIXTURE_CONFIG_DIGEST,
     })),
   }), "utf8").toString("base64");
+}
+
+function availableLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(String(address.port));
+      });
+    });
+  });
+}
+
+function runRunnerWithDiagnostics(env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-64 * 1024); });
+    child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-64 * 1024); });
+    child.on("error", reject);
+    child.on("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+  });
+}
+
+function runnerFailureContext(result, state) {
+  return JSON.stringify({
+    exit_code: result.exitCode,
+    event_types: state.events.map((event) => event.type),
+    status_updates: state.statusUpdates.map((update) => update.status),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
 }
 
 describe("buildPiCommand regression: shell-injection safety", () => {
@@ -225,6 +262,11 @@ describe("runner regression: task-container setup failures", () => {
     "system_prompt_copy",
   ]);
 
+  it("does not reuse fixed gateway proxy ports under full-suite parallelism", () => {
+    const source = readFileSync(new URL(import.meta.url), "utf8");
+    expect(source).not.toMatch(/GATEWAY_PROXY_PORT:\s*"1460[45]"/);
+  });
+
   it.each(REQUIRED_TASK_CONTAINER_SETUP_OPERATIONS)("fails closed for required setup operation %s", async (operation) => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "runner-setup-failure-"));
     const dockerLog = path.join(fixtureRoot, "docker.log");
@@ -273,7 +315,7 @@ describe("runner regression: task-container setup failures", () => {
       RUNNER_CALLBACK_SECRET: "setup-secret",
       AI_GATEWAY_API_KEY: "vck_setup_secret_123",
       GATEWAY_UPSTREAM: baseUrl,
-      GATEWAY_PROXY_PORT: "14604",
+      GATEWAY_PROXY_PORT: await availableLoopbackPort(),
       RUNNER_MODEL: "zai/glm-5.2-fast",
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
       TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
@@ -285,17 +327,14 @@ describe("runner regression: task-container setup failures", () => {
       FAIL_SETUP_OPERATION: operation,
     };
 
-    const exitCode = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
-      child.on("error", reject);
-      child.on("close", resolve);
-    });
+    const result = await runRunnerWithDiagnostics(env);
     await stop();
 
     try {
-      expect(exitCode).toBe(0);
+      const diagnostic = runnerFailureContext(result, state);
+      expect(result.exitCode, diagnostic).toBe(0);
       const failure = state.events.find((event) => event.type === "task.failed");
-      expect(failure?.payload).toMatchObject({
+      expect(failure?.payload, diagnostic).toMatchObject({
         task_id: "setup-failure",
         stage: "task_setup_error",
       });
@@ -373,7 +412,7 @@ describe("runner regression: task-container setup failures", () => {
       RUNNER_CALLBACK_SECRET: "verifier-setup-secret",
       AI_GATEWAY_API_KEY: "test-key",
       GATEWAY_UPSTREAM: baseUrl,
-      GATEWAY_PROXY_PORT: "14605",
+      GATEWAY_PROXY_PORT: await availableLoopbackPort(),
       TASKS_JSON_B64: Buffer.from(JSON.stringify(tasks), "utf8").toString("base64"),
       TASK_IMAGE_LOCK_B64: taskImageLockB64(tasks),
       TASK_IMAGE_MANIFEST_DIGEST: FIXTURE_MANIFEST_DIGEST,
@@ -382,17 +421,14 @@ describe("runner regression: task-container setup failures", () => {
       DOCKER_CMD: fakeDocker,
       PI_INSTALL_MODE: "none",
     };
-    const exitCode = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [RUNNER_SCRIPT], { env });
-      child.on("error", reject);
-      child.on("close", resolve);
-    });
+    const result = await runRunnerWithDiagnostics(env);
     await stop();
 
     try {
-      expect(exitCode).toBe(0);
+      const diagnostic = runnerFailureContext(result, state);
+      expect(result.exitCode, diagnostic).toBe(0);
       const failure = state.events.find((event) => event.type === "task.failed");
-      expect(failure?.payload).toMatchObject({ task_id: "verifier-setup-cost", stage: "task_setup_error" });
+      expect(failure?.payload, diagnostic).toMatchObject({ task_id: "verifier-setup-cost", stage: "task_setup_error" });
       expect(state.events.map((event) => event.type)).toContain("task.agent_finished");
       expect(state.events.map((event) => event.type)).not.toContain("task.verify_started");
       const stdoutTrace = state.traces.find((trace) => trace.name === "pi-stdout.txt");
