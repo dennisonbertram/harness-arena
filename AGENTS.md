@@ -1,3 +1,44 @@
+# Start here
+
+Local coding needs no hosted credentials. From a clean worktree, use
+`./scripts/init.sh --check` for read-only prerequisites, then
+`./scripts/init.sh` (or `./scripts/init.sh --smoke` for the deterministic
+real-HTTP flow). Run the smallest relevant `pnpm test` target first, then
+`pnpm test`, `pnpm typecheck`, and `pnpm build` as the change warrants.
+
+Harness Arena is a Next.js app: submissions/prompts pass through the
+[fairness gate](lib/judge.ts) before dispatch; local uses file storage while
+hosted uses Vercel Blob. The [dispatcher](lib/dispatch.ts) invokes the
+[Sandbox boundary](lib/sandbox.ts), which creates Vercel Sandboxes; the
+[task manifest boundary](lib/tasks-for-runner.ts) builds the derived task
+manifest. The [Sandbox runner](scripts/runner/runner.mjs) executes it via the
+pinned AI Gateway/provider and posts authenticated callbacks and
+traces/results. Persisted events/results drive
+[scoring/UI aggregation](lib/aggregate.ts), while logs/traces and
+[GET-only ops](lib/ops-read.ts) provide observation.
+
+Source map: `app/` contains routes and UI, `lib/` contains domain/storage and
+safety boundaries, `scripts/runner/` is the Sandbox runner, `scripts/ops/` is
+the read-only operator tooling, and `docs/runbooks/` is the operational source
+of truth. Start with the [local init runbook](docs/runbooks/local-init.md),
+[Development environment runbook](docs/runbooks/development-environment.md),
+[agent access runbook](docs/runbooks/agent-access.md),
+[Development policy](config/development-environment.json), and
+[access policy](config/agent-access-policy.json); link rather than copy their
+details into code or PRs.
+
+Keep the boundaries explicit: local uses `STORAGE=file` only; hosted
+Development is the isolated `dev` branch/project and native Git owns its
+deployments; production is read-only and must never be mutated. External
+observer credentials are optional and operator-only: local development does
+not need them, and an agent must report missing access rather than borrow an
+owner credential or print a secret.
+
+Before implementation, create an Epic and a PR-sized native GitHub subissue.
+Red first: add the regression test, run it, and confirm it fails for the
+expected reason before the fix. Preserve the existing development-only,
+lineage, rollback, and review rules below.
+
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know
 
