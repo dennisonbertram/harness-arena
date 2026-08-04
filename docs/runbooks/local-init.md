@@ -50,13 +50,16 @@ missing or mismatched cache entry is acquired only as
 `repository@manifest-digest`, then rechecked; it never pulls a mutable tag and
 runs the task only by its locked config SHA-256 ID.
 
-Docker Hub access (`auth.docker.io`, `registry-1.docker.io`, and Docker's
-current pull CDN `production.cloudfront.docker.com`) is added only to
-Sandboxes launched by the isolated Development Vercel project. Production and
-local policies do not receive those domains. The historical R2 host
+Docker Hub access (`auth.docker.io`, `registry-1.docker.io`, Docker's pull CDN
+`production.cloudfront.docker.com`, and the exact observed pull host
+`docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`) is added only to
+Sandboxes launched by the isolated Development Vercel project. Production,
+preview, other-project, and local policies do not receive those domains. On
+2026-08-04, a real isolated Development immutable pull reached that S3 host
+and restricted DNS denied it before Gateway work. The historical R2 host
 `docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com`
 is deliberately excluded: it is not a documented Docker Hub pull endpoint and
-we have no direct runtime redirect requiring it. A malformed lock, failed
+the retained runtime evidence did not require it. A malformed lock, failed
 acquisition, or identity mismatch fails once at `task_image_readiness`, before
 Pi or gateway work, with bounded credential-free evidence.
 `run.sandbox_ready` records safe task-ID/config-ID/manifest-digest bindings and

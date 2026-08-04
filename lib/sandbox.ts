@@ -74,16 +74,17 @@ const NETWORK_BASE_ALLOWLIST = [
   "ports.ubuntu.com",
   "registry.npmjs.org",
   // Docker Hub is intentionally excluded here. Only the isolated Development
-  // Vercel project receives its two acquisition endpoints below.
+  // Vercel project receives its exact acquisition endpoints below.
 ];
-// Docker Hub's documented 2026 CDN migration requires this host in addition
-// to registry authentication and manifest endpoints. Keep the list scoped to
-// the isolated Development project; do not add historical Cloudflare/R2 hosts
-// without direct runtime evidence.
+// A real isolated Development immutable pull on 2026-08-04 reached the exact
+// S3 hostname below after registry authentication/CDN routing; restricted DNS
+// denied it before Gateway work. Keep every acquisition host scoped to the
+// isolated Development project. Historical Cloudflare/R2 remains excluded.
 const DEVELOPMENT_DOCKER_HUB_ALLOWLIST = [
   "auth.docker.io",
   "registry-1.docker.io",
   "production.cloudfront.docker.com",
+  "docker-images-prod.s3.dualstack.us-east-1.amazonaws.com",
 ];
 
 function networkPolicy(callbackBase: string): NetworkPolicy {
