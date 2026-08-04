@@ -9,9 +9,9 @@ public/runner-bundle.tgz
 
 .env
 .env.*
-!.env.example
 .vercel
 .env*
+!.env.example
 .harness-arena/
 .agent-access-secrets/
 

@@ -2,6 +2,10 @@
   "name": "harness-arena",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "prebuild": "node scripts/build-runner-bundle.mjs",

@@ -51,7 +51,18 @@ mutation is involved. Do not provision the caller with the Blob write token.
 
 ## Getting started
 
+Prerequisites: Node.js 20.9.0 or newer (Node 24 is the CI and `.nvmrc`
+recommendation) and pnpm 10.33.4. This repository pins pnpm in
+`package.json`; on a new machine with Corepack available, run `corepack enable`
+once before the first startup.
+
+Clone the Development branch, because safe local init intentionally refuses
+`main` and detached/unknown branches:
+
 ```bash
+git clone --branch dev https://github.com/dennisonbertram/harness-arena.git
+cd harness-arena
+corepack enable
 ./scripts/init.sh
 ```
 
