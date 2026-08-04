@@ -38,3 +38,11 @@ Production does not receive image-registry egress. Hosted acceptance therefore
 requires a Development Sandbox run proving cache hit or bounded immutable
 acquisition, exact post-acquisition identity, and failure before gateway/model
 spend when the deadline or identity check fails.
+
+On 2026-08-04, a real isolated Development immutable pull demonstrated that
+Docker routing also required the exact public host
+`docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`; restricted DNS
+denied it before Gateway work. That literal host is Development-only. No S3
+wildcard, allow-all policy, or historical Cloudflare/R2 hostname is permitted.
+Here, Development-only means the isolated Development project's production
+deployment; its Preview deployments do not receive image-registry egress.
