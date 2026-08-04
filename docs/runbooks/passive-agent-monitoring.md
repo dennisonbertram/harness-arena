@@ -9,9 +9,14 @@ may execute anywhere during hour 03 rather than at the configured minute. The
 two routes have no sequencing dependency; each must remain safe and useful when
 it runs before, after, or independently of the other. The monitor route fails
 closed unless the immutable runtime project ID is exact, `VERCEL_ENV=production`
-for that project, the request uses the canonical
-`https://harness-arena-development.vercel.app` origin, and the bearer value
-exactly matches a 32-byte-or-longer `CRON_SECRET`.
+for that project, and the bearer value exactly matches a 32-byte-or-longer
+`CRON_SECRET`. It accepts either the canonical
+`https://harness-arena-development.vercel.app` alias or the exact Vercel
+generated deployment origin reported by the platform runtime as `VERCEL_URL`.
+The generated origin must be an HTTPS
+`harness-arena-development-*.vercel.app` hostname and have a valid Vercel
+deployment ID; arbitrary hosts, the live hostname, queries, fragments, paths,
+and non-GET methods remain rejected.
 
 The collector has two fixed application targets:
 
@@ -70,8 +75,8 @@ and Vercel token must be independently scoped GET-only credentials. All four
 secrets must be distinct; hashed constant-time comparisons fail closed before
 probes if any configured values collide.
 The route explicitly hands the collector only these four credentials plus the
-`VERCEL_PROJECT_ID` and `VERCEL_ENV` guard fields; it never passes the ambient
-environment object. Access inventory diagnostics report presence metadata only
+`VERCEL_PROJECT_ID`, `VERCEL_ENV`, `VERCEL_URL`, and `VERCEL_DEPLOYMENT_ID`
+platform guard fields; it never passes the ambient environment object. Access inventory diagnostics report presence metadata only
 and never print, write, or retain any of the four secret values.
 Do not copy, print, rotate, or inspect a live write credential.
 

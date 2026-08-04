@@ -26,6 +26,8 @@ describe("GET /api/cron/agent-monitor", () => {
     vi.stubEnv("VERCEL_READ_TOKEN", "route-vercel-read-token");
     vi.stubEnv("VERCEL_PROJECT_ID", "route-development-project");
     vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("VERCEL_URL", "harness-arena-development-git-dev-unique.vercel.app");
+    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_development_1");
     const request = new Request("https://harness-arena-development.vercel.app/api/cron/agent-monitor", { headers: { authorization: "Bearer route-secret" } });
     const response = await GET(request);
     expect(response.status).toBe(200);
@@ -39,6 +41,8 @@ describe("GET /api/cron/agent-monitor", () => {
         VERCEL_READ_TOKEN: "route-vercel-read-token",
         VERCEL_PROJECT_ID: "route-development-project",
         VERCEL_ENV: "production",
+        VERCEL_URL: "harness-arena-development-git-dev-unique.vercel.app",
+        VERCEL_DEPLOYMENT_ID: "dpl_development_1",
       },
       fetchImpl: globalThis.fetch,
     });
