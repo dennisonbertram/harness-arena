@@ -67,9 +67,9 @@ const healthyPlatform = {
 };
 
 describe("CLI contract and command safety", () => {
-  it("implements the documented production invocation and safe environment mapping", () => {
-    expect(parseCliArgs(["--env", "production", "--json"], {})).toMatchObject({ environment: "production", json: true, expected_ref: "main", collect_platform: true });
-    expect(parseCliArgs(["--env", "development"], {})).toMatchObject({ environment: "development", json: false, expected_ref: "dev", collect_platform: true });
+  it("derives production and isolated Development status targets from their environment contract", () => {
+    expect(parseCliArgs(["--env", "production", "--json"], {})).toMatchObject({ environment: "production", json: true, expected_ref: "main", collect_platform: true, base_url: "https://harness-arena-psi.vercel.app", vercel_environment: "production", project_id: "prj_f4ppu0xpO0LZeHOAH99RHotVbwyo" });
+    expect(parseCliArgs(["--env", "development"], {})).toMatchObject({ environment: "development", json: false, expected_ref: "dev", collect_platform: true, base_url: "https://harness-arena-development.vercel.app", vercel_environment: "production", project_id: "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA" });
     expect(parseCliArgs(["--env", "local"], {})).toMatchObject({ environment: "local", collect_platform: false, base_url: "http://127.0.0.1:3000" });
     expect(() => parseCliArgs(["--env", "staging"], {})).toThrow("invalid_environment");
     expect(() => parseCliArgs(["--env", "production"], { HARNESS_ARENA_PRODUCTION_URL: "https://user:pass@arena.example" })).toThrow("invalid_base_url");
@@ -78,9 +78,9 @@ describe("CLI contract and command safety", () => {
   it("uses exact Vercel argv grammars and rejects mutation and option injection", async () => {
     const run = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "", exitCode: 0 });
     const adapter = createVercelCommandAdapter(run);
-    await expect(adapter.run(["ls", "--json", "--environment", "production"])).resolves.toMatchObject({ exitCode: 0 });
+    await expect(adapter.run(["ls", "prj_abc123", "--json", "--environment", "production"])).resolves.toMatchObject({ exitCode: 0 });
     for (const args of [["env", "rm", "FOO", "production"], ["env", "add", "FOO", "production"], ["inspect", "--token=leak", "--json"], ["logs", "--evil", "--json", "--since", "1h"], ["deploy"], ["alias"], ["promote"], ["rollback"]]) await expect(adapter.run(args)).rejects.toThrow("unsafe_vercel_command");
-    expect(run).toHaveBeenCalledWith("vercel", ["ls", "--json", "--environment", "production"], expect.objectContaining({ timeoutMs: expect.any(Number) }));
+    expect(run).toHaveBeenCalledWith("vercel", ["ls", "prj_abc123", "--json", "--environment", "production"], expect.objectContaining({ timeoutMs: expect.any(Number) }));
   });
 
   it("uses an exact read-only GitHub expected-SHA grammar", async () => {
@@ -103,17 +103,27 @@ describe("fixture-driven evidence parsers", () => {
   it("parses recent Vercel errors from bounded NDJSON", () => expect(parseVercelLogs(fixture("vercel-logs.ndjson"))).toMatchObject({ recent_errors: [{ level: "error", status_code: 503, message: "gateway failed Bearer [REDACTED]" }] }));
   it("parses only a complete expected GitHub SHA", () => { expect(parseGitHubExpectedSha(fixture("github-sha.txt"))).toBe("abc123"); expect(() => parseGitHubExpectedSha("main\nabc123")).toThrow("invalid_expected_sha"); });
 
-  it("maps requested environments to actual Vercel metadata targets", async () => {
+  it("maps logical Development to its isolated production-targeted Vercel project", async () => {
     const commandRunner = vi.fn(async (binary, args) => {
       if (binary === "gh") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       if (args[0] === "ls") return { stdout: fixture("vercel-list.json"), stderr: "", exitCode: 0 };
       if (args[0] === "inspect") return { stdout: fixture("vercel-inspect.json"), stderr: "", exitCode: 0 };
-      if (args[0] === "env") return { stdout: fixture("vercel-env-preview.json"), stderr: "", exitCode: 0 };
+      if (args[0] === "env") return {
+        stdout: JSON.stringify([
+          "OPS_READ_TOKEN",
+          "OPS_READ_CURSOR_SECRET",
+          "AI_GATEWAY_API_KEY",
+          "RUNNER_CALLBACK_SECRET",
+          "BLOB_READ_WRITE_TOKEN",
+        ].map((key) => ({ key, target: ["production"], type: "encrypted" }))),
+        stderr: "",
+        exitCode: 0,
+      };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
-    const development = await collectPlatformEvidence({ environment: "development", target: "preview.example", expectedRef: "dev", commandRunner });
-    expect(development).toMatchObject({ requested_environment: "development", environment: { target: "preview", required_missing: [] } });
-    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "preview", "--json"], expect.any(Object)]);
+    const development = await collectPlatformEvidence({ environment: "development", target: "harness-arena-development.vercel.app", expectedRef: "dev", commandRunner });
+    expect(development).toMatchObject({ requested_environment: "development", environment: { target: "production", required_missing: [] } });
+    expect(commandRunner.mock.calls).toContainEqual(["vercel", ["env", "ls", "production", "--project", "prj_YcSCWVj8OBPQ9XmQVuCGz4AMV2WA", "--json"], expect.any(Object)]);
     const production = await collectPlatformEvidence({ environment: "production", target: "arena.example", commandRunner });
     expect(production).toMatchObject({ requested_environment: "production", environment: { target: "production" } });
     const localRunner = vi.fn();
@@ -823,7 +833,7 @@ describe("redaction, platform wiring, and process bounds", () => {
       return { stdout: fixture("vercel-logs.ndjson"), stderr: "", exitCode: 0 };
     });
     const writes = [];
-    const jsonRun = await executeCli(["--env", "production", "--json"], { commandRunner, fetchImpl: healthyApiFetch(), env: { OPS_READ_TOKEN: "literal-secret", HARNESS_ARENA_PRODUCTION_URL: "https://arena.example" }, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
+    const jsonRun = await executeCli(["--env", "production", "--json"], { commandRunner, fetchImpl: healthyApiFetch(), env: { OPS_READ_TOKEN: "literal-secret" }, writeOut: (value) => writes.push(value), writeErr: (value) => writes.push(value), now: "2026-08-03T00:10:00.000Z" });
     expect(commandRunner.mock.calls.map(([binary]) => binary)).toEqual(expect.arrayContaining(["vercel", "gh"]));
     expect(JSON.parse(writes[0])).toMatchObject({ schema_version: "agent_ops_status.v1" });
     expect(writes.join("\n")).not.toContain("literal-secret");

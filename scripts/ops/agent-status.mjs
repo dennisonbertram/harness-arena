@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { redactOpsValue } from "../../lib/ops-redaction.mjs";
 
@@ -15,12 +16,25 @@ const MAX_RUN_READS = 20;
 const REQUIRED_ENVIRONMENT = ["OPS_READ_TOKEN", "OPS_READ_CURSOR_SECRET", "AI_GATEWAY_API_KEY", "RUNNER_CALLBACK_SECRET", "BLOB_READ_WRITE_TOKEN"];
 const SAFE_TARGET = /^(?:[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}|dpl_[A-Za-z0-9_]+)$/;
 const SAFE_REF = /^(?:main|dev)$/;
+const SAFE_PROJECT_ID = /^prj_[A-Za-z0-9]+$/;
 
-const ENVIRONMENTS = Object.freeze({
-  production: { base_url: "https://harness-arena-psi.vercel.app", expected_ref: "main", vercel_environment: "production", collect_platform: true },
-  development: { base_url: "http://127.0.0.1:3000", expected_ref: "dev", vercel_environment: "preview", collect_platform: true },
-  local: { base_url: "http://127.0.0.1:3000", expected_ref: null, vercel_environment: "development", collect_platform: false },
-});
+function readEnvironmentContract() {
+  const manifest = JSON.parse(readFileSync(new URL("../../config/development-environment.json", import.meta.url), "utf8"));
+  const developmentHost = manifest?.host;
+  const developmentProjectId = manifest?.vercelProject?.id;
+  const productionHost = manifest?.live?.aliases?.[0];
+  const productionProjectId = manifest?.live?.projectId;
+  if (![developmentHost, productionHost].every((value) => typeof value === "string" && SAFE_TARGET.test(value))) throw new Error("invalid_environment_contract");
+  if (![developmentProjectId, productionProjectId].every((value) => typeof value === "string" && SAFE_PROJECT_ID.test(value))) throw new Error("invalid_environment_contract");
+  if (manifest?.branch !== "dev") throw new Error("invalid_environment_contract");
+  return Object.freeze({
+    production: Object.freeze({ base_url: `https://${productionHost}`, expected_ref: "main", vercel_environment: "production", project_id: productionProjectId, collect_platform: true }),
+    development: Object.freeze({ base_url: `https://${developmentHost}`, expected_ref: manifest.branch, vercel_environment: "production", project_id: developmentProjectId, collect_platform: true }),
+    local: Object.freeze({ base_url: "http://127.0.0.1:3000", expected_ref: null, vercel_environment: "development", project_id: null, collect_platform: false }),
+  });
+}
+
+const ENVIRONMENTS = readEnvironmentContract();
 
 export function redactSensitive(value, knownSecrets = []) {
   return redactOpsValue(value, knownSecrets);
@@ -44,8 +58,9 @@ function resolveEnvironment(environment, env) {
   if (!preset) throw new Error("invalid_environment");
   const key = `HARNESS_ARENA_${environment.toUpperCase()}_URL`;
   const base_url = safeBaseUrl(env[key] ?? preset.base_url).toString().replace(/\/$/, "");
+  if (preset.collect_platform && base_url !== preset.base_url) throw new Error("unexpected_environment_host");
   const hostname = new URL(base_url).hostname;
-  const vercel_target = preset.collect_platform && hostname !== "127.0.0.1" && hostname !== "localhost" ? hostname : null;
+  const vercel_target = preset.collect_platform ? hostname : null;
   return { environment, ...preset, base_url, vercel_target };
 }
 
@@ -92,9 +107,9 @@ export async function spawnCommand(binary, args, { timeoutMs = DEFAULT_TIMEOUT_M
 
 function validVercelArgs(args) {
   if (!Array.isArray(args)) return false;
-  if (args.length === 4 && args[0] === "ls" && args[1] === "--json" && args[2] === "--environment") return ["production", "preview", "development"].includes(args[3]);
+  if (args.length === 5 && args[0] === "ls" && SAFE_PROJECT_ID.test(args[1]) && args[2] === "--json" && args[3] === "--environment") return ["production", "preview", "development"].includes(args[4]);
   if (args.length === 3 && args[0] === "inspect" && args[2] === "--json") return SAFE_TARGET.test(args[1]) && !args[1].startsWith("-");
-  if (args.length === 4 && args[0] === "env" && args[1] === "ls" && args[3] === "--json") return ["production", "preview", "development"].includes(args[2]);
+  if (args.length === 6 && args[0] === "env" && args[1] === "ls" && ["production", "preview", "development"].includes(args[2]) && args[3] === "--project" && SAFE_PROJECT_ID.test(args[4]) && args[5] === "--json") return true;
   if (args.length === 5 && args[0] === "logs" && args[2] === "--json" && args[3] === "--since" && args[4] === "1h") return SAFE_TARGET.test(args[1]) && !args[1].startsWith("-");
   return false;
 }
@@ -106,9 +121,9 @@ export function createVercelCommandAdapter(run = spawnCommand) {
   };
   return {
     run: execute,
-    list: (environment) => execute(["ls", "--json", "--environment", environment]),
+    list: (environment, projectId) => execute(["ls", projectId, "--json", "--environment", environment]),
     inspect: (target) => execute(["inspect", target, "--json"]),
-    environment: (environment) => execute(["env", "ls", environment, "--json"]),
+    environment: (environment, projectId) => execute(["env", "ls", environment, "--project", projectId, "--json"]),
     logs: (target) => execute(["logs", target, "--json", "--since", "1h"]),
   };
 }
@@ -190,9 +205,9 @@ export async function collectPlatformEvidence({ environment, commandRunner = spa
   if (!resolvedTarget) return { requested_environment: environment, state: "access_blocked", expected_sha: null, deployment: null, environment: { target: config.vercel_environment, records: [], required_missing: [] }, logs: { recent_errors: [] }, cron: { state: "unknown" }, blockers: [{ code: "platform_target_missing", detail: `Set HARNESS_ARENA_${environment.toUpperCase()}_URL to a deployed hostname` }], command_provenance: [] };
   const vercel = createVercelCommandAdapter(commandRunner), github = createGitHubCommandAdapter(commandRunner);
   const operations = [
-    { name: "vercel_list", binary: "vercel", args: ["ls", "--json", "--environment", config.vercel_environment], promise: vercel.list(config.vercel_environment), parse: (output) => parseVercelList(output, { now }) },
+    { name: "vercel_list", binary: "vercel", args: ["ls", config.project_id, "--json", "--environment", config.vercel_environment], promise: vercel.list(config.vercel_environment, config.project_id), parse: (output) => parseVercelList(output, { now }) },
     { name: "vercel_inspect", binary: "vercel", args: ["inspect", resolvedTarget, "--json"], promise: vercel.inspect(resolvedTarget), parse: (output) => parseVercelInspect(output, { now }) },
-    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--json"], promise: vercel.environment(config.vercel_environment), parse: (output) => parseVercelEnvironment(output, config.vercel_environment, { now }) },
+    { name: "vercel_env", binary: "vercel", args: ["env", "ls", config.vercel_environment, "--project", config.project_id, "--json"], promise: vercel.environment(config.vercel_environment, config.project_id), parse: (output) => parseVercelEnvironment(output, config.vercel_environment, { now }) },
     { name: "vercel_logs", binary: "vercel", args: ["logs", resolvedTarget, "--json", "--since", "1h"], promise: vercel.logs(resolvedTarget), parse: parseVercelLogs },
     { name: "github_expected_sha", binary: "gh", args: ["api", `repos/dennisonbertram/harness-arena/commits/${resolvedRef}`, "--jq", ".sha"], promise: github.expectedSha(resolvedRef), parse: parseGitHubExpectedSha },
   ];
