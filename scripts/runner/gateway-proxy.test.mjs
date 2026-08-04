@@ -7,6 +7,7 @@ import {
   sanitizeDiagnosticEvent,
   serializeDiagnosticError,
 } from "./gateway-proxy.mjs";
+import { GATEWAY_PREFLIGHT_LIMITS } from "./gateway-preflight-contract.mjs";
 
 const servers = [];
 function listen(server) {
@@ -208,7 +209,14 @@ describe("gateway proxy", () => {
     // A 400 from the gateway (e.g. an unknown provider in the pin) must reach
     // the agent as a 400 -- swallowing it would look like a model that simply
     // stopped answering.
-    const upstream = await fakeUpstream(() => ({ status: 400, payload: { error: { message: "no such provider" } } }));
+    const upstream = await fakeUpstream(() => ({
+      status: 400,
+      payload: { error: { message: "no such provider" } },
+      headers: {
+        "content-type": "application/json",
+        "x-harness-gateway-failure-class": "upstream_fetch",
+      },
+    }));
     const port = await listen(createGatewayProxy({ only: ["nope"], upstream: upstream.url }));
 
     const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -218,6 +226,7 @@ describe("gateway proxy", () => {
     });
 
     expect(res.status).toBe(400);
+    expect(res.headers.get("x-harness-gateway-failure-class")).toBeNull();
     expect((await res.json()).error.message).toBe("no such provider");
   });
 
@@ -232,6 +241,7 @@ describe("gateway proxy", () => {
     });
 
     expect(res.status).toBe(502);
+    expect(res.headers.get("x-harness-gateway-failure-class")).toBe("upstream_fetch");
     expect((await res.json()).error.message).toMatch(/could not reach upstream/);
   });
 
@@ -968,11 +978,163 @@ import { preflightProxy } from "./lib.mjs";
 // passes -- which reads like a terrible model rather than broken plumbing. One
 // real call before any task turns that into an immediate, named failure.
 describe("preflightProxy", () => {
+  function sseResponse(init, lines, { hang = false, status = 200, headers = {} } = {}) {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream({
+      start(controller) {
+        for (const line of lines) controller.enqueue(encoder.encode(`${line}\n\n`));
+        if (!hang) {
+          controller.close();
+          return;
+        }
+        init.signal.addEventListener("abort", () => {
+          controller.error(new Error("fixture response stream aborted"));
+        }, { once: true });
+      },
+    });
+    return new Response(body, {
+      status,
+      headers: { "content-type": "text/event-stream", ...headers },
+    });
+  }
+
+  it("accepts a generated-token proof without waiting for the successful SSE stream to close", async () => {
+    const fetchImpl = async (_url, init) => sseResponse(init, [
+      'data: {"id":"response-fixture","choices":[{"delta":{"content":"x"},"finish_reason":null}]}',
+    ], { hang: true });
+
+    const startedAt = Date.now();
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "private-fixture-key", fetchImpl, timeoutMs: 250 });
+
+    expect(result).toMatchObject({
+      ok: true,
+      classification: "token_observed",
+      status: 200,
+      attempts: 1,
+      proof: "token",
+    });
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(JSON.stringify(result)).not.toContain("private-fixture-key");
+  });
+
+  it("accepts the official terminal marker without waiting for the SSE stream to close", async () => {
+    const fetchImpl = async (_url, init) => sseResponse(init, ["data: [DONE]"], { hang: true });
+
+    const result = await preflightProxy({ port: 4599, model: "m", apiKey: "private-fixture-key", fetchImpl });
+
+    expect(result).toMatchObject({
+      ok: true,
+      classification: "terminal_observed",
+      status: 200,
+      attempts: 1,
+      proof: "done",
+    });
+  });
+
+  it("accepts proof inside the remaining budget when one coalesced chunk crosses the byte limit", async () => {
+    const encoder = new TextEncoder();
+    const proof = 'data: {"choices":[{"delta":{"content":"x"}}]}\n\n';
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`${proof}${"later".repeat(4_000)}`));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: true,
+      classification: "token_observed",
+      proof: "token",
+    });
+  });
+
+  it("stops at the exact byte budget when no proof arrives", async () => {
+    const encoder = new TextEncoder();
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("x".repeat(GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes + 1)));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: false,
+      classification: "response_stream_limit",
+      observedBytes: GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes,
+      observedEvents: 0,
+    });
+  });
+
+  it("stops after exactly 64 complete frames when no proof arrives", async () => {
+    const encoder = new TextEncoder();
+    const frame = 'data: {"choices":[{"delta":{}}]}\n\n';
+    const fetchImpl = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(frame.repeat(GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents + 1)));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    await expect(preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl })).resolves.toMatchObject({
+      ok: false,
+      classification: "response_stream_limit",
+      observedEvents: GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents,
+    });
+  });
+
+  it.each([
+    ["local sidecar reachability", async () => { throw new Error("ECONNREFUSED Bearer private-fixture-key"); }, {
+      ok: false, classification: "local_sidecar_unreachable", attempts: 1,
+    }],
+    ["upstream fetch", async () => new Response(null, {
+      status: 502,
+      headers: { "x-harness-gateway-failure-class": "upstream_fetch" },
+    }), {
+      ok: false, classification: "upstream_fetch_failed", status: 502, attempts: 3,
+    }],
+    ["nonretryable provider HTTP", async () => new Response("private-fixture-key provider rejection", {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    }), {
+      ok: false, classification: "provider_rejected", status: 400, attempts: 1,
+    }],
+  ])("returns a stable redacted classification for %s failure", async (_name, fetchImpl, expected) => {
+    const result = await preflightProxy({
+      port: 4599,
+      model: "m",
+      apiKey: "private-fixture-key",
+      fetchImpl,
+      retryDelayMs: 0,
+    });
+
+    expect(result).toMatchObject(expected);
+    expect(JSON.stringify(result)).not.toMatch(/private-fixture-key|provider rejection|ECONNREFUSED/);
+  });
+
+  it("classifies a successful-header SSE stream with no proof signal as a bounded stream timeout", async () => {
+    const fetchImpl = async (_url, init) => sseResponse(init, [], { hang: true });
+    const result = await preflightProxy({
+      port: 4599,
+      model: "m",
+      apiKey: "private-fixture-key",
+      fetchImpl,
+      timeoutMs: 50,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      classification: "response_stream_timeout",
+      status: 200,
+      attempts: 1,
+    });
+    expect(JSON.stringify(result)).not.toContain("private-fixture-key");
+  });
+
   it("passes when a real call through the sidecar comes back 200", async () => {
     const calls = [];
     const fetchImpl = async (url, init) => {
       calls.push({ url, init });
-      return { ok: true, status: 200, text: async () => '{"content":[]}' };
+      return sseResponse(init, ['data: {"choices":[{"delta":{"content":"x"}}]}']);
     };
     const result = await preflightProxy({ port: 4599, model: "zai/glm-5.2", apiKey: "k", fetchImpl });
 
@@ -987,12 +1149,11 @@ describe("preflightProxy", () => {
   });
 
   it("fails with the upstream status and body when the call is rejected", async () => {
-    const fetchImpl = async () => ({ ok: false, status: 401, text: async () => '{"error":"bad key"}' });
+    const fetchImpl = async () => new Response('{"error":"bad key private-fixture-key"}', { status: 401 });
     const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl });
 
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("401");
-    expect(result.detail).toContain("bad key");
+    expect(result).toMatchObject({ ok: false, classification: "provider_rejected", status: 401, attempts: 1 });
+    expect(JSON.stringify(result)).not.toMatch(/bad key|private-fixture-key/);
   });
 
   it("retries a transient gateway 503 before failing the whole run", async () => {
@@ -1000,13 +1161,12 @@ describe("preflightProxy", () => {
     const fetchImpl = async () => {
       calls += 1;
       if (calls === 1) {
-        return {
-          ok: false,
-          status: 503,
-          text: async () => '{"error":{"message":"Service unavailable","isRetryable":true}}',
-        };
+        return new Response('{"error":{"message":"Service unavailable","isRetryable":true}}', { status: 503 });
       }
-      return { ok: true, status: 200, text: async () => '{"content":[]}' };
+      return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
     };
 
     const result = await preflightProxy({
@@ -1025,8 +1185,7 @@ describe("preflightProxy", () => {
     const fetchImpl = async () => { throw new Error("ECONNREFUSED"); };
     const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl });
 
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("ECONNREFUSED");
+    expect(result).toMatchObject({ ok: false, classification: "local_sidecar_unreachable", attempts: 1 });
   });
 
   it("times out rather than hanging, since hanging is the failure being guarded", async () => {
@@ -1034,22 +1193,14 @@ describe("preflightProxy", () => {
       new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))));
     const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl, timeoutMs: 50 });
 
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: false, classification: "response_stream_timeout", attempts: 1 });
   });
 
   it("fails when the upstream returns 200 headers but never completes a model response", async () => {
-    const fetchImpl = async (_url, init) => ({
-      ok: true,
-      status: 200,
-      text: () =>
-        new Promise((_resolve, reject) => {
-          init.signal.addEventListener("abort", () => reject(new Error("response body timed out")));
-        }),
-    });
+    const fetchImpl = async (_url, init) => sseResponse(init, [], { hang: true });
 
     const result = await preflightProxy({ port: 4599, model: "m", apiKey: "k", fetchImpl, timeoutMs: 50 });
 
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("response body timed out");
+    expect(result).toMatchObject({ ok: false, classification: "response_stream_timeout", status: 200, attempts: 1 });
   });
 });

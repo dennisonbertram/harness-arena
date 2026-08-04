@@ -376,6 +376,7 @@ const REQUEST_HEADERS_FETCH_MUST_DERIVE = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const PREFLIGHT_FAILURE_HEADER = "x-harness-gateway-failure-class";
 
 /**
  * Preserve end-to-end request headers while removing framing that belongs to
@@ -502,7 +503,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
       // The agent must see a real failure, not a hang: a dead proxy that
       // silently swallows calls would look like a model that stopped
       // answering, and we would misread it as a bad prompt.
-      res.writeHead(502, { "content-type": "application/json" });
+      res.writeHead(502, { "content-type": "application/json", [PREFLIGHT_FAILURE_HEADER]: "upstream_fetch" });
       res.end(JSON.stringify({ error: { message: `gateway proxy could not reach upstream: ${error.message}` } }));
       return;
     }
@@ -530,7 +531,7 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
     // which is the worst failure shape for a benchmark.
     const outHeaders = {};
     upstreamRes.headers.forEach((value, key) => {
-      if (key !== "content-encoding" && key !== "content-length" && key !== "transfer-encoding") {
+      if (key !== "content-encoding" && key !== "content-length" && key !== "transfer-encoding" && key !== PREFLIGHT_FAILURE_HEADER) {
         outHeaders[key] = value;
       }
     });

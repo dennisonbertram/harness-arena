@@ -83,6 +83,63 @@ describe("GET /api/runs/[id]/events", () => {
     );
   });
 
+  it("projects only bounded Gateway preflight classifications from run failures", async () => {
+    await storageRef.current.appendRunEvents("run-preflight", [{
+      ts: "2026-08-04T00:00:00.000Z",
+      type: "run.failed",
+      payload: {
+        stage: "gateway_preflight",
+        preflight_class: "response_stream_timeout",
+        preflight_status: 200,
+        preflight_attempts: 1,
+        preflight_observed_bytes: 0,
+        preflight_observed_events: 0,
+        error: "Bearer private-key response body and prompt",
+        response_id: "private-response-id",
+      },
+    }]);
+
+    const response = await GET(new NextRequest("http://localhost/api/runs/run-preflight/events"), {
+      params: Promise.resolve({ id: "run-preflight" }),
+    });
+    const body = await response.json();
+
+    expect(body[0].payload).toEqual({
+      stage: "gateway_preflight",
+      preflight_class: "response_stream_timeout",
+      preflight_status: 200,
+      preflight_attempts: 1,
+      preflight_observed_bytes: 0,
+      preflight_observed_events: 0,
+    });
+    expect(JSON.stringify(body)).not.toMatch(/private-key|response body|prompt|private-response-id/);
+  });
+
+  it("drops unknown Gateway preflight classes and invalid numeric evidence", async () => {
+    await storageRef.current.appendRunEvents("run-invalid-preflight", [{
+      ts: "2026-08-04T00:00:00.000Z",
+      type: "run.failed",
+      payload: {
+        stage: "gateway_preflight",
+        preflight_class: "private-key-response-body",
+        preflight_status: 999,
+        preflight_attempts: -1,
+        preflight_observed_bytes: Number.POSITIVE_INFINITY,
+        preflight_observed_events: 1.5,
+      },
+    }]);
+
+    const response = await GET(new NextRequest("http://localhost/api/runs/run-invalid-preflight/events"), {
+      params: Promise.resolve({ id: "run-invalid-preflight" }),
+    });
+
+    const body = await response.json();
+    expect(body).toEqual([
+      expect.objectContaining({ payload: { stage: "gateway_preflight" } }),
+    ]);
+    expect(JSON.stringify(body)).not.toContain("private-key-response-body");
+  });
+
   describe("?since= cursor", () => {
     async function seed() {
       await storageRef.current.appendRunEvents("run-1", [

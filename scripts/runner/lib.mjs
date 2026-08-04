@@ -2,6 +2,10 @@
 // dependencies beyond the node runtime -- everything here works with plain
 // strings/objects so it can be unit tested without Docker or a network.
 import { execFileSync, spawn } from "node:child_process";
+import {
+  GATEWAY_PREFLIGHT_CLASS,
+  GATEWAY_PREFLIGHT_LIMITS,
+} from "./gateway-preflight-contract.mjs";
 
 // Sum `usage.cost.total` across assistant messages in a `pi` session JSONL,
 // and count how many assistant messages (turns) there were. Ignores
@@ -981,6 +985,104 @@ async function waitForRetry(ms, signal) {
   });
 }
 
+function preflightResult(classification, {
+  ok = false,
+  status,
+  attempts,
+  proof,
+  observedBytes = 0,
+  observedEvents = 0,
+} = {}) {
+  const result = {
+    ok,
+    classification,
+    ...(status === undefined ? {} : { status }),
+    attempts,
+    ...(proof === undefined ? {} : { proof }),
+    observedBytes,
+    observedEvents,
+  };
+  return {
+    ...result,
+    detail: [
+      classification,
+      status === undefined ? undefined : `status=${status}`,
+      `attempts=${attempts}`,
+      `observed_bytes=${observedBytes}`,
+      `observed_events=${observedEvents}`,
+    ].filter(Boolean).join(" "),
+  };
+}
+
+async function readPreflightSse(response, { signal, attempts }) {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, { status: response.status, attempts });
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let observedBytes = 0;
+  let observedEvents = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, {
+          status: response.status, attempts, observedBytes, observedEvents,
+        });
+      }
+      const chunkBytes = value?.byteLength ?? 0;
+      const remainingBytes = Math.max(0, GATEWAY_PREFLIGHT_LIMITS.maxStreamBytes - observedBytes);
+      const crossedByteLimit = chunkBytes > remainingBytes;
+      const boundedValue = crossedByteLimit ? value.subarray(0, remainingBytes) : value;
+      observedBytes += boundedValue?.byteLength ?? 0;
+      buffer += decoder.decode(boundedValue, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        observedEvents += 1;
+        if (observedEvents > GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents) {
+          await reader.cancel().catch(() => {});
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_LIMIT, {
+            status: response.status, attempts, observedBytes, observedEvents: GATEWAY_PREFLIGHT_LIMITS.maxStreamEvents,
+          });
+        }
+        const data = frame.split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data === "[DONE]") {
+          await reader.cancel().catch(() => {});
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.TERMINAL_OBSERVED, {
+            ok: true, status: response.status, attempts, proof: "done", observedBytes, observedEvents,
+          });
+        }
+        let event;
+        try { event = JSON.parse(data); } catch { continue; }
+        const content = event?.choices?.[0]?.delta?.content;
+        if (typeof content === "string" && content.length > 0) {
+          await reader.cancel().catch(() => {});
+          return preflightResult(GATEWAY_PREFLIGHT_CLASS.TOKEN_OBSERVED, {
+            ok: true, status: response.status, attempts, proof: "token", observedBytes, observedEvents,
+          });
+        }
+      }
+      if (crossedByteLimit) {
+        await reader.cancel().catch(() => {});
+        return preflightResult(GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_LIMIT, {
+          status: response.status, attempts, observedBytes, observedEvents,
+        });
+      }
+    }
+  } catch {
+    return preflightResult(signal.aborted
+      ? GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_TIMEOUT
+      : GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_INCOMPLETE, {
+      status: response.status, attempts, observedBytes, observedEvents,
+    });
+  }
+}
+
 export async function preflightProxy({
   port,
   model,
@@ -992,8 +1094,10 @@ export async function preflightProxy({
 }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let lastAttempt = 0;
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      lastAttempt = attempt;
       const response = await fetchImpl(
         `${gatewayProxyBaseUrl({ host: "127.0.0.1", port })}${OPENAI_CHAT_COMPLETIONS_PATH}`,
         {
@@ -1011,23 +1115,27 @@ export async function preflightProxy({
           signal: controller.signal,
         },
       );
-      // `fetch()` resolves once response headers arrive. The gateway can
-      // return HTTP 200 and then never produce a model token; treating headers
-      // alone as success lets every real task burn through Pi's retry
-      // timeouts. Consume the complete one-token response while the same abort
-      // deadline is active so preflight proves generation, not just admission.
-      const detail = (await response.text()).slice(0, 300);
-      if (response.ok) return { ok: true };
+      if (response.ok) return await readPreflightSse(response, { signal: controller.signal, attempts: attempt });
 
       const retryable = response.status === 429 || response.status >= 500;
+      const classification = response.headers?.get?.("x-harness-gateway-failure-class") === "upstream_fetch"
+        ? GATEWAY_PREFLIGHT_CLASS.UPSTREAM_FETCH_FAILED
+        : response.status >= 400 && response.status < 500
+          ? GATEWAY_PREFLIGHT_CLASS.PROVIDER_REJECTED
+          : GATEWAY_PREFLIGHT_CLASS.PROVIDER_HTTP_ERROR;
+      await response.body?.cancel?.().catch(() => {});
       if (!retryable || attempt === maxAttempts || controller.signal.aborted) {
-        return { ok: false, detail: `HTTP ${response.status} ${detail}` };
+        return preflightResult(classification, { status: response.status, attempts: attempt });
       }
       await waitForRetry(retryDelayMs, controller.signal);
     }
-    return { ok: false, detail: "preflight exhausted without a response" };
-  } catch (error) {
-    return { ok: false, detail: String(error?.message ?? error) };
+    return preflightResult(GATEWAY_PREFLIGHT_CLASS.PROVIDER_HTTP_ERROR, { attempts: maxAttempts });
+  } catch {
+    return preflightResult(controller.signal.aborted
+      ? GATEWAY_PREFLIGHT_CLASS.RESPONSE_STREAM_TIMEOUT
+      : GATEWAY_PREFLIGHT_CLASS.LOCAL_SIDECAR_UNREACHABLE, {
+      attempts: Math.max(1, lastAttempt),
+    });
   } finally {
     clearTimeout(timer);
   }
