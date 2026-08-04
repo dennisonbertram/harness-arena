@@ -1,6 +1,7 @@
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createOpsReadService, decodeOpsCursor, encodeOpsCursor, redactOpsValue } from "./ops-read";
+import { redactOpsText } from "./ops-redaction.mjs";
 import { isRunOperationallyStale } from "./stale-policy";
 import type { OpsReadAdapter } from "./ops-read-adapter";
 
@@ -24,6 +25,90 @@ describe("second Sol hardening", () => {
   it("redacts embedded, multiple, and overlapping secret and bearer values recursively", () => {
     process.env.OPS_ALPHA_SECRET="abc-secret"; process.env.OPS_BETA_TOKEN="secret";
     expect(redactOpsValue({ nested:["x abc-secret y secret z", "Bearer abc-secret"] })).toEqual({ nested:["x [REDACTED] y [REDACTED] z", "Bearer [REDACTED]"] });
+  });
+
+  it("keeps safe multiline runner-log records readable while redacting embedded JSON and isolating malformed records", async () => {
+    const previousTraceSecret = process.env.OPS_TRACE_SECRET;
+    process.env.OPS_TRACE_SECRET = "trace-secret";
+    try {
+      const runnerLog = [
+        "[2026-08-04T00:00:00.000Z] runner started component=runner",
+        "[2026-08-04T00:00:01.000Z] setup diagnostic {\"operation\":\"container_create\",\"stderr\":\"trace-secret\",\"timedOut\":false}",
+        "[2026-08-04T00:00:02.000Z] {\"api_key\":\"key-secret\"} {\"access_token\":\"token-secret\"} ordinary text Bearer bearer-secret https://signed.test/path?sig=signed",
+        "[2026-08-04T00:00:03.000Z] malformed setup {\"client_secret\":\"hostile-secret\"",
+        "[2026-08-04T00:00:04.000Z] runner completed status=ok",
+      ].join("\n");
+      const adapter = {
+        listPage: vi.fn(),
+        read: vi.fn(async ({ pathname }) => ({
+          status: "ok" as const,
+          bytes: Buffer.from(runnerLog),
+          metadata: metadata(pathname, Buffer.byteLength(runnerLog)),
+        })),
+      } as OpsReadAdapter;
+
+      const result = await createOpsReadService(adapter).read("traces", {
+        run_id: "r",
+        task_id: "_run",
+        name: "runner-log.txt",
+      });
+      expect(result).toMatchObject({ item: expect.stringContaining("runner started component=runner") });
+      const output = String((result as { item: unknown }).item);
+      expect(output).toContain("container_create");
+      expect(output).toContain("runner completed status=ok");
+      expect(output).toContain("[REDACTED]");
+      for (const secret of ["trace-secret", "key-secret", "token-secret", "bearer-secret", "hostile-secret", "sig=signed"]) {
+        expect(output).not.toContain(secret);
+      }
+    } finally {
+      if (previousTraceSecret === undefined) delete process.env.OPS_TRACE_SECRET;
+      else process.env.OPS_TRACE_SECRET = previousTraceSecret;
+    }
+  });
+
+  it("fails closed for bracketed prefixes that are not strict runner timestamps", () => {
+    expect(redactOpsText("[operator note] opaque runner payload")).toBe("[REDACTED]");
+    expect(redactOpsText("[2026-13-04T00:00:00.000Z] opaque runner payload")).toBe("[REDACTED]");
+    expect(redactOpsText("[2026-08-04T00:00:00.000Z] runner started component=runner")).toContain("runner started");
+  });
+
+  it("uses one redaction traversal budget across every runner-log record", () => {
+    const object = JSON.stringify(Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`field_${index}`, index])));
+    const runnerLog = `[2026-08-04T00:00:00.000Z] ${object}\n[2026-08-04T00:00:01.000Z] ${object}`;
+    expect(redactOpsText(runnerLog)).toBe("[REDACTED]");
+  });
+
+  it("parses and redacts encoded configured secrets in later JSON-array records", () => {
+    const output = redactOpsText([
+      "runner started component=runner",
+      "[\"configured\\u002dsecret\"]",
+      "runner completed status=ok",
+    ].join("\n"), ["configured-secret"]);
+    expect(output).toBe([
+      "runner started component=runner",
+      "[\"[REDACTED]\"]",
+      "runner completed status=ok",
+    ].join("\n"));
+  });
+
+  it("fails closed for later arbitrary bracket records but preserves the exact truncation marker and neighbors", () => {
+    const output = redactOpsText([
+      "runner started component=runner",
+      "[operator note] opaque runner payload",
+      "[TRUNCATED]",
+      "runner completed status=ok",
+    ].join("\n"));
+    expect(output).toBe([
+      "runner started component=runner",
+      "[REDACTED]",
+      "[TRUNCATED]",
+      "runner completed status=ok",
+    ].join("\n"));
+  });
+
+  it("shares the assignment budget across recursive strings and sibling values", () => {
+    const assignments = Array.from({ length: 256 }, (_, index) => `field_${index}=value_${index}`).join(" ");
+    expect(redactOpsValue({ embedded: assignments, trailing: "api_key=last-secret" })).toBe("[REDACTED]");
   });
 
   it("requires a server-only cursor key that the caller token cannot forge", () => {
