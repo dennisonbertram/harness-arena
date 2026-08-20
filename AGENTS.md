@@ -142,3 +142,38 @@ Non-negotiable for every change:
 Coverage thresholds are enforced (90% statements) but they measure lines
 executed, not behaviour pinned. Clearing the gate is not evidence the change is
 safe.
+
+## Cursor Cloud specific instructions
+
+The startup update script only runs `pnpm install --frozen-lockfile`. Everything
+below is non-obvious startup/run context; standard commands live in
+`package.json` and [docs/runbooks/local-init.md](docs/runbooks/local-init.md).
+
+- Local dev needs no hosted credentials or external services. Storage is on-disk
+  (`STORAGE=file`) and runs execute in-process via
+  `HARNESS_EXECUTION_MODE=deterministic-success` — no Sandbox, model, or network.
+- `./scripts/init.sh` **refuses to run on `main` or a detached HEAD**
+  (`init-lib.mjs` `safeChildEnv`). Work from `dev` or a `cursor/*` feature
+  branch, not `main`.
+- Start the app with `./scripts/init.sh --no-install` (deps are already
+  installed by the update script; omit `--no-install` only if you need a
+  frozen reinstall). It seeds local storage, then **detaches** a `next dev`
+  server bound to `127.0.0.1` on a deterministic port hashed from the worktree
+  path (range 20000–29999, e.g. `28911`), **not** port 3000. Read the actual
+  `url`/`port`/`log` from the JSON it prints (log at `.harness-arena/init.log`).
+  `pnpm dev` also works but listens on 3000 and needs a manually provided env.
+- `/api/ready` is the real startup gate (checks owner PID/nonce, seed, and a
+  storage write); a listening port alone is not "ready".
+- `POST /api/submissions` works without GitHub sign-in in local deterministic
+  mode (seeded identity), which is how the smoke test and any scripted
+  hello-world submit a prompt. The `/submit` **UI page still gates on GitHub
+  OAuth**, so exercise submissions through the API locally.
+- `./scripts/init.sh --smoke` is the fastest full end-to-end proof (submits a
+  prompt, runs all 16 tasks deterministically, verifies persisted run/events/
+  traces at zero cost). `--check` is read-only; `--reset` clears only
+  `.harness-arena/local-data`.
+- `pnpm test` prints benign stderr from failure-path fixtures, e.g.
+  `cat: /does/not/exist` and `timeout: failed to run command '/usr/local/bin/pi'`.
+  These are expected and do not indicate failures; trust the vitest summary.
+- `mcp/` is a separate standalone product that uses npm (`package-lock.json`),
+  not the root pnpm lockfile, and is not needed to run the web app.
