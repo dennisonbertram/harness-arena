@@ -220,15 +220,23 @@ export function isEmptyPatch(diffText) {
  * is the exit code, with fail_to_pass/pass_to_pass attribution done by
  * evaluateSweVerifyResult on the output.
  */
-export function buildSweVerifyPipeline({ baseCommit, patchPath, workdir, installCmd, testCmd }) {
+export function buildSweVerifyPipeline({ baseCommit, patchPath, workdir, installCmd, testCmd, testPatchPath }) {
   const dir = sweQuote(workdir);
   const steps = [
     `git -C ${dir} checkout -f ${sweQuote(baseCommit)}`,
     `git -C ${dir} clean -fdx`,
-    `git -C ${dir} apply --check ${sweQuote(patchPath)}`,
-    `git -C ${dir} apply ${sweQuote(patchPath)}`,
-    `cd ${dir}`,
   ];
+  // The dataset's test_patch (updated/added test files) is applied FIRST, on
+  // the clean copy, before the agent's patch: at base_commit the FAIL_TO_PASS
+  // tests do not exist or do not assert the fixed behavior yet. Without it,
+  // stale base tests pass trivially and verification is meaningless.
+  if (testPatchPath) {
+    steps.push(`git -C ${dir} apply --check ${sweQuote(testPatchPath)}`);
+    steps.push(`git -C ${dir} apply ${sweQuote(testPatchPath)}`);
+  }
+  steps.push(`git -C ${dir} apply --check ${sweQuote(patchPath)}`);
+  steps.push(`git -C ${dir} apply ${sweQuote(patchPath)}`);
+  steps.push(`cd ${dir}`);
   if (typeof installCmd === "string" && installCmd.trim().length > 0) {
     steps.push(installCmd);
   }

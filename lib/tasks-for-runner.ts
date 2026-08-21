@@ -21,6 +21,9 @@ export interface RunnerTask {
   test_cmd?: string;
   fail_to_pass?: string[];
   pass_to_pass?: string[];
+  // Public upstream test patch, applied only in the verify phase on a clean
+  // copy. Never exposed to the agent container during the agent session.
+  test_patch?: string;
 }
 
 // task.toml is the benchmark contract. Do not silently shorten its stage
@@ -63,6 +66,7 @@ export function sweToRunnerTask(
     test_cmd: spec.test_cmd,
     fail_to_pass: spec.fail_to_pass,
     pass_to_pass: spec.pass_to_pass,
+    test_patch: spec.test_patch,
   };
 }
 

@@ -23,6 +23,13 @@ export const SweTaskSchema = z.object({
   // subdirectory as the project root).
   workdir: z.string().default("/repo"),
   install_cmd: z.string().default(""),
+  // Upstream test patch (updated/added test files). PUBLIC by design -- the
+  // dataset publishes it and it defines what "fixed" means. Applied ONLY in
+  // the verify phase on the clean copy, never exposed to the agent container:
+  // at base_commit the FAIL_TO_PASS tests don't assert the fixed behavior yet,
+  // so verification without it is meaningless. The gold (solution) patch is
+  // never vendored anywhere.
+  test_patch: z.string().default(""),
   // Command that runs the instance's test suite inside the container. The
   // platform runs this from a CLEAN copy with the patch applied -- the agent
   // never controls it.

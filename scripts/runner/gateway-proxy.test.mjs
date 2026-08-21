@@ -1435,6 +1435,21 @@ describe("buildSweVerifyPipeline", () => {
     const pipeline = buildSweVerifyPipeline({ ...base, installCmd: "" });
     expect(pipeline).toMatch(/cd '\/repo' && pytest -q$/);
   });
+
+  it("applies the dataset test patch BEFORE the agent patch (F2P tests don't exist at base)", () => {
+    const pipeline = buildSweVerifyPipeline({ ...base, testPatchPath: "/tmp/verifier-test.patch" });
+    const tpCheck = pipeline.indexOf("apply --check '/tmp/verifier-test.patch'");
+    const tpApply = pipeline.indexOf("git -C '/repo' apply '/tmp/verifier-test.patch'");
+    const agentApply = pipeline.indexOf("git -C '/repo' apply '/tmp/p.patch'");
+    expect(tpCheck).toBeGreaterThan(-1);
+    expect(tpApply).toBeGreaterThan(tpCheck);
+    expect(agentApply).toBeGreaterThan(tpApply);
+  });
+
+  it("omits the test-patch steps when no test patch is provided", () => {
+    const pipeline = buildSweVerifyPipeline(base);
+    expect(pipeline).not.toContain("verifier-test.patch");
+  });
 });
 
 describe("evaluateSweVerifyResult", () => {

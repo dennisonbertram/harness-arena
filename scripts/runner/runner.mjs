@@ -925,12 +925,30 @@ async function runOneTask(task, index, systemPrompt) {
       await flushEvents();
 
       const verifyStart = Date.now();
+      // The dataset's test patch (public verification material) is written
+      // into the container for the verify phase only -- the agent's session
+      // is already finished, so it can never observe or modify it.
+      let testPatchPath;
+      if (typeof task.test_patch === "string" && task.test_patch.trim().length > 0) {
+        testPatchPath = "/tmp/verifier-test.patch";
+        const hostTestPatch = path.join(os.tmpdir(), `runner-testpatch-${containerName}-${Date.now()}.diff`);
+        writeFileSync(hostTestPatch, task.test_patch);
+        try {
+          const cpTp = sh(DOCKER_CMD, ["cp", hostTestPatch, `${containerName}:${testPatchPath}`]);
+          if (cpTp.code !== 0) {
+            throw new Error(`failed to stage verifier test patch (exit ${cpTp.code})`);
+          }
+        } finally {
+          rmSync(hostTestPatch, { force: true });
+        }
+      }
       const pipeline = buildSweVerifyPipeline({
         baseCommit: task.base_commit,
         patchPath: patchContainerPath,
         workdir: task.workdir,
         installCmd: task.install_cmd,
         testCmd: task.test_cmd,
+        testPatchPath,
       });
       const verifyResult = sh(
         DOCKER_CMD,

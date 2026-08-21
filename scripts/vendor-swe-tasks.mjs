@@ -25,18 +25,19 @@ const TASKS_SWE_DIR = path.join(REPO_ROOT, "tasks-swe");
 const RAW_DIR = process.env.SWE_RAW_DIR ?? path.join(REPO_ROOT, "tmp", "swe-raw");
 
 // Checked-in manifest: which instances make up the fixed board. Start small
-// (8 Python-repo instances, easy/medium skew) per the plan's Phase 1 cut.
-// base_commit is asserted against the fetched instance data -- a mismatch
-// aborts vendoring rather than silently pinning a different commit.
+// (8 Python-repo instances across 5 repos) per the plan's Phase 1 cut. Every
+// id/base_commit below was pulled from princeton-nlp/SWE-bench_Verified and is
+// re-asserted against the fetched record at vendor time -- a mismatch aborts
+// rather than silently pinning a different commit.
 export const SWE_MANIFEST = [
-  { id: "django__django-16379", repo: "django/django", base_commit: "4a72da71001f71449f70da6f6f1c1ff13aea5c46" },
-  { id: "django__django-11433", repo: "django/django", base_commit: "175594ae68117e4689d53a5848300f7ac5ebde34" },
-  { id: "sympy__sympy-24213", repo: "sympy/sympy", base_commit: "2c99b74e99b19dfe6f88a002942d43ba3d3cf35f" },
-  { id: "scikit-learn__scikit-learn-13241", repo: "scikit-learn/scikit-learn", base_commit: "1e35fc6c38637cd8ccf27be93ec8ee7c52edd632" },
-  { id: "matplotlib__matplotlib-24334", repo: "matplotlib/matplotlib", base_commit: "16c1baf7e54abd1517d66c26dd68609da2c1cc78" },
-  { id: "astropy__astropy-14995", repo: "astropy/astropy", base_commit: "d3b5cd1ce39da32e5f08ae5b5968181ba48bc0a6" },
-  { id: "pytest__pytest-11143", repo: "pytest-dev/pytest", base_commit: "571e20cb50d30bec37ff6907fc4bbf5abe03c3e9" },
-  { id: "requests__requests-2317", repo: "psf/requests", base_commit: "d9de5b25d31ed7b7d3ffe0a75ee2a1d5d8f98c62" },
+  { id: "astropy__astropy-14995", repo: "astropy/astropy", base_commit: "b16c7d12ccbc7b2d20364b89fb44285bcbfede54" },
+  { id: "django__django-11433", repo: "django/django", base_commit: "21b1d239125f1228e579b1ce8d94d4d5feadd2a6" },
+  { id: "sympy__sympy-24213", repo: "sympy/sympy", base_commit: "e8c22f6eac7314be8d92590bfff92ced79ee03e2" },
+  { id: "psf__requests-2317", repo: "psf/requests", base_commit: "091991be0da19de9108dbe5e3752917fea3d7fdc" },
+  { id: "pytest-dev__pytest-5631", repo: "pytest-dev/pytest", base_commit: "cb828ebe70b4fa35cd5f9a7ee024272237eab351" },
+  { id: "django__django-11066", repo: "django/django", base_commit: "4b45b6c8e4d7c9701a332e80d3b1c84209dc36e2" },
+  { id: "sympy__sympy-20438", repo: "sympy/sympy", base_commit: "33b47e4bd60e2302e42616141e76285038b724d6" },
+  { id: "astropy__astropy-12907", repo: "astropy/astropy", base_commit: "d16bfe05a744909de4b27f5875fe0d4ed41ce607" },
 ];
 
 /**
@@ -49,9 +50,10 @@ export function toTaskSpec(instance) {
   for (const field of required) {
     if (!instance[field]) throw new Error(`instance missing required field "${field}"`);
   }
-  // Solutions never get vendored: refuse inputs that still carry them so a
-  // sloppy caller can't leak a gold patch through this script.
-  for (const forbidden of ["gold_patch", "test_patch", "solution_patch"]) {
+  // The gold (solution) patch is NEVER vendored. test_patch IS vendored: it
+  // is public upstream, defines what "fixed" means, and is applied only in
+  // the verify phase on a clean copy the agent never touches.
+  for (const forbidden of ["gold_patch", "solution_patch"]) {
     if (instance[forbidden] !== undefined && instance[forbidden] !== null && instance[forbidden] !== "") {
       throw new Error(`refusing to vendor instance carrying "${forbidden}" -- solutions stay out of this repo`);
     }
@@ -68,9 +70,10 @@ export function toTaskSpec(instance) {
     repo: instance.repo,
     base_commit: instance.base_commit,
     issue_text: instance.problem_statement,
-    docker_image: `ghcr.io/harness-arena/swe:${instance.instance_id}`,
+    docker_image: `${process.env.SWE_IMAGE_REPO ?? "ghcr.io/harness-arena/swe"}:${instance.instance_id}`,
     workdir: "/repo",
     install_cmd: "",
+    test_patch: instance.test_patch ?? "",
     test_cmd: instance.test_cmd ?? "python -m pytest -x -q",
     fail_to_pass: failToPass,
     pass_to_pass: passToPass,
@@ -140,11 +143,56 @@ export function vendorFromRawDir(rawDir, manifest = SWE_MANIFEST) {
     .sort();
 }
 
+// Fetches raw instance records for the manifest from the public HuggingFace
+// datasets-server API (princeton-nlp/SWE-bench_Verified) and writes one
+// <instance_id>.json per instance into outDir. Idempotent.
+export async function fetchRawInstances(outDir, manifest = SWE_MANIFEST) {
+  mkdirSync(outDir, { recursive: true });
+  const wanted = new Map(manifest.map((m) => [m.id, m]));
+  const found = new Set();
+  let offset = 0;
+  const pageSize = 100;
+
+  while (found.size < wanted.size && offset < 2400) {
+    const url = `https://datasets-server.huggingface.co/rows?dataset=princeton-nlp%2FSWE-bench_Verified&config=default&split=test&offset=${offset}&length=${pageSize}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HuggingFace datasets-server returned ${res.status} at offset ${offset}`);
+    const page = await res.json();
+    const rows = page.rows ?? [];
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const r = row.row;
+      if (wanted.has(r.instance_id)) {
+        // Strip solution material BEFORE writing to disk (test_patch is kept:
+        // it is public upstream verification material, applied only in the
+        // verify phase on a clean copy).
+        const { gold_patch, patch, ...clean } = r;
+        void gold_patch;
+        void patch;
+        writeFileSync(path.join(outDir, `${r.instance_id}.json`), JSON.stringify(clean, null, 2));
+        found.add(r.instance_id);
+      }
+    }
+    offset += pageSize;
+    if (page.num_rows_total && offset >= page.num_rows_total) break;
+  }
+
+  const missing = [...wanted.keys()].filter((id) => !found.has(id));
+  if (missing.length > 0) {
+    throw new Error(`instances not found in SWE-bench Verified: ${missing.join(", ")}`);
+  }
+  return [...found].sort();
+}
+
 function isMain() {
   return import.meta.url === `file://${process.argv[1]}`;
 }
 
 if (isMain()) {
+  if (process.argv.includes("--fetch")) {
+    const ids = await fetchRawInstances(RAW_DIR);
+    console.log(`Fetched ${ids.length} raw instances into ${RAW_DIR}`);
+  }
   const ids = vendorFromRawDir(RAW_DIR);
   console.log(`Vendored ${ids.length} SWE tasks into tasks-swe/:`);
   for (const id of ids) console.log(`  ${id}`);

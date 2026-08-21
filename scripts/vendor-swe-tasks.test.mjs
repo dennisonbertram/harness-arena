@@ -28,7 +28,7 @@ describe("toTaskSpec", () => {
     expect(spec.id).toBe(SWE_MANIFEST[0].id);
     expect(spec.issue_text).toBe("Something is broken in the ORM.");
     expect(spec.fail_to_pass).toEqual(["tests/test_orm.py::test_new_behavior"]);
-    expect(JSON.stringify(spec)).not.toMatch(/gold_patch|test_patch/);
+    expect(JSON.stringify(spec)).not.toMatch(/gold_patch/);
     expect(spec.canary).toBe(CANARY_GUID);
   });
 
@@ -38,10 +38,9 @@ describe("toTaskSpec", () => {
     );
   });
 
-  it("REFUSES an instance still carrying a test patch", () => {
-    expect(() => toTaskSpec(rawInstance({ test_patch: "diff --git a/t b/t" }))).toThrow(
-      /refusing to vendor/,
-    );
+  it("VENDORS the test patch (public verification material, applied only at verify time)", () => {
+    const spec = toTaskSpec(rawInstance({ test_patch: "diff --git a/t b/t" }));
+    expect(spec.test_patch).toBe("diff --git a/t b/t");
   });
 
   it("rejects an empty FAIL_TO_PASS list as unverifiable", () => {

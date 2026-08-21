@@ -23,6 +23,7 @@ const spec: SweTask = {
   workdir: "/repo",
   install_cmd: "",
   test_cmd: "pytest -q",
+  test_patch: "",
   fail_to_pass: ["tests/test_a.py::test_new"],
   pass_to_pass: ["tests/test_b.py::test_keep"],
   canary: "canary-guid",
@@ -50,6 +51,7 @@ describe("sweToRunnerTask", () => {
       test_cmd: "pytest -q",
       fail_to_pass: ["tests/test_a.py::test_new"],
       pass_to_pass: ["tests/test_b.py::test_keep"],
+      test_patch: "",
     });
   });
 });
