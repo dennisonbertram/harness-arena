@@ -14,7 +14,7 @@ export default defineConfig({
     // mcp/ is a separate package with its own deps and its own `npm test`.
     // Running its suite from here would require its node_modules to be
     // installed, which is not true on a fresh clone or in CI.
-    exclude: ["**/node_modules/**", "mcp/**"],
+    exclude: ["**/node_modules/**", "mcp/**", "external-repo/**", ".claude/**"],
     // The jsdom + user-event suites are an order of magnitude slower than the
     // node ones, and under CPU contention (a full-parallel run on a busy
     // machine) they intermittently blew the 5s default. Observed on unrelated,

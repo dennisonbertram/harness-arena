@@ -38,9 +38,23 @@ function isReapCandidate(run: Run): boolean {
   return run.status === "running" || (run.status === "queued" && !!run.dispatched_at);
 }
 
+function isTerminalRun(status: Run["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "reaped";
+}
+
 async function markSubmissionFailed(storage: Storage, run: Run): Promise<void> {
   const submission = await storage.getSubmission(run.submission_id);
   if (submission && (submission.status === "queued" || submission.status === "running")) {
+    // A submission carries multiple runs. Failing the parent while a sibling
+    // run is still executing orphans it under a terminal parent, so only
+    // flip once EVERY run of this submission has reached a terminal status.
+    // This call happens after the triggering run's own terminal write, so it
+    // counts toward the set.
+    const siblings = await storage.listRuns();
+    const allTerminal = siblings
+      .filter((sibling) => sibling.submission_id === run.submission_id)
+      .every((sibling) => isTerminalRun(sibling.status));
+    if (!allTerminal) return;
     submission.status = "failed";
     await storage.putSubmission(submission);
   }
@@ -82,14 +96,20 @@ export async function reapIfStale(storage: Storage, run: Run, now: number = Date
   // that rate-limits Blob (403) and crashed the read routes.
   const lastEventTs = (await storage.latestEventTimestamp(run.id)) ?? run.created_at;
   if (!shouldReap(run, lastEventTs, now)) return run;
-  // ponytail: read-then-write is not atomic — a runner callback that lands
-  // between the freshness check and putRun could be overwritten. Bounded in
-  // practice: the task-derived threshold exceeds the max per-task quiet period
-  // with an additional safety margin, so a run this stale has almost certainly
-  // stopped emitting. Move to a CAS/conditional write if concurrent writers
-  // ever become real.
 
-  const reaped: Run = { ...run, status: "reaped", finished_at: new Date(now).toISOString() };
+  // Re-read immediately before writing: a runner callback can land between
+  // the staleness probe above and this write, and a whole-document putRun
+  // would clobber the terminal status it just recorded. If the live run is
+  // already terminal, keep it (reconciling the parent for failed/reaped) —
+  // the reap window is derived to make this rare, but it must never lose a
+  // real completion when it does happen.
+  const current = (await storage.getRun(run.id)) ?? run;
+  if (isTerminalRun(current.status)) {
+    if (current.status !== "completed") await markSubmissionFailed(storage, current);
+    return current;
+  }
+
+  const reaped: Run = { ...current, status: "reaped", finished_at: new Date(now).toISOString() };
   await storage.putRun(reaped);
   await storage.appendRunEvents(run.id, [
     {

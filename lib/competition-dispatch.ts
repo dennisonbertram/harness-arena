@@ -97,7 +97,9 @@ export async function judgeAndDispatch(
 
   submission.status = "queued";
   submission.run_id = run.id;
-  submission.run_ids = [run.id];
+  // Merge, don't overwrite: a retry re-dispatch must keep links to earlier
+  // runs or cleanup/archival loses them (and their spend) entirely.
+  submission.run_ids = [...new Set([...(submission.run_ids ?? []), run.id])];
   await storage.putSubmission(submission);
 
   const kickDispatch = () =>

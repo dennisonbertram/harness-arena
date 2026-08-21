@@ -101,6 +101,33 @@ describe("MemoryStorage", () => {
     expect(runs.map((r) => r.id)).toEqual(["run-new", "run-old"]);
   });
 
+  it("tryClaimRun is a CAS: exactly one of two claims wins, and it checks live state not a snapshot", async () => {
+    const storage = new MemoryStorage();
+    await storage.putRun(makeRun("run-1", "2026-07-21T00:00:00.000Z"));
+
+    // Both "callers" hold the same stale pre-claim view; the second must still
+    // lose because tryClaimRun re-checks the live map.
+    const first = await storage.tryClaimRun("run-1", "2026-07-21T00:01:00.000Z");
+    const second = await storage.tryClaimRun("run-1", "2026-07-21T00:02:00.000Z");
+
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    const claimed = await storage.getRun("run-1");
+    expect(claimed?.dispatched_at).toBe("2026-07-21T00:01:00.000Z"); // winner's timestamp kept
+  });
+
+  it("tryClaimRun refuses a run that is not queued-and-unclaimed", async () => {
+    const storage = new MemoryStorage();
+    await storage.putRun({ ...makeRun("running-run", "2026-07-21T00:00:00.000Z"), status: "running" as never });
+    await storage.putRun({ ...makeRun("claimed-run", "2026-07-21T00:00:00.000Z"), dispatched_at: "2026-07-21T00:00:01.000Z" });
+    await storage.putRun({ ...makeRun("reaped-run", "2026-07-21T00:00:00.000Z"), status: "reaped" as never });
+
+    expect(await storage.tryClaimRun("running-run", "2026-07-21T00:05:00.000Z")).toBe(false);
+    expect(await storage.tryClaimRun("claimed-run", "2026-07-21T00:05:00.000Z")).toBe(false);
+    expect(await storage.tryClaimRun("reaped-run", "2026-07-21T00:05:00.000Z")).toBe(false);
+    expect(await storage.tryClaimRun("missing-run", "2026-07-21T00:05:00.000Z")).toBe(false);
+  });
+
   it("appendRunEvents assigns monotonic seq 1..n across two separate batches", async () => {
     const storage = new MemoryStorage();
     const runId = "run-1";
@@ -345,6 +372,55 @@ describe("BlobStorage (contract, @vercel/blob mocked)", () => {
 
     expect(appended.map((event) => event.seq)).toEqual([2]);
     expect(put).toHaveBeenNthCalledWith(2, "events/run-1/0000000002.json", expect.any(String), expect.any(Object));
+  });
+
+  it("tryClaimRun claims via a write-once blob and loses when the marker already exists", async () => {
+    const storage = new BlobStorage();
+
+    vi.mocked(put).mockResolvedValueOnce({ url: "https://blob.example/claims/run-1.json" } as never);
+    const won = await storage.tryClaimRun("run-1", "2026-07-21T00:01:00.000Z");
+
+    expect(won).toBe(true);
+    expect(put).toHaveBeenCalledWith(
+      "claims/run-1.json",
+      expect.any(String),
+      expect.objectContaining({ allowOverwrite: false, addRandomSuffix: false }),
+    );
+
+    // Concurrent claimer: Blob rejects the second write-once put -> loser.
+    vi.mocked(put).mockRejectedValueOnce(new Error("blob already exists"));
+    const lost = await storage.tryClaimRun("run-1", "2026-07-21T00:02:00.000Z");
+    expect(lost).toBe(false);
+  });
+
+  it("appendRunEvents REJECTS when a put fails with a non-conflict error instead of silently dropping the event", async () => {
+    // The catch used to swallow EVERY put failure as if it were a seq
+    // collision, so auth failures / rate limits / network errors silently
+    // dropped events from the batch and returned a shorter array with no
+    // signal. Only a real "already exists"/409 conflict may be retried.
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(put).mockRejectedValue(new Error("Vercel Blob: unauthorized (401)"));
+
+    await expect(
+      storage.appendRunEvents("run-1", [
+        { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+      ]),
+    ).rejects.toThrow("401");
+  });
+
+  it("appendRunEvents throws after exhausting the seq-collision retry budget instead of returning a short batch", async () => {
+    // A persistent conflict must not quietly return fewer events than were
+    // appended -- callers detect loss by rejection, not by array length.
+    const storage = new BlobStorage();
+    vi.mocked(list).mockResolvedValueOnce({ blobs: [], hasMore: false } as never);
+    vi.mocked(put).mockRejectedValue(new Error("blob already exists"));
+
+    await expect(
+      storage.appendRunEvents("run-1", [
+        { ts: "2026-07-21T00:00:00.000Z", type: "run.created", payload: { submission_id: "sub-1" } },
+      ]),
+    ).rejects.toThrow(/already exists/);
   });
 
   it("listRunEvents lists per-seq blobs, fetches each, and returns events ordered by seq", async () => {

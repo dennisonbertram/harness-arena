@@ -2,10 +2,24 @@ import { SignJWT, jwtVerify, errors } from "jose";
 
 const AGENT_TOKEN_EXPIRY_SECONDS = 90 * 24 * 60 * 60;
 
+/**
+ * Issuer/audience pinning: agent tokens share AUTH_SECRET with next-auth
+ * session JWTs, so explicit iss/aud claims are REQUIRED at verification to
+ * make cross-acceptance between HS256 consumers of that secret impossible.
+ *
+ * AGENT_TOKEN_VERSION enables mass revocation: bumping it invalidates every
+ * previously issued token at once (verify rejects any other version). There
+ * is no per-token revocation list; this is the kill switch.
+ */
+export const AGENT_TOKEN_ISSUER = "harness-arena";
+export const AGENT_TOKEN_AUDIENCE = "harness-arena-agent-api";
+export const AGENT_TOKEN_VERSION = 1;
+
 type AgentTokenClaims = {
   githubId: number;
   githubLogin: string;
   scope: string;
+  ver?: number;
   iat?: number;
   exp?: number;
 };
@@ -47,9 +61,12 @@ export async function mintAgentToken(
     githubId: identity.githubId,
     githubLogin: identity.githubLogin,
     scope: options.scope ?? "agent",
+    ver: AGENT_TOKEN_VERSION,
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
+    .setIssuer(AGENT_TOKEN_ISSUER)
+    .setAudience(AGENT_TOKEN_AUDIENCE)
     .setExpirationTime(Math.floor(Date.now() / 1000) + expiresIn)
     .sign(authSecret());
 }
@@ -65,7 +82,11 @@ export async function verifyAgentToken(token: string): Promise<AgentIdentity> {
 
   let claims: Partial<AgentTokenClaims>;
   try {
-    const { payload } = await jwtVerify(token, authSecret(), { algorithms: ["HS256"] });
+    const { payload } = await jwtVerify(token, authSecret(), {
+      algorithms: ["HS256"],
+      issuer: AGENT_TOKEN_ISSUER,
+      audience: AGENT_TOKEN_AUDIENCE,
+    });
     claims = payload as Partial<AgentTokenClaims>;
   } catch (error) {
     if (error instanceof errors.JWTExpired) throw new AgentTokenError("expired");
@@ -73,8 +94,9 @@ export async function verifyAgentToken(token: string): Promise<AgentIdentity> {
     throw new AgentTokenError("malformed");
   }
 
-  const { githubId, githubLogin, scope } = claims;
+  const { githubId, githubLogin, scope, ver } = claims;
   if (scope !== "agent") throw new AgentTokenError("invalid_scope");
+  if (ver !== AGENT_TOKEN_VERSION) throw new AgentTokenError("malformed");
   if (typeof githubId !== "number" || typeof githubLogin !== "string") throw new AgentTokenError("malformed");
   return { githubId, githubLogin };
 }

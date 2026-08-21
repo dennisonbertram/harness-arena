@@ -50,6 +50,7 @@ describe("POST /api/competition/admin/cleanup", () => {
 
   it("requires a stable operation ID before it can touch storage", async () => {
     const { operation_id: _operationId, ...body } = BODY;
+    void _operationId;
     const response = await POST(request(body, {}, "7.7.7.5"));
 
     expect(response.status).toBe(400);

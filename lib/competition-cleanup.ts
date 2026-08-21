@@ -528,12 +528,16 @@ export async function archiveAndDeleteCompetitionSubmissions(
   await claimOperationIdentity(identity);
 
   // Nothing is removed until the entire live set and the manifest are durably
-  // copied. A copy failure leaves the leaderboard exactly as it was.
+  // copied. A copy failure leaves the leaderboard exactly as it was. Copies
+  // overwrite because the destination prefix is operation-scoped: a retry
+  // after an interrupted attempt must resume past already-copied objects
+  // instead of throwing forever. The manifest below stays write-once, so
+  // deletes still only start after it lands durably.
   for (const pathname of sourcePathnames) {
     await copy(pathname, `${archivePrefix}/${pathname}`, {
       access: "public",
       addRandomSuffix: false,
-      allowOverwrite: false,
+      allowOverwrite: true,
     });
   }
 

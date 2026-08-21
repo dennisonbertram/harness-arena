@@ -95,6 +95,42 @@ describe("backfillCompetition", () => {
     const submissions = await storage.listSubmissions();
     expect(submissions.every((s) => s.competition_id === first.competitionId)).toBe(true);
   });
+
+  it("re-reads each submission immediately before stamping so a concurrent app update between list and write survives", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(legacySubmission("racy"));
+
+    // Stale snapshot as of listSubmissions time.
+    const staleSnapshot = legacySubmission("racy");
+
+    let mutated = false;
+    const racyStorage = {
+      getCompetition: (id: string) => storage.getCompetition(id),
+      putCompetition: (c: Parameters<typeof storage.putCompetition>[0]) => storage.putCompetition(c),
+      listCompetitions: () => storage.listCompetitions(),
+      listSubmissions: async () => [staleSnapshot],
+      getSubmission: async (id: string) => {
+        if (!mutated) {
+          mutated = true;
+          // The app updates the submission AFTER listSubmissions returned its
+          // snapshot but BEFORE the backfill writes -- the exact race window.
+          const live = await storage.getSubmission(id);
+          await storage.putSubmission({ ...live!, status: "running", github_login: "octocat" });
+        }
+        return storage.getSubmission(id);
+      },
+      putSubmission: (s: Submission) => storage.putSubmission(s),
+    };
+
+    const result = await backfillCompetition(racyStorage);
+
+    expect(result.stamped).toBe(1);
+    const stored = await storage.getSubmission("racy");
+    // The concurrent mutation must survive; only competition_id is added.
+    expect(stored?.status).toBe("running");
+    expect(stored?.github_login).toBe("octocat");
+    expect(stored?.competition_id).toBe(result.competitionId);
+  });
 });
 
 describe("seed-competition CLI Blob adapter", () => {

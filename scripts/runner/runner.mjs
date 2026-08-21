@@ -5,6 +5,15 @@
 // prompt, verifies the result, uploads traces, and reports events/results
 // to CALLBACK_BASE per callback-contract.md / event-taxonomy.md.
 import { spawn } from "node:child_process";
+// Pure validation/exit-code helpers live in gateway-proxy.mjs so they ship in
+// the same bundle and share its test harness; the proxy server itself is still
+// loaded lazily in startGatewayProxy.
+import {
+  classifyAgentTimeoutExit,
+  decodeB64Env,
+  terminalExitCode,
+  validateTaskTimeouts,
+} from "./gateway-proxy.mjs";
 import {
   mkdtempSync,
   mkdirSync,
@@ -47,6 +56,7 @@ import {
   sh,
   shAsync,
   summarizeGatewayRequests,
+  traceSecrets,
 } from "./lib.mjs";
 
 const DOCKER_CMD = process.env.DOCKER_CMD || "docker";
@@ -102,13 +112,20 @@ const RUNNER_FORCE_TASK_ERROR = process.env.RUNNER_FORCE_TASK_ERROR || undefined
 const RUN_ID = process.env.RUN_ID;
 const CALLBACK_BASE = process.env.CALLBACK_BASE;
 const RUNNER_CALLBACK_SECRET = process.env.RUNNER_CALLBACK_SECRET;
+const TASKS_JSON_B64 = process.env.TASKS_JSON_B64;
+const SYSTEM_PROMPT_B64 = process.env.SYSTEM_PROMPT_B64;
 
 const SESSION_DIR = "/logs/agent/sessions";
 const PROMPT_FILE = "/tmp/system-prompt.txt";
 const DOCKERD_LOG = "/var/log/dockerd.log";
 
-if (!RUN_ID || !CALLBACK_BASE || !RUNNER_CALLBACK_SECRET) {
-  console.error("runner: RUN_ID, CALLBACK_BASE, RUNNER_CALLBACK_SECRET are required env vars");
+// Validate ALL required env up front: Buffer.from(undefined) inside
+// decodeB64 used to throw an opaque TypeError only after docker setup had
+// already run.
+if (!RUN_ID || !CALLBACK_BASE || !RUNNER_CALLBACK_SECRET || !TASKS_JSON_B64 || !SYSTEM_PROMPT_B64) {
+  console.error(
+    "runner: RUN_ID, CALLBACK_BASE, RUNNER_CALLBACK_SECRET, TASKS_JSON_B64, SYSTEM_PROMPT_B64 are required env vars",
+  );
   process.exit(1);
 }
 
@@ -124,10 +141,6 @@ function log(line) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function decodeB64(value) {
-  return Buffer.from(value, "base64").toString("utf8");
 }
 
 function capAt(buffer, maxBytes) {
@@ -305,7 +318,11 @@ async function uploadTrace(taskId, name, buffer) {
 // disappeared with the thrown error, leaving only a run-level message and no
 // way to distinguish a provider stall from an agent that produced bad work.
 async function uploadAgentTraces(taskId, sessionText, piStdout) {
-  const secrets = [process.env.AI_GATEWAY_API_KEY].filter(Boolean);
+  // Derived from FORWARDED_CREDENTIAL_ENV_VARS (lib.mjs): every credential
+  // docker exec passes into the task container can be printenv'd by the agent
+  // into output that is uploaded publicly, so the redaction list must cover
+  // all of them -- not just the gateway key.
+  const secrets = traceSecrets();
   let traceBlobUrl;
   const redactedSession = redactSecrets(sessionText, secrets);
   const sessionUpload = await uploadTrace(
@@ -648,20 +665,42 @@ async function runOneTask(task, index, systemPrompt) {
     });
     await flushEvents();
 
-    // GNU timeout exits 124 after the configured agent deadline. This is a
-    // failed task, not a failed benchmark run: a weak or temporarily stalled
-    // model must not discard earlier results or prevent the remaining selected
-    // tasks from running. The hard kill still bounds each task; the runner now
-    // records the timeout transparently and continues.
+    // GNU timeout exits 124 after the configured agent deadline, and its hard
+    // kill surfaces as 137 -- but 137 is ALSO what the kernel OOM killer (or
+    // an external docker kill) produces. Before labeling, ask docker whether
+    // the container itself was OOM-killed: an infra failure must not be
+    // reported as an agent timeout. This is a failed task, not a failed
+    // benchmark run: a weak or temporarily stalled model must not discard
+    // earlier results or prevent the remaining selected tasks from running.
+    // The hard kill still bounds each task; the runner records the outcome
+    // transparently and continues.
     if (execResult.code === 124 || execResult.code === 137) {
-      const error = (
-        `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
-        `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
-      );
+      let oomKilled;
+      if (execResult.code === 137) {
+        const inspect = sh(
+          DOCKER_CMD,
+          ["inspect", containerName, "--format", "{{.State.OOMKilled}}"],
+          { timeout: DOCKER_INFO_TIMEOUT_MS },
+        );
+        oomKilled =
+          inspect.code === 0 && inspect.stdout?.toString("utf8").trim() === "true"
+            ? true
+            : undefined;
+      }
+      const classification = classifyAgentTimeoutExit({
+        exitCode: execResult.code,
+        oomKilled,
+      });
+      const error =
+        classification.stage === "agent_oom_killed"
+          ? `Agent container was OOM-killed (exit 137, OOMKilled=true) while waiting for model output ` +
+            `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`
+          : `Agent timed out after ${task.agent_timeout_sec}s waiting for model output ` +
+            `(provider=${PINNED_PROVIDER || "automatic"}, model=${RUNNER_MODEL})`;
       const { traceBlobUrl } = await uploadAgentTraces(task.id, sessionText, piStdout);
       queueEvent("task.failed", {
         task_id: task.id,
-        stage: "agent_timeout",
+        stage: classification.stage,
         error,
         duration_s: (Date.now() - taskStart) / 1000,
         agent_duration_s: agentDurationS,
@@ -679,7 +718,7 @@ async function runOneTask(task, index, systemPrompt) {
         agent_duration_s: agentDurationS,
         ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
         trace_blob_url: traceBlobUrl,
-        failure_stage: "agent_timeout",
+        failure_stage: classification.stage,
         error,
       };
     }
@@ -853,7 +892,7 @@ async function main() {
         stage: "gateway_preflight",
       });
       const delivered = await finalizeTerminalStatus({ status: "failed" });
-      process.exit(delivered ? 0 : 1);
+      process.exit(terminalExitCode({ status: "failed", delivered }));
     }
     log(`gateway preflight ok (pinned to ${PINNED_PROVIDER || "nothing"})`);
 
@@ -864,7 +903,7 @@ async function main() {
         stage: "sandbox_ready",
       });
       const delivered = await finalizeTerminalStatus({ status: "failed" });
-      process.exit(delivered ? 0 : 1);
+      process.exit(terminalExitCode({ status: "failed", delivered }));
     }
     queueEvent("run.sandbox_ready", { sandbox_id: os.hostname() });
     // First status transition of the run (issue #23 finding B): posting
@@ -889,11 +928,15 @@ async function main() {
     } catch (err) {
       queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
       const delivered = await finalizeTerminalStatus({ status: "failed" });
-      process.exit(delivered ? 0 : 1);
+      process.exit(terminalExitCode({ status: "failed", delivered }));
     }
 
-    const tasks = JSON.parse(decodeB64(process.env.TASKS_JSON_B64));
-    const systemPrompt = decodeB64(process.env.SYSTEM_PROMPT_B64);
+    // Timeout fields are interpolated into sh -c strings inside the root
+    // container, so they are validated ONCE here at parse time -- a crafted
+    // or non-numeric value from TASKS_JSON_B64 must fail the run before any
+    // docker invocation, not surface as `sleep NaN` mid-task.
+    const tasks = validateTaskTimeouts(JSON.parse(decodeB64Env(TASKS_JSON_B64, "TASKS_JSON_B64")));
+    const systemPrompt = decodeB64Env(SYSTEM_PROMPT_B64, "SYSTEM_PROMPT_B64");
 
     for (let index = 0; index < tasks.length; index++) {
       const task = tasks[index];
@@ -935,7 +978,7 @@ async function main() {
       provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
       resolved_system_prompt: resolvedSystemPrompt,
     });
-    process.exit(delivered ? 0 : 1);
+    process.exit(terminalExitCode({ status: "completed", delivered }));
   } catch (err) {
     gatewayProxy?.close();
     log(`uncaught error: ${err?.stack ?? err}`);
@@ -957,7 +1000,7 @@ async function main() {
       provider_pinned: resolvePinnedProvider({ configured: PINNED_PROVIDER, applied: pinWasApplied }),
       resolved_system_prompt: resolvedSystemPrompt,
     });
-    process.exit(delivered ? 0 : 1);
+    process.exit(terminalExitCode({ status: "failed", delivered }));
   }
 }
 

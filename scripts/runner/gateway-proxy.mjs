@@ -28,6 +28,103 @@ import http from "node:http";
 
 const UPSTREAM = process.env.GATEWAY_UPSTREAM ?? "https://ai-gateway.vercel.sh";
 
+// Upper bound on how much request body the proxy will buffer before
+// forwarding. A model request is well under this; an unbounded read let any
+// client that could reach the sidecar port exhaust sandbox memory.
+const DEFAULT_MAX_REQUEST_BODY_BYTES = parseInt(
+  process.env.GATEWAY_PROXY_MAX_BODY_BYTES ?? String(32 * 1024 * 1024),
+  10,
+);
+// Once over the limit we stop buffering but keep DISCARDING the remainder so
+// the client reliably receives the 413 instead of a connection reset -- up to
+// this much excess, after which the socket is cut.
+const MAX_OVERSIZE_DISCARD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Runner-side input validation, exported here (rather than a new module) so
+ * runner.mjs can import pure helpers from a file that already ships in its
+ * bundle and has a direct test harness.
+ */
+
+/** Decodes a base64 env value, failing with a clear error when absent. */
+export function decodeB64Env(value, name) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`runner: ${name} is required and must be non-empty`);
+  }
+  return Buffer.from(value, "base64").toString("utf8");
+}
+
+/**
+ * Coerces a finite positive number, accepting numeric strings ("300") and
+ * rejecting anything else. These values are interpolated into `sh -c`
+ * strings inside the root container (`sleep ${n}`, `timeout ${n}`), so a
+ * crafted value like "1; rm -rf /" must never survive parsing.
+ */
+export function positiveTimeoutSec(value, label) {
+  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+    throw new Error(
+      `runner: ${label} must be a finite positive number of seconds (got ${JSON.stringify(value) ?? "undefined"})`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Validates every task's timeout fields once, at parse time -- before any
+ * docker/sh invocation can interpolate them. Mutates and returns tasks.
+ */
+export function validateTaskTimeouts(tasks) {
+  if (!Array.isArray(tasks)) {
+    throw new Error("runner: TASKS_JSON_B64 must decode to an array of tasks");
+  }
+  for (const task of tasks) {
+    task.agent_timeout_sec = positiveTimeoutSec(
+      task?.agent_timeout_sec,
+      `task ${task?.id ?? "(unnumbered)"} agent_timeout_sec`,
+    );
+    task.verifier_timeout_sec = positiveTimeoutSec(
+      task?.verifier_timeout_sec,
+      `task ${task?.id ?? "(unnumbered)"} verifier_timeout_sec`,
+    );
+  }
+  return tasks;
+}
+
+/**
+ * The runner's process exit code. A failed run must NEVER exit 0 merely
+ * because its terminal status was delivered successfully -- orchestrators
+ * read exit 0 as "run OK". Delivery failure gets its own distinct code.
+ *
+ *   0  completed run, terminal status delivered
+ *   1  failed run (delivered or not, non-zero either way)
+ *   2  terminal status could not be delivered (any status)
+ */
+export function terminalExitCode({ status, delivered }) {
+  if (!delivered) return 2;
+  return status === "failed" ? 1 : 0;
+}
+
+/**
+ * Exit 137 is ambiguous: GNU timeout's hard kill after the agent deadline
+ * (an agent timeout) AND SIGKILL from the kernel OOM killer or an external
+ * `docker kill` (an infra failure) both surface as 137. docker inspect's
+ * State.OOMKilled flag is the only discriminator, so the runner reads it
+ * before labeling; mislabeling an OOM kill as an agent timeout sends
+ * infra-vs-model triage down the wrong path.
+ *
+ * When the flag cannot be read (container already removed, inspect failed),
+ * keep the historical agent-timeout label rather than inventing a failure we
+ * did not observe.
+ */
+export function classifyAgentTimeoutExit({ exitCode, oomKilled }) {
+  if (exitCode !== 124 && exitCode !== 137) return undefined;
+  if (exitCode === 124 || oomKilled !== true) {
+    return { stage: "agent_timeout", oom: false };
+  }
+  return { stage: "agent_oom_killed", oom: true };
+}
+
 /**
  * Adds the provider pin without clobbering anything the caller already set.
  * Exported for tests -- the injection is the whole point of this file, so it
@@ -83,6 +180,9 @@ const MODEL_COMPLETION_TOKEN_CEILINGS = new Map([
  * therefore the authoritative boundary.
  */
 export function boundCompletionTokens(body) {
+  // A valid non-object JSON body (number/string/bool) has no model route and
+  // no token fields; Object.hasOwn on it would throw inside the async handler.
+  if (typeof body !== "object" || body === null) return body;
   const ceiling = MODEL_COMPLETION_TOKEN_CEILINGS.get(body?.model);
   if (ceiling === undefined) return body;
   const field = Object.hasOwn(body, "max_completion_tokens") ? "max_completion_tokens" : "max_tokens";
@@ -333,8 +433,9 @@ export function gatewayRequestHeaders(incoming) {
   return headers;
 }
 
-export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDiagnostic } = {}) {
+export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDiagnostic, maxBodyBytes } = {}) {
   const pinned = (only ?? []).filter(Boolean);
+  const bodyLimit = maxBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   return http.createServer(async (req, res) => {
     const requestId = req.headers["x-request-id"] || randomUUID();
     const abortController = new AbortController();
@@ -374,8 +475,20 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
     });
 
     const chunks = [];
+    let totalBytes = 0;
+    let bodyTooLarge = false;
     try {
-      for await (const chunk of req) chunks.push(chunk);
+      for await (const chunk of req) {
+        totalBytes += chunk.length;
+        if (totalBytes > bodyLimit) {
+          bodyTooLarge = true;
+          // Stop buffering, but keep draining (discarding) a bounded amount
+          // more so the client sees the 413 rather than a mid-upload reset.
+          if (totalBytes - bodyLimit > MAX_OVERSIZE_DISCARD_BYTES) break;
+          continue;
+        }
+        chunks.push(chunk);
+      }
     } catch (error) {
       emitDiagnostic(onDiagnostic, {
         type: "gateway_proxy.request_error",
@@ -384,6 +497,17 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
         error: serializeDiagnosticError(error),
       });
       if (!res.destroyed) res.destroy(error);
+      return;
+    }
+    if (bodyTooLarge) {
+      emitDiagnostic(onDiagnostic, {
+        type: "gateway_proxy.request_too_large",
+        request_id: requestId,
+        incoming_bytes: totalBytes,
+        max_body_bytes: bodyLimit,
+      });
+      res.writeHead(413, { "content-type": "application/json", connection: "close" });
+      res.end(JSON.stringify({ error: { message: `request body exceeds ${bodyLimit} byte limit` } }));
       return;
     }
     const raw = Buffer.concat(chunks).toString() || "{}";
@@ -396,10 +520,15 @@ export function createGatewayProxy({ only, upstream = UPSTREAM, onForward, onDia
       // request shape we did not anticipate.
       body = null;
     }
-    const forwarded =
-      body === null
-        ? raw
-        : JSON.stringify(pinProviders(boundCompletionTokens(normalizeZaiReasoning(body)), pinned));
+    // Only a JSON object is a request shape we know how to transform. A
+    // primitive or array is forwarded byte-for-byte, same as an unparseable
+    // body: spreading it through pinProviders would silently replace the
+    // agent's request with one of our own making.
+    const transformable =
+      body !== null && typeof body === "object" && !Array.isArray(body);
+    const forwarded = transformable
+      ? JSON.stringify(pinProviders(boundCompletionTokens(normalizeZaiReasoning(body)), pinned))
+      : raw;
     const requestBytes = Buffer.byteLength(forwarded);
     const counts = requestToolCounts(body);
     emitDiagnostic(onDiagnostic, {

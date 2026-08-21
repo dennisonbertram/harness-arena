@@ -37,6 +37,10 @@
     // own dependencies (the MCP SDK is not a dependency of the web app). The
     // Next build typechecks the whole project, so without this it fails on an
     // import it was never meant to resolve.
-    "mcp"
+    "mcp",
+    // Untracked vendored reference repo with its own toolchain and deps.
+    "external-repo",
+    // Stale agent worktree artifacts.
+    ".claude"
   ]
 }

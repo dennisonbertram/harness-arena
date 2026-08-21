@@ -81,10 +81,16 @@ export async function backfillCompetition(
   const submissions = await storage.listSubmissions();
   let stamped = 0;
   for (const submission of submissions) {
-    if (submission.competition === true && !submission.competition_id) {
-      await storage.putSubmission({ ...submission, competition_id: id });
-      stamped += 1;
-    }
+    if (!(submission.competition === true && !submission.competition_id)) continue;
+    // Re-read immediately before stamping: listSubmissions' snapshot can be
+    // arbitrarily stale, and putSubmission is a full-document overwrite with
+    // allowOverwrite -- stamping from the snapshot would silently clobber any
+    // concurrent app update (status change, github_login, ...). Only the
+    // missing field is added to the freshly read document.
+    const current = (await storage.getSubmission?.(submission.id)) ?? submission;
+    if (!(current.competition === true && !current.competition_id)) continue;
+    await storage.putSubmission({ ...current, competition_id: id });
+    stamped += 1;
   }
 
   return { competitionId: id, created, stamped, totalSubmissions: submissions.length };
@@ -126,6 +132,7 @@ function blobStorage() {
       const subs = await Promise.all(blobs.map((b) => fetch(b.url).then((r) => r.json())));
       return subs;
     },
+    getSubmission: (id) => readJson(`submissions/${id}.json`),
     putSubmission: (s) => writeJson(`submissions/${s.id}.json`, s),
   };
 }

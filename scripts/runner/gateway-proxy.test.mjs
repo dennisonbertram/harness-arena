@@ -250,9 +250,258 @@ describe("gateway proxy", () => {
     expect(res.status).toBe(400);
     expect(upstream.received[0].raw).toBe("not json");
   });
+
+  // A valid non-object JSON body (number/string/bool) used to be silently
+  // rewritten by the transform pipeline -- spreading a primitive into an
+  // object replaced the agent's request wholesale before it reached the
+  // gateway. A body we did not anticipate must be forwarded untouched.
+  it.each([
+    ["the number", "42"],
+    ["a string", '"just text"'],
+    ["a boolean", "true"],
+  ])("answers %s as the whole body instead of hanging", async (_label, raw) => {
+    const upstream = await fakeUpstream();
+    const port = await listen(createGatewayProxy({ only: ["zai"], upstream: upstream.url }));
+
+    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: raw,
+      signal: AbortSignal.timeout(2_000),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.received[0].raw).toBe(raw);
+  });
+});
+
+// A crafted or runaway request body used to be buffered without any bound
+// before the proxy ever looked at it: memory exhaustion on the sandbox VM was
+// reachable by anyone who could reach the sidecar port. The cap must be
+// enforced WHILE reading, not after concat.
+describe("request body size cap", () => {
+  it("answers 413 when the body exceeds the configured cap and never reaches upstream", async () => {
+    const upstream = await fakeUpstream();
+    const diagnostics = [];
+    const port = await listen(
+      createGatewayProxy({
+        only: ["zai"],
+        upstream: upstream.url,
+        maxBodyBytes: 1024,
+        onDiagnostic: (event) => diagnostics.push(event),
+      }),
+    );
+
+    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "m", messages: [], padding: "x".repeat(64 * 1024) }),
+      signal: AbortSignal.timeout(5_000),
+    });
+
+    expect(res.status).toBe(413);
+    expect((await res.json()).error.message).toMatch(/exceeds/i);
+    expect(upstream.received).toHaveLength(0);
+    expect(diagnostics.some((event) => event.type === "gateway_proxy.request_too_large")).toBe(true);
+  });
+
+  it("forwards bodies within the cap untouched", async () => {
+    const upstream = await fakeUpstream();
+    const port = await listen(
+      createGatewayProxy({ only: ["zai"], upstream: upstream.url, maxBodyBytes: 64 * 1024 }),
+    );
+
+    const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "zai/glm-5.2", messages: [] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.received[0].body.model).toBe("zai/glm-5.2");
+  });
+});
+
+// The runner's own entrypoint has no direct harness (it calls main() on
+// import), so its wiring is pinned the same way the credential-forwarding test
+// above pins it: against the source it must contain.
+describe("runner exit-code and input-validation wiring", () => {
+  const readRunnerSource = async () => {
+    const { readFile } = await import("node:fs/promises");
+    const path = await import("node:path");
+    return readFile(path.join(process.cwd(), "scripts", "runner", "runner.mjs"), "utf8");
+  };
+
+  it("never exits 0 for a failed run just because delivery succeeded", async () => {
+    const src = await readRunnerSource();
+    // `process.exit(delivered ? 0 : 1)` told orchestrators a failed run was OK
+    // whenever the terminal status POST happened to succeed.
+    expect(src).not.toMatch(/delivered\s*\?\s*0\s*:\s*1/);
+    expect(src).toContain("terminalExitCode(");
+  });
+
+  it("validates task timeout fields at parse time, before any sh -c interpolation", async () => {
+    const src = await readRunnerSource();
+    // agent_timeout_sec / verifier_timeout_sec are interpolated into sh -c
+    // strings; validation must happen where TASKS_JSON_B64 is decoded, not at
+    // each use site.
+    expect(src).toContain("validateTaskTimeouts(");
+    const parseSite = src.indexOf('JSON.parse(decodeB64Env(TASKS_JSON_B64');
+    expect(parseSite).toBeGreaterThan(-1);
+    const validateSite = src.indexOf("validateTaskTimeouts(");
+    expect(validateSite).toBeGreaterThan(-1);
+    // Validation must happen where tasks are parsed, before the loop that
+    // invokes runOneTask (whose docker/sh calls interpolate the timeouts).
+    expect(validateSite).toBeLessThan(src.indexOf("await runOneTask("));
+  });
+
+  it("requires TASKS_JSON_B64 and SYSTEM_PROMPT_B64 up front with RUN_ID/CALLBACK_BASE", async () => {
+    const src = await readRunnerSource();
+    const guard = src.match(/if \(!RUN_ID[\s\S]*?\}\)/)?.[0] ?? "";
+    expect(guard).toContain("!TASKS_JSON_B64");
+    expect(guard).toContain("!SYSTEM_PROMPT_B64");
+  });
+
+  it("classifies exit 137 via docker inspect OOMKilled before labeling agent_timeout", async () => {
+    const src = await readRunnerSource();
+    // Exit 137 is also SIGKILL from the kernel OOM killer; labeling that as an
+    // agent timeout misdirects infra-vs-model triage. The runner must consult
+    // docker inspect's OOMKilled flag (via the classifyAgentTimeoutExit
+    // helper) before choosing a failure_stage.
+    expect(src).toContain("classifyAgentTimeoutExit(");
+    expect(src).toContain("{{.State.OOMKilled}}");
+  });
+});
+
+describe("classifyAgentTimeoutExit", () => {
+  // Dynamic import so a missing export fails only these tests, not the whole
+  // file -- this suite is written red-first against code without the helper.
+  const load = async () => import("./gateway-proxy.mjs");
+
+  it("labels exit 137 with OOMKilled=true as an OOM kill, not an agent timeout", async () => {
+    const { classifyAgentTimeoutExit } = await load();
+    expect(classifyAgentTimeoutExit({ exitCode: 137, oomKilled: true })).toEqual({
+      stage: "agent_oom_killed",
+      oom: true,
+    });
+  });
+
+  it("keeps exit 137 with OOMKilled=false on the agent-timeout path (GNU timeout hard kill)", async () => {
+    const { classifyAgentTimeoutExit } = await load();
+    expect(classifyAgentTimeoutExit({ exitCode: 137, oomKilled: false })).toEqual({
+      stage: "agent_timeout",
+      oom: false,
+    });
+  });
+
+  it("falls back to agent_timeout when the OOMKilled flag cannot be read", async () => {
+    const { classifyAgentTimeoutExit } = await load();
+    // Container already removed / inspect failed: keep the historical label
+    // rather than inventing a failure we did not observe.
+    expect(classifyAgentTimeoutExit({ exitCode: 137, oomKilled: undefined })).toEqual({
+      stage: "agent_timeout",
+      oom: false,
+    });
+  });
+
+  it("treats exit 124 as an agent timeout regardless of any OOM signal", async () => {
+    const { classifyAgentTimeoutExit } = await load();
+    expect(classifyAgentTimeoutExit({ exitCode: 124, oomKilled: false })).toEqual({
+      stage: "agent_timeout",
+      oom: false,
+    });
+    expect(classifyAgentTimeoutExit({ exitCode: 124, oomKilled: true })).toEqual({
+      stage: "agent_timeout",
+      oom: false,
+    });
+  });
+
+  it("returns undefined for exits outside the timeout path", async () => {
+    const { classifyAgentTimeoutExit } = await load();
+    expect(classifyAgentTimeoutExit({ exitCode: 0 })).toBeUndefined();
+    expect(classifyAgentTimeoutExit({ exitCode: 1 })).toBeUndefined();
+    expect(classifyAgentTimeoutExit({ exitCode: undefined })).toBeUndefined();
+  });
 });
 
 import { buildPiSettings, buildPinnedModelsConfig, PI_SETTINGS_CONFIG_PATH } from "./lib.mjs";
+import { decodeB64Env, positiveTimeoutSec, terminalExitCode, validateTaskTimeouts } from "./gateway-proxy.mjs";
+
+describe("positiveTimeoutSec", () => {
+  it("accepts finite positive numbers and numeric strings", () => {
+    expect(positiveTimeoutSec(300, "t")).toBe(300);
+    expect(positiveTimeoutSec("300", "t")).toBe(300);
+    expect(positiveTimeoutSec(0.5, "t")).toBe(0.5);
+  });
+
+  it.each([
+    ["a non-numeric string", "abc"],
+    ["shell metacharacters", "1; rm -rf /"],
+    ["NaN-producing input", "NaN"],
+    ["zero", 0],
+    ["a negative number", -5],
+    ["Infinity", Infinity],
+    ["undefined", undefined],
+    ["an empty string", ""],
+  ])("rejects %s", (_label, value) => {
+    expect(() => positiveTimeoutSec(value, "agent_timeout_sec")).toThrow(/finite positive number/);
+  });
+});
+
+describe("validateTaskTimeouts", () => {
+  it("coerces valid numeric-string timeouts so downstream sh -c only ever sees numbers", () => {
+    const tasks = [
+      { id: "t1", agent_timeout_sec: "120", verifier_timeout_sec: "60" },
+    ];
+    expect(validateTaskTimeouts(tasks)).toEqual([
+      { id: "t1", agent_timeout_sec: 120, verifier_timeout_sec: 60 },
+    ]);
+  });
+
+  it("rejects a non-numeric agent_timeout_sec at parse time with the task named", () => {
+    expect(() =>
+      validateTaskTimeouts([{ id: "evil", agent_timeout_sec: "1; reboot", verifier_timeout_sec: 60 }]),
+    ).toThrow(/task evil agent_timeout_sec/);
+  });
+
+  it("rejects a missing verifier_timeout_sec", () => {
+    expect(() =>
+      validateTaskTimeouts([{ id: "t2", agent_timeout_sec: 120 }]),
+    ).toThrow(/task t2 verifier_timeout_sec/);
+  });
+
+  it("rejects a non-array payload", () => {
+    expect(() => validateTaskTimeouts({ not: "an array" })).toThrow(/array of tasks/);
+  });
+});
+
+describe("decodeB64Env", () => {
+  it("decodes a present value", () => {
+    expect(decodeB64Env(Buffer.from('{"a":1}').toString("base64"), "TASKS_JSON_B64")).toBe('{"a":1}');
+  });
+
+  it("fails with a clear error naming the variable when absent or empty", () => {
+    expect(() => decodeB64Env(undefined, "TASKS_JSON_B64")).toThrow(/TASKS_JSON_B64 is required/);
+    expect(() => decodeB64Env("", "SYSTEM_PROMPT_B64")).toThrow(/SYSTEM_PROMPT_B64 is required/);
+  });
+});
+
+describe("terminalExitCode", () => {
+  it("exits non-zero for a failed run even when delivery succeeded", () => {
+    // The old `delivered ? 0 : 1` told orchestrators a failed run was OK
+    // whenever its terminal status POST happened to succeed.
+    expect(terminalExitCode({ status: "failed", delivered: true })).not.toBe(0);
+  });
+
+  it("gives undelivered terminal status its own distinct non-zero code", () => {
+    expect(terminalExitCode({ status: "failed", delivered: false })).toBe(2);
+    expect(terminalExitCode({ status: "completed", delivered: false })).toBe(2);
+  });
+
+  it("exits 0 only for a completed run whose status was delivered", () => {
+    expect(terminalExitCode({ status: "completed", delivered: true })).toBe(0);
+  });
+});
 
 describe("buildPinnedModelsConfig", () => {
   it("forces GLM through Pi's OpenAI-compatible transport and its chat-completions path", () => {
@@ -829,6 +1078,62 @@ describe("gateway proxy diagnostics", () => {
 });
 
 import * as runnerLib from "./lib.mjs";
+import { FORWARDED_CREDENTIAL_ENV_VARS, redactSecrets, traceSecrets } from "./lib.mjs";
+
+// Every env var forwarded into the task container with `docker exec -e` can be
+// printed by a root agent into its own session/stdout/verifier output -- and
+// those traces are uploaded publicly. The redaction list must therefore be
+// DERIVED from the forwarding list, never maintained by hand next to it: the
+// runner originally scrubbed only AI_GATEWAY_API_KEY while also forwarding
+// OPENROUTER_API_KEY, so `printenv OPENROUTER_API_KEY` published a live
+// provider credential.
+describe("trace redaction covers every credential forwarded into the task container", () => {
+  it("collects every forwarded credential value from the environment", () => {
+    const secrets = traceSecrets({
+      AI_GATEWAY_API_KEY: "vck_gateway_value",
+      OPENROUTER_API_KEY: "sk-or-v1-live-value",
+      UNRELATED: "not-a-secret",
+    });
+
+    expect(secrets).toContain("vck_gateway_value");
+    expect(secrets).toContain("sk-or-v1-live-value");
+    expect(secrets).not.toContain("not-a-secret");
+  });
+
+  it("redacts the OpenRouter key from agent output before public upload", () => {
+    const secrets = traceSecrets({ OPENROUTER_API_KEY: "sk-or-v1-live-value" });
+    const redacted = redactSecrets(
+      "agent printed: sk-or-v1-live-value\nsession continues",
+      secrets,
+    );
+
+    expect(redacted).not.toContain("sk-or-v1-live-value");
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("keeps empty and missing credentials off the list", () => {
+    expect(traceSecrets({ AI_GATEWAY_API_KEY: "", OPENROUTER_API_KEY: undefined })).toEqual([]);
+  });
+
+  it("names exactly the credentials the runner forwards with docker exec -e", async () => {
+    // Derive, don't enumerate: read the -e names straight out of the runner's
+    // docker exec invocation so a newly forwarded credential that is not in
+    // FORWARDED_CREDENTIAL_ENV_VARS fails here instead of leaking publicly.
+    const { readFile } = await import("node:fs/promises");
+    const path = await import("node:path");
+    const src = await readFile(path.join(process.cwd(), "scripts", "runner", "runner.mjs"), "utf8");
+    const execBlock = src.match(/"exec",[\s\S]*?"sh",/);
+    expect(execBlock).toBeTruthy();
+    const forwarded = [...src.slice(execBlock.index).matchAll(/"-e",\s*\n\s*"([A-Z0-9_]+)",/g)].map(
+      (m) => m[1],
+    );
+    expect(forwarded.length).toBeGreaterThan(0);
+    for (const name of forwarded) {
+      expect(FORWARDED_CREDENTIAL_ENV_VARS, `${name} is forwarded but not redacted`).toContain(name);
+    }
+  });
+});
+
 
 describe("runner subprocess isolation", () => {
   it("keeps the in-process gateway proxy responsive while Pi is running", async () => {

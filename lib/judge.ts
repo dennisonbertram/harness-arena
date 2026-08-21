@@ -9,6 +9,10 @@ import type { Task } from "./tasks";
 export const JUDGE_MODEL = "anthropic/claude-sonnet-5";
 const GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/chat/completions";
 
+// Hard cap on each judge gateway call so a hung connection can't stall the
+// submission route indefinitely inside a serverless invocation.
+export const JUDGE_TIMEOUT_MS = 30_000;
+
 // Verbatim rubric system prompt — published openly on /how-it-works for
 // transparency. Do not reword; see judge-rubric.md (architect-decided).
 export const JUDGE_SYSTEM_PROMPT = `You are the fairness judge for Harness Arena, a competition where participants submit a SYSTEM PROMPT that will drive the \`pi\` coding agent through a fixed, publicly-known set of Terminal-Bench tasks. Competitors are ranked by pass rate, then by lowest inference cost.
@@ -117,6 +121,7 @@ function tryParseVerdict(raw: string): JudgeVerdict | undefined {
 async function callGateway(prompt: string, tasks: JudgeTask[]): Promise<string> {
   const response = await fetch(GATEWAY_URL, {
     method: "POST",
+    signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`,
@@ -154,14 +159,13 @@ export async function judgeSubmission(prompt: string, tasks: JudgeTask[]): Promi
   const retryParsed = tryParseVerdict(retryRaw);
   if (retryParsed) return retryParsed;
 
-  // Bias to APPROVE when the judge can't produce a clear verdict: a parsing
-  // failure is uncertainty, not evidence of cheating, and rejecting a fair
-  // competitor over an infra hiccup is worse than letting one questionable
-  // prompt through (every prompt and trace is public for post-hoc review).
+  // Fail CLOSED when the judge can't produce a clear verdict: unparsable
+  // output is exactly what a prompt-injection or truncation attack produces,
+  // so auto-approving here would let an attacker steer the gate. Throwing
+  // routes the submission to pending_review (human queue) via the callers'
+  // judge_unavailable handling.
   log("warn", "judge.parse_failed", { attempt: 2 });
-  return {
-    verdict: "approved",
-    reason:
-      "Approved by default: the fairness judge could not return a clear verdict (we bias to approving when uncertain). This prompt and its run traces are public.",
-  };
+  throw new Error(
+    "judge returned no parsable verdict after retry; routing to pending_review",
+  );
 }

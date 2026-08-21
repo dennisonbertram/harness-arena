@@ -441,6 +441,21 @@ export function redactSecrets(text, secrets = []) {
   return result.replace(VCK_TOKEN_RE, "[REDACTED]");
 }
 
+// Credentials the runner forwards into the task container with `docker exec
+// -e` (see runner.mjs). A root agent can printenv any of them into its own
+// session/stdout/verifier output, and those traces are uploaded publicly --
+// so every forwarded credential must also be on the trace redaction list.
+// The gateway-proxy.test.mjs regression scans runner.mjs's exec invocation
+// against this list, so a newly forwarded credential that is missing here
+// fails a test instead of leaking a live key.
+export const FORWARDED_CREDENTIAL_ENV_VARS = ["AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY"];
+
+export function traceSecrets(env = process.env) {
+  return FORWARDED_CREDENTIAL_ENV_VARS.map((name) => env[name]).filter(
+    (value) => typeof value === "string" && value !== "",
+  );
+}
+
 // Shell-out helper: never throws, always returns a result. Pass
 // `timeout` (ms) for a bounded per-attempt deadline -- Node's execFileSync
 // kills the child with SIGTERM once it elapses, so a wedged command (e.g.

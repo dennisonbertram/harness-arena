@@ -108,11 +108,19 @@ function requireEnv(name: string): string {
 // Any failure here (missing env, SDK throw, non-zero bootstrap exit) must
 // surface as run.failed instead of leaving the run stuck at `queued`
 // forever -- that's the whole point of this ticket.
+//
+// Only a QUEUED run may transition to failed. The in-memory `run` snapshot can
+// be stale: the runner's terminal callback may have already moved the stored
+// run to running/completed, and unconditionally overwriting it backwards to
+// failed clobbered real results. Re-read from storage and leave any
+// non-queued state untouched.
 async function markFailed(run: Run, err: unknown): Promise<void> {
   const storage = getStorage();
   const message = err instanceof Error ? err.message : String(err);
   log("error", "sandbox.create_failed", { run_id: run.id, error: message });
-  const failed: Run = { ...run, status: "failed", finished_at: new Date().toISOString() };
+  const stored = (await storage.getRun(run.id)) ?? run;
+  if (stored.status !== "queued") return;
+  const failed: Run = { ...stored, status: "failed", finished_at: new Date().toISOString() };
   await storage.putRun(failed);
   await storage.appendRunEvents(run.id, [
     { ts: new Date().toISOString(), type: "run.failed", payload: { error: message, stage: "sandbox_create" } },

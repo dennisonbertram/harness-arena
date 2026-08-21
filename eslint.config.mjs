@@ -17,6 +17,10 @@ const eslintConfig = defineConfig([
     "coverage/**",
     // Build output of the standalone MCP package; generated, not authored.
     "mcp/dist/**",
+    // Untracked vendored reference repo with its own toolchain.
+    "external-repo/**",
+    // Stale agent worktree artifacts; generated, not authored.
+    ".claude/**",
   ]),
 ]);
 

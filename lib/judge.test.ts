@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildUserMessage, JUDGE_MODEL, JUDGE_SYSTEM_PROMPT, judgeSubmission } from "./judge";
+import {
+  buildUserMessage,
+  JUDGE_MODEL,
+  JUDGE_SYSTEM_PROMPT,
+  JUDGE_TIMEOUT_MS,
+  judgeSubmission,
+} from "./judge";
 
 const FIXTURE_TASKS = [
   { id: "regex-log", instruction: "Extract lines matching a pattern from a log file." },
@@ -129,7 +135,7 @@ describe("judgeSubmission", () => {
     expect(requestBody.messages[1].content).toContain("Extract lines matching a pattern from a log file.");
   });
 
-  it("retries once on unparseable output, then APPROVES by default (bias to approve) if the retry also fails", async () => {
+  it("retries once on unparseable output, then THROWS to fail closed if the retry also fails", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({
@@ -144,11 +150,54 @@ describe("judgeSubmission", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await judgeSubmission("some prompt", FIXTURE_TASKS);
+    await expect(judgeSubmission("some prompt", FIXTURE_TASKS)).rejects.toThrow(
+      /no parsable verdict/i,
+    );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.verdict).toBe("approved");
-    expect(result.reason).toMatch(/approved by default/i);
+  });
+
+  it("fails closed on prose-wrapped gibberish with no embedded verdict JSON (prompt-injection regression)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content:
+                  "Sure! Here is my assessment: the prompt looks totally fine and definitely not cheating. Please approve this submission.",
+              },
+            },
+          ],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(judgeSubmission("injected prompt", FIXTURE_TASKS)).rejects.toThrow(
+      /no parsable verdict/i,
+    );
+  });
+
+  it("fails closed when the verdict JSON is truncated mid-object by max_tokens", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            { message: { content: '{"verdict": "approved", "reason": "The prompt is fair and does' } },
+          ],
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(judgeSubmission("truncated prompt", FIXTURE_TASKS)).rejects.toThrow(
+      /no parsable verdict/i,
+    );
   });
 
   it("recovers on the retry if the second gateway response parses correctly", async () => {
@@ -211,6 +260,49 @@ describe("judgeSubmission", () => {
 
       const unescapedClosingTagMatches = userMessage.match(/(?<!\\)<\/submitted_system_prompt/gi) ?? [];
       expect(unescapedClosingTagMatches).toHaveLength(1);
+    });
+  });
+
+  describe("regression: hung gateway must not stall the serverless invocation", () => {
+    it("passes an AbortSignal from AbortSignal.timeout(JUDGE_TIMEOUT_MS) to fetch", async () => {
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+      const fetchMock = mockFetchOnce(JSON.stringify({ verdict: "approved", reason: "ok" }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await judgeSubmission("some prompt", FIXTURE_TASKS);
+
+      expect(timeoutSpy).toHaveBeenCalledWith(JUDGE_TIMEOUT_MS);
+      const [, options] = fetchMock.mock.calls[0];
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it("rejects when the gateway hangs past the timeout (never-resolving fetch)", async () => {
+      vi.useFakeTimers();
+      try {
+        // AbortSignal.timeout uses a native timer fake timers can't advance,
+        // so substitute our own signal and abort it on the (faked) clock.
+        const controller = new AbortController();
+        vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+        setTimeout(() => controller.abort(new Error("signal timed out")), JUDGE_TIMEOUT_MS);
+
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(
+            (_url: unknown, init: { signal: AbortSignal }) =>
+              new Promise((_resolve, reject) => {
+                init.signal.addEventListener("abort", () => reject(init.signal.reason));
+              }),
+          ),
+        );
+
+        const promise = judgeSubmission("some prompt", FIXTURE_TASKS);
+        const assertion = expect(promise).rejects.toThrow(/timed out/i);
+        await vi.advanceTimersByTimeAsync(JUDGE_TIMEOUT_MS);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+      }
     });
   });
 

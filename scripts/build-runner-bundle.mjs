@@ -28,14 +28,52 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_DIR = path.join(ROOT, "scripts", "runner");
 const DEFAULT_OUT_FILE = path.join(ROOT, "public", "runner-bundle.tgz");
 
-function localModuleSpecifiers(source) {
-  const matches = [
-    ...source.matchAll(
-      /\b(?:import|export)\s+(?:(?:[^"'()]*?)\s+from\s+)?["']((?:\.{1,2}\/)[^"']+\.mjs)["']/g,
-    ),
-    ...source.matchAll(/\bimport\s*\(\s*["']((?:\.{1,2}\/)[^"']+\.mjs)["']\s*\)/g),
-  ];
-  return [...new Set(matches.map((match) => match[1]))].sort();
+// Extracts every relative import specifier from `source`. Any relative
+// reference the extractor cannot resolve to a literal local .mjs path --
+// a template-literal/variable dynamic import, a non-.mjs extension -- throws
+// naming the module and line, instead of being silently dropped from the
+// bundle (the failure mode behind the past "Cannot find module
+// '.../gateway-proxy.mjs'" production incident).
+function localModuleSpecifiers(source, modulePath) {
+  const lineOf = (index) => source.slice(0, index).split("\n").length;
+  const fail = (line, specifier, reason) => {
+    throw new Error(
+      `${modulePath}:${line} ${reason}: "${specifier}" -- the bundle closure is derived from ` +
+        `literal imports, so every relative import must be a plain string literal ending in .mjs`,
+    );
+  };
+
+  const specifiers = [];
+  const staticPattern =
+    /\b(?:import|export)\s+(?:(?:[^"'`()]*?)\s+from\s+)?["']((?:\.{1,2}\/)[^"']*)["']/g;
+  for (const match of source.matchAll(staticPattern)) {
+    const [, specifier] = match;
+    if (!specifier.endsWith(".mjs")) {
+      fail(lineOf(match.index), specifier, "relative import does not resolve to a local .mjs path");
+    }
+    specifiers.push(specifier);
+  }
+
+  const dynamicPattern = /\bimport\s*\(\s*([^)]*?)\s*\)/g;
+  for (const match of source.matchAll(dynamicPattern)) {
+    const argument = match[1];
+    const literal = argument.match(/^(["'])((?:\.{1,2}\/)[^"']*)\1$/);
+    if (!literal) {
+      if (!/(?:\.{1,2}\/)/.test(argument)) continue; // bare/package/builtin specifier
+      fail(
+        lineOf(match.index),
+        argument,
+        "could not resolve relative import -- dynamic import specifier is not a string literal",
+      );
+    }
+    const specifier = literal[2];
+    if (!specifier.endsWith(".mjs")) {
+      fail(lineOf(match.index), specifier, "relative import does not resolve to a local .mjs path");
+    }
+    specifiers.push(specifier);
+  }
+
+  return [...new Set(specifiers)].sort();
 }
 
 function relativePathInside(root, candidate, description) {
@@ -72,7 +110,7 @@ export function findRunnerModuleClosure({ runnerDir = RUNNER_DIR, entry = "runne
     seen.add(relativeSource);
 
     const source = readFileSync(realSource, "utf8");
-    for (const specifier of localModuleSpecifiers(source)) {
+    for (const specifier of localModuleSpecifiers(source, relativeSource)) {
       const dependencyPath = path.resolve(path.dirname(sourcePath), specifier);
       const dependency = relativePathInside(
         root,

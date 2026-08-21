@@ -88,6 +88,34 @@ describe("findRunnerModuleClosure", () => {
 
     expect(() => findRunnerModuleClosure({ runnerDir: workDir })).toThrow(expectedMessage);
   });
+
+  // A dynamic import whose specifier is not a plain string literal (template
+  // literal, variable, concatenation) cannot be resolved by the extractor.
+  // Silently omitting the module is exactly how the past production failure
+  // ("Cannot find module '.../gateway-proxy.mjs'") happened -- so abort the
+  // build instead, naming the file and line.
+  it("fails closed on a dynamic import with a template-literal specifier", () => {
+    workDir = mkdtempSync(path.join(tmpdir(), "runner-module-closure-test-"));
+    writeFileSync(
+      path.join(workDir, "runner.mjs"),
+      'const name = "gateway";\nawait import(`./${name}.mjs`);\n',
+    );
+    writeFileSync(path.join(workDir, "gateway.mjs"), "export const value = 1;\n");
+
+    expect(() => findRunnerModuleClosure({ runnerDir: workDir })).toThrow(
+      /runner\.mjs:2 could not resolve relative import/,
+    );
+  });
+
+  it("fails closed on a relative import that does not resolve to a local .mjs path", () => {
+    workDir = mkdtempSync(path.join(tmpdir(), "runner-module-closure-test-"));
+    writeFileSync(path.join(workDir, "runner.mjs"), 'import "./helper.js";\n');
+    writeFileSync(path.join(workDir, "helper.js"), "export const value = 1;\n");
+
+    expect(() => findRunnerModuleClosure({ runnerDir: workDir })).toThrow(
+      /runner\.mjs:1 relative import does not resolve to a local \.mjs path: "\.\/helper\.js"/,
+    );
+  });
 });
 
 describe("security: the public bundle carries no grading materials", () => {

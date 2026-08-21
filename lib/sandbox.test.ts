@@ -363,6 +363,20 @@ describe("createRunSandbox", () => {
     ).toBe(true);
   });
 
+  it("does NOT overwrite an already-running run back to failed when sandbox creation fails", async () => {
+    // markFailed used to unconditionally putRun status:"failed", clobbering a
+    // running/completed run backwards when racing the runner's terminal
+    // callback. It must re-read the stored run and only transition queued→failed.
+    mockCreate.mockRejectedValue(new Error("late sandbox failure"));
+    const run = makeRun({ status: "running" });
+    await storageRef.current.putRun(run);
+
+    await expect(createRunSandbox(run, { prompt: "hi" })).rejects.toThrow("late sandbox failure");
+
+    const stored = await storageRef.current.getRun(run.id);
+    expect(stored?.status).toBe("running");
+  });
+
   it("marks the run failed and appends run.failed when Sandbox.create throws", async () => {
     mockCreate.mockRejectedValue(new Error("sandbox quota exceeded"));
     const run = makeRun();

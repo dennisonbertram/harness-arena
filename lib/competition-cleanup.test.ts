@@ -27,11 +27,14 @@ vi.mock("@vercel/blob", () => ({
       .map((pathname) => ({ pathname, url: `https://blob.example/${pathname}` })),
     hasMore: false,
   })),
-  copy: vi.fn(async (from: string, to: string) => {
+  copy: vi.fn(async (from: string, to: string, options?: { allowOverwrite?: boolean }) => {
     blob.operations.push(`copy:${from}`);
     if (blob.failCopyOf === from) throw new Error("archive unavailable");
     const value = blob.objects.get(from);
     if (value === undefined) throw new Error(`missing ${from}`);
+    if (blob.objects.has(to) && options?.allowOverwrite !== true) {
+      throw new Error(`blob already exists: ${to}`);
+    }
     blob.objects.set(to, value);
   }),
   put: vi.fn(async (pathname: string, body: string, options?: { allowOverwrite?: boolean }) => {
@@ -296,6 +299,46 @@ describe("archiveAndDeleteCompetitionSubmissions", () => {
     expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(false);
     expect(JSON.parse(blob.objects.get(
       `archives/competition-cleanups/${COMPETITION_ID}/stable-operation-id/recovery.json`,
+    ) ?? "{}")).toMatchObject({ status: "completed", remainingPathnames: [] });
+  });
+
+  it("resumes an interrupted archive copy on retry instead of throwing on already-copied objects", async () => {
+    seed();
+    blob.failCopyOf = `traces/${RUN_ID}/task/trace.json`;
+    const input = {
+      competitionId: COMPETITION_ID,
+      submissionIds: [SUBMISSION_ID],
+      reason: "provider configuration error",
+      archiveId: "interrupted-copy-operation",
+    };
+
+    await expect(archiveAndDeleteCompetitionSubmissions(input)).rejects.toThrow("archive unavailable");
+    expect(blob.objects.has(`archives/competition-cleanups/${COMPETITION_ID}/interrupted-copy-operation/submissions/${SUBMISSION_ID}.json`)).toBe(true);
+    expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(true);
+
+    blob.failCopyOf = undefined;
+    blob.operations.length = 0;
+    const result = await archiveAndDeleteCompetitionSubmissions(input);
+
+    expect(result).toMatchObject({
+      archivePrefix: `archives/competition-cleanups/${COMPETITION_ID}/interrupted-copy-operation`,
+      counts: { submissions: 1, runs: 1, events: 1, traces: 1 },
+    });
+    expect(blob.operations).toEqual([
+      `copy:submissions/${SUBMISSION_ID}.json`,
+      `copy:runs/${RUN_ID}.json`,
+      `copy:events/${RUN_ID}/0000000001.json`,
+      `copy:traces/${RUN_ID}/task/trace.json`,
+      `put:archives/competition-cleanups/${COMPETITION_ID}/interrupted-copy-operation/manifest.json`,
+      `del:events/${RUN_ID}/0000000001.json`,
+      `del:traces/${RUN_ID}/task/trace.json`,
+      `del:runs/${RUN_ID}.json`,
+      `del:submissions/${SUBMISSION_ID}.json`,
+      `put:archives/competition-cleanups/${COMPETITION_ID}/interrupted-copy-operation/recovery.json`,
+    ]);
+    expect(blob.objects.has(`submissions/${SUBMISSION_ID}.json`)).toBe(false);
+    expect(JSON.parse(blob.objects.get(
+      `archives/competition-cleanups/${COMPETITION_ID}/interrupted-copy-operation/recovery.json`,
     ) ?? "{}")).toMatchObject({ status: "completed", remainingPathnames: [] });
   });
 

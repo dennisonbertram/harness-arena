@@ -12,6 +12,13 @@ export interface Storage {
   getRun(id: string): Promise<Run | undefined>;
   putRun(run: Run): Promise<void>;
   listRuns(): Promise<Run[]>;
+  /**
+   * Atomically claims a queued run for dispatch. Returns true when THIS call
+   * won the claim (no prior claim existed); false when another writer claimed
+   * it first or the run is no longer claimable. Backed by a write-once blob so
+   * Blob storage itself resolves concurrent claims -- the loser's put throws.
+   */
+  tryClaimRun(runId: string, dispatchedAt: string): Promise<boolean>;
   /** Assigns each event a monotonic seq (1..n, continuing across batches) and returns them with seq/run_id filled in. */
   appendRunEvents(runId: string, events: NewRunEvent[]): Promise<RunEvent[]>;
   /** Returns all events for a run in strict seq order. Best-effort: skips any event that can't be read. */
@@ -78,6 +85,15 @@ export class MemoryStorage implements Storage {
 
   async listRuns(): Promise<Run[]> {
     return [...this.runs.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }
+
+  async tryClaimRun(runId: string, dispatchedAt: string): Promise<boolean> {
+    // Check the LIVE map, not a caller-held snapshot: the whole point is that
+    // the caller's view may be stale relative to a concurrent claimer.
+    const run = this.runs.get(runId);
+    if (!run || run.status !== "queued" || run.dispatched_at) return false;
+    this.runs.set(runId, { ...run, dispatched_at: dispatchedAt });
+    return true;
   }
 
   async appendRunEvents(runId: string, newEvents: NewRunEvent[]): Promise<RunEvent[]> {
@@ -177,6 +193,17 @@ export function seqFromEventPathname(pathname: string | undefined): number | nul
   if (!match) return null;
   const seq = Number(match[1]);
   return Number.isSafeInteger(seq) ? seq : null;
+}
+
+/**
+ * True only when a put() failure is a genuine "blob already exists" conflict
+ * (the allowOverwrite:false seq-collision signal), not an auth failure, rate
+ * limit, or network error. Vercel Blob surfaces the collision as an
+ * "already exists" message; 409-style statuses are matched too.
+ */
+export function isWriteConflict(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already exists|\b409\b/.test(message);
 }
 
 export async function fetchJson<T>(url: string): Promise<T> {
@@ -357,6 +384,25 @@ export class BlobStorage implements Storage {
     await this.writeJson(`runs/${run.id}.json`, run);
   }
 
+  async tryClaimRun(runId: string, dispatchedAt: string): Promise<boolean> {
+    // Write-once claim marker: allowOverwrite:false turns the read-then-write
+    // race into a real compare-and-set. Of N concurrent claimers exactly one
+    // put succeeds; every loser's put throws "already exists". A transient
+    // failure also returns false (fail-closed): the run waits for the next
+    // dispatch tick rather than risking a double-started sandbox.
+    try {
+      await put(`claims/${runId}.json`, JSON.stringify({ run_id: runId, dispatched_at: dispatchedAt }), {
+        access: "public",
+        addRandomSuffix: false,
+        allowOverwrite: false,
+        contentType: "application/json",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async listRuns(): Promise<Run[]> {
     const blobs = await this.listAllBlobs("runs/");
     const results = await Promise.all(
@@ -387,7 +433,14 @@ export class BlobStorage implements Storage {
       // seq; allowOverwrite:false then throws "already exists" on the second.
       // Retry with the next seq (bounded) rather than clobbering or failing
       // the callback (which would drop the whole event batch).
-      for (let tries = 0; tries < 50; tries++) {
+      //
+      // ONLY a genuine conflict is a retry signal. Auth failures, rate limits,
+      // and network errors used to be swallowed here too, silently dropping
+      // events from the batch; those must propagate so callers can detect the
+      // loss instead of receiving a quietly-shorter array.
+      let lastErr: unknown;
+      let written = false;
+      for (let tries = 0; tries < 50 && !written; tries++) {
         try {
           const full: RunEvent = { ...event, run_id: runId, seq };
           await put(`events/${runId}/${String(seq).padStart(10, "0")}.json`, JSON.stringify(full), {
@@ -397,11 +450,14 @@ export class BlobStorage implements Storage {
             contentType: "application/json",
           });
           appended.push(full);
-          break;
-        } catch {
-          seq += 1; // path collided (or transient) — advance and retry
+          written = true;
+        } catch (err) {
+          lastErr = err;
+          if (!isWriteConflict(err)) throw err;
+          seq += 1; // path collided — advance and retry
         }
       }
+      if (!written) throw lastErr;
     }
     return appended;
   }

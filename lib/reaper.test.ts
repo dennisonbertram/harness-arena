@@ -220,6 +220,89 @@ describe("regression: reaping is idempotent", () => {
   });
 });
 
+describe("regression: reap must not clobber a concurrent terminal callback", () => {
+  it("leaves a run that completed between the staleness check and the reap write as completed", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });
+    await storage.putRun(run);
+
+    // Simulate the runner's terminal callback landing while the reaper is
+    // between its staleness probe and its write: the moment the reaper reads
+    // event timestamps, the run completes underneath it.
+    const originalLatest = storage.latestEventTimestamp.bind(storage);
+    storage.latestEventTimestamp = async (id: string) => {
+      const ts = await originalLatest(id);
+      await storage.putRun({
+        ...run,
+        status: "completed",
+        finished_at: "2026-07-21T00:30:00.000Z",
+      });
+      return ts;
+    };
+
+    const now = new Date(run.created_at).getTime() + DEFAULT_REAP_STALE_MS + 60 * 1000;
+    const result = await reapIfStale(storage, run, now);
+
+    expect(result.status).toBe("completed");
+    const stored = await storage.getRun(run.id);
+    expect(stored?.status).toBe("completed");
+    const events = await storage.listRunEvents(run.id);
+    expect(events.some((e) => e.type === "run.reaped")).toBe(false);
+  });
+});
+
+describe("regression: submission only fails when ALL of its runs are terminal", () => {
+  it("does not flip the submission to failed while a sibling run is still executing", async () => {
+    const storage = new MemoryStorage();
+    const staleCreated = "2026-07-21T00:00:00.000Z";
+    const staleA = makeRun({ id: "run-a", status: "running", created_at: staleCreated });
+    const staleB = makeRun({ id: "run-b", status: "running", created_at: staleCreated });
+    await storage.putRun(staleA);
+    await storage.putRun(staleB);
+    await storage.putSubmission({
+      id: "sub-1",
+      agent_name: "multi-run agent",
+      prompt: "p",
+      status: "running",
+      run_id: staleA.id,
+      created_at: staleCreated,
+    });
+
+    const now = new Date(staleCreated).getTime() + DEFAULT_REAP_STALE_MS + 60 * 1000;
+
+    // First run reaped: sibling run-b is still executing, so the parent
+    // submission must stay active.
+    await reapIfStale(storage, staleA, now);
+    expect((await storage.getSubmission("sub-1"))?.status).toBe("running");
+
+    // Only once every run of the submission is terminal does it fail.
+    await reapIfStale(storage, staleB, now);
+    expect((await storage.getSubmission("sub-1"))?.status).toBe("failed");
+  });
+
+  it("still fails the submission when its single stale run is reaped", async () => {
+    const storage = new MemoryStorage();
+    const run = makeRun({ status: "running", created_at: "2026-07-21T00:00:00.000Z" });
+    await storage.putRun(run);
+    await storage.putSubmission({
+      id: run.submission_id,
+      agent_name: "solo agent",
+      prompt: "p",
+      status: "running",
+      run_id: run.id,
+      created_at: run.created_at,
+    });
+
+    await reapIfStale(
+      storage,
+      run,
+      new Date(run.created_at).getTime() + DEFAULT_REAP_STALE_MS + 60 * 1000,
+    );
+
+    expect((await storage.getSubmission(run.submission_id))?.status).toBe("failed");
+  });
+});
+
 describe("regression: REAP_STALE_MINUTES env override (issue #23 finding F)", () => {
   const ORIGINAL = process.env.REAP_STALE_MINUTES;
 

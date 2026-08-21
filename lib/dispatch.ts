@@ -51,15 +51,12 @@ type StartFn = (run: Run, prompt: string) => Promise<void>;
 
 /**
  * Start as many queued runs as the concurrency cap allows (bounded per tick).
- * Claims each run (sets dispatched_at, persisted BEFORE the sandbox call) so a
- * concurrent dispatch is less likely to double-start it, then fires startRun
- * fire-and-forget — createRunSandbox marks the run failed on its own error, so a
- * broken start surfaces on the UI. Idempotent-ish and safe to call from any
- * trigger (submission, run completion, a run-list poll, the cron backstop).
- *
- * ponytail: the claim is a read-then-write on Blob, not a real CAS, so two
- * simultaneous dispatch invocations could still both claim the same run at POC
- * traffic. Add an atomic claim (or a single-writer cron) if double-starts appear.
+ * Claims each run atomically (storage.tryClaimRun: a write-once CAS marker, so
+ * of N concurrent dispatch invocations exactly one wins) BEFORE the sandbox
+ * call, then fires startRun fire-and-forget — createRunSandbox marks the run
+ * failed on its own error, so a broken start surfaces on the UI. Idempotent and
+ * safe to call from any trigger (submission, run completion, a run-list poll,
+ * the cron backstop).
  */
 export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = startRun): Promise<string[]> {
   const runs = await storage.listRuns();
@@ -73,8 +70,15 @@ export async function dispatchQueuedRuns(storage: Storage, startFn: StartFn = st
       continue;
     }
     // Claim BEFORE the sandbox call so concurrency accounting counts it and a
-    // concurrent dispatch is less likely to double-start it.
-    const claimed: Run = { ...run, dispatched_at: new Date().toISOString() };
+    // concurrent dispatch cannot double-start it. The selection above ran off a
+    // snapshot that may be stale; tryClaimRun re-checks against live state and
+    // is resolved by the storage backend itself.
+    const dispatchedAt = new Date().toISOString();
+    if (!(await storage.tryClaimRun(run.id, dispatchedAt))) {
+      log("info", "dispatch.claim_lost", { run_id: run.id });
+      continue;
+    }
+    const claimed: Run = { ...run, dispatched_at: dispatchedAt };
     await storage.putRun(claimed);
     started.push(run.id);
     starts.push(
