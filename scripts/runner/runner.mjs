@@ -9,9 +9,17 @@ import { spawn } from "node:child_process";
 // the same bundle and share its test harness; the proxy server itself is still
 // loaded lazily in startGatewayProxy.
 import {
+  buildPatchCaptureCommand,
+  buildSweRepoPrepareCommand,
+  buildSweVerifyPipeline,
   classifyAgentTimeoutExit,
   decodeB64Env,
+  evaluateSweVerifyResult,
+  isEmptyPatch,
+  isSweTask,
+  resolveRunMode,
   terminalExitCode,
+  validateSweTask,
   validateTaskTimeouts,
 } from "./gateway-proxy.mjs";
 import {
@@ -469,6 +477,9 @@ async function startGatewayProxy() {
 
 async function runOneTask(task, index, systemPrompt) {
   const containerName = buildContainerName(RUN_ID, index, task.id);
+  // Swe tasks carry their repo/workdir/test spec in the payload and verify by
+  // patch application; terminal-bench tasks keep the /tests + reward.txt flow.
+  const swe = isSweTask(task);
   const taskStart = Date.now();
   const tempDirs = [];
   // The proxy preflight uses the same sidecar before task 1. Establish the
@@ -495,6 +506,51 @@ async function runOneTask(task, index, systemPrompt) {
       "-c",
       `sleep ${task.agent_timeout_sec + 900}`,
     ]);
+
+    // Swe: make sure the repo is present and pinned to base_commit BEFORE the
+    // agent starts, so the patch capture later diffs against a known base.
+    // The prebuilt image normally ships the repo already (mirroring how
+    // terminal-bench images ship /app); the clone inside the command is the
+    // fallback for images that do not, and fails here -- not mid-verify --
+    // when network policy blocks it.
+    if (swe) {
+      const prep = sh(
+        DOCKER_CMD,
+        [
+          "exec",
+          containerName,
+          "sh",
+          "-c",
+          buildSweRepoPrepareCommand({
+            workdir: task.workdir,
+            repo: task.repo,
+            baseCommit: task.base_commit,
+          }),
+        ],
+        { timeout: DOCKER_INFO_TIMEOUT_MS * 6 },
+      );
+      if (prep.code !== 0) {
+        const error = `swe repo prepare failed in ${task.workdir} at ${task.base_commit}: ${
+          prep.stderr?.toString("utf8").slice(0, 500) || `exit ${prep.code}`
+        }`;
+        queueEvent("task.failed", {
+          task_id: task.id,
+          stage: "repo_prepare_failed",
+          error,
+          duration_s: (Date.now() - taskStart) / 1000,
+        });
+        await flushEvents();
+        return {
+          task_id: task.id,
+          attempted: true,
+          passed: false,
+          reward: 0,
+          duration_s: (Date.now() - taskStart) / 1000,
+          failure_stage: "repo_prepare_failed",
+          error,
+        };
+      }
+    }
 
     {
       // pi cannot add the gateway's providerOptions itself, but it can take a
@@ -573,7 +629,9 @@ async function runOneTask(task, index, systemPrompt) {
       [
         "exec",
         "-w",
-        "/app",
+        // Swe agents start inside the repo checkout; terminal-bench images
+        // keep the historical /app.
+        swe ? task.workdir : "/app",
         "-e",
         "AI_GATEWAY_API_KEY",
         "-e",
@@ -786,6 +844,169 @@ async function runOneTask(task, index, systemPrompt) {
       };
     }
 
+    // --- swe verification: platform-side patch capture + clean-copy verify ---
+    if (swe) {
+      const { traceBlobUrl, secrets } = await uploadAgentTraces(task.id, sessionText, piStdout);
+
+      // Capture the submission's patch OURSELVES from the agent's worktree --
+      // never trust an agent-written patch file. Staging everything (add -A)
+      // includes the untracked files a real fix usually creates.
+      const patchContainerPath = "/tmp/submission.patch";
+      const capture = sh(
+        DOCKER_CMD,
+        [
+          "exec",
+          "-w",
+          task.workdir,
+          containerName,
+          "sh",
+          "-c",
+          buildPatchCaptureCommand({ baseCommit: task.base_commit, patchPath: patchContainerPath }),
+        ],
+        { timeout: DOCKER_INFO_TIMEOUT_MS * 2 },
+      );
+      let patchText = "";
+      if (capture.code === 0) {
+        const hostFile = path.join(os.tmpdir(), `runner-patch-${containerName}-${Date.now()}.diff`);
+        const cp = sh(DOCKER_CMD, ["cp", `${containerName}:${patchContainerPath}`, hostFile]);
+        if (cp.code === 0) {
+          try {
+            patchText = readFileSync(hostFile, "utf8");
+          } finally {
+            rmSync(hostFile, { force: true });
+          }
+        }
+      }
+      if (isEmptyPatch(patchText)) {
+        const error =
+          capture.code !== 0
+            ? `git diff against ${task.base_commit} failed: ${
+                capture.stderr?.toString("utf8").slice(0, 500) || `exit ${capture.code}`
+              }`
+            : "agent produced an empty diff (no changes against base_commit)";
+        queueEvent("task.failed", {
+          task_id: task.id,
+          stage: "patch_extraction_failed",
+          error,
+          duration_s: (Date.now() - taskStart) / 1000,
+        });
+        await flushEvents();
+        return {
+          task_id: task.id,
+          attempted: true,
+          passed: false,
+          reward: 0,
+          cost_usd: totalCost === null ? undefined : totalCost,
+          cost_source: costSource,
+          duration_s: (Date.now() - taskStart) / 1000,
+          turns,
+          agent_duration_s: agentDurationS,
+          ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+          trace_blob_url: traceBlobUrl,
+          failure_stage: "patch_extraction_failed",
+          error,
+        };
+      }
+
+      const patchUpload = await uploadTrace(
+        task.id,
+        "patch.diff",
+        Buffer.from(redactSecrets(patchText, secrets), "utf8"),
+      );
+      if (patchUpload?.url) {
+        queueEvent("task.patch_captured", { task_id: task.id, blob_url: patchUpload.url });
+      }
+
+      // Verify on a CLEAN copy: force the worktree back to pristine
+      // base_commit, apply the captured patch gated on --check, then run
+      // install_cmd + test_cmd. Signal = pipeline exit code, sharpened by the
+      // FAIL_TO_PASS/PASS_TO_PASS lists where the output allows.
+      queueEvent("task.verify_started", { task_id: task.id });
+      await flushEvents();
+
+      const verifyStart = Date.now();
+      const pipeline = buildSweVerifyPipeline({
+        baseCommit: task.base_commit,
+        patchPath: patchContainerPath,
+        workdir: task.workdir,
+        installCmd: task.install_cmd,
+        testCmd: task.test_cmd,
+      });
+      const verifyResult = sh(
+        DOCKER_CMD,
+        [
+          "exec",
+          "-w",
+          "/",
+          containerName,
+          "sh",
+          "-c",
+          `timeout ${task.verifier_timeout_sec} bash -c ${shQuote(pipeline)}`,
+        ],
+        { maxBuffer: 20 * 1024 * 1024 },
+      );
+      const verifyDurationS = (Date.now() - verifyStart) / 1000;
+
+      const evaluation = evaluateSweVerifyResult({
+        exitCode: verifyResult.code,
+        output: [verifyResult.stdout?.toString("utf8"), verifyResult.stderr?.toString("utf8")].join(
+          "\n",
+        ),
+        failToPass: Array.isArray(task.fail_to_pass) ? task.fail_to_pass : [],
+        passToPass: Array.isArray(task.pass_to_pass) ? task.pass_to_pass : [],
+      });
+      const passed = evaluation.passed;
+      const reward = passed ? 1 : 0;
+
+      queueEvent("task.verified", {
+        task_id: task.id,
+        passed,
+        reward,
+        duration_s: verifyDurationS,
+        ...(evaluation.fail_to_pass_missing.length
+          ? { fail_to_pass_missing: evaluation.fail_to_pass_missing }
+          : {}),
+        ...(evaluation.pass_to_pass_missing.length
+          ? { pass_to_pass_missing: evaluation.pass_to_pass_missing }
+          : {}),
+      });
+
+      const verifierParts = [verifyResult.stdout?.toString("utf8") ?? ""];
+      const sweVerifyStderr = verifyResult.stderr?.toString("utf8") ?? "";
+      if (sweVerifyStderr.trim()) verifierParts.push(`\n[stderr]\n${sweVerifyStderr}`);
+      verifierParts.push(`\n[verify exit] ${verifyResult.code}`);
+      if (evaluation.fail_to_pass_missing.length) {
+        verifierParts.push(`\n[fail_to_pass missing] ${evaluation.fail_to_pass_missing.join(", ")}`);
+      }
+      if (evaluation.pass_to_pass_missing.length) {
+        verifierParts.push(`\n[pass_to_pass missing] ${evaluation.pass_to_pass_missing.join(", ")}`);
+      }
+      const sweVerifierUpload = await uploadTrace(
+        task.id,
+        "verifier.txt",
+        Buffer.from(redactSecrets(verifierParts.join(""), secrets), "utf8"),
+      );
+      if (sweVerifierUpload?.url) {
+        queueEvent("task.trace_uploaded", { task_id: task.id, blob_url: sweVerifierUpload.url });
+      }
+      await flushEvents();
+
+      return {
+        task_id: task.id,
+        attempted: true,
+        passed,
+        reward,
+        cost_usd: totalCost === null ? undefined : totalCost,
+        cost_source: costSource,
+        duration_s: (Date.now() - taskStart) / 1000,
+        turns,
+        agent_duration_s: agentDurationS,
+        ...(parsed.validOutputTokenCount > 0 ? { output_tokens: parsed.totalOutputTokens } : {}),
+        trace_blob_url: traceBlobUrl,
+        ...(patchUpload?.url ? { patch_blob_url: patchUpload.url } : {}),
+      };
+    }
+
     // Verification against a clean copy of the task's tests.
     sh(DOCKER_CMD, ["exec", containerName, "rm", "-rf", "/tests"]);
     sh(DOCKER_CMD, ["cp", path.join(RUNNER_TASKS_DIR, task.id, "tests"), `${containerName}:/tests`]);
@@ -920,23 +1141,35 @@ async function main() {
       await flushEvents();
     }
 
-    // Pull grading materials before any task runs. Fail closed (see
-    // fetchTaskTests): without tests we cannot verify, so abort rather than
-    // report unscored passes.
-    try {
-      await fetchTaskTests();
-    } catch (err) {
-      queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
-      const delivered = await finalizeTerminalStatus({ status: "failed" });
-      process.exit(terminalExitCode({ status: "failed", delivered }));
-    }
-
     // Timeout fields are interpolated into sh -c strings inside the root
     // container, so they are validated ONCE here at parse time -- a crafted
     // or non-numeric value from TASKS_JSON_B64 must fail the run before any
     // docker invocation, not surface as `sleep NaN` mid-task.
     const tasks = validateTaskTimeouts(JSON.parse(decodeB64Env(TASKS_JSON_B64, "TASKS_JSON_B64")));
     const systemPrompt = decodeB64Env(SYSTEM_PROMPT_B64, "SYSTEM_PROMPT_B64");
+
+    // Mode dispatch: RUN_MODE=swe (set by the swe-bench dispatch) or a payload
+    // that is entirely swe-bench tasks. In swe mode grading materials come
+    // from each task's own spec (test_cmd + FAIL_TO_PASS/PASS_TO_PASS), so
+    // there is no /api/runner-tests fetch to fail closed on.
+    const runMode = resolveRunMode({ runModeEnv: process.env.RUN_MODE, tasks });
+    if (runMode === "swe") {
+      for (const task of tasks) validateSweTask(task);
+      log(`swe mode: ${tasks.length} task(s) from TASKS_JSON_B64`);
+    }
+
+    // Pull grading materials before any task runs. Fail closed (see
+    // fetchTaskTests): without tests we cannot verify, so abort rather than
+    // report unscored passes. Swe tasks verify against their own spec instead.
+    if (runMode !== "swe") {
+      try {
+        await fetchTaskTests();
+      } catch (err) {
+        queueEvent("run.failed", { error: String(err?.message ?? err), stage: "fetch_tests" });
+        const delivered = await finalizeTerminalStatus({ status: "failed" });
+        process.exit(terminalExitCode({ status: "failed", delivered }));
+      }
+    }
 
     for (let index = 0; index < tasks.length; index++) {
       const task = tasks[index];

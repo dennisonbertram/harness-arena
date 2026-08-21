@@ -1,9 +1,19 @@
 import Link from "next/link";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
+import { getSweTasks } from "@/lib/swe-task";
 import { formatUsd, scaleScatterPoints } from "@/lib/format";
 import { aggregatePrompts, aggregateAllRunsByTask, baselineDisplayName, type TaskModelBreakdown } from "@/lib/aggregate";
-import { ARENA_HARNESS, ARENA_ENDPOINT, ARENA_BENCHMARK, RERUN_OPERATOR_LOGIN } from "@/lib/arena-params";
+import {
+  ARENA_HARNESS,
+  ARENA_ENDPOINT,
+  ARENA_BENCHMARK,
+  RERUN_OPERATOR_LOGIN,
+  SWE_BENCHMARK,
+  normalizeBenchmark,
+  type BenchmarkBoard,
+} from "@/lib/arena-params";
+import { runsForBoard } from "@/lib/leaderboard";
 import { auth } from "@/auth";
 import { modelLabel, modelColor, runModel, MODEL_LABELS } from "@/lib/models";
 import { UNKNOWN_GITHUB_LOGIN } from "@/lib/github";
@@ -25,7 +35,16 @@ const GITHUB_URL = "https://github.com/dennisonbertram/harness-arena";
 // would never show new submissions. ISR re-renders it at most every 15s.
 export const revalidate = 15;
 
-export default async function LeaderboardPage() {
+export default async function LeaderboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ benchmark?: string }>;
+} = {}) {
+  const params = (await searchParams) ?? {};
+  // One page renders either board; absent/unknown ?benchmark= falls back to
+  // the legacy terminal-bench board, so every existing URL is unchanged.
+  const board: BenchmarkBoard = normalizeBenchmark(params.benchmark);
+  const isSweBoard = board === SWE_BENCHMARK;
   const storage = getStorage();
   const [runs, submissions, competitions, session] = await Promise.all([
     storage.listRuns(),
@@ -34,25 +53,37 @@ export default async function LeaderboardPage() {
     auth(),
   ]);
   const canRerun = session?.user?.githubLogin === RERUN_OPERATOR_LOGIN;
-  const tasks = getTasks();
-  const totalTasks = tasks.length;
-  const standings = aggregatePrompts(runs, submissions, totalTasks);
-  const competitionRuns = competitionBenchmarkRuns(runs, submissions, competitions);
+  // Each board ranks against its own task set: terminal-bench tasks for the
+  // default board, vendored SWE specs for the swe-bench board.
+  const totalTasks = isSweBoard ? getSweTasks().length : getTasks().length;
+  // Board discrimination: both boards share one storage keyed by run ->
+  // submission, so every panel below consumes only this board's runs.
+  // (aggregatePrompts additionally excludes competition entries itself.)
+  const boardRuns = runsForBoard(runs, submissions, board);
+  const standings = aggregatePrompts(boardRuns, submissions, totalTasks);
+  const competitionById = new Map(competitions.map((c) => [c.id, c]));
+  // Competition entries are board-scoped too: a competition's benchmark field
+  // (absent = legacy terminal-bench) decides which board lists its runs.
+  const competitionRuns = competitionBenchmarkRuns(runs, submissions, competitions).filter((r) =>
+    normalizeBenchmark(r.competitionId ? competitionById.get(r.competitionId)?.benchmark : undefined) === board,
+  );
   // The /benchmarks per-task view pools EVERY completed run across ALL prompts — a
   // task-difficulty overview, not one agent's profile.
-  const taskOverview = aggregateAllRunsByTask(runs, submissions, tasks.map((t) => t.id));
+  const taskOverview = aggregateAllRunsByTask(boardRuns, submissions, isSweBoard
+    ? Array.from(new Set(boardRuns.flatMap((r) => r.task_results.map((t) => t.task_id))))
+    : getTasks().map((t) => t.id));
   const submissionById = new Map(submissions.map((s) => [s.id, s]));
   // Competition entries (see the / homepage) live in the same storage but must
   // never surface on this benchmarks board -- matches aggregatePrompts's
   // own exclusion, so the run count and scatter chart agree with the table.
   const isMainArenaRun = (r: Run) => submissionById.get(r.submission_id)?.competition !== true;
-  const completedRuns = runs.filter(
+  const completedRuns = boardRuns.filter(
     (r) => r.status === "completed" && r.tasks_passed !== undefined && isMainArenaRun(r),
   ).length;
-  const pendingRuns = runs.filter((r) => r.status === "running" || r.status === "queued").length;
+  const pendingRuns = boardRuns.filter((r) => r.status === "running" || r.status === "queued").length;
 
   // Cost-vs-tasks scatter: one dot per completed run, colored by model.
-  const chartRuns = runs.filter(
+  const chartRuns = boardRuns.filter(
     (r) =>
       r.status === "completed" && r.tasks_passed !== undefined && r.total_cost_usd !== undefined && isMainArenaRun(r),
   );
@@ -89,15 +120,49 @@ export default async function LeaderboardPage() {
         <h1 style={{ fontSize: 40, fontWeight: 600, letterSpacing: "-0.02em", marginBottom: 12 }}>
           Harness Arena
         </h1>
+        {/* Board switcher — both boards share this page; ?benchmark=swe-bench
+            selects the SWE board, no param is the legacy terminal-bench one. */}
+        <div style={{ display: "flex", gap: 16, fontSize: 14, marginBottom: 16 }} aria-label="Benchmark boards">
+          <Link
+            href="/benchmarks"
+            style={{
+              fontWeight: isSweBoard ? 400 : 600,
+              textDecoration: isSweBoard ? "none" : "underline",
+            }}
+          >
+            Terminal-Bench 2
+          </Link>
+          <Link
+            href="/benchmarks?benchmark=swe-bench"
+            style={{
+              fontWeight: isSweBoard ? 600 : 400,
+              textDecoration: isSweBoard ? "underline" : "none",
+            }}
+          >
+            SWE-Bench
+          </Link>
+        </div>
         <p style={{ fontSize: 18, color: "var(--gray-900)", maxWidth: 660, marginBottom: 16 }}>
-          A public contest: submit a system prompt and it runs against a {totalTasks}-task subset of Terminal-Bench 2
-          (not the full benchmark), on the model of your choice. Models are noisy, so prompts are ranked by{" "}
-          <strong>pass rate</strong> — mean tasks solved across every run, not a single lucky attempt — with cost as
-          the tiebreaker once pass rate is solved.
+          {isSweBoard ? (
+            <>
+              A public contest: submit a system prompt and it runs against a {totalTasks}-task SWE-bench board
+              (repo@commit plus a real issue; verified by applying the agent&apos;s patch and running the repo&apos;s own
+              test suite), on the model of your choice. Models are noisy, so prompts are ranked by{" "}
+              <strong>pass rate</strong> — mean tasks solved across every run, not a single lucky attempt — with cost as
+              the tiebreaker once pass rate is solved.
+            </>
+          ) : (
+            <>
+              A public contest: submit a system prompt and it runs against a {totalTasks}-task subset of Terminal-Bench 2
+              (not the full benchmark), on the model of your choice. Models are noisy, so prompts are ranked by{" "}
+              <strong>pass rate</strong> — mean tasks solved across every run, not a single lucky attempt — with cost as
+              the tiebreaker once pass rate is solved.
+            </>
+          )}
         </p>
         <div style={{ display: "flex", gap: 20, fontSize: 14, marginBottom: 24 }}>
           <Link href="/how-it-works">How it works</Link>
-          <Link href="/submit">Submit a prompt</Link>
+          <Link href={isSweBoard ? "/submit?benchmark=swe-bench" : "/submit"}>Submit a prompt</Link>
           <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
             GitHub repo
           </a>
@@ -114,7 +179,14 @@ export default async function LeaderboardPage() {
             maxWidth: "100%",
           }}
         >
-          <Param label="Benchmark" value={`${ARENA_BENCHMARK} · ${totalTasks}-task subset`} />
+          <Param
+            label="Benchmark"
+            value={
+              isSweBoard
+                ? `SWE-Bench · ${totalTasks}-task board`
+                : `${ARENA_BENCHMARK} · ${totalTasks}-task subset`
+            }
+          />
           <Param label="Models" value={Object.values(MODEL_LABELS).join(" · ")} />
           <Param label="Harness" value={ARENA_HARNESS} />
           <Param label="Endpoint" value={ARENA_ENDPOINT} />

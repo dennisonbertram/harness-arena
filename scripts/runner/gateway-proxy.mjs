@@ -125,6 +125,135 @@ export function classifyAgentTimeoutExit({ exitCode, oomKilled }) {
   return { stage: "agent_oom_killed", oom: true };
 }
 
+// --- swe mode ---------------------------------------------------------------
+// Pure helpers for the swe-bench board (repo@base_commit + issue -> patch ->
+// verify on a clean copy). Exported from here rather than runner.mjs so they
+// ship in the same bundle and share this file's test harness.
+
+/** POSIX shell single-quote escaping; mirrors lib.mjs shQuote. */
+function sweQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+const SWE_BENCHMARK = "swe-bench";
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Per-task dispatch: does this task run under the swe flow? */
+export function isSweTask(task) {
+  return task?.benchmark === SWE_BENCHMARK;
+}
+
+/**
+ * Run-level mode. RUN_MODE=swe wins explicitly (the platform sets it for
+ * swe-bench dispatches); otherwise infer from the payload so a tasks array
+ * that is entirely swe-bench is unambiguous. Mixed or empty payloads stay
+ * "tb" -- silently guessing a mode for a half-swe payload would mis-verify
+ * real tasks.
+ */
+export function resolveRunMode({ runModeEnv, tasks }) {
+  if (String(runModeEnv ?? "").trim() === "swe") return "swe";
+  if (Array.isArray(tasks) && tasks.length > 0 && tasks.every(isSweTask)) return "swe";
+  return "tb";
+}
+
+/**
+ * Validates the swe-specific fields a task must carry before any docker exec
+ * interpolates them into `sh -c` strings. Timeouts are already covered by
+ * validateTaskTimeouts; this covers the fields only swe tasks have.
+ */
+export function validateSweTask(task) {
+  if (!isSweTask(task)) {
+    throw new Error(
+      `runner: task ${task?.id ?? "(unnumbered)"} must carry benchmark "${SWE_BENCHMARK}" in swe mode`,
+    );
+  }
+  for (const field of ["repo", "workdir", "test_cmd"]) {
+    if (typeof task[field] !== "string" || task[field].length === 0) {
+      throw new Error(`runner: swe task ${task.id} is missing required field ${field}`);
+    }
+  }
+  if (!FULL_SHA_RE.test(String(task.base_commit))) {
+    throw new Error(`runner: swe task ${task.id} base_commit must be a full 40-hex sha`);
+  }
+  positiveTimeoutSec(task.agent_timeout_sec, `swe task ${task.id} agent_timeout_sec`);
+  positiveTimeoutSec(task.verifier_timeout_sec, `swe task ${task.id} verifier_timeout_sec`);
+  return task;
+}
+
+/**
+ * Ensures the task container has the repo checked out at base_commit.
+ * The prebuilt image normally ships the repo already (mirroring how
+ * terminal-bench images ship /app), so clone only when it is absent --
+ * network policy may not allow egress. fetch is best-effort: when the image
+ * was built at base_commit the object already exists locally.
+ */
+export function buildSweRepoPrepareCommand({ workdir, repo, baseCommit }) {
+  const dir = sweQuote(workdir);
+  const url = sweQuote(`https://github.com/${repo}.git`);
+  const base = sweQuote(baseCommit);
+  return (
+    `[ -d ${dir}/.git ] || git clone ${url} ${dir}; ` +
+    `git -C ${dir} fetch origin ${base} 2>/dev/null || true; ` +
+    `git -C ${dir} checkout -f ${base} && git -C ${dir} clean -fdx`
+  );
+}
+
+/**
+ * Platform-side patch capture (never agent-supplied): stage everything the
+ * agent left -- including untracked files, which are part of a submission --
+ * and write a binary-safe diff against base_commit to patchPath.
+ */
+export function buildPatchCaptureCommand({ baseCommit, patchPath }) {
+  return `git add -A && git diff --cached --binary ${sweQuote(baseCommit)} > ${sweQuote(patchPath)}`;
+}
+
+/** A whitespace-only diff means the agent changed nothing: no submission. */
+export function isEmptyPatch(diffText) {
+  return String(diffText ?? "").trim().length === 0;
+}
+
+/**
+ * The verifier pipeline run on a CLEAN copy: force the worktree back to
+ * pristine base_commit (discarding every trace of the agent), then apply the
+ * captured patch gated on --check, then install + test inside the workdir.
+ * Every step is &&-joined so one failure fails verification; pass/fail signal
+ * is the exit code, with fail_to_pass/pass_to_pass attribution done by
+ * evaluateSweVerifyResult on the output.
+ */
+export function buildSweVerifyPipeline({ baseCommit, patchPath, workdir, installCmd, testCmd }) {
+  const dir = sweQuote(workdir);
+  const steps = [
+    `git -C ${dir} checkout -f ${sweQuote(baseCommit)}`,
+    `git -C ${dir} clean -fdx`,
+    `git -C ${dir} apply --check ${sweQuote(patchPath)}`,
+    `git -C ${dir} apply ${sweQuote(patchPath)}`,
+    `cd ${dir}`,
+  ];
+  if (typeof installCmd === "string" && installCmd.trim().length > 0) {
+    steps.push(installCmd);
+  }
+  steps.push(testCmd);
+  return steps.join(" && ");
+}
+
+/**
+ * Minimum viable signal is the verify pipeline's exit code; where the spec's
+ * FAIL_TO_PASS/PASS_TO_PASS lists are available and the test output is too,
+ * each listed test id must appear in the output -- a green exit that never
+ * ran the target tests must not count as a pass.
+ */
+export function evaluateSweVerifyResult({ exitCode, output = "", failToPass = [], passToPass = [] }) {
+  const text = String(output ?? "");
+  const missing = (ids) => (Array.isArray(ids) ? ids : []).filter((id) => !text.includes(id));
+  const fail_to_pass_missing = missing(failToPass);
+  const pass_to_pass_missing = missing(passToPass);
+  return {
+    passed: exitCode === 0 && fail_to_pass_missing.length === 0 && pass_to_pass_missing.length === 0,
+    fail_to_pass_missing,
+    pass_to_pass_missing,
+  };
+}
+
 /**
  * Adds the provider pin without clobbering anything the caller already set.
  * Exported for tests -- the injection is the whole point of this file, so it

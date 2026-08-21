@@ -260,6 +260,47 @@ describe("benchmarks board", () => {
 
     expect(html).not.toContain("unpinned");
   });
+
+  // The two boards share one storage. A swe-bench submission's runs must never
+  // surface on the default terminal-bench board (and vice versa) — the boards
+  // measure different task sets, so mixing them compares unlike with unlike.
+  it("keeps swe-bench submissions off the default terminal-bench board and shows them on the swe-bench board", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-tb", { agent_name: "TB Agent", github_login: "tb-user" }));
+    await storage.putSubmission(
+      submission("s-swe", { agent_name: "SWE Agent", github_login: "swe-user", benchmark: "swe-bench" }),
+    );
+    await storage.putRun(
+      run("r-tb", {
+        submission_id: "s-tb",
+        tasks_passed: 16,
+        total_cost_usd: 1.0,
+        task_results: [{ task_id: "fix-git", attempted: true, passed: true }],
+      }),
+    );
+    await storage.putRun(
+      run("r-swe", {
+        submission_id: "s-swe",
+        tasks_passed: 2,
+        total_cost_usd: 0.5,
+        task_results: [{ task_id: "django__django-123", attempted: true, passed: true }],
+      }),
+    );
+
+    const defaultHtml = renderToStaticMarkup(await LeaderboardPage.default());
+    expect(defaultHtml).toContain("TB Agent");
+    expect(defaultHtml).not.toContain("SWE Agent");
+    expect(defaultHtml).toContain('href="/benchmarks?benchmark=swe-bench"');
+
+    const sweHtml = renderToStaticMarkup(
+      await LeaderboardPage.default({
+        searchParams: Promise.resolve({ benchmark: "swe-bench" }),
+      }),
+    );
+    expect(sweHtml).toContain("SWE Agent");
+    expect(sweHtml).not.toContain("TB Agent");
+    expect(sweHtml).toContain('href="/benchmarks"');
+  });
 });
 
 function submission(id: string, overrides: Partial<Submission> = {}): Submission {

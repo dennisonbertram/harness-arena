@@ -49,6 +49,9 @@ export const RUN_EVENT_TYPES = [
   // Gateway proxy after each task. Persisting this makes provider failures,
   // response IDs, retry signals, and stream timing inspectable from the run
   // event history instead of only from ephemeral sandbox logs.
+  // Emitted by runner.mjs after the platform (never the agent) captures the
+  // working-tree diff against the base commit as the submission's patch.
+  "task.patch_captured",
   "task.gateway_correlation",
 ] as const;
 
@@ -69,6 +72,11 @@ export const SubmissionSchema = z.object({
   // The model this prompt runs on (gateway id). Absent = the default (glm-5.2)
   // for legacy submissions made before multi-model support.
   model: z.string().optional(),
+  // Which benchmark board this row belongs to. Absent = "terminal-bench-2"
+  // (every legacy row predates multiple boards). "swe-bench" rows run
+  // SWE-bench-style tasks (repo@commit + issue, patch-based verification --
+  // see lib/swe-task.ts).
+  benchmark: z.enum(["terminal-bench-2", "swe-bench"]).optional(),
   // Marks this submission as belonging to the /competition pool rather than
   // the main arena. Absent/false = main arena (the default, unaffected). Kept
   // (not repurposed) alongside competition_id: legacy rows predate the
@@ -116,6 +124,10 @@ export const TaskResultSchema = z.object({
   // provider session did not report output usage.
   output_tokens: z.number().optional(),
   trace_blob_url: z.string().optional(),
+  // SWE-bench boards only: blob URL of the platform-captured patch (git diff
+  // against base_commit) that verification ran against. Absent on
+  // terminal-bench tasks.
+  patch_blob_url: z.string().optional(),
   failure_stage: z.string().optional(),
   error: z.string().optional(),
 });
@@ -139,6 +151,9 @@ export const CompetitionSchema = z.object({
   // Optional for legacy competitions, which continue to use the historical
   // model-level default in PINNED_PROVIDERS.
   gateway_provider: z.string().optional(),
+  // Which benchmark board this competition runs. Absent = "terminal-bench-2"
+  // (legacy rows predate multiple boards).
+  benchmark: z.enum(["terminal-bench-2", "swe-bench"]).optional(),
   // Prize amount/cadence are data, not a constant, but deliberately UNSET at
   // seed time (epic #74: "TBD, do not invent a figure"). Nullable because a
   // seeded row explicitly carries "no value yet" rather than omitting the

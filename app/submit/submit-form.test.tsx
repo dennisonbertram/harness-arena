@@ -31,7 +31,7 @@ describe("SubmitForm", () => {
     const user = userEvent.setup();
     render(<SubmitForm githubLogin="octocat" />);
 
-    await user.selectOptions(screen.getByRole("combobox"), "anthropic/claude-opus-4-8");
+    await user.selectOptions(screen.getByRole("combobox", { name: /^Model/ }), "anthropic/claude-opus-4-8");
     expect(screen.getByText(/most expensive model/)).toBeInTheDocument();
     await fillAndSubmit(user);
 
@@ -117,5 +117,25 @@ describe("SubmitForm", () => {
     await user.click(screen.getByRole("button", { name: "Start from the baseline prompt" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Start from the baseline prompt" })).toBeEnabled());
     expect(screen.getByLabelText(SYSTEM_PROMPT_LABEL)).toHaveValue("baseline instructions");
+  });
+
+  // Board targeting: selecting SWE-Bench must stamp benchmark=swe-bench on the
+  // POST body; the default terminal-bench board sends no benchmark field at all,
+  // so legacy payloads stay byte-identical.
+  it("posts benchmark=swe-bench when the SWE-Bench board is selected, and no benchmark field for the default board", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { submission_id: "sub-swe", status: "accepted" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<SubmitForm githubLogin="octocat" />);
+
+    await fillAndSubmit(user);
+    await waitFor(() => expect(screen.getByText("sub-swe")).toBeInTheDocument());
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).benchmark).toBeUndefined();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /^Board/ }), "swe-bench");
+    await user.click(screen.getByRole("button", { name: "Submit Prompt" }));
+    await waitFor(() => expect(JSON.parse(fetchMock.mock.calls[1][1].body).benchmark).toBe("swe-bench"));
   });
 });

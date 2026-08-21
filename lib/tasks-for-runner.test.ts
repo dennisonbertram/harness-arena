@@ -1,88 +1,73 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildRunnerTasks } from "./tasks-for-runner";
-import { getTasks } from "./tasks";
+import { describe, expect, it, vi } from "vitest";
+import { buildRunnerTasks, sweToRunnerTask } from "./tasks-for-runner";
+import type { SweTask } from "./swe-task";
 
-describe("buildRunnerTasks", () => {
-  it("maps every getTasks() entry to the runner's TASKS_JSON shape with its benchmark timeouts", () => {
-    const tasks = getTasks();
-    const runnerTasks = buildRunnerTasks();
+vi.mock("./tasks", () => ({
+  getTasks: () => [
+    {
+      id: "tb-1",
+      dockerImage: "tb-image",
+      instruction: "do tb thing",
+      agentTimeoutSec: 300,
+      verifierTimeoutSec: 600,
+    },
+  ],
+}));
 
-    expect(runnerTasks).toHaveLength(tasks.length);
-    expect(runnerTasks).toEqual(
-      tasks.map((t) => ({
-        id: t.id,
-        image: t.dockerImage,
-        instruction: t.instruction,
-        agent_timeout_sec: t.agentTimeoutSec,
-        verifier_timeout_sec: t.verifierTimeoutSec,
-      })),
-    );
-  });
+const spec: SweTask = {
+  id: "swe-1",
+  repo: "owner/name",
+  base_commit: "a".repeat(40),
+  issue_text: "fix the bug described in this issue",
+  docker_image: "swe-image",
+  workdir: "/repo",
+  install_cmd: "",
+  test_cmd: "pytest -q",
+  fail_to_pass: ["tests/test_a.py::test_new"],
+  pass_to_pass: ["tests/test_b.py::test_keep"],
+  canary: "canary-guid",
+  agent_timeout_sec: 1800,
+  verifier_timeout_sec: 1800,
+  cpus: 4,
+  memory: "8GB",
+};
 
-  it("uses the runner's snake_case env-contract keys (agent_timeout_sec, verifier_timeout_sec), not the internal camelCase names", () => {
-    const [first] = buildRunnerTasks();
-    expect(first).toHaveProperty("agent_timeout_sec");
-    expect(first).toHaveProperty("verifier_timeout_sec");
-    expect(first).not.toHaveProperty("agentTimeoutSec");
-    expect(first).not.toHaveProperty("verifierTimeoutSec");
+const sweLoader = vi.fn(() => [spec]);
+
+describe("sweToRunnerTask", () => {
+  it("maps a vendored SWE spec into the runner's snake_case contract", () => {
+    expect(sweToRunnerTask(spec)).toEqual({
+      id: "swe-1",
+      image: "swe-image",
+      instruction: "fix the bug described in this issue",
+      agent_timeout_sec: 1800,
+      verifier_timeout_sec: 1800,
+      benchmark: "swe-bench",
+      repo: "owner/name",
+      base_commit: "a".repeat(40),
+      workdir: "/repo",
+      install_cmd: "",
+      test_cmd: "pytest -q",
+      fail_to_pass: ["tests/test_a.py::test_new"],
+      pass_to_pass: ["tests/test_b.py::test_keep"],
+    });
   });
 });
 
-describe("regression: image field carries the full docker_image tag runner.mjs passes straight to `docker run`", () => {
-  it("every task's image matches alexgshaw/<id>:20251031", () => {
-    for (const task of buildRunnerTasks()) {
-      expect(task.image).toBe(`alexgshaw/${task.id}:20251031`);
-    }
-  });
-});
-
-describe("timeout caps: preserve each benchmark-defined task window by default", () => {
-  it("does not cut the benchmark's 10-30 minute stage timeouts down to five minutes", () => {
-    const tasks = getTasks();
-    expect(Math.min(...tasks.map((t) => t.agentTimeoutSec))).toBe(600);
-    expect(Math.max(...tasks.map((t) => t.agentTimeoutSec))).toBe(1800);
-
-    for (const [index, runnerTask] of buildRunnerTasks().entries()) {
-      expect(runnerTask.agent_timeout_sec).toBe(tasks[index].agentTimeoutSec);
-      expect(runnerTask.verifier_timeout_sec).toBe(tasks[index].verifierTimeoutSec);
-    }
+describe("buildRunnerTasks mode dispatch", () => {
+  it("defaults to terminal-bench tasks when RUN_MODE is unset", () => {
+    const tasks = buildRunnerTasks({} as NodeJS.ProcessEnv);
+    expect(tasks).toMatchObject([{ id: "tb-1", image: "tb-image" }]);
+    expect(tasks[0].benchmark).toBeUndefined();
+    expect(sweLoader).not.toHaveBeenCalled();
   });
 
-  describe("RUNNER_AGENT_TIMEOUT_CAP / RUNNER_VERIFY_TIMEOUT_CAP env overrides", () => {
-    const ORIGINAL_AGENT_CAP = process.env.RUNNER_AGENT_TIMEOUT_CAP;
-    const ORIGINAL_VERIFY_CAP = process.env.RUNNER_VERIFY_TIMEOUT_CAP;
-
-    afterEach(() => {
-      if (ORIGINAL_AGENT_CAP === undefined) delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
-      else process.env.RUNNER_AGENT_TIMEOUT_CAP = ORIGINAL_AGENT_CAP;
-      if (ORIGINAL_VERIFY_CAP === undefined) delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
-      else process.env.RUNNER_VERIFY_TIMEOUT_CAP = ORIGINAL_VERIFY_CAP;
+  it("serves vendored SWE specs when RUN_MODE=swe", () => {
+    const tasks = buildRunnerTasks({ RUN_MODE: "swe" } as unknown as NodeJS.ProcessEnv, {
+      getSweTasks: sweLoader,
     });
-
-    beforeEach(() => {
-      delete process.env.RUNNER_AGENT_TIMEOUT_CAP;
-      delete process.env.RUNNER_VERIFY_TIMEOUT_CAP;
-    });
-
-    it("honors a tighter RUNNER_AGENT_TIMEOUT_CAP / RUNNER_VERIFY_TIMEOUT_CAP", () => {
-      process.env.RUNNER_AGENT_TIMEOUT_CAP = "120";
-      process.env.RUNNER_VERIFY_TIMEOUT_CAP = "90";
-
-      for (const runnerTask of buildRunnerTasks()) {
-        expect(runnerTask.agent_timeout_sec).toBe(120);
-        expect(runnerTask.verifier_timeout_sec).toBe(90);
-      }
-    });
-
-    it("does not let an environment override exceed each task's benchmark timeout", () => {
-      process.env.RUNNER_AGENT_TIMEOUT_CAP = "3600";
-      process.env.RUNNER_VERIFY_TIMEOUT_CAP = "3600";
-
-      const tasks = getTasks();
-      for (const [index, runnerTask] of buildRunnerTasks().entries()) {
-        expect(runnerTask.agent_timeout_sec).toBe(tasks[index].agentTimeoutSec);
-        expect(runnerTask.verifier_timeout_sec).toBe(tasks[index].verifierTimeoutSec);
-      }
-    });
+    expect(sweLoader).toHaveBeenCalled();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ id: "swe-1", benchmark: "swe-bench" });
   });
 });

@@ -47,6 +47,13 @@ data, it wipes it.
   Rollout section for the full sequence, including re-triggering the
   competition baseline afterward.
 
+## Boards
+
+Two benchmark boards share the arena: the default Terminal-Bench 2 board and
+the swe-bench board (repo@commit + issue → patch → clean-copy verification).
+See [`docs/swe-bench.md`](docs/swe-bench.md) for scoring, anti-cheat layers,
+task vendoring, the `RUN_MODE=swe` runner contract, and launch ops.
+
 ## Health check
 
 `GET /api/health` returns `{ ok: true, sha: "<git sha>" }`. `sha` comes from

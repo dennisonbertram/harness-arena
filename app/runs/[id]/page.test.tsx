@@ -495,4 +495,59 @@ describe("RunDetailPage", () => {
     expect(html).toContain("there&#x27;s no diff to show");
     expect(html).toContain("auto-refreshes every 15 seconds");
   });
+
+  // SWE-bench boards capture a patch (git diff against base_commit) per task;
+  // terminal-bench tasks never carry one. The link must appear only when the
+  // field is present so legacy TB rows render exactly as before.
+  it("renders a 'view patch' link for a task result carrying patch_blob_url", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-patch"));
+    await storage.putRun(
+      run("r-patch", {
+        submission_id: "s-patch",
+        status: "completed",
+        tasks_passed: 1,
+        total_cost_usd: 0.2,
+        task_results: [
+          {
+            task_id: "django__django-123",
+            attempted: true,
+            passed: true,
+            trace_blob_url: "https://blob.example/trace",
+            patch_blob_url: "https://blob.example/patch.diff",
+          },
+        ],
+      }),
+    );
+
+    const html = renderToStaticMarkup(await RunPage.default({ params: Promise.resolve({ id: "r-patch" }) }));
+
+    expect(html).toContain('href="https://blob.example/patch.diff"');
+    expect(html).toContain("view patch");
+  });
+
+  it("renders no 'view patch' link when patch_blob_url is absent (terminal-bench rows unchanged)", async () => {
+    const storage = resetStorage();
+    await storage.putSubmission(submission("s-no-patch"));
+    await storage.putRun(
+      run("r-no-patch", {
+        submission_id: "s-no-patch",
+        status: "completed",
+        tasks_passed: 1,
+        total_cost_usd: 0.2,
+        task_results: [
+          {
+            task_id: "fix-git",
+            attempted: true,
+            passed: true,
+            trace_blob_url: "https://blob.example/trace",
+          },
+        ],
+      }),
+    );
+
+    const html = renderToStaticMarkup(await RunPage.default({ params: Promise.resolve({ id: "r-no-patch" }) }));
+
+    expect(html).not.toContain("view patch");
+  });
 });

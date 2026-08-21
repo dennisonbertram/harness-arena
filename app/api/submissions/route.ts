@@ -8,6 +8,7 @@ import { dispatchQueuedRuns } from "@/lib/dispatch";
 import { DEFAULT_MODEL, isAllowedModel } from "@/lib/models";
 import { clientIp, createRateLimiter } from "@/lib/rate-limit";
 import { isBaselinePrompt } from "@/lib/prompt";
+import { SWE_BENCHMARK, TERMINAL_BENCH_BENCHMARK } from "@/lib/arena-params";
 import { getStorage } from "@/lib/storage";
 import { getTasks } from "@/lib/tasks";
 import type { Run, Submission } from "@/lib/types";
@@ -33,6 +34,9 @@ const SubmissionInputSchema = z.object({
   // Optional model (gateway id); defaults to glm-5.2. Must be on the allowlist
   // so a public submitter can't route to an arbitrary/expensive model.
   model: z.string().optional(),
+  // Optional board target. Absent = the legacy terminal-bench board, so every
+  // pre-boards client payload stores byte-identically to before.
+  benchmark: z.enum([TERMINAL_BENCH_BENCHMARK, SWE_BENCHMARK]).optional(),
 });
 
 // A GitHub account is cheap to mint, so identity alone is a weak rate-limit
@@ -94,6 +98,9 @@ export async function POST(request: NextRequest) {
     prompt: parsedInput.data.prompt,
     status: "pending_review",
     model,
+    // Only stamped when the body asked for a board; absent keeps the row a
+    // legacy terminal-bench entry (normalizeBenchmark treats absence as TB).
+    ...(parsedInput.data.benchmark ? { benchmark: parsedInput.data.benchmark } : {}),
     github_id: githubId,
     github_login: githubLogin,
     created_at: new Date().toISOString(),

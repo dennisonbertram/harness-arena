@@ -3,13 +3,21 @@
 import { useState } from "react";
 import Link from "next/link";
 import { parseSubmitResponse, type SubmitResponse } from "@/lib/submit-response";
+import { SWE_BENCHMARK, TERMINAL_BENCH_BENCHMARK, type BenchmarkBoard } from "@/lib/arena-params";
 import { DEFAULT_MODEL, modelOptions } from "@/lib/models";
 
 const PROMPT_MAX_CHARS = 32768;
 const OPUS_MODEL = "anthropic/claude-opus-4-8";
 
-export function SubmitForm({ githubLogin }: { githubLogin: string }) {
+export function SubmitForm({
+  githubLogin,
+  benchmark: initialBenchmark = TERMINAL_BENCH_BENCHMARK,
+}: {
+  githubLogin: string;
+  benchmark?: BenchmarkBoard;
+}) {
   const [agentName, setAgentName] = useState("");
+  const [benchmark, setBenchmark] = useState<BenchmarkBoard>(initialBenchmark);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -45,7 +53,14 @@ export function SubmitForm({ githubLogin }: { githubLogin: string }) {
       const response = await fetch("/api/submissions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_name: agentName, prompt, model }),
+        // Only send the board when it isn't the legacy default, so the
+        // terminal-bench payload stays byte-identical to before boards existed.
+        body: JSON.stringify({
+          agent_name: agentName,
+          prompt,
+          model,
+          ...(benchmark === SWE_BENCHMARK ? { benchmark } : {}),
+        }),
       });
       const {
         result: body,
@@ -70,14 +85,39 @@ export function SubmitForm({ githubLogin }: { githubLogin: string }) {
         Submit a prompt
       </h1>
       <p style={{ fontSize: 14, color: "var(--gray-900)", marginBottom: 8 }}>
-        Give your agent a name, pick a model, and write a system prompt. It&apos;s judged for fairness, then run
-        against 16 tasks. Cost varies by model (a $15 per-run safety cap applies); glm-5.2 runs cost ~$1.
+        Give your agent a name, pick a board and model, and write a system prompt. It&apos;s judged for fairness, then
+        run against the board&apos;s tasks. Cost varies by model (a $15 per-run safety cap applies); glm-5.2 runs cost
+        ~$1.
       </p>
       <p style={{ fontSize: 13, color: "var(--gray-700)", marginBottom: 24 }}>
         Signed in as <span className="mono">{githubLogin}</span>.
       </p>
 
       <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
+          Board
+          <select
+            value={benchmark}
+            onChange={(e) => setBenchmark(e.target.value as BenchmarkBoard)}
+            style={{
+              height: 40,
+              padding: "0 10px",
+              borderRadius: 6,
+              border: "1px solid var(--gray-alpha-400)",
+              background: "var(--background-100)",
+              color: "var(--gray-1000)",
+            }}
+          >
+            <option value={TERMINAL_BENCH_BENCHMARK}>Terminal-Bench 2</option>
+            <option value={SWE_BENCHMARK}>SWE-Bench</option>
+          </select>
+          <span style={{ fontSize: 12, color: "var(--gray-700)" }}>
+            {benchmark === SWE_BENCHMARK
+              ? "SWE-bench board: repo@commit plus a real issue; verified by applying your agent's patch and running the repo's own tests."
+              : "Terminal-Bench 2 board: real terminal tasks in Docker containers."}
+          </span>
+        </label>
+
         <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 14 }}>
           Agent name
           <input

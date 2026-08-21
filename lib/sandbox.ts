@@ -1,6 +1,7 @@
 import { Sandbox } from "@vercel/sandbox";
 import type { NetworkPolicy } from "@vercel/sandbox";
 import { PINNED_PROVIDERS } from "./arena-params";
+import { resolveRunBudgetCapUsd } from "./budget-caps";
 import { log } from "./log";
 import { getStorage } from "./storage";
 import { buildRunnerTasks } from "./tasks-for-runner";
@@ -137,9 +138,10 @@ export async function createRunSandbox(run: Run, opts: { prompt: string }): Prom
     const callbackBase = process.env.CALLBACK_BASE ?? DEFAULT_CALLBACK_BASE;
     const runnerCallbackSecret = requireEnv("RUNNER_CALLBACK_SECRET");
     const aiGatewayApiKey = requireEnv("AI_GATEWAY_API_KEY");
-    // Safety ceiling per run (not the metric). Headroom for pricier models like
-    // Claude; glm-5.2 runs cost ~$1 and never approach it.
-    const budgetCapUsd = process.env.RUN_BUDGET_CAP_USD ?? "15";
+    // Per-board safety ceiling per run (not the metric). Resolved by
+    // lib/budget-caps.ts: $2/run on terminal-bench, $6/run on swe-bench
+    // (TUNABLE from Phase-0 spike data); RUN_BUDGET_CAP_USD overrides both.
+    const budgetCapUsd = String(resolveRunBudgetCapUsd(process.env));
     const systemPromptB64 = Buffer.from(opts.prompt, "utf8").toString("base64");
     const runnerTasks = buildRunnerTasks();
     const tasksJsonB64 = Buffer.from(JSON.stringify(runnerTasks), "utf8").toString("base64");

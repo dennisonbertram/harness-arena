@@ -1283,3 +1283,229 @@ describe("preflightProxy", () => {
     expect(result.detail).toContain("response body timed out");
   });
 });
+
+// --- swe mode ---------------------------------------------------------------
+// Pure command construction / classification helpers for the swe-bench board.
+// They live in gateway-proxy.mjs (not runner.mjs) so they ship in the same
+// bundle and share this test harness, exactly like validateTaskTimeouts and
+// classifyAgentTimeoutExit before them.
+
+import {
+  buildPatchCaptureCommand,
+  buildSweRepoPrepareCommand,
+  buildSweVerifyPipeline,
+  evaluateSweVerifyResult,
+  isEmptyPatch,
+  isSweTask,
+  resolveRunMode,
+  validateSweTask,
+} from "./gateway-proxy.mjs";
+
+describe("resolveRunMode", () => {
+  it("honours an explicit RUN_MODE=swe even over terminal-bench tasks", () => {
+    expect(resolveRunMode({ runModeEnv: "swe", tasks: [{ id: "tb-1" }] })).toBe("swe");
+  });
+
+  it("infers swe when every task carries benchmark=swe-bench", () => {
+    expect(
+      resolveRunMode({
+        runModeEnv: undefined,
+        tasks: [
+          { id: "a", benchmark: "swe-bench" },
+          { id: "b", benchmark: "swe-bench" },
+        ],
+      }),
+    ).toBe("swe");
+  });
+
+  it("stays tb for mixed or plain terminal-bench payloads", () => {
+    expect(
+      resolveRunMode({
+        runModeEnv: undefined,
+        tasks: [{ id: "a", benchmark: "swe-bench" }, { id: "b" }],
+      }),
+    ).toBe("tb");
+    expect(resolveRunMode({ runModeEnv: undefined, tasks: [{ id: "b" }] })).toBe("tb");
+  });
+
+  it("never infers swe from an empty task list", () => {
+    expect(resolveRunMode({ runModeEnv: "", tasks: [] })).toBe("tb");
+    expect(resolveRunMode({ runModeEnv: "", tasks: undefined })).toBe("tb");
+  });
+});
+
+describe("isSweTask", () => {
+  it("dispatches on the benchmark field only", () => {
+    expect(isSweTask({ benchmark: "swe-bench" })).toBe(true);
+    expect(isSweTask({ benchmark: "terminal-bench-2" })).toBe(false);
+    expect(isSweTask({})).toBe(false);
+    expect(isSweTask(null)).toBe(false);
+    expect(isSweTask(undefined)).toBe(false);
+  });
+});
+
+describe("buildPatchCaptureCommand", () => {
+  it("stages every change and diffs against base_commit into a patch file", () => {
+    const cmd = buildPatchCaptureCommand({ baseCommit: "abc123", patchPath: "/tmp/p.patch" });
+    // Untracked new files are part of a submission; --cached after add -A
+    // captures them against the named base commit.
+    expect(cmd).toContain("git add -A");
+    expect(cmd).toMatch(/git diff --cached --binary\s+'abc123'/);
+    expect(cmd).toContain("> '/tmp/p.patch'");
+    // Binary-safe: test fixtures and images legitimately appear in patches.
+    expect(cmd).toContain("--binary");
+  });
+
+  it("single-quote escapes values so shell metacharacters cannot break out", () => {
+    const cmd = buildPatchCaptureCommand({
+      baseCommit: "abc'; rm -rf /",
+      patchPath: "/tmp/$(reboot).patch",
+    });
+    expect(cmd).toContain("'abc'\\''; rm -rf /'");
+    expect(cmd).not.toMatch(/>\s*\/tmp\/\$/);
+  });
+});
+
+describe("isEmptyPatch", () => {
+  it("treats empty and whitespace-only diffs as no submission", () => {
+    expect(isEmptyPatch("")).toBe(true);
+    expect(isEmptyPatch("\n \n\t")).toBe(true);
+    expect(isEmptyPatch(undefined)).toBe(true);
+  });
+
+  it("accepts any real diff content", () => {
+    expect(isEmptyPatch("diff --git a/x b/x\n")).toBe(false);
+  });
+});
+
+describe("buildSweRepoPrepareCommand", () => {
+  it("clones only when the workdir has no repo, then pins base_commit", () => {
+    const cmd = buildSweRepoPrepareCommand({
+      workdir: "/repo",
+      repo: "owner/name",
+      baseCommit: "a".repeat(40),
+    });
+    expect(cmd).toMatch(
+      /\[ -d '\/repo'\/\.git \] \|\| git clone 'https:\/\/github\.com\/owner\/name\.git' '\/repo'/,
+    );
+    expect(cmd).toContain(`checkout -f '${"a".repeat(40)}'`);
+    // Untracked agent leftovers must not survive into patch capture.
+    expect(cmd).toContain("clean -fdx");
+  });
+
+  it("escapes the workdir path", () => {
+    const cmd = buildSweRepoPrepareCommand({
+      workdir: "/opt/my repo",
+      repo: "o/n",
+      baseCommit: "b".repeat(40),
+    });
+    expect(cmd).toContain("'/opt/my repo'/.git");
+  });
+});
+
+describe("buildSweVerifyPipeline", () => {
+  const base = {
+    baseCommit: "c".repeat(40),
+    patchPath: "/tmp/p.patch",
+    workdir: "/repo",
+    testCmd: "pytest -q",
+  };
+
+  it("resets to pristine base_commit BEFORE applying the patch", () => {
+    const pipeline = buildSweVerifyPipeline(base);
+    const resetAt = pipeline.indexOf("checkout -f");
+    const cleanAt = pipeline.indexOf("clean -fdx");
+    const checkAt = pipeline.indexOf("apply --check");
+    const applyAt = pipeline.indexOf("apply '");
+    expect(resetAt).toBeGreaterThanOrEqual(0);
+    expect(cleanAt).toBeGreaterThan(resetAt);
+    expect(checkAt).toBeGreaterThan(cleanAt);
+    expect(applyAt).toBeGreaterThan(checkAt);
+  });
+
+  it("runs install_cmd then test_cmd inside the workdir, apply gated on --check", () => {
+    const pipeline = buildSweVerifyPipeline({ ...base, installCmd: "pip install -e ." });
+    // The whole chain is &&-joined: one failed step fails verification.
+    expect(pipeline).toMatch(/apply --check '[^']+' && git -C '\/repo' apply/);
+    expect(pipeline.indexOf("pip install -e .")).toBeLessThan(pipeline.indexOf("pytest -q"));
+    expect(pipeline).toMatch(/cd '\/repo' && pip install -e \. && pytest -q$/);
+  });
+
+  it("omits the install step entirely when install_cmd is empty", () => {
+    const pipeline = buildSweVerifyPipeline({ ...base, installCmd: "" });
+    expect(pipeline).toMatch(/cd '\/repo' && pytest -q$/);
+  });
+});
+
+describe("evaluateSweVerifyResult", () => {
+  const output = "PASSED tests/test_a.py::test_new FAILED nothing\nPASSED tests/test_b.py::test_keep";
+
+  it("passes only when exit code is 0 AND every required test id appears in output", () => {
+    expect(
+      evaluateSweVerifyResult({
+        exitCode: 0,
+        output,
+        failToPass: ["tests/test_a.py::test_new"],
+        passToPass: ["tests/test_b.py::test_keep"],
+      }),
+    ).toMatchObject({ passed: true, fail_to_pass_missing: [], pass_to_pass_missing: [] });
+  });
+
+  it("fails on a non-zero verify pipeline regardless of output text", () => {
+    expect(evaluateSweVerifyResult({ exitCode: 1, output, failToPass: [], passToPass: [] }).passed).toBe(
+      false,
+    );
+  });
+
+  it("fails when a fail_to_pass test never shows up in the output", () => {
+    const result = evaluateSweVerifyResult({
+      exitCode: 0,
+      output,
+      failToPass: ["tests/test_a.py::test_new", "tests/test_missing.py::test_x"],
+      passToPass: [],
+    });
+    expect(result.passed).toBe(false);
+    expect(result.fail_to_pass_missing).toEqual(["tests/test_missing.py::test_x"]);
+  });
+
+  it("fails when a pass_to_pass regression disappears from the output", () => {
+    const result = evaluateSweVerifyResult({
+      exitCode: 0,
+      output,
+      failToPass: [],
+      passToPass: ["tests/test_gone.py::test_reg"],
+    });
+    expect(result.passed).toBe(false);
+    expect(result.pass_to_pass_missing).toEqual(["tests/test_gone.py::test_reg"]);
+  });
+
+  it("degrades to pure exit-code signal when no lists are provided", () => {
+    expect(evaluateSweVerifyResult({ exitCode: 0, output: "" }).passed).toBe(true);
+    expect(evaluateSweVerifyResult({ exitCode: 2, output: "" }).passed).toBe(false);
+  });
+});
+
+describe("validateSweTask", () => {
+  const valid = () => ({
+    id: "swe-1",
+    benchmark: "swe-bench",
+    repo: "owner/name",
+    base_commit: "a".repeat(40),
+    workdir: "/repo",
+    test_cmd: "pytest -q",
+    agent_timeout_sec: 300,
+    verifier_timeout_sec: 600,
+  });
+
+  it("accepts a well-formed swe task and returns it unchanged", () => {
+    expect(validateSweTask(valid())).toEqual(valid());
+  });
+
+  it("rejects non-swe tasks, bad commits, and missing commands before docker runs", () => {
+    expect(() => validateSweTask({ ...valid(), benchmark: "terminal-bench-2" })).toThrow(/benchmark/);
+    expect(() => validateSweTask({ ...valid(), base_commit: "deadbeef" })).toThrow(/base_commit/);
+    expect(() => validateSweTask({ ...valid(), test_cmd: "" })).toThrow(/test_cmd/);
+    expect(() => validateSweTask({ ...valid(), workdir: "" })).toThrow(/workdir/);
+    expect(() => validateSweTask({ ...valid(), agent_timeout_sec: -1 })).toThrow(/agent_timeout_sec/);
+  });
+});

@@ -16,7 +16,7 @@ import { RunAutoRefresh } from "./RunAutoRefresh";
 import { EventTimeline } from "./EventTimeline";
 import { LiveDuration } from "./LiveDuration";
 import { cellStyle } from "../../tableStyles";
-import { ARENA_ENDPOINT } from "@/lib/arena-params";
+import { ARENA_ENDPOINT, SWE_BENCHMARK, normalizeBenchmark } from "@/lib/arena-params";
 import { redactRunError, redactRunEventPayload } from "@/lib/run-error";
 
 const BENCHMARK_REPO = "https://github.com/laude-institute/terminal-bench-2";
@@ -60,7 +60,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
   const events = await storage.listRunEvents(id);
   const status = RUN_STATUS_BADGE_STYLES[run.status];
   const totalTasks = run.task_results.length;
-  const benchmarkTaskCount = getTasks().length;
+  // The board this run belongs to (absent benchmark = legacy terminal-bench
+  // row). SWE runs verify a captured patch instead of the container state, so
+  // the header names the board and each task row links its patch.
+  const isSweRun = normalizeBenchmark(submission?.benchmark) === SWE_BENCHMARK;
+  // Terminal-bench runs are measured against the fixed vendored subset; SWE
+  // runs carry their own per-run instance list, so no fixed denominator exists.
+  const benchmarkTaskCount = isSweRun ? undefined : getTasks().length;
   const totalDurationSec = run.task_results.reduce((sum, t) => sum + (t.duration_s ?? 0), 0);
   const costPerTaskUsd =
     run.total_cost_usd !== undefined && totalTasks > 0 ? run.total_cost_usd / totalTasks : undefined;
@@ -139,10 +145,14 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         </p>
         <p style={{ fontSize: 13, color: "var(--gray-700)", marginTop: 6 }}>
           Benchmark:{" "}
-          <a href={BENCHMARK_REPO} target="_blank" rel="noopener noreferrer">
-            Terminal-Bench 2
-          </a>{" "}
-          · {benchmarkTaskCount}-task subset
+          {isSweRun ? (
+            <span>SWE-Bench</span>
+          ) : (
+            <a href={BENCHMARK_REPO} target="_blank" rel="noopener noreferrer">
+              Terminal-Bench 2
+            </a>
+          )}
+          {benchmarkTaskCount !== undefined ? <> · {benchmarkTaskCount}-task subset</> : null}
         </p>
         <dl style={{ display: "flex", flexWrap: "wrap", gap: "12px 28px", margin: "16px 0 0" }}>
           <RoutingMeta label="Model" value={modelLabel(run.model)} />
@@ -218,7 +228,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
         {progress ? (
           <>
             <Stat label="Passed so far" value={`${progress.passed}/${progress.verified}`} />
-            <Stat label="Progress" value={`${progress.started}/${benchmarkTaskCount} started`} />
+            <Stat
+              label="Progress"
+              value={`${progress.started}${benchmarkTaskCount !== undefined ? `/${benchmarkTaskCount}` : ""} started`}
+            />
             <Stat label="Cost so far" value={progress.costSoFar === null ? "—" : formatUsd(progress.costSoFar)} />
             <Stat
               label="Elapsed (tasks)"
@@ -342,6 +355,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
                         {" · "}
                         <a href={task.trace_blob_url} style={{ color: "var(--gray-700)" }}>
                           raw
+                        </a>
+                      </>
+                    ) : null}
+                    {/* SWE-bench boards only: the platform-captured patch the
+                        verifier applied. Absent on terminal-bench tasks, so
+                        legacy rows render exactly as before. */}
+                    {task.patch_blob_url ? (
+                      <>
+                        {" · "}
+                        <a href={task.patch_blob_url} style={{ color: "var(--gray-700)" }}>
+                          view patch
                         </a>
                       </>
                     ) : null}

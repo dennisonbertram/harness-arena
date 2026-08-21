@@ -435,6 +435,41 @@ describe("POST /api/submissions", () => {
       expect(dispatchQueuedRuns).toHaveBeenCalled();
     });
   });
+
+  describe("benchmark board targeting", () => {
+    it("stamps benchmark=swe-bench on the stored submission when the body targets the swe-bench board", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(
+        postRequest({ agent_name: "agent-swe", prompt: "hi", benchmark: "swe-bench" }, "9.9.9.1"),
+      );
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.benchmark).toBe("swe-bench");
+    });
+
+    it("stores no benchmark field when the body omits it (legacy terminal-bench rows render exactly as before)", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(postRequest({ agent_name: "agent-tb", prompt: "hi" }, "9.9.9.2"));
+      const body = await response.json();
+
+      const submission = await storageRef.current.getSubmission(body.submission_id);
+      expect(submission?.benchmark).toBeUndefined();
+    });
+
+    it("rejects an unknown benchmark value with 400 and stores nothing", async () => {
+      vi.mocked(judgeSubmission).mockResolvedValueOnce({ verdict: "approved", reason: "fine" });
+
+      const response = await POST(
+        postRequest({ agent_name: "agent-bogus", prompt: "hi", benchmark: "kaggle" }, "9.9.9.3"),
+      );
+
+      expect(response.status).toBe(400);
+      expect(await storageRef.current.listSubmissions()).toHaveLength(0);
+    });
+  });
 });
 
 describe("GET /api/submissions", () => {

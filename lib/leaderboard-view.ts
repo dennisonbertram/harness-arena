@@ -1,17 +1,24 @@
 import { aggregatePrompts, type PromptStanding } from "./aggregate";
-import { partitionLeaderboard } from "./leaderboard";
+import { partitionLeaderboard, runsForBoard } from "./leaderboard";
 import { getTasks } from "./tasks";
+import { DEFAULT_BENCHMARK, type BenchmarkBoard } from "./arena-params";
 import type { Storage } from "./storage";
 import type { Run, Submission } from "./types";
 
 /**
  * v1 standings: every prompt's mean pass rate across its runs, ranked pass
  * rate desc (cost breaks ties). This is the primary board — cost ranking
- * waits until pass rate is saturated.
+ * waits until pass rate is saturated. `benchmark` selects the board; the
+ * default is the legacy terminal-bench board, so existing callers are
+ * unaffected.
  */
-export async function getStandings(storage: Storage): Promise<PromptStanding[]> {
+export async function getStandings(
+  storage: Storage,
+  benchmark: BenchmarkBoard = DEFAULT_BENCHMARK,
+): Promise<PromptStanding[]> {
   const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
-  return aggregatePrompts(runs, submissions, getTasks().length);
+  const boardRuns = runsForBoard(runs, submissions, benchmark);
+  return aggregatePrompts(boardRuns, submissions, getTasks().length);
 }
 
 /** The reference entry: stock pi harness prompt, nothing added. Shown as the
@@ -74,17 +81,25 @@ function rowsFor(runs: Run[], submissionById: Map<string, Submission>): Leaderbo
  *    the single optimization parameter (total cost, ascending).
  *  - incomplete: completed runs that didn't pass every task — shown for
  *    transparency but not ranked (they didn't finish the test).
+ *
+ * `benchmark` selects the board (default: the legacy terminal-bench board);
+ * runs belonging to the other board are excluded, never mixed in.
  */
 export async function getLeaderboardSections(
   storage: Storage,
+  benchmark: BenchmarkBoard = DEFAULT_BENCHMARK,
 ): Promise<{ ranked: LeaderboardRow[]; incomplete: LeaderboardRow[] }> {
   const [runs, submissions] = await Promise.all([storage.listRuns(), storage.listSubmissions()]);
   const submissionById = new Map(submissions.map((submission) => [submission.id, submission]));
-  const { ranked, incomplete } = partitionLeaderboard(runs, getTasks().length);
+  const boardRuns = runsForBoard(runs, submissions, benchmark);
+  const { ranked, incomplete } = partitionLeaderboard(boardRuns, getTasks().length);
   return { ranked: rowsFor(ranked, submissionById), incomplete: rowsFor(incomplete, submissionById) };
 }
 
 /** Backwards-compatible view: the ranked (complete-test) rows only. */
-export async function getLeaderboardView(storage: Storage): Promise<LeaderboardRow[]> {
-  return (await getLeaderboardSections(storage)).ranked;
+export async function getLeaderboardView(
+  storage: Storage,
+  benchmark: BenchmarkBoard = DEFAULT_BENCHMARK,
+): Promise<LeaderboardRow[]> {
+  return (await getLeaderboardSections(storage, benchmark)).ranked;
 }

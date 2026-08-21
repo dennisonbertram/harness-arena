@@ -292,7 +292,7 @@ describe("createRunSandbox", () => {
       expect(launchCall.env.CALLBACK_BASE).toBe("https://cb.example.test");
       expect(launchCall.env.RUNNER_CALLBACK_SECRET).toBe("test-secret");
       expect(launchCall.env.AI_GATEWAY_API_KEY).toBe("test-gw-key");
-      expect(launchCall.env.BUDGET_CAP_USD).toBe("15");
+      expect(launchCall.env.BUDGET_CAP_USD).toBe("2");
 
       const decodedPrompt = Buffer.from(launchCall.env.SYSTEM_PROMPT_B64, "base64").toString("utf8");
       expect(decodedPrompt).toBe("be extremely careful");
@@ -318,6 +318,17 @@ describe("createRunSandbox", () => {
 
       const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
       expect(launchCall.env.BUDGET_CAP_USD).toBe("5.5");
+    });
+
+    it("passes the swe-bench board's own cap when RUN_MODE=swe", async () => {
+      process.env.RUN_MODE = "swe";
+      const sandbox = makeSandbox();
+      mockCreate.mockResolvedValue(sandbox);
+
+      await createRunSandbox(makeRun(), { prompt: "hi" });
+
+      const launchCall = sandbox.runCommand.mock.calls[1][0] as { env: Record<string, string> };
+      expect(launchCall.env.BUDGET_CAP_USD).toBe("6");
     });
   });
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getLeaderboardSections,
   getLeaderboardView,
+  getStandings,
   partitionBaseline,
   type LeaderboardRow,
 } from "./leaderboard-view";
@@ -59,13 +60,14 @@ describe("partitionBaseline", () => {
   });
 });
 
-function submission(id: string, agentName: string, createdAt: string): Submission {
+function submission(id: string, agentName: string, createdAt: string, overrides: Partial<Submission> = {}): Submission {
   return {
     id,
     agent_name: agentName,
     prompt: "do the thing",
     status: "scored",
     created_at: createdAt,
+    ...overrides,
   };
 }
 
@@ -178,5 +180,83 @@ describe("getLeaderboardView", () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].agentName).toBe("unknown");
     });
+  });
+});
+
+// The two boards share one storage, so a swe-bench submission's runs must
+// never surface on the default terminal-bench board (and vice versa) —
+// otherwise a SWE patch run would be ranked against terminal-bench task
+// counts it never attempted.
+describe("board discrimination (benchmark field)", () => {
+  it("keeps a swe-bench submission's runs off the default terminal-bench sections and vice versa", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(submission("sub-tb", "tb-agent", "2026-07-19T00:00:00.000Z"));
+    await storage.putSubmission(
+      submission("sub-swe", "swe-agent", "2026-07-19T00:00:00.000Z", { benchmark: "swe-bench" }),
+    );
+    await storage.putRun(
+      run("run-tb", "sub-tb", "completed", {
+        tasks_passed: TASK_COUNT,
+        total_cost_usd: 2.0,
+        task_results: fullResults(),
+      }),
+    );
+    await storage.putRun(
+      run("run-swe", "sub-swe", "completed", {
+        tasks_passed: TASK_COUNT,
+        total_cost_usd: 1.0,
+        task_results: fullResults(),
+      }),
+    );
+
+    const tb = await getLeaderboardSections(storage);
+    expect(tb.ranked.map((r) => r.runId)).toEqual(["run-tb"]);
+    expect(tb.incomplete.map((r) => r.runId)).toEqual([]);
+
+    const swe = await getLeaderboardSections(storage, "swe-bench");
+    expect(swe.ranked.map((r) => r.runId)).toEqual(["run-swe"]);
+    expect(swe.incomplete.map((r) => r.runId)).toEqual([]);
+  });
+
+  it("treats an absent benchmark field as terminal-bench-2 (legacy rows stay on the default board)", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(submission("sub-legacy", "legacy-agent", "2026-07-19T00:00:00.000Z"));
+    await storage.putRun(
+      run("run-legacy", "sub-legacy", "completed", {
+        tasks_passed: TASK_COUNT,
+        total_cost_usd: 1.0,
+        task_results: fullResults(),
+      }),
+    );
+
+    const tb = await getLeaderboardSections(storage);
+    expect(tb.ranked.map((r) => r.runId)).toEqual(["run-legacy"]);
+    const swe = await getLeaderboardSections(storage, "swe-bench");
+    expect(swe.ranked).toEqual([]);
+  });
+
+  it("keeps swe-bench standings out of the default getStandings view used by /api/leaderboard", async () => {
+    const storage = new MemoryStorage();
+    await storage.putSubmission(submission("sub-tb", "tb-agent", "2026-07-19T00:00:00.000Z"));
+    await storage.putSubmission(
+      submission("sub-swe", "swe-agent", "2026-07-19T00:00:00.000Z", { benchmark: "swe-bench" }),
+    );
+    await storage.putRun(
+      run("run-tb", "sub-tb", "completed", {
+        tasks_passed: TASK_COUNT,
+        total_cost_usd: 1.0,
+        task_results: fullResults(),
+      }),
+    );
+    await storage.putRun(
+      run("run-swe", "sub-swe", "completed", {
+        tasks_passed: TASK_COUNT,
+        total_cost_usd: 0.5,
+        task_results: fullResults(),
+      }),
+    );
+
+    const standings = await getStandings(storage);
+    expect(standings.map((s) => s.agentName)).toEqual(["tb-agent"]);
   });
 });

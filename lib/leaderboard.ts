@@ -1,4 +1,5 @@
-import type { Run } from "./types";
+import type { Run, Submission } from "./types";
+import { normalizeBenchmark, type BenchmarkBoard } from "./arena-params";
 
 // The competition is binary: a run is RANKED only if it completed the entire
 // test — passed every task in the benchmark. Passing some-but-not-all is not a
@@ -17,6 +18,22 @@ export function isComplete(run: Run, totalTaskCount: number): boolean {
   if (run.status !== "completed" || run.total_cost_usd === undefined) return false;
   if (run.task_results.length !== totalTaskCount) return false;
   return run.task_results.every((t) => t.passed);
+}
+
+/**
+ * Board discrimination. Both boards live in one storage keyed by run ->
+ * submission; the board is read off the submission's `benchmark` field
+ * (absent = "terminal-bench-2" — every legacy row predates multiple boards).
+ * A run whose submission no longer exists is treated as a legacy
+ * terminal-bench row, matching how every other join falls back for orphans.
+ */
+export function runsForBoard(
+  runs: readonly Run[],
+  submissions: readonly Submission[],
+  benchmark: BenchmarkBoard,
+): Run[] {
+  const submissionById = new Map(submissions.map((submission) => [submission.id, submission]));
+  return runs.filter((run) => normalizeBenchmark(submissionById.get(run.submission_id)?.benchmark) === benchmark);
 }
 
 /** The ranked board: complete runs only, ordered by total cost ascending. */

@@ -10,6 +10,23 @@ export const ARENA_ENDPOINT = "Vercel AI Gateway";
 export const ARENA_BENCHMARK = "Terminal-Bench 2.0";
 export const ARENA_BENCHMARK_URL = "https://github.com/laude-institute/terminal-bench-2";
 
+// The two boards. Values match SubmissionSchema/CompetitionSchema's benchmark
+// enum (lib/types.ts) exactly; every row written before multiple boards
+// existed has NO benchmark field, so absent means terminal-bench-2 — never
+// treat absence as "unknown board".
+export const TERMINAL_BENCH_BENCHMARK = "terminal-bench-2";
+export const SWE_BENCHMARK = "swe-bench";
+export type BenchmarkBoard = typeof TERMINAL_BENCH_BENCHMARK | typeof SWE_BENCHMARK;
+export const DEFAULT_BENCHMARK = TERMINAL_BENCH_BENCHMARK as BenchmarkBoard;
+
+/**
+ * The board a row belongs to. Absent/unrecognized values fall back to the
+ * default terminal-bench board so legacy rows render exactly as before.
+ */
+export function normalizeBenchmark(benchmark: string | undefined): BenchmarkBoard {
+  return benchmark === SWE_BENCHMARK ? SWE_BENCHMARK : DEFAULT_BENCHMARK;
+}
+
 // Who sees the Rerun control on /benchmarks. This is a UI affordance only:
 // Rerun posts to POST /api/submissions, the same public endpoint the Submit
 // page uses, which accepts any signed-in GitHub user by design. Hiding the
@@ -38,6 +55,14 @@ export const PINNED_PROVIDERS: Record<string, string> = {
   // assertion.
   "thinkingmachines/inkling-small": "baseten",
 };
+
+// The swe-bench board's pins. Pinning is a property of the model+upstream
+// pair, not of the board: both boards run the same model allowlist on the
+// same gateway upstreams today. Kept as its own named constant (rather than
+// having the swe board read PINNED_PROVIDERS directly) so a future
+// board-specific pin — a provider that serves SWE repos well but
+// Terminal-Bench poorly — diverges deliberately instead of silently.
+export const SWE_PINNED_PROVIDERS: Record<string, string> = { ...PINNED_PROVIDERS };
 
 /**
  * A run recorded before provider pinning shipped. Its model calls were served

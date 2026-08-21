@@ -1,8 +1,13 @@
 import { auth } from "@/auth";
+import { normalizeBenchmark } from "@/lib/arena-params";
 import { GithubSignInButton } from "../github-sign-in-button";
 import { SubmitForm } from "./submit-form";
 
-export default async function SubmitPage() {
+export default async function SubmitPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ benchmark?: string }>;
+} = {}) {
   const session = await auth();
   const githubLogin = session?.user?.githubLogin;
 
@@ -18,5 +23,8 @@ export default async function SubmitPage() {
     );
   }
 
-  return <SubmitForm githubLogin={githubLogin} />;
+  // ?benchmark=swe-bench preselects the SWE board; absent/unknown falls back
+  // to the legacy terminal-bench board.
+  const params = (await searchParams) ?? {};
+  return <SubmitForm githubLogin={githubLogin} benchmark={normalizeBenchmark(params.benchmark)} />;
 }
